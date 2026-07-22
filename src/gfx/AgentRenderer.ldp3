@@ -1,15 +1,14 @@
 import System.Collections.ArrayList;
-import Agents.World.Grid;
-import Agents.World.Biome;
 import Agents.World.Camera;
 import Agents.Sim.Realm;
 import Agents.People.Nation;
 import Agents.People.Worker;
 import Agents.Gfx.Batch2D;
+import Agents.Gfx.Atlas;
 
-// Draws the inhabitants over the world: each nation's capital as a banner-coloured marker, and every
-// living worker as a small upright nation-tinted figure at its projected isometric position, with a
-// shadow, a pale head, a facing hint and a carry marker.
+// Draws every living worker from the original's 4-direction character sprites -- soldiers as the soldier
+// sprite, everyone else as the civilian -- facing its movement direction, standing (bottom-centre pivot)
+// on its projected isometric cell.
 program AgentsExe;
 
 public bundle Agents {
@@ -17,78 +16,37 @@ public bundle Agents {
 
         public class AgentRenderer {
 
-            public static method draw(Batch2D* batch, Realm* realm, Camera* cam) returns void {
+            // Sprite id of a worker: soldiers/generals use the soldier sprite (54+dir), the rest civilian
+            // (50+dir). dir order matches the Direction enum: 0 NE, 1 SE, 2 SW, 3 NW.
+            private static method charId(int prof, int dir) returns int {
+                mutable int d = dir;
+                if (d < 0 || d > 3) {
+                    d = 1;
+                }
+                if (prof == 10 || prof == 11) {
+                    return 54 + d;
+                }
+                return 50 + d;
+            }
+
+            public static method draw(Batch2D* batch, Realm* realm, Camera* cam, Atlas* atlas) returns void {
                 int sw = cam.screenW;
                 int sh = cam.screenH;
-                mutable int hh = cast<int>(cam.halfH);
-                if (hh < 1) {
-                    hh = 1;
-                }
-                // Capitals: a taller banner marker so each nation's seat stands out.
-                mutable int ci = 0;
-                while (ci < realm.nations.size()) {
-                    mutable Nation* n = realm.nations.get(ci);
-                    if (n.alive) {
-                        int elev = realm.grid.biomeAt(n.capX, n.capY).elevation();
-                        int sx = cam.screenX(n.capX, n.capY);
-                        int sy = cam.screenY(n.capX, n.capY, elev);
-                        int m = hh + 2;
-                        float rf = cast<float>(n.cr) / 255.0;
-                        float gf = cast<float>(n.cg) / 255.0;
-                        float bf = cast<float>(n.cb) / 255.0;
-                        // a pole with a banner diamond on top
-                        batch.rect(sx - 1, sy - m * 3, 2, m * 3, 0.15, 0.12, 0.1, 1.0);
-                        batch.quad(sx, sy - m * 3 - m, sx + m, sy - m * 3, sx, sy - m * 3 + m,
-                                   sx - m, sy - m * 3, rf, gf, bf, 1.0);
-                    }
-                    ci = ci + 1;
-                }
-                // Workers: small upright nation-tinted figures at their projected foot position, with a
-                // shadow, a pale head, a facing hint and a carry marker.
-                mutable int bw = (hh * 3) / 5;
-                if (bw < 2) {
-                    bw = 2;
-                }
-                mutable int bh = (hh * 5) / 4;
-                if (bh < 3) {
-                    bh = 3;
-                }
-                mutable int hs = (bw * 3) / 4;
-                if (hs < 2) {
-                    hs = 2;
-                }
+                float scale = cast<float>(cast<int>(cam.halfW())) / 32.0;
                 mutable int wi = 0;
                 while (wi < realm.workers.size()) {
                     mutable Worker* wk = realm.workers.get(wi);
                     if (wk.alive) {
-                        int cx = cast<int>(wk.px);
-                        int cy = cast<int>(wk.py);
-                        int elev = realm.grid.biomeAt(cx, cy).elevation();
-                        int fx = cam.projX(wk.px, wk.py);
-                        int fy = cam.projY(wk.px, wk.py, elev);
-                        int top = fy - bh - hs;
-                        if (!(fx + bw < 0 || fx - bw > sw || top > sh || fy < 0)) {
-                            mutable Nation* nn = realm.nations.get(wk.nationId);
-                            float rf = cast<float>(nn.cr) / 255.0;
-                            float gf = cast<float>(nn.cg) / 255.0;
-                            float bf = cast<float>(nn.cb) / 255.0;
-                            // shadow
-                            batch.quad(fx, fy - bw / 3, fx + bw, fy, fx, fy + bw / 3, fx - bw, fy,
-                                       0.0, 0.0, 0.0, 0.35);
-                            // body
-                            batch.rect(fx - bw / 2, fy - bh, bw, bh, rf, gf, bf, 1.0);
-                            // head
-                            batch.rect(fx - hs / 2, fy - bh - hs, hs, hs, 0.86, 0.76, 0.66, 1.0);
-                            // facing hint: a darker pip on the side the worker faces
-                            mutable int fpx = fx + hs / 4;
-                            if (wk.dir == 2 || wk.dir == 3) {
-                                fpx = fx - hs / 4 - 1;
-                            }
-                            batch.rect(fpx, fy - bh - hs + hs / 4, 1, 1, 0.1, 0.08, 0.06, 1.0);
-                            // carry marker (a bundle above the head)
-                            if (wk.carryRes >= 0) {
-                                batch.rect(fx - 1, top - 2, 3, 3, 0.62, 0.45, 0.22, 1.0);
-                            }
+                        int id = AgentRenderer.charId(wk.profession, wk.dir);
+                        int dw = cast<int>(cast<float>(atlas.pw[id]) * scale);
+                        int dh = cast<int>(cast<float>(atlas.ph[id]) * scale);
+                        int sx = cam.projX(wk.px, wk.py);
+                        int sy = cam.projY(wk.px, wk.py, 0);
+                        int x = sx - dw / 2;
+                        int y = sy - dh;
+                        if (!(x + dw < 0 || x > sw || y + dh < 0 || y > sh)) {
+                            batch.sprite(x, y, dw, dh, atlas.u0[id], atlas.v0[id], atlas.u1[id],
+                                         atlas.v1[id], 1.0);
                         }
                     }
                     wi = wi + 1;

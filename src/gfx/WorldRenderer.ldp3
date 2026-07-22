@@ -3,13 +3,14 @@ import Agents.World.Grid;
 import Agents.World.Biome;
 import Agents.World.Camera;
 import Agents.World.ResourceNode;
+import Agents.World.ResourceKind;
 import Agents.Gfx.Batch2D;
+import Agents.Gfx.Atlas;
 
-// Draws the world as an isometric map through the quad batcher. Each tile is a 2:1 diamond placed at
-// its projected screen centre; Mountain and Snow are raised by their elevation and get darker SE/SW
-// side-faces so they read as cliffs. Tiles are drawn back-to-front (by gx+gy diagonal) so raised tiles
-// correctly overlap the ones behind them, and each cell is tinted slightly by a position hash so the
-// terrain is not a flat colour. Off-screen tiles are culled.
+// Draws the world from the original's real pixel art (the sprite atlas): each terrain cell is one of its
+// biome's five 64x32 diamond variants, drawn back-to-front (by gx+gy) so the tiles composite seamlessly,
+// and each resource node is its prop sprite standing on its cell. Off-screen cells are culled. The batch
+// must have the atlas texture bound (begin(..., atlasTex)).
 program AgentsExe;
 
 public bundle Agents {
@@ -17,28 +18,53 @@ public bundle Agents {
 
         public class WorldRenderer {
 
-            private static method clamp(int v) returns int {
-                if (v < 0) {
-                    return 0;
+            // Sprite id of a biome's tile variant (terrain ids are biomeOrdinal*5 + variant).
+            private static method biomeId(Biome b, int variant) returns int {
+                mutable int ord = 3;
+                if (b == Biome.DeepOcean) {
+                    ord = 0;
+                } else if (b == Biome.Ocean) {
+                    ord = 1;
+                } else if (b == Biome.Beach) {
+                    ord = 2;
+                } else if (b == Biome.Grassland) {
+                    ord = 3;
+                } else if (b == Biome.Mountain) {
+                    ord = 4;
+                } else {
+                    ord = 5;
                 }
-                if (v > 255) {
-                    return 255;
-                }
-                return v;
+                return ord * 5 + variant;
             }
 
-            public static method draw(Batch2D* batch, Grid* g, Camera* cam) returns void {
+            private static method propId(ResourceKind k) returns int {
+                if (k == ResourceKind.Bush) {
+                    return 33;
+                }
+                if (k == ResourceKind.StoneNode) {
+                    return 34;
+                }
+                if (k == ResourceKind.IronNode) {
+                    return 35;
+                }
+                if (k == ResourceKind.Fauna) {
+                    return 60;
+                }
+                return 30;   // Tree -> pine
+            }
+
+            public static method draw(Batch2D* batch, Grid* g, Camera* cam, Atlas* atlas) returns void {
                 int w = g.width;
                 int h = g.height;
                 int sw = cam.screenW;
                 int sh = cam.screenH;
                 mutable int hw = cast<int>(cam.halfW());
                 mutable int hh = cast<int>(cam.halfH);
-                if (hh < 1) {
-                    hh = 1;
-                }
                 if (hw < 1) {
                     hw = 1;
+                }
+                if (hh < 1) {
+                    hh = 1;
                 }
                 int last = w + h - 2;
                 mutable int s = 0;
@@ -53,74 +79,45 @@ public bundle Agents {
                     }
                     while (gx <= gxEnd) {
                         int gy = s - gx;
-                        WorldRenderer.tile(batch, g, cam, gx, gy, sw, sh, hw, hh);
+                        int sx = cam.screenX(gx, gy);
+                        int sy = cam.screenY(gx, gy, 0);
+                        if (!(sx + hw < 0 || sx - hw > sw || sy - hh > sh || sy + hh < 0)) {
+                            long hv = (cast<long>(gx) * 73856093 ^ cast<long>(gy) * 19349663)
+                                      & 9223372036854775807;
+                            int variant = cast<int>(hv % 5);
+                            int id = WorldRenderer.biomeId(g.biomeAt(gx, gy), variant);
+                            batch.sprite(sx - hw, sy - hh, hw * 2, hh * 2, atlas.u0[id], atlas.v0[id],
+                                         atlas.u1[id], atlas.v1[id], 1.0);
+                        }
                         gx = gx + 1;
                     }
                     s = s + 1;
                 }
             }
 
-            // Draw the resource nodes as small kind-coloured diamond marks sitting on their tiles,
-            // over the terrain. Culled off-screen.
             public static method drawResources(Batch2D* batch, Grid* g, ArrayList<ResourceNode*> nodes,
-                                               Camera* cam) returns void {
+                                               Camera* cam, Atlas* atlas) returns void {
                 int sw = cam.screenW;
                 int sh = cam.screenH;
-                mutable int hh = cast<int>(cam.halfH);
-                if (hh < 1) {
-                    hh = 1;
-                }
-                mutable int m = (hh * 3) / 5;
-                if (m < 1) {
-                    m = 1;
-                }
+                float scale = cast<float>(cast<int>(cam.halfW())) / 32.0;
                 mutable int i = 0;
                 while (i < nodes.size()) {
                     mutable ResourceNode* n = nodes.get(i);
                     if (n.alive) {
-                        int elev = g.biomeAt(n.gx, n.gy).elevation();
-                        int sx = cam.screenX(n.gx, n.gy);
-                        int sy = cam.screenY(n.gx, n.gy, elev) - hh / 2;
-                        if (!(sx + m < 0 || sx - m > sw || sy + m < 0 || sy - m > sh)) {
-                            float rf = cast<float>(n.kind.red()) / 255.0;
-                            float gf = cast<float>(n.kind.green()) / 255.0;
-                            float bf = cast<float>(n.kind.blue()) / 255.0;
-                            batch.quad(sx, sy - m, sx + m, sy, sx, sy + m, sx - m, sy, rf, gf, bf, 1.0);
+                        int id = WorldRenderer.propId(n.kind);
+                        int dw = cast<int>(cast<float>(atlas.pw[id]) * scale);
+                        int dh = cast<int>(cast<float>(atlas.ph[id]) * scale);
+                        int sx = cam.projX(cast<float>(n.gx) + 0.5, cast<float>(n.gy) + 0.5);
+                        int sy = cam.projY(cast<float>(n.gx) + 0.5, cast<float>(n.gy) + 0.5, 0);
+                        int x = sx - dw / 2;
+                        int y = sy - dh;
+                        if (!(x + dw < 0 || x > sw || y + dh < 0 || y > sh)) {
+                            batch.sprite(x, y, dw, dh, atlas.u0[id], atlas.v0[id], atlas.u1[id],
+                                         atlas.v1[id], 1.0);
                         }
                     }
                     i = i + 1;
                 }
-            }
-
-            private static method tile(Batch2D* batch, Grid* g, Camera* cam, int gx, int gy,
-                                       int sw, int sh, int hw, int hh) returns void {
-                mutable Biome b = g.biomeAt(gx, gy);
-                int elev = b.elevation();
-                int sx = cam.screenX(gx, gy);
-                int sy = cam.screenY(gx, gy, elev);
-                int eh = elev * hh;
-                // Cull tiles fully off-screen (account for the raised body + side height).
-                if (sx + hw < 0 || sx - hw > sw || sy - hh > sh || sy + hh + eh < 0) {
-                    return;
-                }
-                long hsh = cast<long>(gx) * 73856093 ^ cast<long>(gy) * 19349663;
-                int shade = cast<int>(hsh & 7) - 3;
-                int r = WorldRenderer.clamp(b.red() + shade * 3);
-                int gg = WorldRenderer.clamp(b.green() + shade * 3);
-                int bb = WorldRenderer.clamp(b.blue() + shade * 3);
-                float rf = cast<float>(r) / 255.0;
-                float gf = cast<float>(gg) / 255.0;
-                float bf = cast<float>(bb) / 255.0;
-                if (elev > 0) {
-                    // SE (right) side face -- darker.
-                    batch.quad(sx + hw, sy, sx, sy + hh, sx, sy + hh + eh, sx + hw, sy + eh,
-                               rf * 0.55, gf * 0.55, bf * 0.55, 1.0);
-                    // SW (left) side face -- darkest.
-                    batch.quad(sx - hw, sy, sx, sy + hh, sx, sy + hh + eh, sx - hw, sy + eh,
-                               rf * 0.40, gf * 0.40, bf * 0.40, 1.0);
-                }
-                // Top diamond face (T, R, B, L).
-                batch.quad(sx, sy - hh, sx + hw, sy, sx, sy + hh, sx - hw, sy, rf, gf, bf, 1.0);
             }
         }
     }

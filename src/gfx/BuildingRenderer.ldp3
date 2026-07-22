@@ -5,10 +5,11 @@ import Agents.People.Nation;
 import Agents.Economy.Building;
 import Agents.Economy.BuildingType;
 import Agents.Gfx.Batch2D;
+import Agents.Gfx.Atlas;
 
-// Draws each nation's buildings as raised isometric structures: a footprint-sized coloured roof over two
-// darker walls, coloured by type (a grey blueprint while under construction). Sized by the building's
-// footprint so a Castle towers over a House.
+// Draws each nation's buildings from the original's building sprites, standing on their footprint's
+// centre cell (bottom-centre pivot). A blueprint under construction draws faintly. Sized by the sprite's
+// own pixel dimensions scaled to the tile size, so the art keeps its proportions.
 program AgentsExe;
 
 public bundle Agents {
@@ -16,87 +17,65 @@ public bundle Agents {
 
         public class BuildingRenderer {
 
-            public static method draw(Batch2D* batch, Realm* realm, Camera* cam) returns void {
+            // Sprite id of a building type (building ids are 40 + the type's ordinal).
+            private static method buildId(BuildingType t) returns int {
+                if (t == BuildingType.Castle) {
+                    return 40;
+                }
+                if (t == BuildingType.TownHall) {
+                    return 41;
+                }
+                if (t == BuildingType.Farm) {
+                    return 42;
+                }
+                if (t == BuildingType.HuntersLodge) {
+                    return 43;
+                }
+                if (t == BuildingType.Sawmill) {
+                    return 44;
+                }
+                if (t == BuildingType.House) {
+                    return 45;
+                }
+                if (t == BuildingType.HouseMedium) {
+                    return 46;
+                }
+                if (t == BuildingType.HouseLarge) {
+                    return 47;
+                }
+                return 48;   // Barracks
+            }
+
+            public static method draw(Batch2D* batch, Realm* realm, Camera* cam, Atlas* atlas) returns void {
                 int sw = cam.screenW;
                 int sh = cam.screenH;
-                mutable int hw = cast<int>(cam.halfW());
-                mutable int hh = cast<int>(cam.halfH);
-                if (hw < 1) {
-                    hw = 1;
-                }
-                if (hh < 1) {
-                    hh = 1;
-                }
+                float scale = cast<float>(cast<int>(cam.halfW())) / 32.0;
                 mutable int ni = 0;
                 while (ni < realm.nations.size()) {
                     mutable Nation* n = realm.nations.get(ni);
                     mutable int bi = 0;
                     while (bi < n.buildings.size()) {
-                        BuildingRenderer.one(batch, cam, n.buildings.get(bi), sw, sh, hw, hh);
+                        mutable Building* b = n.buildings.get(bi);
+                        int id = BuildingRenderer.buildId(b.type);
+                        int dw = cast<int>(cast<float>(atlas.pw[id]) * scale);
+                        int dh = cast<int>(cast<float>(atlas.ph[id]) * scale);
+                        float fh = cast<float>(b.type.footprint()) * 0.5 - 0.5;
+                        int sx = cam.projX(cast<float>(b.gx) + fh, cast<float>(b.gy) + fh);
+                        int sy = cam.projY(cast<float>(b.gx) + fh, cast<float>(b.gy) + fh, 0);
+                        int x = sx - dw / 2;
+                        int y = sy - dh;
+                        if (!(x + dw < 0 || x > sw || y + dh < 0 || y > sh)) {
+                            mutable float a = 1.0;
+                            if (!b.built) {
+                                a = 0.45;
+                            }
+                            batch.sprite(x, y, dw, dh, atlas.u0[id], atlas.v0[id], atlas.u1[id],
+                                         atlas.v1[id], a);
+                        }
                         bi = bi + 1;
                     }
                     ni = ni + 1;
                 }
-            }
-
-            private static method one(Batch2D* batch, Camera* cam, Building* b, int sw, int sh,
-                                      int hw, int hh) returns void {
-                int f = b.type.footprint();
-                float cgx = cast<float>(b.gx) + cast<float>(f) * 0.5 - 0.5;
-                float cgy = cast<float>(b.gy) + cast<float>(f) * 0.5 - 0.5;
-                int fx = cam.projX(cgx, cgy);
-                int fy = cam.projY(cgx, cgy, 0);
-                int rhw = hw * f;
-                int rhh = hh * f;
-                int height = hh * f * 2 + hh * 2;
-                int roofY = fy - height;
-                if (fx + rhw < 0 || fx - rhw > sw || roofY - rhh > sh || fy + rhh < 0) {
-                    return;
-                }
-                mutable float rr = 0.35;
-                mutable float gg = 0.35;
-                mutable float bbc = 0.37;
-                if (b.built) {
-                    BuildingType t = b.type;
-                    if (t == BuildingType.Castle) {
-                        rr = 0.60;
-                        gg = 0.60;
-                        bbc = 0.64;
-                    } else if (t == BuildingType.TownHall) {
-                        rr = 0.60;
-                        gg = 0.44;
-                        bbc = 0.26;
-                    } else if (t == BuildingType.Farm) {
-                        rr = 0.62;
-                        gg = 0.70;
-                        bbc = 0.30;
-                    } else if (t == BuildingType.HuntersLodge) {
-                        rr = 0.36;
-                        gg = 0.52;
-                        bbc = 0.30;
-                    } else if (t == BuildingType.Sawmill) {
-                        rr = 0.55;
-                        gg = 0.40;
-                        bbc = 0.24;
-                    } else if (t == BuildingType.Barracks) {
-                        rr = 0.62;
-                        gg = 0.28;
-                        bbc = 0.24;
-                    } else {
-                        rr = 0.80;
-                        gg = 0.70;
-                        bbc = 0.52;   // houses (tan)
-                    }
-                }
-                // SE wall (right, darker)
-                batch.quad(fx + rhw, roofY, fx, roofY + rhh, fx, fy + rhh, fx + rhw, fy,
-                           rr * 0.60, gg * 0.60, bbc * 0.60, 1.0);
-                // SW wall (left, darkest)
-                batch.quad(fx - rhw, roofY, fx, roofY + rhh, fx, fy + rhh, fx - rhw, fy,
-                           rr * 0.42, gg * 0.42, bbc * 0.42, 1.0);
-                // roof diamond
-                batch.quad(fx, roofY - rhh, fx + rhw, roofY, fx, roofY + rhh, fx - rhw, roofY,
-                           rr, gg, bbc, 1.0);
             }
         }
     }
