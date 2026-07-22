@@ -1,0 +1,1011 @@
+import System.IO.Console;
+import System.Collections.ArrayList;
+
+// The Realm: the simulation orchestrator. It owns the grid, the resource nodes, and the nations, and
+// runs every self-scheduled system from agents.exe -- the tactical Worker FSM, economy production,
+// building growth, combat/conquest, and the strategic DecisionScheduler that fires each nation's
+// Leader (MockHeuristic -> Intent -> IntentDispatcher) on its own cadence. All headless.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        // A harvestable node. kind: 0 Tree->Wood, 1 Stone, 2 Iron, 3 Bush->Food, 4 Fauna->Food.
+        public class ResourceNode {
+            public mutable int kind;
+            public mutable int x;
+            public mutable int y;
+            public mutable int remaining;
+            public mutable boolean alive;
+            public mutable int reservedBy;
+
+            public constructor ResourceNode(int kind, int x, int y, int cap) {
+                this.kind = kind;
+                this.x = x;
+                this.y = y;
+                this.remaining = cap;
+                this.alive = true;
+                this.reservedBy = -1;
+            }
+
+            // The stockpile resource this node yields.
+            public method gives() returns int {
+                if (this.kind == 0) {
+                    return 1;
+                }
+                if (this.kind == 1) {
+                    return 3;
+                }
+                if (this.kind == 2) {
+                    return 4;
+                }
+                return 0;
+            }
+
+            public method glyph() returns char {
+                if (this.kind == 0) {
+                    return 't';
+                }
+                if (this.kind == 1) {
+                    return 's';
+                }
+                if (this.kind == 2) {
+                    return 'i';
+                }
+                if (this.kind == 3) {
+                    return 'b';
+                }
+                return 'f';
+            }
+        }
+
+        public class Realm {
+            public mutable Grid* grid;
+            public mutable ArrayList<Nation*> nations;
+            public mutable ArrayList<ResourceNode*> resources;
+            public mutable int seed;
+            public mutable int tick;
+            public mutable int nationCount;
+            public mutable Rng* rng;
+            public mutable ArrayList<String> intentFeed;
+
+            public constructor Realm(int width, int height, int seed, int nationCount) {
+                this.seed = seed;
+                this.tick = 0;
+                this.nationCount = nationCount;
+                this.grid = new Grid(width, height, seed) on heap;
+                this.rng = new Rng(seed * 7 + 3) on heap;
+                this.nations = new ArrayList<Nation*>() on heap;
+                this.resources = new ArrayList<ResourceNode*>() on heap;
+                this.intentFeed = new ArrayList<String>() on heap;
+                this.seedResources();
+                this.placeNations();
+            }
+
+            public method year() returns int {
+                return this.tick / 60;
+            }
+
+            public method nationById(int id) returns Nation* {
+                return this.nations.get(id);
+            }
+
+            // -------- setup --------
+
+            private method seedResources() returns void {
+                mutable int y = 0;
+                while (y < this.grid.height) {
+                    mutable int x = 0;
+                    while (x < this.grid.width) {
+                        int b = this.grid.biomeAt(x, y);
+                        if (b == 2) {
+                            int r = this.rng.nextInt(100);
+                            if (r < 5) {
+                                this.resources.add(new ResourceNode(0, x, y, 40) on heap);
+                            } else if (r < 9) {
+                                this.resources.add(new ResourceNode(3, x, y, 12) on heap);
+                            } else if (r < 13) {
+                                this.resources.add(new ResourceNode(1, x, y, 30) on heap);
+                            } else if (r < 15) {
+                                this.resources.add(new ResourceNode(2, x, y, 30) on heap);
+                            } else if (r < 16) {
+                                this.resources.add(new ResourceNode(4, x, y, 15) on heap);
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+            }
+
+            private method placeNations() returns void {
+                String[] names = new String[4]();
+                names[0] = "Aurelia";
+                names[1] = "Brenmark";
+                names[2] = "Cindara";
+                names[3] = "Dorne";
+                char[] glyphs = new char[4]();
+                glyphs[0] = '1';
+                glyphs[1] = '2';
+                glyphs[2] = '3';
+                glyphs[3] = '4';
+                mutable int placed = 0;
+                mutable int attempts = 0;
+                while (placed < this.nationCount && attempts < 4000) {
+                    attempts = attempts + 1;
+                    int x = this.rng.range(3, this.grid.width - 4);
+                    int y = this.rng.range(3, this.grid.height - 4);
+                    if (!this.grid.passable(x, y)) {
+                        continue;
+                    }
+                    if (this.walkableAround(x, y) < 14) {
+                        continue;
+                    }
+                    if (this.tooCloseToCapital(x, y, 12)) {
+                        continue;
+                    }
+                    int personality = placed % 7;
+                    mutable Nation* n = new Nation(placed, names[placed], glyphs[placed], this.grid, x, y,
+                                                   personality, this.nationCount) on heap;
+                    this.nations.add(n);
+                    this.foundCapital(n);
+                    placed = placed + 1;
+                }
+            }
+
+            private method walkableAround(int cx, int cy) returns int {
+                mutable int n = 0;
+                mutable int dy = -2;
+                while (dy <= 2) {
+                    mutable int dx = -2;
+                    while (dx <= 2) {
+                        if (this.grid.passable(cx + dx, cy + dy)) {
+                            n = n + 1;
+                        }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                return n;
+            }
+
+            private method tooCloseToCapital(int x, int y, int minDist) returns boolean {
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    mutable Nation* o = this.nations.get(i);
+                    int dx = o.capX - x;
+                    int dy = o.capY - y;
+                    if (dx * dx + dy * dy < minDist * minDist) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            private method foundCapital(Nation* n) returns void {
+                n.stock.add(0, 45);
+                n.stock.add(1, 25);
+                n.stock.add(2, 22);
+                n.stock.add(3, 22);
+                n.stock.add(4, 12);
+                mutable Building* hall = new Building(0, n.capX, n.capY, n.id) on heap;
+                hall.markBuilt();
+                n.buildings.add(hall);
+                mutable Building* farm = new Building(1, n.capX + 1, n.capY, n.id) on heap;
+                farm.markBuilt();
+                n.buildings.add(farm);
+                // Spawn the populace: a royal couple + a spread of professions.
+                int idBase = n.id * 1000;
+                mutable Worker* leader = this.spawnWorker(n, idBase, 0);
+                leader.royal = true;
+                leader.royalRole = 0;
+                leader.lifetime = this.rng.range(480, 680);   // royals live ~2.5x a commoner (agents.exe)
+                mutable Worker* consort = this.spawnWorker(n, idBase + 1, 0);
+                consort.royal = true;
+                consort.royalRole = 1;
+                consort.lifetime = this.rng.range(480, 680);
+                int[] mix = new int[10]();
+                mix[0] = 1;
+                mix[1] = 1;
+                mix[2] = 2;
+                mix[3] = 2;
+                mix[4] = 3;
+                mix[5] = 4;
+                mix[6] = 5;
+                mix[7] = 6;
+                mix[8] = 2;
+                mix[9] = 1;
+                mutable int k = 0;
+                while (k < 22) {
+                    int job = mix[k % 10];
+                    this.spawnWorker(n, idBase + 2 + k, job);
+                    k = k + 1;
+                }
+            }
+
+            private method spawnWorker(Nation* n, int id, int job) returns Worker* {
+                int lx = n.capX + this.rng.range(-2, 2);
+                int ly = n.capY + this.rng.range(-2, 2);
+                mutable int px = lx;
+                mutable int py = ly;
+                if (!this.grid.passable(px, py)) {
+                    px = n.capX;
+                    py = n.capY;
+                }
+                int lifetime = this.rng.range(360, 560);
+                mutable Worker* w = new Worker(id, n.id, px, py, job, lifetime) on heap;
+                n.addWorker(w);
+                return w;
+            }
+
+            // -------- strategy helpers (read by MockHeuristic / IntentDispatcher) --------
+
+            public method strengthOf(int id) returns int {
+                if (id < 0 || id >= this.nations.size()) {
+                    return 0;
+                }
+                mutable Nation* n = this.nations.get(id);
+                if (!n.alive) {
+                    return 0;
+                }
+                return n.soldierCount() * 3 + n.livingCount();
+            }
+
+            public method firstEnemy(Nation* n) returns int {
+                mutable int i = 0;
+                while (i < n.enemies.length()) {
+                    if (n.enemies[i]) {
+                        return i;
+                    }
+                    i = i + 1;
+                }
+                return -1;
+            }
+
+            public method weakestOther(int myId) returns int {
+                mutable int best = -1;
+                mutable int bestStr = 2000000000;
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    if (i != myId) {
+                        mutable Nation* o = this.nations.get(i);
+                        if (o.alive) {
+                            int s = this.strengthOf(i);
+                            if (s < bestStr) {
+                                bestStr = s;
+                                best = i;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                return best;
+            }
+
+            public method declareWar(int a, int b) returns void {
+                if (b < 0 || a == b || b >= this.nations.size()) {
+                    return;
+                }
+                mutable Nation* na = this.nations.get(a);
+                mutable Nation* nb = this.nations.get(b);
+                if (!nb.alive || na.enemies[b]) {
+                    return;
+                }
+                na.enemies[b] = true;
+                nb.enemies[a] = true;
+                na.desiredSoldiers = 12;
+                nb.desiredSoldiers = 12;
+                this.pushFeed($"{na.name} declares WAR on {nb.name}!");
+            }
+
+            public method makePeace(int a, int b) returns void {
+                if (b < 0 || b >= this.nations.size()) {
+                    return;
+                }
+                mutable Nation* na = this.nations.get(a);
+                mutable Nation* nb = this.nations.get(b);
+                na.enemies[b] = false;
+                nb.enemies[a] = false;
+                na.attackTarget = -1;
+                nb.attackTarget = -1;
+                this.pushFeed($"{na.name} and {nb.name} make peace.");
+            }
+
+            public method foundCity(Nation* n) returns void {
+                n.citiesFounded = n.citiesFounded + 1;   // simplified: recorded, capital stays the seat
+            }
+
+            public method conscript(Nation* n, int count) returns void {
+                mutable int done = 0;
+                mutable int i = 0;
+                while (i < n.members.size() && done < count) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && !w.royal && w.job != 7 && w.job != 5) {
+                        w.job = 7;
+                        w.state = 7;
+                        done = done + 1;
+                    }
+                    i = i + 1;
+                }
+            }
+
+            public method hasHeir(Nation* n) returns boolean {
+                mutable int i = 0;
+                while (i < n.members.size()) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && w.royal && w.heir) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            public method hasSpareRoyal(Nation* n) returns boolean {
+                mutable int i = 0;
+                while (i < n.members.size()) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && w.royal && w.royalRole != 0 && !w.heir) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            public method nameHeir(Nation* n) returns void {
+                mutable int i = 0;
+                while (i < n.members.size()) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && w.royal && w.royalRole != 0 && !w.heir) {
+                        w.heir = true;
+                        return;
+                    }
+                    i = i + 1;
+                }
+            }
+
+            public method pushFeed(String s) returns void {
+                this.intentFeed.add($"[{this.year()}y] {s}");
+                if (this.intentFeed.size() > 8) {
+                    this.intentFeed.removeAt(0);
+                }
+            }
+
+            // -------- the tick --------
+
+            public method advance() returns void {
+                this.tick = this.tick + 1;
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(i);
+                    if (n.alive) {
+                        this.tickNation(n);
+                    }
+                    i = i + 1;
+                }
+                this.combat();
+                this.resolveWars();
+                this.runDecisions();
+            }
+
+            private method tickNation(Nation* n) returns void {
+                mutable int i = 0;
+                while (i < n.members.size()) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive) {
+                        this.tickWorker(n, w);
+                        w.ageTicks = w.ageTicks + 1;
+                        if (w.ageTicks > w.lifetime) {
+                            this.naturalDeath(n, w);
+                        }
+                    }
+                    i = i + 1;
+                }
+                if (this.tick % 5 == 0) {
+                    this.produce(n);
+                    this.grow(n);
+                }
+                if (this.tick % 10 == 0) {
+                    this.reassign(n);
+                }
+            }
+
+            // Economy production: farms yield food, sawmills turn wood into planks, the people eat.
+            private method produce(Nation* n) returns void {
+                int farms = n.countBuilding(1);
+                int sawmills = n.countBuilding(2);
+                n.stock.add(0, farms * 7 + 2);
+                mutable int convert = sawmills * 5;
+                if (convert > n.stock.get(1)) {
+                    convert = n.stock.get(1);
+                }
+                if (convert > 0) {
+                    n.stock.spend(1, convert);
+                    n.stock.add(2, convert);
+                }
+                int eat = n.livingCount() / 3 + 1;
+                if (!n.stock.spend(0, eat)) {
+                    n.stock.add(0, 0);
+                    this.starve(n);
+                }
+                if (n.casualties > 0 && this.tick % 20 == 0) {
+                    n.casualties = n.casualties - 1;
+                }
+            }
+
+            private method starve(Nation* n) returns void {
+                mutable int i = 0;
+                mutable int killed = 0;
+                while (i < n.members.size() && killed < 2) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && !w.royal) {
+                        w.hp = w.hp - 40;
+                        if (w.hp <= 0) {
+                            this.naturalDeath(n, w);
+                            killed = killed + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+            }
+
+            // Building growth: place one blueprint per city need (respecting the Leader's priority,
+            // per-type caps, and affordability). Cost is paid at placement.
+            private method grow(Nation* n) returns void {
+                if (this.buildingBusy(n)) {
+                    return;
+                }
+                mutable int kind = MockHeuristic.buildingNeed(n);
+                if (n.prioBuilding >= 0 && n.countBuilding(n.prioBuilding) < Bld.perCityCap(n.prioBuilding)) {
+                    kind = n.prioBuilding;
+                }
+                if (kind < 0) {
+                    return;
+                }
+                if (n.countBuilding(kind) >= Bld.perCityCap(kind)) {
+                    return;
+                }
+                if (!n.stock.payFor(Bld.costPlanks(kind), Bld.costStone(kind), Bld.costIron(kind))) {
+                    return;
+                }
+                mutable int cx = 0;
+                mutable int cy = 0;
+                if (this.findBuildCell(n)) {
+                    cx = this.lastCellX;
+                    cy = this.lastCellY;
+                    mutable Building* b = new Building(kind, cx, cy, n.id) on heap;
+                    n.buildings.add(b);
+                } else {
+                    n.stock.add(2, Bld.costPlanks(kind));
+                    n.stock.add(3, Bld.costStone(kind));
+                    n.stock.add(4, Bld.costIron(kind));
+                }
+            }
+
+            private mutable int lastCellX;
+            private mutable int lastCellY;
+
+            private method findBuildCell(Nation* n) returns boolean {
+                mutable int radius = 2;
+                while (radius <= 6) {
+                    mutable int dy = 0 - radius;
+                    while (dy <= radius) {
+                        mutable int dx = 0 - radius;
+                        while (dx <= radius) {
+                            int x = n.capX + dx;
+                            int y = n.capY + dy;
+                            if (this.grid.passable(x, y) && !this.occupied(x, y)) {
+                                this.lastCellX = x;
+                                this.lastCellY = y;
+                                return true;
+                            }
+                            dx = dx + 1;
+                        }
+                        dy = dy + 1;
+                    }
+                    radius = radius + 1;
+                }
+                return false;
+            }
+
+            private method occupied(int x, int y) returns boolean {
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(i);
+                    mutable int j = 0;
+                    while (j < n.buildings.size()) {
+                        mutable Building* b = n.buildings.get(j);
+                        if (b.x == x && b.y == y) {
+                            return true;
+                        }
+                        j = j + 1;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            private method buildingBusy(Nation* n) returns boolean {
+                mutable int i = 0;
+                while (i < n.buildings.size()) {
+                    if (!n.buildings.get(i).built) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            // Labour allocation: keep enough builders for blueprints and enough soldiers for the war
+            // effort; otherwise leave people at their economic jobs.
+            private method reassign(Nation* n) returns void {
+                int wantSoldiers = n.desiredSoldiers;
+                mutable int soldiers = n.soldierCount();
+                if (this.buildingBusy(n) && n.countJob(5) < 2) {
+                    this.retrain(n, 5, 1);
+                }
+                if (soldiers < wantSoldiers) {
+                    this.retrain(n, 7, wantSoldiers - soldiers);
+                }
+                if (soldiers > wantSoldiers && !n.atWarWithAny()) {
+                    this.demobilize(n, soldiers - wantSoldiers);
+                }
+            }
+
+            private method retrain(Nation* n, int toJob, int count) returns void {
+                mutable int done = 0;
+                mutable int i = 0;
+                while (i < n.members.size() && done < count) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && !w.royal && w.job != toJob && w.job != 5 && w.job != 7) {
+                        w.job = toJob;
+                        w.state = 0;
+                        w.carryRes = -1;
+                        done = done + 1;
+                    }
+                    i = i + 1;
+                }
+            }
+
+            private method demobilize(Nation* n, int count) returns void {
+                mutable int done = 0;
+                mutable int i = 0;
+                while (i < n.members.size() && done < count) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && !w.royal && w.job == 7) {
+                        w.job = 1;
+                        w.state = 0;
+                        done = done + 1;
+                    }
+                    i = i + 1;
+                }
+            }
+
+            private method naturalDeath(Nation* n, Worker* w) returns void {
+                w.alive = false;
+                if (w.targetNode >= 0 && w.targetNode < this.resources.size()) {
+                    this.resources.get(w.targetNode).reservedBy = -1;
+                }
+                // The crown must pass when a leader dies (agents.exe SuccessionSystem).
+                if (w.royal && w.royalRole == 0 && n.alive) {
+                    this.succeed(n);
+                }
+                // Replace a fallen commoner to keep the population roughly stable.
+                if (!w.royal && n.alive && n.livingCount() < 26) {
+                    this.spawnWorker(n, n.id * 1000 + 500 + this.tick % 400, 1);
+                }
+            }
+
+            // Resolve succession: the named heir first, then any surviving royal, then a raised commoner;
+            // a realm with too few people and no successor dies out (agents.exe DissolveNation).
+            private method succeed(Nation* n) returns void {
+                mutable int i = 0;
+                while (i < n.members.size()) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && w.royal && w.heir && w.royalRole != 0) {
+                        w.royalRole = 0;
+                        w.heir = false;
+                        this.pushFeed($"{n.name}: the heir ascends the throne.");
+                        return;
+                    }
+                    i = i + 1;
+                }
+                i = 0;
+                while (i < n.members.size()) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && w.royal && w.royalRole != 0) {
+                        w.royalRole = 0;
+                        this.pushFeed($"{n.name}: a royal takes the crown.");
+                        return;
+                    }
+                    i = i + 1;
+                }
+                if (n.livingCount() >= 8) {
+                    i = 0;
+                    while (i < n.members.size()) {
+                        mutable Worker* w = n.members.get(i);
+                        if (w.alive && !w.royal) {
+                            w.royal = true;
+                            w.royalRole = 0;
+                            w.lifetime = w.lifetime + 300;
+                            this.pushFeed($"{n.name}: a commoner is raised to lead the realm.");
+                            return;
+                        }
+                        i = i + 1;
+                    }
+                }
+                this.dissolve(n);
+            }
+
+            // -------- tactical FSM --------
+
+            private method tickWorker(Nation* n, Worker* w) returns void {
+                if (w.job == 7) {
+                    this.tickSoldier(n, w);
+                    return;
+                }
+                if (w.job == 5) {
+                    this.tickBuilder(n, w);
+                    return;
+                }
+                if (w.job == 1 || w.job == 3 || w.job == 4) {
+                    this.tickGatherer(n, w);
+                    return;
+                }
+                this.wanderHome(n, w);
+            }
+
+            private method gatherKind(int job) returns int {
+                if (job == 1) {
+                    return 0;
+                }
+                if (job == 3) {
+                    return 1;
+                }
+                return 2;
+            }
+
+            private method tickGatherer(Nation* n, Worker* w) returns void {
+                if (w.carryRes >= 0) {
+                    if (this.adjacent(w, n.capX, n.capY)) {
+                        n.stock.add(w.carryRes, w.carryAmt);
+                        w.carryRes = -1;
+                        w.carryAmt = 0;
+                        w.state = 0;
+                    } else {
+                        this.moveFlow(n, w);
+                    }
+                    return;
+                }
+                if (w.targetNode < 0 || !this.nodeValid(w.targetNode)) {
+                    w.targetNode = this.findNode(w.x, w.y, this.gatherKind(w.job));
+                    if (w.targetNode >= 0) {
+                        mutable ResourceNode* nd = this.resources.get(w.targetNode);
+                        nd.reservedBy = w.id;
+                        w.targetX = nd.x;
+                        w.targetY = nd.y;
+                        w.state = 1;
+                    } else {
+                        this.wanderHome(n, w);
+                        return;
+                    }
+                }
+                mutable ResourceNode* node = this.resources.get(w.targetNode);
+                if (this.adjacent(w, node.x, node.y)) {
+                    w.harvestTimer = w.harvestTimer + 1;
+                    if (w.harvestTimer >= 4) {
+                        w.harvestTimer = 0;
+                        mutable int got = 10;
+                        if (got > node.remaining) {
+                            got = node.remaining;
+                        }
+                        node.remaining = node.remaining - got;
+                        w.carryRes = node.gives();
+                        w.carryAmt = got;
+                        if (node.remaining <= 0) {
+                            node.alive = false;
+                        }
+                        node.reservedBy = -1;
+                        w.targetNode = -1;
+                    }
+                } else {
+                    this.moveGreedy(w, node.x, node.y);
+                }
+            }
+
+            private method tickBuilder(Nation* n, Worker* w) returns void {
+                mutable int bi = this.findBlueprint(n);
+                if (bi < 0) {
+                    this.wanderHome(n, w);
+                    return;
+                }
+                mutable Building* b = n.buildings.get(bi);
+                if (this.adjacent(w, b.x, b.y)) {
+                    b.progress = b.progress + 1;
+                    if (b.progress >= 8) {
+                        b.markBuilt();
+                        n.addEvent($"[{this.year()}y] built a {Bld.name(b.kind)}");
+                    }
+                } else {
+                    this.moveGreedy(w, b.x, b.y);
+                }
+            }
+
+            private method tickSoldier(Nation* n, Worker* w) returns void {
+                if (n.attackTarget < 0 || !n.enemies[n.attackTarget]) {
+                    this.wanderHome(n, w);
+                    return;
+                }
+                mutable Nation* foe = this.nations.get(n.attackTarget);
+                if (!foe.alive) {
+                    n.attackTarget = -1;
+                    this.wanderHome(n, w);
+                    return;
+                }
+                this.moveGreedy(w, foe.capX, foe.capY);
+            }
+
+            private method wanderHome(Nation* n, Worker* w) returns void {
+                int dx = w.x - n.capX;
+                int dy = w.y - n.capY;
+                if (dx * dx + dy * dy > 25) {
+                    this.moveFlow(n, w);
+                } else {
+                    int mv = this.rng.nextInt(9);
+                    int mx = (mv % 3) - 1;
+                    int my = (mv / 3) - 1;
+                    if (this.grid.passable(w.x + mx, w.y + my)) {
+                        w.x = w.x + mx;
+                        w.y = w.y + my;
+                    }
+                }
+            }
+
+            // -------- movement --------
+
+            private method adjacent(Worker* w, int tx, int ty) returns boolean {
+                mutable int dx = w.x - tx;
+                mutable int dy = w.y - ty;
+                if (dx < 0) {
+                    dx = 0 - dx;
+                }
+                if (dy < 0) {
+                    dy = 0 - dy;
+                }
+                return dx <= 1 && dy <= 1;
+            }
+
+            private method moveFlow(Nation* n, Worker* w) returns void {
+                int packed = n.capFlow.stepToward(w.x, w.y);
+                int dx = FlowField.stepDx(packed);
+                int dy = FlowField.stepDy(packed);
+                if (dx == 0 && dy == 0) {
+                    this.moveGreedy(w, n.capX, n.capY);
+                    return;
+                }
+                w.x = w.x + dx;
+                w.y = w.y + dy;
+                w.stuck = 0;
+            }
+
+            private method moveGreedy(Worker* w, int tx, int ty) returns void {
+                mutable int bestX = w.x;
+                mutable int bestY = w.y;
+                int cur = (w.x - tx) * (w.x - tx) + (w.y - ty) * (w.y - ty);
+                mutable int bestD = cur;
+                mutable int oy = -1;
+                while (oy <= 1) {
+                    mutable int ox = -1;
+                    while (ox <= 1) {
+                        if (!(ox == 0 && oy == 0)) {
+                            int nx = w.x + ox;
+                            int ny = w.y + oy;
+                            if (this.grid.passable(nx, ny)) {
+                                int d = (nx - tx) * (nx - tx) + (ny - ty) * (ny - ty);
+                                if (d < bestD) {
+                                    bestD = d;
+                                    bestX = nx;
+                                    bestY = ny;
+                                }
+                            }
+                        }
+                        ox = ox + 1;
+                    }
+                    oy = oy + 1;
+                }
+                if (bestX == w.x && bestY == w.y) {
+                    w.stuck = w.stuck + 1;
+                    if (w.stuck > 30) {
+                        w.stuck = 0;
+                        mutable Nation* n = this.nations.get(w.nationId);
+                        w.x = n.capX;
+                        w.y = n.capY;
+                        w.targetNode = -1;
+                        w.carryRes = -1;
+                    }
+                } else {
+                    w.x = bestX;
+                    w.y = bestY;
+                    w.stuck = 0;
+                }
+            }
+
+            private method findNode(int x, int y, int kind) returns int {
+                mutable int best = -1;
+                mutable int bestD = 2000000000;
+                mutable int i = 0;
+                while (i < this.resources.size()) {
+                    mutable ResourceNode* nd = this.resources.get(i);
+                    if (nd.alive && nd.kind == kind && nd.reservedBy < 0) {
+                        int d = (nd.x - x) * (nd.x - x) + (nd.y - y) * (nd.y - y);
+                        if (d < bestD) {
+                            bestD = d;
+                            best = i;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return best;
+            }
+
+            private method nodeValid(int idx) returns boolean {
+                if (idx < 0 || idx >= this.resources.size()) {
+                    return false;
+                }
+                return this.resources.get(idx).alive;
+            }
+
+            private method findBlueprint(Nation* n) returns int {
+                mutable int i = 0;
+                while (i < n.buildings.size()) {
+                    if (!n.buildings.get(i).built) {
+                        return i;
+                    }
+                    i = i + 1;
+                }
+                return -1;
+            }
+
+            // -------- combat & war --------
+
+            private method combat() returns void {
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(i);
+                    if (n.alive && n.attackTarget >= 0 && n.enemies[n.attackTarget]) {
+                        mutable Nation* foe = this.nations.get(n.attackTarget);
+                        if (foe.alive) {
+                            this.siege(n, foe);
+                        }
+                    }
+                    i = i + 1;
+                }
+            }
+
+            private method siege(Nation* attacker, Nation* foe) returns void {
+                mutable int engaged = 0;
+                mutable int i = 0;
+                while (i < attacker.members.size()) {
+                    mutable Worker* w = attacker.members.get(i);
+                    if (w.alive && w.job == 7) {
+                        int dx = w.x - foe.capX;
+                        int dy = w.y - foe.capY;
+                        if (dx * dx + dy * dy <= 9) {
+                            engaged = engaged + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                if (engaged == 0) {
+                    return;
+                }
+                foe.townHallHp = foe.townHallHp - engaged * 4;
+                // Defenders trade blows with the attackers.
+                int defenders = foe.soldierCount();
+                mutable int a = 0;
+                mutable int killedAtt = 0;
+                while (a < defenders && this.rng.chance(30) && killedAtt < 3) {
+                    this.killOneEngaged(attacker, foe, true);
+                    killedAtt = killedAtt + 1;
+                    a = a + 1;
+                }
+                // Attackers cut down the defenders and civilians near the hall.
+                mutable int killedDef = 0;
+                while (killedDef < engaged && this.rng.chance(35) && killedDef < 3) {
+                    this.killNearCapital(foe);
+                    foe.casualties = foe.casualties + 1;
+                    killedDef = killedDef + 1;
+                }
+            }
+
+            private method killOneEngaged(Nation* attacker, Nation* foe, boolean attackerVictim) returns void {
+                mutable int i = 0;
+                while (i < attacker.members.size()) {
+                    mutable Worker* w = attacker.members.get(i);
+                    if (w.alive && w.job == 7) {
+                        int dx = w.x - foe.capX;
+                        int dy = w.y - foe.capY;
+                        if (dx * dx + dy * dy <= 9) {
+                            w.alive = false;
+                            attacker.casualties = attacker.casualties + 1;
+                            return;
+                        }
+                    }
+                    i = i + 1;
+                }
+            }
+
+            private method killNearCapital(Nation* foe) returns void {
+                mutable int i = 0;
+                while (i < foe.members.size()) {
+                    mutable Worker* w = foe.members.get(i);
+                    if (w.alive && !w.royal) {
+                        w.alive = false;
+                        return;
+                    }
+                    i = i + 1;
+                }
+            }
+
+            private method resolveWars() returns void {
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(i);
+                    if (n.alive && (n.townHallHp <= 0 || n.livingCount() == 0)) {
+                        this.dissolve(n);
+                    }
+                    i = i + 1;
+                }
+            }
+
+            private method dissolve(Nation* n) returns void {
+                n.alive = false;
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    mutable Nation* o = this.nations.get(i);
+                    if (o.alive && o.enemies[n.id]) {
+                        o.enemies[n.id] = false;
+                        o.attackTarget = -1;
+                        o.warsWon = o.warsWon + 1;
+                    }
+                    if (i != n.id) {
+                        n.enemies[i] = false;
+                    }
+                    i = i + 1;
+                }
+                this.pushFeed($"{n.name} has FALLEN and is no more.");
+            }
+
+            // -------- strategic scheduler --------
+
+            private method runDecisions() returns void {
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(i);
+                    if (n.alive && n.hasLeader() && this.tick >= n.nextDecisionTick) {
+                        mutable Intent* it = MockHeuristic.decide(n, this, this.tick);
+                        IntentDispatcher.apply(n, it, this);
+                        this.pushFeed($"{n.name}({Trait.name(n.personality)}): {it.reason}");
+                        delete it;
+                        n.nextDecisionTick = this.tick + 45;
+                    }
+                    i = i + 1;
+                }
+            }
+
+            public method aliveNations() returns int {
+                mutable int n = 0;
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    if (this.nations.get(i).alive) {
+                        n = n + 1;
+                    }
+                    i = i + 1;
+                }
+                return n;
+            }
+        }
+    }
+}

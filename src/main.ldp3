@@ -1,0 +1,122 @@
+import System.IO.Console;
+
+// Entry point + terminal renderer. agents.exe is a Unity game; this LDP3 reimplementation is headless
+// -- it runs the whole simulation and paints the world, the nations, and the strategic decision feed
+// as ASCII to the terminal. Map legend: '~' ocean  '.' beach  ' ' grass  '^' mountain  '*' snow;
+// digits 1-4 are a nation's people, letters H/F/W/h/B are its TownHall/Farm/saWmill/house/Barracks.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        public class Renderer {
+            // Paints the world overlaid with each nation's people and buildings.
+            public static method frame(Realm* world) returns void {
+                mutable Grid* grid = world.grid;
+                int w = grid.width;
+                int h = grid.height;
+                char[] canvas = new char[w * h]();
+                mutable int i = 0;
+                while (i < w * h) {
+                    canvas[i] = Biomes.glyph(grid.biomeAt(i % w, i / w));
+                    i = i + 1;
+                }
+                // People first, then buildings on top.
+                mutable int ni = 0;
+                while (ni < world.nations.size()) {
+                    mutable Nation* n = world.nations.get(ni);
+                    if (n.alive) {
+                        mutable int mi = 0;
+                        while (mi < n.members.size()) {
+                            mutable Worker* wk = n.members.get(mi);
+                            if (wk.alive && grid.inBounds(wk.x, wk.y)) {
+                                canvas[wk.y * w + wk.x] = n.glyph;
+                            }
+                            mi = mi + 1;
+                        }
+                        mutable int bi = 0;
+                        while (bi < n.buildings.size()) {
+                            mutable Building* b = n.buildings.get(bi);
+                            if (grid.inBounds(b.x, b.y)) {
+                                mutable char g = Bld.glyph(b.kind);
+                                if (!b.built) {
+                                    g = '?';
+                                }
+                                canvas[b.y * w + b.x] = g;
+                            }
+                            bi = bi + 1;
+                        }
+                    }
+                    ni = ni + 1;
+                }
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        System.IO.Console.printf("%c", canvas[y * w + x]);
+                        x = x + 1;
+                    }
+                    System.IO.Console.printf("\n");
+                    y = y + 1;
+                }
+                delete canvas;
+            }
+
+            public static method dashboard(Realm* world) returns void {
+                System.IO.Console.println("");
+                System.IO.Console.println($"== tick {world.tick}  year {world.year()}  nations alive: {world.aliveNations()} ==");
+                mutable int i = 0;
+                while (i < world.nations.size()) {
+                    mutable Nation* n = world.nations.get(i);
+                    if (n.alive) {
+                        String war = n.atWarWithAny() ? "WAR " : "peace";
+                        System.IO.Console.println($"  {n.glyph} {n.name} [{Trait.name(n.personality)}] {war} pop={n.livingCount()} sol={n.soldierCount()}/{n.desiredSoldiers} hall={n.townHallHp}");
+                        System.IO.Console.println($"      food={n.stock.get(0)} wood={n.stock.get(1)} planks={n.stock.get(2)} stone={n.stock.get(3)} iron={n.stock.get(4)}  builds: F{n.countBuilding(1)} W{n.countBuilding(2)} h{n.countBuilding(3)} B{n.countBuilding(4)}  wins={n.warsWon}");
+                        System.IO.Console.println($"      leader intent: {n.lastIntent} -- \"{n.lastReason}\"");
+                    } else {
+                        System.IO.Console.println($"  {n.glyph} {n.name} -- fallen");
+                    }
+                    i = i + 1;
+                }
+                System.IO.Console.println("  -- recent world events --");
+                mutable int f = 0;
+                while (f < world.intentFeed.size()) {
+                    System.IO.Console.println($"    {world.intentFeed.get(f)}");
+                    f = f + 1;
+                }
+            }
+        }
+
+        public class Main {
+            public static method main(string[] args) returns void {
+                System.IO.Console.println("agents.exe -- a civilisation sandbox, reimplemented in pure LDP3 (headless, no LLM)");
+                System.IO.Console.println("Four AI nations grow, build, and war on a generated island. Their Leaders decide by");
+                System.IO.Console.println("the scripted MockHeuristic cascade -- the same strategy oracle agents.exe falls back to.");
+                mutable Realm* world = new Realm(78, 38, 20260722, 4) on heap;
+
+                int totalTicks = 900;
+                int frameEvery = 180;
+                mutable int t = 0;
+                while (t < totalTicks) {
+                    world.advance();
+                    if (world.tick % frameEvery == 0) {
+                        System.IO.Console.println("");
+                        Renderer.frame(world);
+                        Renderer.dashboard(world);
+                    }
+                    if (world.aliveNations() <= 1) {
+                        t = totalTicks;
+                    }
+                    t = t + 1;
+                }
+
+                System.IO.Console.println("");
+                System.IO.Console.println("=== FINAL STATE ===");
+                Renderer.frame(world);
+                Renderer.dashboard(world);
+                delete world;
+                return;
+            }
+        }
+    }
+}
