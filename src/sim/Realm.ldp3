@@ -320,6 +320,7 @@ public bundle Agents {
                 while (i < n.members.size() && done < count) {
                     mutable Worker* w = n.members.get(i);
                     if (w.alive && !w.royal && w.job != 7 && w.job != 5) {
+                        this.releaseNode(w);
                         w.job = 7;
                         w.state = 7;
                         done = done + 1;
@@ -442,6 +443,7 @@ public bundle Agents {
                 while (i >= 0) {
                     mutable Worker* w = n.members.get(i);
                     if (!w.alive) {
+                        this.releaseNode(w);
                         n.members.removeAt(i);
                         delete w;
                     }
@@ -712,6 +714,7 @@ public bundle Agents {
                     mutable Worker* w = n.members.get(i);
                     if (w.alive && !w.royal && w.job != toJob && w.job != 5 && w.job != 7 && w.job != 11
                             && w.job != 12) {
+                        this.releaseNode(w);
                         w.job = toJob;
                         w.state = 0;
                         w.carryRes = -1;
@@ -737,9 +740,7 @@ public bundle Agents {
 
             private method naturalDeath(Nation* n, Worker* w) returns void {
                 w.alive = false;
-                if (w.targetNode >= 0 && w.targetNode < this.resources.size()) {
-                    this.resources.get(w.targetNode).reservedBy = -1;
-                }
+                this.releaseNode(w);
                 // The crown must pass when a leader dies (agents.exe SuccessionSystem).
                 if (w.royal && w.royalRole == 0 && n.alive) {
                     this.succeed(n);
@@ -1348,7 +1349,7 @@ public bundle Agents {
                         mutable Nation* n = this.nations.get(w.nationId);
                         w.x = n.capX;
                         w.y = n.capY;
-                        w.targetNode = -1;
+                        this.releaseNode(w);
                         w.carryRes = -1;
                     }
                 } else {
@@ -1386,6 +1387,19 @@ public bundle Agents {
                 return this.resources.get(idx).alive;
             }
 
+            // Drop a worker's claim on its reserved resource node. Any path that abandons a gather job --
+            // a retrain, a stuck teleport, a battle death -- must call this, or the node stays flagged
+            // reserved forever and findNode skips it, quietly shrinking the harvestable pool over a long run.
+            private method releaseNode(Worker* w) returns void {
+                if (w.targetNode >= 0 && w.targetNode < this.resources.size()) {
+                    mutable ResourceNode* nd = this.resources.get(w.targetNode);
+                    if (nd.reservedBy == w.id) {
+                        nd.reservedBy = -1;
+                    }
+                }
+                w.targetNode = -1;
+            }
+
             private method findBlueprint(Nation* n) returns int {
                 mutable int i = 0;
                 while (i < n.buildings.size()) {
@@ -1418,7 +1432,7 @@ public bundle Agents {
                 mutable int i = 0;
                 while (i < attacker.members.size()) {
                     mutable Worker* w = attacker.members.get(i);
-                    if (w.alive && w.job == 7) {
+                    if (w.alive && (w.job == 7 || w.job == 11)) {
                         int dx = w.x - foe.capX;
                         int dy = w.y - foe.capY;
                         if (dx * dx + dy * dy <= 9) {
@@ -1453,7 +1467,7 @@ public bundle Agents {
                 mutable int i = 0;
                 while (i < attacker.members.size()) {
                     mutable Worker* w = attacker.members.get(i);
-                    if (w.alive && w.job == 7) {
+                    if (w.alive && (w.job == 7 || w.job == 11)) {
                         int dx = w.x - foe.capX;
                         int dy = w.y - foe.capY;
                         if (dx * dx + dy * dy <= 9) {
@@ -1471,6 +1485,7 @@ public bundle Agents {
                 while (i < foe.members.size()) {
                     mutable Worker* w = foe.members.get(i);
                     if (w.alive && !w.royal) {
+                        this.releaseNode(w);
                         w.alive = false;
                         return;
                     }
@@ -1496,7 +1511,11 @@ public bundle Agents {
                     mutable Nation* o = this.nations.get(i);
                     if (o.alive && o.enemies[n.id]) {
                         o.enemies[n.id] = false;
-                        o.attackTarget = -1;
+                        // Only call off the assault if it was aimed at the nation that just fell -- a war
+                        // against a third party must carry on.
+                        if (o.attackTarget == n.id) {
+                            o.attackTarget = -1;
+                        }
                         o.warsWon = o.warsWon + 1;
                     }
                     if (i != n.id) {
