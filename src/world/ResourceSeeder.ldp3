@@ -1,0 +1,123 @@
+import System.Collections.ArrayList;
+
+// Seeds the map's resource nodes deterministically from the world seed (ResourceNodeSeeder.cs): first
+// tree clusters ("forests"), then a per-cell probability roll for scattered trees/bushes/stone/iron on
+// grassland (and palms on beach), then sparse mobile fauna. Capital-clear radii are applied later, once
+// nations are placed. Returns the node list; the caller owns it.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public class ResourceSeeder {
+
+            public static method seed(Grid* g, int worldSeed) returns ArrayList<ResourceNode*> {
+                int w = g.width;
+                int h = g.height;
+                mutable ArrayList<ResourceNode*> nodes = new ArrayList<ResourceNode*>() on heap;
+                boolean[] occ = new boolean[w * h]();
+                mutable Rng rng = new Rng(worldSeed) on stack;
+
+                // Pass 1 -- forests: scattered cluster centres, each grown into a small blob of trees.
+                int wantForests = 130;
+                int[] fcx = new int[wantForests]();
+                int[] fcy = new int[wantForests]();
+                mutable int nf = 0;
+                mutable int tries = 0;
+                while (nf < wantForests && tries < wantForests * 30) {
+                    tries = tries + 1;
+                    int cx = rng.nextInt(w);
+                    int cy = rng.nextInt(h);
+                    if (g.biomeAt(cx, cy) == Biome.Grassland) {
+                        mutable boolean far = true;
+                        mutable int k = 0;
+                        while (k < nf) {
+                            int dx = cx - fcx[k];
+                            int dy = cy - fcy[k];
+                            if (dx * dx + dy * dy < 144) {
+                                far = false;
+                            }
+                            k = k + 1;
+                        }
+                        if (far) {
+                            fcx[nf] = cx;
+                            fcy[nf] = cy;
+                            nf = nf + 1;
+                            int size = rng.range(5, 25);
+                            mutable int added = 0;
+                            mutable int att = 0;
+                            while (added < size && att < size * 5) {
+                                att = att + 1;
+                                int tx = cx + rng.range(0 - 3, 3);
+                                int ty = cy + rng.range(0 - 3, 3);
+                                if (g.inBounds(tx, ty) && g.biomeAt(tx, ty) == Biome.Grassland
+                                        && !occ[ty * w + tx]) {
+                                    occ[ty * w + tx] = true;
+                                    nodes.add(new ResourceNode(ResourceKind.Tree, tx, ty, 10, false) on heap);
+                                    added = added + 1;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Pass 2 -- scattered nodes: one roll per free grassland cell (palms on free beach).
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        int idx = y * w + x;
+                        if (!occ[idx]) {
+                            mutable Biome b = g.biomeAt(x, y);
+                            if (b == Biome.Grassland) {
+                                float roll = rng.nextFloat();
+                                if (roll < 0.03) {
+                                    occ[idx] = true;
+                                    nodes.add(new ResourceNode(ResourceKind.Tree, x, y, 10, false) on heap);
+                                } else if (roll < 0.07) {
+                                    occ[idx] = true;
+                                    nodes.add(new ResourceNode(ResourceKind.Bush, x, y, 3, false) on heap);
+                                } else if (roll < 0.11) {
+                                    occ[idx] = true;
+                                    nodes.add(new ResourceNode(ResourceKind.StoneNode, x, y, 5, false) on heap);
+                                } else if (roll < 0.13) {
+                                    occ[idx] = true;
+                                    nodes.add(new ResourceNode(ResourceKind.IronNode, x, y, 5, false) on heap);
+                                }
+                            } else if (b == Biome.Beach) {
+                                if (rng.nextFloat() < 0.04) {
+                                    occ[idx] = true;
+                                    nodes.add(new ResourceNode(ResourceKind.Tree, x, y, 10, false) on heap);
+                                }
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+
+                // Pass 3 -- fauna: sparse mobile Food nodes on remaining free grassland.
+                mutable int fy = 0;
+                while (fy < h) {
+                    mutable int fx = 0;
+                    while (fx < w) {
+                        int idx = fy * w + fx;
+                        if (!occ[idx] && g.biomeAt(fx, fy) == Biome.Grassland) {
+                            if (rng.nextFloat() < 0.015) {
+                                occ[idx] = true;
+                                nodes.add(new ResourceNode(ResourceKind.Fauna, fx, fy, 5, true) on heap);
+                            }
+                        }
+                        fx = fx + 1;
+                    }
+                    fy = fy + 1;
+                }
+
+                delete occ;
+                delete fcx;
+                delete fcy;
+                return nodes;
+            }
+        }
+    }
+}

@@ -1,10 +1,13 @@
 import System.IO.Console;
 import System.IO.File;
 import System.Text.StringBuilder;
+import System.Collections.ArrayList;
 import opengl.glfw.GlWindow;
 import opengl.gl.Wgl;
 import Agents.World.Grid;
 import Agents.World.Camera;
+import Agents.World.ResourceNode;
+import Agents.World.ResourceSeeder;
 import Agents.Gfx.Batch2D;
 import Agents.Gfx.WorldRenderer;
 
@@ -20,7 +23,8 @@ public bundle Agents {
             public static method main(string[] args) returns void {
                 System.IO.Console.println("agents.exe (LDP3) -- Phase 1: isometric world");
                 mutable Grid* world = new Grid(480, 480, 42) on heap;
-                System.IO.Console.println("world generated (480x480, seed 42)");
+                mutable ArrayList<ResourceNode*> nodes = ResourceSeeder.seed(world, 42);
+                System.IO.Console.println($"world generated (480x480, seed 42); {nodes.size()} resource nodes");
                 mutable GlWindow* win = new GlWindow() on heap;
                 if (win.open("agents.exe", 1280, 720, 4, 6) == 0) {
                     System.IO.Console.println("No GL window available.");
@@ -30,8 +34,13 @@ public bundle Agents {
                 }
                 win.setVSync(1);
                 mutable Batch2D* batch = new Batch2D(win.gl) on heap;
-                Main.renderView(win, batch, world, 240.0, 240.0, 0.68, "C:/Users/jvpts/Desktop/erros_ldp3/world_full.ppm");
-                Main.renderView(win, batch, world, 120.0, 120.0, 14.0, "C:/Users/jvpts/Desktop/erros_ldp3/world_close.ppm");
+                Main.renderView(win, batch, world, nodes, 240.0, 240.0, 0.68, "C:/Users/jvpts/Desktop/erros_ldp3/world_full.ppm");
+                Main.renderView(win, batch, world, nodes, 120.0, 120.0, 14.0, "C:/Users/jvpts/Desktop/erros_ldp3/world_close.ppm");
+                mutable int di = 0;
+                while (di < nodes.size()) {
+                    delete nodes.get(di);
+                    di = di + 1;
+                }
                 delete batch;
                 delete win;
                 delete world;
@@ -39,7 +48,8 @@ public bundle Agents {
             }
 
             private static method renderView(GlWindow* win, Batch2D* batch, Grid* world,
-                                             float fx, float fy, float halfH, String path) returns void {
+                                             ArrayList<ResourceNode*> nodes, float fx, float fy,
+                                             float halfH, String path) returns void {
                 mutable Camera* cam = new Camera(1280, 720, fx, fy, halfH) on heap;
                 mutable int f = 0;
                 while (f < 3) {
@@ -49,6 +59,7 @@ public bundle Agents {
                     Wgl.glClear(0x4000);
                     batch.begin(win.width(), win.height(), 0);
                     WorldRenderer.draw(batch, world, cam);
+                    WorldRenderer.drawResources(batch, world, nodes, cam);
                     batch.flush();
                     if (f == 2) {
                         Main.dump(win, 1280, 720, path);
