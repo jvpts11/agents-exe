@@ -27,6 +27,7 @@ public bundle Agents {
             public mutable ArrayList<Worker*> workers;
             public mutable int seed;
             private mutable Rng* moveRng;
+            private mutable float reproTimer;
 
             public constructor Realm(int w, int h, int seed) {
                 this.seed = seed;
@@ -35,6 +36,7 @@ public bundle Agents {
                 this.nations = new ArrayList<Nation*>() on heap;
                 this.workers = new ArrayList<Worker*>() on heap;
                 this.moveRng = new Rng(seed ^ 7788) on heap;
+                this.reproTimer = 0.0;
                 this.placeNations(4);
                 this.spawnWorkers(50);
             }
@@ -165,6 +167,54 @@ public bundle Agents {
                 while (i < this.workers.size()) {
                     this.tickWorker(this.workers.get(i), dt);
                     i = i + 1;
+                }
+                this.reproTimer = this.reproTimer + dt;
+                while (this.reproTimer >= 3.0) {
+                    this.reproTimer = this.reproTimer - 3.0;
+                    this.reproduce();
+                }
+            }
+
+            // Population growth (Worldbox-style): a nation with food to spare and room grows children
+            // near its capital. (Housing gating arrives with the buildings in the next phase.)
+            private method reproduce() returns void {
+                mutable int ni = 0;
+                while (ni < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(ni);
+                    if (n.alive) {
+                        int pop = n.livingCount();
+                        mutable int need = pop / 8;
+                        if (need < 10) {
+                            need = 10;
+                        }
+                        if (pop < 150 && n.stock.get(0) >= need) {
+                            int births = pop / 40 + 1;
+                            mutable int b = 0;
+                            while (b < births) {
+                                this.spawnChild(n);
+                                b = b + 1;
+                            }
+                        }
+                    }
+                    ni = ni + 1;
+                }
+            }
+
+            private method spawnChild(Nation* n) returns void {
+                mutable int att = 0;
+                while (att < 20) {
+                    att = att + 1;
+                    int sx = n.capX + this.moveRng.range(0 - 5, 5);
+                    int sy = n.capY + this.moveRng.range(0 - 5, 5);
+                    if (this.grid.walkable(sx, sy)) {
+                        float life = cast<float>(this.moveRng.range(360, 540));
+                        mutable Worker* wk = new Worker(n.id, cast<float>(sx) + 0.5,
+                                                       cast<float>(sy) + 0.5, life) on heap;
+                        wk.profession = Realm.startingProfession(this.workers.size());
+                        this.workers.add(wk);
+                        n.members.add(wk);
+                        return;
+                    }
                 }
             }
 
