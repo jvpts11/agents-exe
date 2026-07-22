@@ -48,6 +48,9 @@ Everything advances off one tick: world generation, gathering, building growth, 
 processing, births and death, combat and dwell-based conquest, boats and colonisation, research and
 era progression, royal succession and nation dissolution.
 
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design and the LDP3 features it
+exercises.
+
 ## Rendering
 
 Drawing goes through one `Painter` interface with two back ends, so the CPU and GPU share a single
