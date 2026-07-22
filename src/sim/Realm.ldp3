@@ -474,9 +474,10 @@ public bundle Agents {
                     n.stock.spend(1, convert);
                     n.stock.add(2, convert);
                 }
-                // Processing buildings: fishing huts land coastal food, marketplaces earn gold, smithies
-                // refine iron into gold (tools/trade). Gold is a nation's wealth -- it speeds research.
-                n.stock.add(0, n.countBuilding(10) * 6 * techBonus / 100);
+                // Processing buildings: marketplaces earn gold, smithies refine iron into gold
+                // (tools/trade). Gold is a nation's wealth -- it speeds research. Fishing-hut food now
+                // comes mostly from the fishers who walk to the shore; the hut keeps a small baseline.
+                n.stock.add(0, n.countBuilding(10) * 2 * techBonus / 100);
                 n.stock.add(5, n.countBuilding(9) * 3);
                 mutable int refine = n.countBuilding(11) * 2;
                 if (refine > n.stock.get(4)) {
@@ -640,6 +641,11 @@ public bundle Agents {
                 if (n.countJob(9) < wantPlanters) {
                     this.retrain(n, 9, wantPlanters - n.countJob(9));
                 }
+                // Each fishing hut sends two out to the shore.
+                int wantFishers = n.countBuilding(10) * 2;
+                if (n.countJob(13) < wantFishers) {
+                    this.retrain(n, 13, wantFishers - n.countJob(13));
+                }
                 if (soldiers < wantSoldiers) {
                     this.retrain(n, 7, wantSoldiers - soldiers);
                 }
@@ -751,6 +757,10 @@ public bundle Agents {
                 }
                 if (w.job == 12) {
                     this.tickBoat(n, w);
+                    return;
+                }
+                if (w.job == 13) {
+                    this.tickFisher(n, w);
                     return;
                 }
                 if (w.job == 1 || w.job == 3 || w.job == 4 || w.job == 8) {
@@ -1015,6 +1025,71 @@ public bundle Agents {
                 } else {
                     this.moveGreedy(w, node.x, node.y);
                 }
+            }
+
+            // Fisher: walks out to the nearest shore, casts for a few ticks, and carries the catch back
+            // to the capital -- coastal food the inland gatherers cannot reach. A fishing hut staffs two.
+            private method tickFisher(Nation* n, Worker* w) returns void {
+                if (w.carryRes >= 0) {
+                    if (this.adjacent(w, n.capX, n.capY)) {
+                        n.stock.add(w.carryRes, w.carryAmt);
+                        w.carryRes = -1;
+                        w.carryAmt = 0;
+                        w.state = 0;
+                    } else {
+                        this.moveFlow(n, w);
+                    }
+                    return;
+                }
+                if (w.state != 1) {
+                    if (!this.findCoast(w)) {
+                        this.wanderHome(n, w);
+                        return;
+                    }
+                    w.state = 1;
+                }
+                if (this.adjacent(w, w.targetX, w.targetY) || (w.x == w.targetX && w.y == w.targetY)) {
+                    w.harvestTimer = w.harvestTimer + 1;
+                    if (w.harvestTimer >= 5) {
+                        w.harvestTimer = 0;
+                        w.carryRes = 0;
+                        w.carryAmt = 5;
+                    }
+                } else {
+                    this.moveGreedy(w, w.targetX, w.targetY);
+                }
+            }
+
+            // A passable cell with open water on at least one side (map edges count as sea).
+            private method oceanAdjacent(int x, int y) returns boolean {
+                return this.grid.biomeAt(x - 1, y) == 0 || this.grid.biomeAt(x + 1, y) == 0
+                        || this.grid.biomeAt(x, y - 1) == 0 || this.grid.biomeAt(x, y + 1) == 0;
+            }
+
+            // Nearest shore tile to a fisher, searched ring by ring so the walk is short.
+            private method findCoast(Worker* w) returns boolean {
+                mutable int r = 1;
+                while (r <= 22) {
+                    mutable int oy = 0 - r;
+                    while (oy <= r) {
+                        mutable int ox = 0 - r;
+                        while (ox <= r) {
+                            if (ox == 0 - r || ox == r || oy == 0 - r || oy == r) {
+                                int cx = w.x + ox;
+                                int cy = w.y + oy;
+                                if (this.grid.passable(cx, cy) && this.oceanAdjacent(cx, cy)) {
+                                    w.targetX = cx;
+                                    w.targetY = cy;
+                                    return true;
+                                }
+                            }
+                            ox = ox + 1;
+                        }
+                        oy = oy + 1;
+                    }
+                    r = r + 1;
+                }
+                return false;
             }
 
             private method tickBuilder(Nation* n, Worker* w) returns void {
