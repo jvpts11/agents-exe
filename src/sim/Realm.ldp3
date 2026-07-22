@@ -388,6 +388,9 @@ public bundle Agents {
                     this.births(n);
                     this.promoteGeneral(n);
                 }
+                if (this.tick % 30 == 0) {
+                    this.maybeColony(n);
+                }
             }
 
             // The population a nation's finished houses can shelter (agents.exe HouseBehavior capacity).
@@ -594,7 +597,8 @@ public bundle Agents {
                 mutable int i = 0;
                 while (i < n.members.size() && done < count) {
                     mutable Worker* w = n.members.get(i);
-                    if (w.alive && !w.royal && w.job != toJob && w.job != 5 && w.job != 7) {
+                    if (w.alive && !w.royal && w.job != toJob && w.job != 5 && w.job != 7 && w.job != 11
+                            && w.job != 12) {
                         w.job = toJob;
                         w.state = 0;
                         w.carryRes = -1;
@@ -689,11 +693,187 @@ public bundle Agents {
                     this.tickTreePlanter(n, w);
                     return;
                 }
+                if (w.job == 12) {
+                    this.tickBoat(n, w);
+                    return;
+                }
                 if (w.job == 1 || w.job == 3 || w.job == 4 || w.job == 8) {
                     this.tickGatherer(n, w);
                     return;
                 }
                 this.wanderHome(n, w);
+            }
+
+            // A colony boat crosses open water (unlike land units, which oceans wall off) toward a distant
+            // shore, then disembarks a fresh settlement -- how a nation reaches other landmasses.
+            private method tickBoat(Nation* n, Worker* w) returns void {
+                w.harvestTimer = w.harvestTimer + 1;   // ticks spent at sea
+                // Once well out to sea, beach on the first new shore reached (any grassland neighbour).
+                if (w.harvestTimer > 14) {
+                    mutable int oy = -1;
+                    while (oy <= 1) {
+                        mutable int ox = -1;
+                        while (ox <= 1) {
+                            int gx = w.x + ox;
+                            int gy = w.y + oy;
+                            if (this.grid.biomeAt(gx, gy) == 2 && !this.occupied(gx, gy)) {
+                                this.landColony(n, gx, gy);
+                                w.alive = false;
+                                return;
+                            }
+                            ox = ox + 1;
+                        }
+                        oy = oy + 1;
+                    }
+                }
+                this.moveBoat(w, w.targetX, w.targetY);
+                w.stuck = w.stuck + 1;
+                if (w.stuck > 700) {
+                    w.alive = false;   // lost at sea; give up
+                }
+            }
+
+            // Boat passability: open water and coast (and the destination land tile it beaches on).
+            private method boatCell(int x, int y) returns boolean {
+                if (!this.grid.inBounds(x, y)) {
+                    return false;
+                }
+                int b = this.grid.biomeAt(x, y);
+                return b == 0 || b == 1;
+            }
+
+            private method moveBoat(Worker* w, int tx, int ty) returns void {
+                mutable int bestX = w.x;
+                mutable int bestY = w.y;
+                mutable int bestD = (w.x - tx) * (w.x - tx) + (w.y - ty) * (w.y - ty);
+                mutable int oy = -1;
+                while (oy <= 1) {
+                    mutable int ox = -1;
+                    while (ox <= 1) {
+                        if (!(ox == 0 && oy == 0)) {
+                            int nx = w.x + ox;
+                            int ny = w.y + oy;
+                            // Allowed to move onto water/coast, or onto the destination land tile to beach.
+                            if (this.boatCell(nx, ny) || (nx == tx && ny == ty)) {
+                                int d = (nx - tx) * (nx - tx) + (ny - ty) * (ny - ty);
+                                if (d < bestD) {
+                                    bestD = d;
+                                    bestX = nx;
+                                    bestY = ny;
+                                }
+                            }
+                        }
+                        ox = ox + 1;
+                    }
+                    oy = oy + 1;
+                }
+                if (bestX == w.x && bestY == w.y) {
+                    // Blocked by its own coast: slide along the shore to any open water to get around it.
+                    int a = this.rng.nextInt(9);
+                    mutable int t = 0;
+                    while (t < 9) {
+                        int k = (a + t) % 9;
+                        if (k != 4) {
+                            int ox2 = (k % 3) - 1;
+                            int oy2 = (k / 3) - 1;
+                            if (this.boatCell(w.x + ox2, w.y + oy2)) {
+                                w.x = w.x + ox2;
+                                w.y = w.y + oy2;
+                                return;
+                            }
+                        }
+                        t = t + 1;
+                    }
+                    return;
+                }
+                w.x = bestX;
+                w.y = bestY;
+                w.stuck = 0;
+            }
+
+            // Disembark: found a satellite settlement (TownHall + Farm + a handful of settlers) on the far
+            // shore, extending the nation across the sea.
+            private method landColony(Nation* n, int x, int y) returns void {
+                mutable Building* hall = new Building(0, x, y, n.id) on heap;
+                hall.markBuilt();
+                n.buildings.add(hall);
+                if (this.grid.passable(x + 1, y)) {
+                    mutable Building* farm = new Building(1, x + 1, y, n.id) on heap;
+                    farm.markBuilt();
+                    n.buildings.add(farm);
+                }
+                mutable int k = 0;
+                while (k < 6) {
+                    int job = 1 + (k % 4);
+                    mutable Worker* s = new Worker(n.id * 1000 + 700 + this.tick % 250 + k, n.id, x, y, job,
+                                                   this.rng.range(360, 560)) on heap;
+                    n.addWorker(s);
+                    k = k + 1;
+                }
+                n.citiesFounded = n.citiesFounded + 1;
+                this.pushFeed($"{n.name} founds a colony across the sea!");
+            }
+
+            // Every so often a coast-hugging nation with resources launches a colony boat toward a far
+            // grassland tile it cannot reach by land.
+            private method maybeColony(Nation* n) returns void {
+                if (n.citiesFounded >= 3 || n.stock.get(2) < 18 || n.livingCount() < 14) {
+                    return;
+                }
+                mutable int chance = 6;
+                if (n.personality == 2) {
+                    chance = 22;   // Expansionist
+                }
+                if (n.personality == 3) {
+                    chance = 12;   // Mercantile
+                }
+                if (!this.rng.chance(chance)) {
+                    return;
+                }
+                // Find a launch cell (water/coast near the capital) and a distant land target.
+                mutable int lx = -1;
+                mutable int ly = -1;
+                mutable int rad = 3;
+                while (rad <= 30 && lx < 0) {
+                    mutable int a = 0;
+                    while (a < 24 && lx < 0) {
+                        int cx = n.capX + this.rng.range(0 - rad, rad);
+                        int cy = n.capY + this.rng.range(0 - rad, rad);
+                        if (this.boatCell(cx, cy)) {
+                            lx = cx;
+                            ly = cy;
+                        }
+                        a = a + 1;
+                    }
+                    rad = rad + 3;
+                }
+                if (lx < 0) {
+                    return;
+                }
+                mutable int tx = -1;
+                mutable int ty = -1;
+                mutable int tries = 0;
+                while (tries < 200 && tx < 0) {
+                    int gx = this.rng.range(2, this.grid.width - 3);
+                    int gy = this.rng.range(2, this.grid.height - 3);
+                    int dx = gx - n.capX;
+                    int dy = gy - n.capY;
+                    if (this.grid.biomeAt(gx, gy) == 2 && dx * dx + dy * dy > 625 && !this.occupied(gx, gy)) {
+                        tx = gx;
+                        ty = gy;
+                    }
+                    tries = tries + 1;
+                }
+                if (tx < 0) {
+                    return;
+                }
+                mutable Worker* boat = new Worker(n.id * 1000 + 800 + this.tick % 150, n.id, lx, ly, 12,
+                                                  100000) on heap;
+                boat.targetX = tx;
+                boat.targetY = ty;
+                n.stock.spend(2, 12);
+                n.addWorker(boat);
+                this.pushFeed($"{n.name} launches a colony boat.");
             }
 
             // A gatherer/hunter targets nodes of a fixed kind: woodcutter->Tree, stoneMiner->Stone,
