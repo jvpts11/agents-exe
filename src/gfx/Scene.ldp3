@@ -1,0 +1,208 @@
+import Agents.Gfx.Painter;
+import Agents.Sim.Realm;
+import Agents.World.Grid;
+import Agents.People.Nation;
+import Agents.People.Worker;
+import Agents.Economy.Building;
+
+// The single scene painter: draws the whole game once, through a Painter, so the CPU and GPU back ends
+// share one drawing. Terrain gets per-cell shading so it is not flat; buildings are little pixel icons
+// (a nation-tinted base + a darker roof); people are dots, soldiers pipped, generals larger.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class Scene {
+            public static method tile() returns int {
+                return 9;
+            }
+
+            public static method canvasW(Realm* world) returns int {
+                return world.grid.width * Scene.tile();
+            }
+            public static method canvasH(Realm* world) returns int {
+                return world.grid.height * Scene.tile() + 82;
+            }
+
+            public static method paint(Painter* p, Realm* world) returns void {
+                mutable Grid* grid = world.grid;
+                int ts = Scene.tile();
+                int gw = grid.width;
+                int gh = grid.height;
+                p.fillRect(0, 0, gw * ts, gh * ts + 82, 13, 15, 20);
+                mutable int y = 0;
+                while (y < gh) {
+                    mutable int x = 0;
+                    while (x < gw) {
+                        long hh = cast<long>(x) * 2246822519 + cast<long>(y) * 3266489917
+                                  + cast<long>(x) * cast<long>(y) * 40503;
+                        int sh = cast<int>((hh / 131072) % 9) - 4;   // scattered -4..4, not a grid
+                        Scene.biome(p, x * ts, y * ts, ts, grid.biomeAt(x, y), sh * 2);
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                mutable int ni = 0;
+                while (ni < world.nations.size()) {
+                    mutable Nation* n = world.nations.get(ni);
+                    if (n.alive) {
+                        mutable int bi = 0;
+                        while (bi < n.buildings.size()) {
+                            mutable Building* b = n.buildings.get(bi);
+                            Scene.building(p, b.x * ts, b.y * ts, ts, b.kind, b.built, n.id);
+                            bi = bi + 1;
+                        }
+                        mutable int mi = 0;
+                        while (mi < n.members.size()) {
+                            mutable Worker* w = n.members.get(mi);
+                            if (w.alive) {
+                                Scene.person(p, w.x * ts, w.y * ts, ts, n.id, w.job);
+                            }
+                            mi = mi + 1;
+                        }
+                    }
+                    ni = ni + 1;
+                }
+                Scene.hud(p, world, gh * ts + 6, gw * ts);
+            }
+
+            private static method clamp(int v) returns int {
+                if (v < 0) {
+                    return 0;
+                }
+                if (v > 255) {
+                    return 255;
+                }
+                return v;
+            }
+
+            private static method biome(Painter* p, int px, int py, int ts, int b, int d) returns void {
+                mutable int r = 84;
+                mutable int g = 148;
+                mutable int bl = 74;
+                if (b == 0) {
+                    r = 33;
+                    g = 82;
+                    bl = 153;
+                } else if (b == 1) {
+                    r = 212;
+                    g = 194;
+                    bl = 133;
+                } else if (b == 3) {
+                    r = 112;
+                    g = 105;
+                    bl = 99;
+                } else if (b == 4) {
+                    r = 235;
+                    g = 240;
+                    bl = 247;
+                }
+                p.fillRect(px, py, ts, ts, Scene.clamp(r + d), Scene.clamp(g + d), Scene.clamp(bl + d));
+            }
+
+            // A building icon: a nation-tinted base, a body in the building's colour, and a darker roof
+            // band across the top so kinds read at a glance. Blueprints are a hollow grey box.
+            private static method building(Painter* p, int px, int py, int ts, int kind, boolean built, int id) returns void {
+                Scene.nation(p, px, py, ts, ts, id);
+                if (!built) {
+                    p.fillRect(px + 2, py + 2, ts - 4, ts - 4, 60, 62, 70);
+                    return;
+                }
+                mutable int r = 150;
+                mutable int g = 110;
+                mutable int b = 66;
+                if (kind == 0) {
+                    r = 200;
+                    g = 186;
+                    b = 96;
+                } else if (kind == 6) {
+                    r = 176;
+                    g = 176;
+                    b = 190;
+                } else if (kind == 1) {
+                    r = 140;
+                    g = 204;
+                    b = 64;
+                } else if (kind == 2) {
+                    r = 150;
+                    g = 104;
+                    b = 54;
+                } else if (kind == 3 || kind == 7 || kind == 8) {
+                    r = 206;
+                    g = 178;
+                    b = 138;
+                } else if (kind == 4) {
+                    r = 179;
+                    g = 60;
+                    b = 60;
+                } else if (kind == 5) {
+                    r = 96;
+                    g = 140;
+                    b = 74;
+                }
+                p.fillRect(px + 2, py + 2, ts - 4, ts - 4, r, g, b);
+                p.fillRect(px + 2, py + 2, ts - 4, (ts - 4) / 2, (r * 6) / 10, (g * 6) / 10, (b * 6) / 10);
+            }
+
+            private static method person(Painter* p, int px, int py, int ts, int id, int job) returns void {
+                boolean soldier = job == 7 || job == 11;
+                mutable int s = 5;
+                if (job == 11) {
+                    s = 7;
+                }
+                int off = (ts - s) / 2;
+                Scene.nation(p, px + off, py + off, s, s, id);
+                if (soldier) {
+                    if (job == 11) {
+                        p.fillRect(px + off + 2, py + off + 2, 3, 3, 245, 224, 120);
+                    } else {
+                        p.fillRect(px + off + 1, py + off + 1, 2, 2, 240, 240, 240);
+                    }
+                }
+            }
+
+            private static method nation(Painter* p, int x, int y, int w, int h, int id) returns void {
+                if (id == 0) {
+                    p.fillRect(x, y, w, h, 219, 56, 51);
+                } else if (id == 1) {
+                    p.fillRect(x, y, w, h, 51, 122, 219);
+                } else if (id == 2) {
+                    p.fillRect(x, y, w, h, 235, 194, 41);
+                } else if (id == 3) {
+                    p.fillRect(x, y, w, h, 148, 66, 184);
+                } else if (id == 4) {
+                    p.fillRect(x, y, w, h, 41, 184, 158);
+                } else if (id == 5) {
+                    p.fillRect(x, y, w, h, 230, 133, 41);
+                } else if (id == 6) {
+                    p.fillRect(x, y, w, h, 219, 110, 171);
+                } else {
+                    p.fillRect(x, y, w, h, 148, 199, 61);
+                }
+            }
+
+            private static method hud(Painter* p, Realm* world, int y, int width) returns void {
+                p.fillRect(0, y - 6, width, 82, 26, 28, 33);
+                mutable int i = 0;
+                mutable int col = 8;
+                int stride = width / world.nations.size();
+                while (i < world.nations.size()) {
+                    mutable Nation* n = world.nations.get(i);
+                    Scene.nation(p, col, y, 14, 14, n.id);
+                    if (n.alive) {
+                        p.fillRect(col + 20, y, n.livingCount() * 2, 6, 89, 184, 82);
+                        p.fillRect(col + 20, y + 9, n.soldierCount() * 4, 6, 204, 64, 64);
+                        if (n.atWarWithAny()) {
+                            p.fillRect(col, y + 18, 14, 5, 217, 51, 51);
+                        }
+                    } else {
+                        p.fillRect(col + 20, y, 60, 15, 60, 60, 60);
+                    }
+                    col = col + stride;
+                    i = i + 1;
+                }
+            }
+        }
+    }
+}

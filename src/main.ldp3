@@ -3,13 +3,14 @@ import opengl.glfw.GlWindow;
 import opengl.gl.Gl;
 import opengl.gl.Wgl;
 import Agents.Sim.Realm;
-import Agents.Gfx.Game;
+import Agents.Gfx.Scene;
 import Agents.Gfx.Batch2D;
-import Agents.Gfx.SoftRender;
+import Agents.Gfx.GlPainter;
+import Agents.Gfx.SoftPainter;
 
 // Entry point. Opens a window through ldp3-opengl and runs the live civilisation simulation, painting
-// the world every frame. The first game written in LDP3. Screenshots are dumped along the way so the
-// visuals can be checked. Falls back to a headless run if no window/GL context is available.
+// the world every frame through the shared Scene. The first game written in LDP3. Where no GL context
+// is available (headless), it software-renders the run to PPM frames instead -- the same picture.
 program AgentsExe;
 
 public bundle Agents {
@@ -18,10 +19,9 @@ public bundle Agents {
         public class Main {
             public static method main(string[] args) returns void {
                 System.IO.Console.println("agents.exe -- the first game written in LDP3");
-                int ts = Game.tile();
                 mutable Realm* world = new Realm(144, 84, 20260722, 7) on heap;
-                int w = world.grid.width * ts;
-                int h = world.grid.height * ts + 82;
+                int w = Scene.canvasW(world);
+                int h = Scene.canvasH(world);
 
                 mutable GlWindow* win = new GlWindow() on heap;
                 if (win.open("agents.exe", w, h, 3, 3) != 0) {
@@ -30,7 +30,10 @@ public bundle Agents {
                     while (tk < 900) {
                         world.advance();
                         if (tk == 60 || tk == 450 || tk == 898) {
-                            SoftRender.render(world, $"C:/Users/jvpts/Desktop/erros_ldp3/soft_{tk}.ppm");
+                            mutable SoftPainter* sp = new SoftPainter(w, h) on heap;
+                            Scene.paint(sp, world);
+                            sp.save($"C:/Users/jvpts/Desktop/erros_ldp3/soft_{tk}.ppm");
+                            delete sp;
                             System.IO.Console.println($"[soft] tick {tk} alive {world.aliveNations()}");
                         }
                         if (world.aliveNations() <= 1) {
@@ -42,35 +45,27 @@ public bundle Agents {
                     delete world;
                     return;
                 }
-                win.setVSync(0);
+                win.setVSync(1);
                 mutable Batch2D* batch = new Batch2D(win.gl) on heap;
+                mutable GlPainter* glp = new GlPainter(batch) on heap;
 
-                int maxFrames = 1400;
                 mutable int frame = 0;
-                while (win.isOpen() && frame < maxFrames) {
+                while (win.isOpen()) {
                     win.pump();
                     if (frame % 2 == 0 && world.aliveNations() > 1) {
                         world.advance();
                     }
-                    int ww = win.width();
-                    int wh = win.height();
-                    Wgl.glViewport(0, 0, ww, wh);
+                    Wgl.glViewport(0, 0, win.width(), win.height());
                     Wgl.glClearColor(0.05, 0.06, 0.08, 1.0);
                     Wgl.glClear(0x4000);
-                    batch.begin(ww, wh, 0);
-                    Game.draw(batch, world);
+                    batch.begin(win.width(), win.height(), 0);
+                    Scene.paint(glp, world);
                     batch.flush();
-                    if (frame == 4 || frame == 500 || frame == 1000 || frame == maxFrames - 2) {
-                        byte[] px = win.gl.readPixelsRgb(0, 0, ww, wh);
-                        Game.writePpm($"C:/Users/jvpts/Desktop/erros_ldp3/agents_{frame}.ppm", px, ww, wh);
-                        delete px;
-                        System.IO.Console.println($"[shot] frame {frame} tick {world.tick} alive {world.aliveNations()}");
-                    }
                     win.swap();
                     frame = frame + 1;
                 }
 
-                System.IO.Console.println($"Done. tick {world.tick}, nations alive {world.aliveNations()}.");
+                delete glp;
                 delete batch;
                 delete win;
                 delete world;
