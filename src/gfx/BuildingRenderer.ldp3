@@ -1,0 +1,103 @@
+import System.Collections.ArrayList;
+import Agents.World.Camera;
+import Agents.Sim.Realm;
+import Agents.People.Nation;
+import Agents.Economy.Building;
+import Agents.Economy.BuildingType;
+import Agents.Gfx.Batch2D;
+
+// Draws each nation's buildings as raised isometric structures: a footprint-sized coloured roof over two
+// darker walls, coloured by type (a grey blueprint while under construction). Sized by the building's
+// footprint so a Castle towers over a House.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class BuildingRenderer {
+
+            public static method draw(Batch2D* batch, Realm* realm, Camera* cam) returns void {
+                int sw = cam.screenW;
+                int sh = cam.screenH;
+                mutable int hw = cast<int>(cam.halfW());
+                mutable int hh = cast<int>(cam.halfH);
+                if (hw < 1) {
+                    hw = 1;
+                }
+                if (hh < 1) {
+                    hh = 1;
+                }
+                mutable int ni = 0;
+                while (ni < realm.nations.size()) {
+                    mutable Nation* n = realm.nations.get(ni);
+                    mutable int bi = 0;
+                    while (bi < n.buildings.size()) {
+                        BuildingRenderer.one(batch, cam, n.buildings.get(bi), sw, sh, hw, hh);
+                        bi = bi + 1;
+                    }
+                    ni = ni + 1;
+                }
+            }
+
+            private static method one(Batch2D* batch, Camera* cam, Building* b, int sw, int sh,
+                                      int hw, int hh) returns void {
+                int f = b.type.footprint();
+                float cgx = cast<float>(b.gx) + cast<float>(f) * 0.5 - 0.5;
+                float cgy = cast<float>(b.gy) + cast<float>(f) * 0.5 - 0.5;
+                int fx = cam.projX(cgx, cgy);
+                int fy = cam.projY(cgx, cgy, 0);
+                int rhw = hw * f;
+                int rhh = hh * f;
+                int height = hh * f * 2 + hh * 2;
+                int roofY = fy - height;
+                if (fx + rhw < 0 || fx - rhw > sw || roofY - rhh > sh || fy + rhh < 0) {
+                    return;
+                }
+                mutable float rr = 0.35;
+                mutable float gg = 0.35;
+                mutable float bbc = 0.37;
+                if (b.built) {
+                    BuildingType t = b.type;
+                    if (t == BuildingType.Castle) {
+                        rr = 0.60;
+                        gg = 0.60;
+                        bbc = 0.64;
+                    } else if (t == BuildingType.TownHall) {
+                        rr = 0.60;
+                        gg = 0.44;
+                        bbc = 0.26;
+                    } else if (t == BuildingType.Farm) {
+                        rr = 0.62;
+                        gg = 0.70;
+                        bbc = 0.30;
+                    } else if (t == BuildingType.HuntersLodge) {
+                        rr = 0.36;
+                        gg = 0.52;
+                        bbc = 0.30;
+                    } else if (t == BuildingType.Sawmill) {
+                        rr = 0.55;
+                        gg = 0.40;
+                        bbc = 0.24;
+                    } else if (t == BuildingType.Barracks) {
+                        rr = 0.62;
+                        gg = 0.28;
+                        bbc = 0.24;
+                    } else {
+                        rr = 0.80;
+                        gg = 0.70;
+                        bbc = 0.52;   // houses (tan)
+                    }
+                }
+                // SE wall (right, darker)
+                batch.quad(fx + rhw, roofY, fx, roofY + rhh, fx, fy + rhh, fx + rhw, fy,
+                           rr * 0.60, gg * 0.60, bbc * 0.60, 1.0);
+                // SW wall (left, darkest)
+                batch.quad(fx - rhw, roofY, fx, roofY + rhh, fx, fy + rhh, fx - rhw, fy,
+                           rr * 0.42, gg * 0.42, bbc * 0.42, 1.0);
+                // roof diamond
+                batch.quad(fx, roofY - rhh, fx + rhw, roofY, fx, roofY + rhh, fx - rhw, roofY,
+                           rr, gg, bbc, 1.0);
+            }
+        }
+    }
+}
