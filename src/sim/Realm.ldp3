@@ -692,6 +692,11 @@ public bundle Agents {
                 if (n.countJob(2) < wantFarmers) {
                     this.retrain(n, 2, wantFarmers - n.countJob(2));
                 }
+                // A trader minds each marketplace.
+                int wantTraders = n.countBuilding(9);
+                if (n.countJob(10) < wantTraders) {
+                    this.retrain(n, 10, wantTraders - n.countJob(10));
+                }
                 if (soldiers < wantSoldiers) {
                     this.retrain(n, 7, wantSoldiers - soldiers);
                 }
@@ -811,6 +816,10 @@ public bundle Agents {
                 }
                 if (w.job == 2) {
                     this.tickFarmer(n, w);
+                    return;
+                }
+                if (w.job == 10) {
+                    this.tickTrader(n, w);
                     return;
                 }
                 if (w.job == 1 || w.job == 3 || w.job == 4 || w.job == 8) {
@@ -1082,7 +1091,7 @@ public bundle Agents {
             // field. This is what fills the land around a capital with working people.
             private method tickFarmer(Nation* n, Worker* w) returns void {
                 if (w.state != 1) {
-                    if (!this.findFarm(n, w)) {
+                    if (!this.findBuilding(n, w, 1)) {
                         this.wanderHome(n, w);
                         return;
                     }
@@ -1102,14 +1111,38 @@ public bundle Agents {
                 }
             }
 
-            // The nation's nearest built farm to a worker, if any.
-            private method findFarm(Nation* n, Worker* w) returns boolean {
+            // Trader: works the marketplace, walking to it and turning the town's goods into a trickle of
+            // gold, then now and then heading back to the square. The last of the professions to draw breath.
+            private method tickTrader(Nation* n, Worker* w) returns void {
+                if (w.state != 1) {
+                    if (!this.findBuilding(n, w, 9)) {
+                        this.wanderHome(n, w);
+                        return;
+                    }
+                    w.state = 1;
+                }
+                if (this.adjacent(w, w.targetX, w.targetY) || (w.x == w.targetX && w.y == w.targetY)) {
+                    w.harvestTimer = w.harvestTimer + 1;
+                    if (w.harvestTimer >= 8) {
+                        w.harvestTimer = 0;
+                        n.stock.add(5, 2);
+                        if (this.rng.chance(15)) {
+                            w.state = 0;
+                        }
+                    }
+                } else {
+                    this.moveGreedy(w, w.targetX, w.targetY);
+                }
+            }
+
+            // Point a worker at the nation's nearest built building of a kind; false if it has none.
+            private method findBuilding(Nation* n, Worker* w, int kind) returns boolean {
                 mutable int best = -1;
                 mutable int bestD = 1000000000;
                 mutable int i = 0;
                 while (i < n.buildings.size()) {
                     mutable Building* b = n.buildings.get(i);
-                    if (b.built && b.kind == 1) {
+                    if (b.built && b.kind == kind) {
                         int d = (b.x - w.x) * (b.x - w.x) + (b.y - w.y) * (b.y - w.y);
                         if (d < bestD) {
                             bestD = d;
