@@ -1,0 +1,243 @@
+import System.IO.Console;
+
+// The economy: the six resources, a nation/city stockpile, and buildings with their construction
+// costs and lifecycle. Mirrors agents.exe's ResourceStockpile, BuildingType/BuildingRegistry and
+// Building, kept to the types the economy actually builds.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        // Resource ordinals (index into a stockpile's counters). agents.exe: Food/Wood/Planks/Stone/Iron/Gold.
+        public class Res {
+            public static method food() returns int {
+                return 0;
+            }
+            public static method wood() returns int {
+                return 1;
+            }
+            public static method planks() returns int {
+                return 2;
+            }
+            public static method stone() returns int {
+                return 3;
+            }
+            public static method iron() returns int {
+                return 4;
+            }
+            public static method gold() returns int {
+                return 5;
+            }
+            public static method count() returns int {
+                return 6;
+            }
+            public static method name(int r) returns String {
+                if (r == 0) {
+                    return "Food";
+                }
+                if (r == 1) {
+                    return "Wood";
+                }
+                if (r == 2) {
+                    return "Planks";
+                }
+                if (r == 3) {
+                    return "Stone";
+                }
+                if (r == 4) {
+                    return "Iron";
+                }
+                return "Gold";
+            }
+        }
+
+        // Six integer resource counters with spend semantics (spend fails, leaving the pile untouched,
+        // if it cannot afford the amount).
+        public class Stockpile {
+            private mutable int[] amount;
+
+            public constructor Stockpile() {
+                this.amount = new int[6]();
+            }
+
+            public destructor ~Stockpile() returns void {
+                delete this.amount;
+            }
+
+            public method get(int r) returns int {
+                return this.amount[r];
+            }
+
+            public method add(int r, int n) returns void {
+                this.amount[r] = this.amount[r] + n;
+            }
+
+            public method spend(int r, int n) returns boolean {
+                if (this.amount[r] < n) {
+                    return false;
+                }
+                this.amount[r] = this.amount[r] - n;
+                return true;
+            }
+
+            // Can this pile pay planks/stone/iron all at once?
+            public method canAfford(int planks, int stone, int iron) returns boolean {
+                return this.amount[2] >= planks && this.amount[3] >= stone && this.amount[4] >= iron;
+            }
+
+            public method payFor(int planks, int stone, int iron) returns boolean {
+                if (!this.canAfford(planks, stone, iron)) {
+                    return false;
+                }
+                this.amount[2] = this.amount[2] - planks;
+                this.amount[3] = this.amount[3] - stone;
+                this.amount[4] = this.amount[4] - iron;
+                return true;
+            }
+
+            public method total() returns int {
+                mutable int t = 0;
+                mutable int i = 0;
+                while (i < 6) {
+                    t = t + this.amount[i];
+                    i = i + 1;
+                }
+                return t;
+            }
+        }
+
+        // Building ordinals + their construction costs (planks, stone, iron) and per-city caps. The
+        // TownHall/Castle are placed for free at founding; the rest are grown from need.
+        public class Bld {
+            public static method townhall() returns int {
+                return 0;
+            }
+            public static method farm() returns int {
+                return 1;
+            }
+            public static method sawmill() returns int {
+                return 2;
+            }
+            public static method house() returns int {
+                return 3;
+            }
+            public static method barracks() returns int {
+                return 4;
+            }
+            public static method count() returns int {
+                return 5;
+            }
+            public static method name(int t) returns String {
+                if (t == 0) {
+                    return "TownHall";
+                }
+                if (t == 1) {
+                    return "Farm";
+                }
+                if (t == 2) {
+                    return "Sawmill";
+                }
+                if (t == 3) {
+                    return "House";
+                }
+                return "Barracks";
+            }
+            public static method costPlanks(int t) returns int {
+                if (t == 1) {
+                    return 8;
+                }
+                if (t == 2) {
+                    return 6;
+                }
+                if (t == 3) {
+                    return 5;
+                }
+                if (t == 4) {
+                    return 10;
+                }
+                return 0;
+            }
+            public static method costStone(int t) returns int {
+                if (t == 1) {
+                    return 4;
+                }
+                if (t == 2) {
+                    return 6;
+                }
+                if (t == 3) {
+                    return 3;
+                }
+                if (t == 4) {
+                    return 8;
+                }
+                return 0;
+            }
+            public static method costIron(int t) returns int {
+                if (t == 2) {
+                    return 3;
+                }
+                if (t == 4) {
+                    return 6;
+                }
+                return 0;
+            }
+            public static method perCityCap(int t) returns int {
+                if (t == 1) {
+                    return 6;
+                }
+                if (t == 2) {
+                    return 3;
+                }
+                if (t == 3) {
+                    return 99;
+                }
+                if (t == 4) {
+                    return 2;
+                }
+                return 1;
+            }
+            public static method glyph(int t) returns char {
+                if (t == 0) {
+                    return 'H';
+                }
+                if (t == 1) {
+                    return 'F';
+                }
+                if (t == 2) {
+                    return 'W';
+                }
+                if (t == 3) {
+                    return 'h';
+                }
+                return 'B';
+            }
+        }
+
+        // One structure on the map. Blueprints start unconstructed with 0 progress; a Builder raises
+        // progress to BUILD_TIME and calls markBuilt. A barracks/townhall can take damage in war.
+        public class Building {
+            public mutable int kind;
+            public mutable int x;
+            public mutable int y;
+            public mutable int nationId;
+            public mutable int hp;
+            public mutable boolean built;
+            public mutable int progress;
+
+            public constructor Building(int kind, int x, int y, int nationId) {
+                this.kind = kind;
+                this.x = x;
+                this.y = y;
+                this.nationId = nationId;
+                this.hp = 100;
+                this.built = false;
+                this.progress = 0;
+            }
+
+            public method markBuilt() returns void {
+                this.built = true;
+                this.hp = 100;
+            }
+        }
+    }
+}

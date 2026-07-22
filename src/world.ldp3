@@ -1,0 +1,207 @@
+import System.IO.Console;
+
+// The world: a biome grid generated from continent seeds, plus a deterministic RNG. This mirrors
+// agents.exe's HeightmapGenerator/BiomeMapper (a continent mask with radial falloff, thresholded into
+// biomes) but stays integer-only so it is fully deterministic and needs no float noise library.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        // A deterministic Park-Miller minimal-standard LCG. The multiply stays inside 2^46, so it never
+        // overflows a 64-bit long -- no trap, fully reproducible from a seed.
+        public class Rng {
+            private mutable long state;
+
+            public constructor Rng(int seed) {
+                mutable long s = cast<long>(seed);
+                if (s <= 0) {
+                    s = 1;
+                }
+                this.state = s % 2147483647;
+                if (this.state == 0) {
+                    this.state = 1;
+                }
+            }
+
+            public method next() returns int {
+                this.state = (this.state * 48271) % 2147483647;
+                return cast<int>(this.state);
+            }
+
+            // A value in [0, bound).
+            public method nextInt(int bound) returns int {
+                if (bound <= 0) {
+                    return 0;
+                }
+                return this.next() % bound;
+            }
+
+            // A value in [lo, hi].
+            public method range(int lo, int hi) returns int {
+                if (hi <= lo) {
+                    return lo;
+                }
+                return lo + this.nextInt(hi - lo + 1);
+            }
+
+            // Returns true with probability percent/100.
+            public method chance(int percent) returns boolean {
+                return this.nextInt(100) < percent;
+            }
+        }
+
+        // Biome ordinals, stored as ints in the grid (enum-free so they live in an int[] cheaply).
+        // 0 Ocean, 1 Beach, 2 Grassland, 3 Mountain, 4 Snow. Only Grassland and Beach are walkable.
+        public class Biomes {
+            public static method ocean() returns int {
+                return 0;
+            }
+            public static method beach() returns int {
+                return 1;
+            }
+            public static method grass() returns int {
+                return 2;
+            }
+            public static method mountain() returns int {
+                return 3;
+            }
+            public static method snow() returns int {
+                return 4;
+            }
+            public static method glyph(int b) returns char {
+                if (b == 0) {
+                    return '~';
+                }
+                if (b == 1) {
+                    return '.';
+                }
+                if (b == 2) {
+                    return ' ';
+                }
+                if (b == 3) {
+                    return '^';
+                }
+                return '*';
+            }
+        }
+
+        // The biome grid. Cells are row-major (y*width + x). Generation lays down a few continents and
+        // islands as radial height blobs, takes the max, and thresholds the [0,1000] height into biomes.
+        public class Grid {
+            public mutable int width;
+            public mutable int height;
+            private mutable int[] cell;
+
+            public constructor Grid(int w, int h, int seed) {
+                this.width = w;
+                this.height = h;
+                this.cell = new int[w * h]();
+                this.generate(seed);
+            }
+
+            public destructor ~Grid() returns void {
+                delete this.cell;
+            }
+
+            public method index(int x, int y) returns int {
+                return y * this.width + x;
+            }
+
+            public method inBounds(int x, int y) returns boolean {
+                return x >= 0 && y >= 0 && x < this.width && y < this.height;
+            }
+
+            public method biomeAt(int x, int y) returns int {
+                if (!this.inBounds(x, y)) {
+                    return 0;
+                }
+                return this.cell[this.index(x, y)];
+            }
+
+            // Ground units walk only on grassland and beach (agents.exe PassabilityMap.ForGroundUnits).
+            public method passable(int x, int y) returns boolean {
+                if (!this.inBounds(x, y)) {
+                    return false;
+                }
+                int b = this.cell[this.index(x, y)];
+                return b == 1 || b == 2;
+            }
+
+            private method generate(int seed) returns void {
+                mutable Rng rng = new Rng(seed) on stack;
+                int continents = 3;
+                int islands = 4;
+                int total = continents + islands;
+                int[] sx = new int[total]();
+                int[] sy = new int[total]();
+                int[] sr = new int[total]();
+                mutable int i = 0;
+                while (i < total) {
+                    sx[i] = rng.range(this.width / 8, this.width - this.width / 8);
+                    sy[i] = rng.range(this.height / 8, this.height - this.height / 8);
+                    if (i < continents) {
+                        sr[i] = rng.range(this.height / 2, (this.height * 3) / 4);
+                    } else {
+                        sr[i] = rng.range(this.height / 8, this.height / 5);
+                    }
+                    i = i + 1;
+                }
+                mutable int y = 0;
+                while (y < this.height) {
+                    mutable int x = 0;
+                    while (x < this.width) {
+                        mutable int best = 0;
+                        mutable int s = 0;
+                        while (s < total) {
+                            int dx = x - sx[s];
+                            int dy = y - sy[s];
+                            int distSq = dx * dx + dy * dy;
+                            int radSq = sr[s] * sr[s];
+                            if (radSq > 0 && distSq < radSq) {
+                                int contribution = 1000 - (distSq * 1000) / radSq;
+                                if (contribution > best) {
+                                    best = contribution;
+                                }
+                            }
+                            s = s + 1;
+                        }
+                        this.cell[this.index(x, y)] = Grid.classify(best);
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+            }
+
+            private static method classify(int h) returns int {
+                if (h < 210) {
+                    return 0;
+                }
+                if (h < 260) {
+                    return 1;
+                }
+                if (h < 890) {
+                    return 2;
+                }
+                if (h < 960) {
+                    return 3;
+                }
+                return 4;
+            }
+
+            // How many walkable cells the world has -- a quick sanity metric.
+            public method walkableCount() returns int {
+                mutable int n = 0;
+                mutable int i = 0;
+                int total = this.width * this.height;
+                while (i < total) {
+                    if (this.cell[i] == 1 || this.cell[i] == 2) {
+                        n = n + 1;
+                    }
+                    i = i + 1;
+                }
+                return n;
+            }
+        }
+    }
+}

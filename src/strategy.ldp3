@@ -1,0 +1,348 @@
+import System.IO.Console;
+
+// The strategic decision layer -- the seat the LLM occupied in agents.exe. Every ~45 ticks a nation's
+// Leader produces ONE Intent from the live nation/world state; IntentDispatcher applies it to the
+// world, nudging the tactical layer. In agents.exe this Intent came from a fine-tuned Phi-4-mini OR,
+// on any failure, from the deterministic MockHeuristic rule cascade -- which produces the identical
+// Intent from the identical input. This build has NO LLM: it always routes to the scripted decider,
+// which is a faithful port of MockHeuristic's R0..R5 priority cascade (agents.exe LLM/MockHeuristic).
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        // Intent type ordinals (the subset agents.exe's IntentDispatcher actually implements + a few).
+        public class IType {
+            public static method declareWar() returns int {
+                return 0;
+            }
+            public static method makePeace() returns int {
+                return 1;
+            }
+            public static method buildArmy() returns int {
+                return 2;
+            }
+            public static method foundCity() returns int {
+                return 3;
+            }
+            public static method focusResource() returns int {
+                return 4;
+            }
+            public static method prioritizeBuilding() returns int {
+                return 5;
+            }
+            public static method attackCity() returns int {
+                return 6;
+            }
+            public static method conscript() returns int {
+                return 7;
+            }
+            public static method nameHeir() returns int {
+                return 8;
+            }
+            public static method retreat() returns int {
+                return 9;
+            }
+            public static method idle() returns int {
+                return 10;
+            }
+            public static method name(int t) returns String {
+                if (t == 0) {
+                    return "DeclareWar";
+                }
+                if (t == 1) {
+                    return "MakePeace";
+                }
+                if (t == 2) {
+                    return "BuildArmy";
+                }
+                if (t == 3) {
+                    return "FoundCity";
+                }
+                if (t == 4) {
+                    return "FocusResource";
+                }
+                if (t == 5) {
+                    return "PrioritizeBuilding";
+                }
+                if (t == 6) {
+                    return "AttackCity";
+                }
+                if (t == 7) {
+                    return "Conscript";
+                }
+                if (t == 8) {
+                    return "NameHeir";
+                }
+                if (t == 9) {
+                    return "Retreat";
+                }
+                return "Idle";
+            }
+        }
+
+        // One strategic order. Only the fields relevant to its type are meaningful.
+        public class Intent {
+            public mutable int type;
+            public mutable int targetNation;
+            public mutable int targetSize;
+            public mutable int resource;
+            public mutable int buildingType;
+            public mutable int count;
+            public mutable String reason;
+            public mutable String rulePath;
+
+            public constructor Intent(int type) {
+                this.type = type;
+                this.targetNation = -1;
+                this.targetSize = 0;
+                this.resource = -1;
+                this.buildingType = -1;
+                this.count = 0;
+                this.reason = "";
+                this.rulePath = "";
+            }
+        }
+
+        // The scripted strategy oracle: NationState (read live) -> one Intent. Reseeded per call from
+        // worldSeed ^ nationId ^ tick, exactly like MockHeuristic, so decisions are reproducible.
+        public class MockHeuristic {
+
+            public static method decide(Nation* n, Realm* world, int tick) returns Intent* {
+                mutable Rng rng = new Rng(world.seed ^ n.id ^ (tick * 131)) on stack;
+                int food = n.stock.get(0);
+                int pop = n.livingCount();
+                int soldiers = n.soldierCount();
+                boolean atWar = n.atWarWithAny();
+
+                // R0 -- stalemate peace: a long, bloodless war is not worth its upkeep.
+                if (atWar && n.casualties == 0 && tick > 220 && rng.chance(45)) {
+                    return MockHeuristic.peace(n, world, "This war spills no blood and drains our stores; we make peace.", "R0");
+                }
+
+                // R1 -- crisis response: a food crash is an emergency.
+                if (food < 8 && pop > 6) {
+                    if (n.countBuilding(1) < 2 && rng.chance(60)) {
+                        return MockHeuristic.build(1, "Our granaries run empty -- raise more farms.", "R1.food");
+                    }
+                    return MockHeuristic.focus(0, "Hunger stalks us -- every hand to the harvest.", "R1.food");
+                }
+                // R1 -- heavy losses: rebuild the army.
+                if (n.casualties >= 3) {
+                    return MockHeuristic.army(soldiers + 8, "Our fallen must be answered -- muster the ranks.", "R1.losses");
+                }
+
+                // R3 -- war conduct (we are at war).
+                if (atWar) {
+                    int enemy = world.firstEnemy(n);
+                    if (soldiers == 0) {
+                        return MockHeuristic.peace(n, world, "We have no army left to fight -- sue for peace.", "R3.noarmy");
+                    }
+                    if (enemy >= 0 && soldiers >= (n.desiredSoldiers * 4) / 5 && n.desiredSoldiers > 0) {
+                        return MockHeuristic.attack(enemy, "The host is ready -- march on the enemy capital!", "R3.attack");
+                    }
+                    int es = world.strengthOf(enemy);
+                    if (es > world.strengthOf(n.id) && (n.personality == 1 || n.personality == 4) && rng.chance(35)) {
+                        return MockHeuristic.peace(n, world, "The enemy overmatches us -- we bow and seek terms.", "R3.surrender");
+                    }
+                    return MockHeuristic.army(soldiers + 10, "Reinforce the front before we strike.", "R3.build");
+                }
+
+                // R3.5 -- proactive war: prey on a weak neighbour.
+                if (soldiers >= 4 && food >= 15) {
+                    int prey = world.weakestOther(n.id);
+                    int myStr = world.strengthOf(n.id);
+                    if (prey >= 0 && world.strengthOf(prey) * 2 < myStr * 3) {
+                        mutable int chance = 6;
+                        if (n.personality == 0) {
+                            chance = 28;
+                        }
+                        if (n.personality == 5 || n.personality == 2) {
+                            chance = 16;
+                        }
+                        if (rng.chance(chance)) {
+                            return MockHeuristic.war(prey, "A weak neighbour tempts us -- we declare war.", "R3.5");
+                        }
+                    }
+                }
+
+                // R4 -- succession: name an heir while we can.
+                if (!world.hasHeir(n) && world.hasSpareRoyal(n) && rng.chance(50)) {
+                    return MockHeuristic.simple(8, "The line must be secured -- we name an heir.", "R4");
+                }
+
+                // R5 -- default, weighted by personality.
+                return MockHeuristic.byPersonality(n, world, rng);
+            }
+
+            private static method byPersonality(Nation* n, Realm* world, Rng* rng) returns Intent* {
+                int p = n.personality;
+                int roll = rng.nextInt(100);
+                int need = MockHeuristic.buildingNeed(n);
+                // Expansionist leans to founding cities; aggressive/cunning to arms; the rest to economy.
+                if (p == 2) {
+                    if (roll < 40) {
+                        return MockHeuristic.found("We spread to new lands -- found a city.", "R5.exp");
+                    }
+                    if (roll < 70) {
+                        return MockHeuristic.build(need, "Grow the settlement.", "R5.exp");
+                    }
+                    return MockHeuristic.focus(MockHeuristic.scarcest(n), "Feed the expansion.", "R5.exp");
+                }
+                if (p == 0 || p == 5) {
+                    if (roll < 40) {
+                        return MockHeuristic.army(n.soldierCount() + 6, "A strong host keeps us feared.", "R5.mil");
+                    }
+                    if (roll < 60) {
+                        return MockHeuristic.build(4, "Raise a barracks.", "R5.mil");
+                    }
+                    if (roll < 80) {
+                        return MockHeuristic.build(need, "Tend the economy between campaigns.", "R5.mil");
+                    }
+                    return MockHeuristic.focus(MockHeuristic.scarcest(n), "Stockpile for war.", "R5.mil");
+                }
+                if (p == 3) {
+                    if (roll < 45) {
+                        return MockHeuristic.build(2, "Trade thrives on planks -- raise a sawmill.", "R5.merc");
+                    }
+                    if (roll < 80) {
+                        return MockHeuristic.focus(MockHeuristic.scarcest(n), "Balance the ledgers.", "R5.merc");
+                    }
+                    return MockHeuristic.found("New markets in new cities.", "R5.merc");
+                }
+                // Cautious / Pious / Stoic: steady economy.
+                if (roll < 50) {
+                    return MockHeuristic.build(need, "Build steadily and endure.", "R5.eco");
+                }
+                if (roll < 80) {
+                    return MockHeuristic.focus(MockHeuristic.scarcest(n), "See to what we lack.", "R5.eco");
+                }
+                return MockHeuristic.simple(10, "We hold and watch.", "R5.idle");
+            }
+
+            // Choose a building the nation most needs (agents.exe PickBuildingNeed by security levels).
+            public static method buildingNeed(Nation* n) returns int {
+                int pop = n.livingCount();
+                int houses = n.countBuilding(3);
+                int farms = n.countBuilding(1);
+                int food = n.stock.get(0);
+                // A sawmill is the planks engine -- without it every other building stalls; build it first.
+                if (n.countBuilding(2) < 1) {
+                    return 2;
+                }
+                if (food < 25 && farms < 4) {
+                    return 1;
+                }
+                if (n.desiredSoldiers > 0 && n.countBuilding(4) < 1) {
+                    return 4;
+                }
+                if (pop > houses * 3 + 3) {
+                    return 3;
+                }
+                if (farms < 3) {
+                    return 1;
+                }
+                if (n.countBuilding(2) < 2) {
+                    return 2;
+                }
+                return -1;
+            }
+
+            // The resource the nation is shortest on (favouring the economic staples).
+            private static method scarcest(Nation* n) returns int {
+                mutable int best = 0;
+                mutable int bestAmt = n.stock.get(0);
+                mutable int r = 1;
+                while (r <= 4) {
+                    int a = n.stock.get(r);
+                    if (a < bestAmt) {
+                        bestAmt = a;
+                        best = r;
+                    }
+                    r = r + 1;
+                }
+                return best;
+            }
+
+            // --- Intent builders ---
+            private static method simple(int type, String reason, String rule) returns Intent* {
+                mutable Intent* it = new Intent(type) on heap;
+                it.reason = reason;
+                it.rulePath = rule;
+                return it;
+            }
+            private static method army(int size, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.simple(2, reason, rule);
+                it.targetSize = size;
+                return it;
+            }
+            private static method build(int kind, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.simple(5, reason, rule);
+                it.buildingType = kind;
+                return it;
+            }
+            private static method focus(int res, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.simple(4, reason, rule);
+                it.resource = res;
+                return it;
+            }
+            private static method found(String reason, String rule) returns Intent* {
+                return MockHeuristic.simple(3, reason, rule);
+            }
+            private static method war(int target, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.simple(0, reason, rule);
+                it.targetNation = target;
+                return it;
+            }
+            private static method attack(int target, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.simple(6, reason, rule);
+                it.targetNation = target;
+                return it;
+            }
+            private static method peace(Nation* n, Realm* world, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.simple(1, reason, rule);
+                it.targetNation = world.firstEnemy(n);
+                return it;
+            }
+        }
+
+        // Applies an Intent to the world (agents.exe IntentDispatcher). Records it on the nation and in
+        // the recent-events feed. Illegal intents are quietly rejected, matching the game.
+        public class IntentDispatcher {
+            public static method apply(Nation* n, Intent* it, Realm* world) returns void {
+                n.lastIntent = IType.name(it.type);
+                n.lastReason = it.reason;
+                if (it.type == 0) {
+                    world.declareWar(n.id, it.targetNation);
+                } else if (it.type == 1) {
+                    world.makePeace(n.id, it.targetNation);
+                } else if (it.type == 2) {
+                    mutable int s = it.targetSize;
+                    if (s > 60) {
+                        s = 60;
+                    }
+                    if (s > n.desiredSoldiers) {
+                        n.desiredSoldiers = s;
+                    }
+                } else if (it.type == 3) {
+                    world.foundCity(n);
+                } else if (it.type == 4) {
+                    n.focusedRes = it.resource;
+                } else if (it.type == 5) {
+                    n.prioBuilding = it.buildingType;
+                } else if (it.type == 6) {
+                    if (n.enemies[it.targetNation]) {
+                        n.attackTarget = it.targetNation;
+                    }
+                } else if (it.type == 7) {
+                    world.conscript(n, it.count);
+                } else if (it.type == 8) {
+                    world.nameHeir(n);
+                } else if (it.type == 9) {
+                    n.attackTarget = -1;
+                }
+                n.addEvent($"[{world.year()}y] {IType.name(it.type)}: {it.reason}");
+            }
+        }
+    }
+}

@@ -1,0 +1,356 @@
+import System.IO.Console;
+import System.Collections.ArrayList;
+
+// Nations and their people. A Worker is the tactical agent (its per-profession FSM is driven by the
+// World, which has the grid/resources it needs to act on). A Nation is a civilisation: a capital, a
+// stockpile, buildings, members, a royal family, war state, and the strategic knobs the Leader's
+// Intents set. Mirrors agents.exe Worker/Nation (City folded into the capital for this build).
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        // Profession ordinals (agents.exe Profession, trimmed to the economy this build runs).
+        public class Job {
+            public static method civilian() returns int {
+                return 0;
+            }
+            public static method woodcutter() returns int {
+                return 1;
+            }
+            public static method farmer() returns int {
+                return 2;
+            }
+            public static method stoneMiner() returns int {
+                return 3;
+            }
+            public static method ironMiner() returns int {
+                return 4;
+            }
+            public static method builder() returns int {
+                return 5;
+            }
+            public static method sawyer() returns int {
+                return 6;
+            }
+            public static method soldier() returns int {
+                return 7;
+            }
+            public static method name(int j) returns String {
+                if (j == 0) {
+                    return "Civilian";
+                }
+                if (j == 1) {
+                    return "Woodcutter";
+                }
+                if (j == 2) {
+                    return "Farmer";
+                }
+                if (j == 3) {
+                    return "StoneMiner";
+                }
+                if (j == 4) {
+                    return "IronMiner";
+                }
+                if (j == 5) {
+                    return "Builder";
+                }
+                if (j == 6) {
+                    return "Sawyer";
+                }
+                return "Soldier";
+            }
+        }
+
+        // Personality ordinals (agents.exe Personality). Drives the Leader's MockHeuristic roll tables.
+        public class Trait {
+            public static method aggressive() returns int {
+                return 0;
+            }
+            public static method cautious() returns int {
+                return 1;
+            }
+            public static method expansionist() returns int {
+                return 2;
+            }
+            public static method mercantile() returns int {
+                return 3;
+            }
+            public static method pious() returns int {
+                return 4;
+            }
+            public static method cunning() returns int {
+                return 5;
+            }
+            public static method stoic() returns int {
+                return 6;
+            }
+            public static method name(int p) returns String {
+                if (p == 0) {
+                    return "Aggressive";
+                }
+                if (p == 1) {
+                    return "Cautious";
+                }
+                if (p == 2) {
+                    return "Expansionist";
+                }
+                if (p == 3) {
+                    return "Mercantile";
+                }
+                if (p == 4) {
+                    return "Pious";
+                }
+                if (p == 5) {
+                    return "Cunning";
+                }
+                return "Stoic";
+            }
+        }
+
+        // Worker FSM states.
+        public class WState {
+            public static method wander() returns int {
+                return 0;
+            }
+            public static method toResource() returns int {
+                return 1;
+            }
+            public static method harvest() returns int {
+                return 2;
+            }
+            public static method toHome() returns int {
+                return 3;
+            }
+            public static method deposit() returns int {
+                return 4;
+            }
+            public static method toBlueprint() returns int {
+                return 5;
+            }
+            public static method constructing() returns int {
+                return 6;
+            }
+            public static method soldierIdle() returns int {
+                return 7;
+            }
+            public static method soldierMarch() returns int {
+                return 8;
+            }
+            public static method soldierFight() returns int {
+                return 9;
+            }
+        }
+
+        // A person: position, profession FSM state, vital stats, carry slot, and royal role. The FSM is
+        // ticked by World.tickWorker (World holds the grid + resources it acts on).
+        public class Worker {
+            public mutable int id;
+            public mutable int nationId;
+            public mutable int x;
+            public mutable int y;
+            public mutable int job;
+            public mutable int state;
+            public mutable int hp;
+            public mutable int ageTicks;
+            public mutable int lifetime;
+            public mutable int hunger;
+            public mutable int carryRes;    // -1 = empty
+            public mutable int carryAmt;
+            public mutable int targetX;
+            public mutable int targetY;
+            public mutable int targetNode;  // index into World.resources, -1 = none
+            public mutable int stuck;
+            public mutable boolean alive;
+            public mutable boolean royal;
+            public mutable int royalRole;   // -1 commoner, 0 Leader, 1 Consort, 2 Royal
+            public mutable boolean heir;
+            public mutable int harvestTimer;
+
+            public constructor Worker(int id, int nationId, int x, int y, int job, int lifetime) {
+                this.id = id;
+                this.nationId = nationId;
+                this.x = x;
+                this.y = y;
+                this.job = job;
+                this.state = 0;
+                this.hp = 100;
+                this.ageTicks = 0;
+                this.lifetime = lifetime;
+                this.hunger = 0;
+                this.carryRes = -1;
+                this.carryAmt = 0;
+                this.targetX = x;
+                this.targetY = y;
+                this.targetNode = -1;
+                this.stuck = 0;
+                this.alive = true;
+                this.royal = false;
+                this.royalRole = -1;
+                this.heir = false;
+                this.harvestTimer = 0;
+            }
+
+            public method isSoldier() returns boolean {
+                return this.job == 7;
+            }
+        }
+
+        // A civilisation. The capital is (capX, capY); its stockpile, buildings and members live here.
+        // The strategic knobs (desiredSoldiers, focusedRes, prioBuilding) are what Leader Intents set;
+        // the tactical layer reads them. enemies[i] marks war with nation i.
+        public class Nation {
+            public mutable int id;
+            public mutable String name;
+            public mutable char glyph;
+            public mutable int capX;
+            public mutable int capY;
+            public mutable Stockpile* stock;
+            public mutable ArrayList<Building*> buildings;
+            public mutable ArrayList<Worker*> members;
+            public mutable int desiredSoldiers;
+            public mutable int focusedRes;      // -1 none
+            public mutable int prioBuilding;    // -1 none
+            public mutable int warsWon;
+            public mutable int warsLost;
+            public mutable String lastIntent;
+            public mutable String lastReason;
+            public mutable boolean alive;
+            public mutable FlowField* capFlow;
+            public mutable ArrayList<String> events;
+            public mutable int personality;
+            public mutable boolean[] enemies;
+            public mutable int townHallHp;
+            public mutable int casualties;       // combat deaths in the recent window
+            public mutable int nextDecisionTick;
+            public mutable int attackTarget;     // nation id its army is ordered to attack, -1 none
+            public mutable int citiesFounded;
+
+            public constructor Nation(int id, String name, char glyph, Grid* grid, int capX, int capY,
+                                      int personality, int nationCount) {
+                this.id = id;
+                this.name = name;
+                this.glyph = glyph;
+                this.capX = capX;
+                this.capY = capY;
+                this.stock = new Stockpile() on heap;
+                this.buildings = new ArrayList<Building*>() on heap;
+                this.members = new ArrayList<Worker*>() on heap;
+                this.desiredSoldiers = 0;
+                this.focusedRes = -1;
+                this.prioBuilding = -1;
+                this.warsWon = 0;
+                this.warsLost = 0;
+                this.lastIntent = "none";
+                this.lastReason = "";
+                this.alive = true;
+                this.capFlow = new FlowField(grid, capX, capY) on heap;
+                this.events = new ArrayList<String>() on heap;
+                this.personality = personality;
+                this.enemies = new boolean[nationCount]();
+                this.townHallHp = 300;
+                this.casualties = 0;
+                this.nextDecisionTick = 20 + id * 5;
+                this.attackTarget = -1;
+                this.citiesFounded = 0;
+            }
+
+            public method addWorker(Worker* w) returns void {
+                this.members.add(w);
+            }
+
+            public method livingCount() returns int {
+                mutable int n = 0;
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    if (this.members.get(i).alive) {
+                        n = n + 1;
+                    }
+                    i = i + 1;
+                }
+                return n;
+            }
+
+            public method soldierCount() returns int {
+                mutable int n = 0;
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    mutable Worker* w = this.members.get(i);
+                    if (w.alive && w.isSoldier()) {
+                        n = n + 1;
+                    }
+                    i = i + 1;
+                }
+                return n;
+            }
+
+            public method countJob(int job) returns int {
+                mutable int n = 0;
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    mutable Worker* w = this.members.get(i);
+                    if (w.alive && w.job == job) {
+                        n = n + 1;
+                    }
+                    i = i + 1;
+                }
+                return n;
+            }
+
+            public method countBuilding(int kind) returns int {
+                mutable int n = 0;
+                mutable int i = 0;
+                while (i < this.buildings.size()) {
+                    mutable Building* b = this.buildings.get(i);
+                    if (b.built && b.kind == kind) {
+                        n = n + 1;
+                    }
+                    i = i + 1;
+                }
+                return n;
+            }
+
+            public method leader() returns Worker* {
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    mutable Worker* w = this.members.get(i);
+                    if (w.alive && w.royal && w.royalRole == 0) {
+                        return w;
+                    }
+                    i = i + 1;
+                }
+                return this.members.get(0);
+            }
+
+            public method hasLeader() returns boolean {
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    mutable Worker* w = this.members.get(i);
+                    if (w.alive && w.royal && w.royalRole == 0) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            public method atWarWithAny() returns boolean {
+                mutable int i = 0;
+                while (i < this.enemies.length()) {
+                    if (this.enemies[i]) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            public method addEvent(String e) returns void {
+                this.events.add(e);
+                if (this.events.size() > 10) {
+                    this.events.removeAt(0);
+                }
+            }
+        }
+    }
+}
