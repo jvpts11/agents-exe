@@ -1,0 +1,94 @@
+// Fractal noise for world generation. The original uses Unity's Mathf.PerlinNoise (32-bit float);
+// matching it bit-for-bit is impractical across engines (the spec notes seeds need not match), so this
+// is faded value noise with the same multi-octave/persistence/lacunarity structure -- it produces the
+// same kind of warped continental heightmap. All math is 32-bit `float` (matching the original and
+// halving the heightmap's memory); integer lattice hashing uses `long`. Deterministic given the
+// coordinate offsets the world generator draws from its seeded RNG.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public class Noise {
+            // Newton's-method square root, so world generation needs no math-library import.
+            public static method sqrtF(float x) returns float {
+                if (x <= 0.0) {
+                    return 0.0;
+                }
+                mutable float g = x;
+                mutable int i = 0;
+                while (i < 20) {
+                    g = 0.5 * (g + x / g);
+                    i = i + 1;
+                }
+                return g;
+            }
+
+            // floor toward negative infinity (cast<int> truncates toward zero; coords can be negative).
+            private static method floorF(float x) returns int {
+                mutable int i = cast<int>(x);
+                if (cast<float>(i) > x) {
+                    i = i - 1;
+                }
+                return i;
+            }
+
+            // Perlin's quintic smoothstep 6t^5 - 15t^4 + 10t^3.
+            private static method fade(float t) returns float {
+                return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+            }
+
+            private static method lerp(float t, float a, float b) returns float {
+                return a + t * (b - a);
+            }
+
+            // A deterministic hash of an integer lattice point to [0,1).
+            private static method hash2(int ix, int iy) returns float {
+                mutable long h = cast<long>(ix) * 374761393 + cast<long>(iy) * 668265263;
+                h = (h ^ (h >> 13)) * 1274126177;
+                h = h ^ (h >> 16);
+                long m = h & 16777215;   // low 24 bits, always non-negative
+                return cast<float>(m) / 16777216.0;
+            }
+
+            // Bilinearly-interpolated, faded value noise in [0,1].
+            public static method value(float x, float y) returns float {
+                int x0 = Noise.floorF(x);
+                int y0 = Noise.floorF(y);
+                float fx = x - cast<float>(x0);
+                float fy = y - cast<float>(y0);
+                float u = Noise.fade(fx);
+                float v = Noise.fade(fy);
+                float a = Noise.hash2(x0, y0);
+                float b = Noise.hash2(x0 + 1, y0);
+                float c = Noise.hash2(x0, y0 + 1);
+                float d = Noise.hash2(x0 + 1, y0 + 1);
+                float ab = Noise.lerp(u, a, b);
+                float cd = Noise.lerp(u, c, d);
+                return Noise.lerp(v, ab, cd);
+            }
+
+            // Multi-octave fractal noise, each octave remapped to [-1,1], normalized to ~[-1,1].
+            public static method fractal(float x, float y, int octaves, float persistence,
+                                         float lacunarity) returns float {
+                mutable float amp = 1.0;
+                mutable float freq = 1.0;
+                mutable float sum = 0.0;
+                mutable float maxAmp = 0.0;
+                mutable int o = 0;
+                while (o < octaves) {
+                    float n = Noise.value(x * freq, y * freq) * 2.0 - 1.0;
+                    sum = sum + n * amp;
+                    maxAmp = maxAmp + amp;
+                    amp = amp * persistence;
+                    freq = freq * lacunarity;
+                    o = o + 1;
+                }
+                if (maxAmp <= 0.0000001) {
+                    return 0.0;
+                }
+                return sum / maxAmp;
+            }
+        }
+    }
+}

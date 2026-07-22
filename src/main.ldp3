@@ -1,11 +1,16 @@
 import System.IO.Console;
+import System.IO.File;
+import System.Text.StringBuilder;
 import opengl.glfw.GlWindow;
 import opengl.gl.Wgl;
+import Agents.World.Grid;
+import Agents.World.Camera;
+import Agents.Gfx.Batch2D;
+import Agents.Gfx.WorldRenderer;
 
-// Entry point for the faithful rebuild of agents.exe -- a generative-agents civilisation sandbox,
-// re-implemented 1:1 in LDP3 (see docs/BLUEPRINT.md and docs/reference/). This is the Phase 0 skeleton:
-// it opens the 1280x720 window on the plugged-in LDP3-OpenGL back end and clears it to the game's
-// Windows-95 desktop blue. The world, agents, economy, nations and UI land in the phases that follow.
+// Phase 1 harness: generate the 480x480 world (seed 42) and render it isometrically through LDP3-OpenGL,
+// then read the framebuffer back to a PPM so the isometric map can be verified headless. (Becomes the
+// live windowed loop once the world, agents and UI are in.)
 program AgentsExe;
 
 public bundle Agents {
@@ -13,23 +18,74 @@ public bundle Agents {
 
         public class Main {
             public static method main(string[] args) returns void {
-                System.IO.Console.println("agents.exe (LDP3) -- faithful rebuild, Phase 0");
+                System.IO.Console.println("agents.exe (LDP3) -- Phase 1: isometric world");
+                mutable Grid* world = new Grid(480, 480, 42) on heap;
+                System.IO.Console.println("world generated (480x480, seed 42)");
                 mutable GlWindow* win = new GlWindow() on heap;
                 if (win.open("agents.exe", 1280, 720, 4, 6) == 0) {
                     System.IO.Console.println("No GL window available.");
                     delete win;
+                    delete world;
                     return;
                 }
                 win.setVSync(1);
-                while (win.isOpen()) {
+                mutable Batch2D* batch = new Batch2D(win.gl) on heap;
+                Main.renderView(win, batch, world, 240.0, 240.0, 0.68, "C:/Users/jvpts/Desktop/erros_ldp3/world_full.ppm");
+                Main.renderView(win, batch, world, 120.0, 120.0, 14.0, "C:/Users/jvpts/Desktop/erros_ldp3/world_close.ppm");
+                delete batch;
+                delete win;
+                delete world;
+                return;
+            }
+
+            private static method renderView(GlWindow* win, Batch2D* batch, Grid* world,
+                                             float fx, float fy, float halfH, String path) returns void {
+                mutable Camera* cam = new Camera(1280, 720, fx, fy, halfH) on heap;
+                mutable int f = 0;
+                while (f < 3) {
                     win.pump();
                     Wgl.glViewport(0, 0, win.width(), win.height());
-                    Wgl.glClearColor(0.102, 0.227, 0.353, 1.0);   // Win95 desktop blue (26,58,90)
+                    Wgl.glClearColor(0.102, 0.227, 0.353, 1.0);
                     Wgl.glClear(0x4000);
+                    batch.begin(win.width(), win.height(), 0);
+                    WorldRenderer.draw(batch, world, cam);
+                    batch.flush();
+                    if (f == 2) {
+                        Main.dump(win, 1280, 720, path);
+                    }
                     win.swap();
+                    f = f + 1;
                 }
-                delete win;
-                return;
+                delete cam;
+                System.IO.Console.println($"wrote {path}");
+            }
+
+            private static method dump(GlWindow* win, int w, int h, String path) returns void {
+                byte[] px = win.gl.readPixelsRgb(0, 0, w, h);
+                mutable StringBuilder sb = new StringBuilder() on heap;
+                sb.append("P3\n");
+                sb.appendInt(w);
+                sb.append(" ");
+                sb.appendInt(h);
+                sb.append("\n255\n");
+                mutable int y = h - 1;
+                while (y >= 0) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        int i = (y * w + x) * 3;
+                        sb.appendInt(cast<int>(px[i]) & 255);
+                        sb.append(" ");
+                        sb.appendInt(cast<int>(px[i + 1]) & 255);
+                        sb.append(" ");
+                        sb.appendInt(cast<int>(px[i + 2]) & 255);
+                        sb.append(" ");
+                        x = x + 1;
+                    }
+                    sb.append("\n");
+                    y = y - 1;
+                }
+                File.writeAll(path, sb.toString());
+                delete sb;
             }
         }
     }

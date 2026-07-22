@@ -1,0 +1,66 @@
+// The 2-D camera over the isometric world. It holds the grid cell that sits at the screen centre and a
+// zoom (half-tile height in pixels; tile width is twice that, the 2:1 iso ratio). Pan moves the focus
+// in grid space; zoom scales the tiles, clamped like the original's orthographic size. The renderer
+// asks it to project any grid cell (and its elevation) to a screen pixel, and to invert a screen pixel
+// back to a grid cell for mouse-picking.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public class Camera {
+            public mutable float focusX;   // grid cell at screen centre
+            public mutable float focusY;
+            public mutable float halfH;    // pixels per half tile-height (zoom); halfW = 2*halfH
+            public mutable int screenW;
+            public mutable int screenH;
+
+            public constructor Camera(int screenW, int screenH, float focusX, float focusY, float halfH) {
+                this.screenW = screenW;
+                this.screenH = screenH;
+                this.focusX = focusX;
+                this.focusY = focusY;
+                this.halfH = halfH;
+            }
+
+            public method halfW() returns float {
+                return this.halfH * 2.0;
+            }
+
+            // Pan the focus by a screen-pixel delta (converted into grid units at the current zoom).
+            public method pan(float dxPix, float dyPix) returns void {
+                float hw = this.halfW();
+                // invert the iso projection of a pixel delta into a grid delta
+                float a = dxPix / hw;
+                float b = dyPix / this.halfH;
+                this.focusX = this.focusX + (a + b) * 0.5;
+                this.focusY = this.focusY + (b - a) * 0.5;
+            }
+
+            // Multiply the zoom, clamped so a tile stays between ~1px and a large close-up.
+            public method zoom(float factor) returns void {
+                mutable float z = this.halfH * factor;
+                if (z < 0.5) {
+                    z = 0.5;
+                }
+                if (z > 48.0) {
+                    z = 48.0;
+                }
+                this.halfH = z;
+            }
+
+            // Screen-pixel X of a grid cell's diamond centre.
+            public method screenX(int gx, int gy) returns int {
+                float dx = (cast<float>(gx) - cast<float>(gy)) - (this.focusX - this.focusY);
+                return cast<int>(cast<float>(this.screenW) * 0.5 + dx * this.halfW());
+            }
+
+            // Screen-pixel Y of a grid cell's diamond centre, raised by its visual elevation.
+            public method screenY(int gx, int gy, int elev) returns int {
+                float dy = (cast<float>(gx) + cast<float>(gy)) - (this.focusX + this.focusY);
+                float sy = cast<float>(this.screenH) * 0.5 + dy * this.halfH;
+                return cast<int>(sy - cast<float>(elev) * this.halfH);
+            }
+        }
+    }
+}

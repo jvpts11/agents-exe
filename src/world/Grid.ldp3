@@ -1,0 +1,204 @@
+import System.IO.Console;
+
+// The world: the plain 480x480 integer grid that all simulation logic runs on (rendering projects it
+// isometrically -- see Iso/WorldRenderer). It generates a heightmap with the original's pipeline
+// (domain-warped multi-octave fractal noise + continent/island smoothstep masks + boundary noise,
+// then normalized) and collapses it into the six elevation-band biomes. Storage is a flat Biome array
+// indexed y*width + x -- faithful to the original's parallel-array model (no per-tile object).
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public class Grid {
+            public mutable int width;
+            public mutable int height;
+            public mutable int seed;
+            private mutable Biome[] biome;
+            private mutable float[] hmap;
+
+            public constructor Grid(int width, int height, int seed) {
+                this.width = width;
+                this.height = height;
+                this.seed = seed;
+                int n = width * height;
+                this.biome = new Biome[n]();
+                this.hmap = new float[n]();
+                this.generate();
+            }
+
+            public destructor ~Grid() returns void {
+                delete this.biome;
+                delete this.hmap;
+            }
+
+            public method inBounds(int x, int y) returns boolean {
+                return x >= 0 && y >= 0 && x < this.width && y < this.height;
+            }
+
+            public method biomeAt(int x, int y) returns Biome {
+                if (!this.inBounds(x, y)) {
+                    return Biome.DeepOcean;
+                }
+                return this.biome[y * this.width + x];
+            }
+
+            public method walkable(int x, int y) returns boolean {
+                if (!this.inBounds(x, y)) {
+                    return false;
+                }
+                return this.biome[y * this.width + x].walkable();
+            }
+
+            // --- generation ---
+
+            private method generate() returns void {
+                mutable Rng rng = new Rng(this.seed) on stack;
+                int w = this.width;
+                int h = this.height;
+                // Six large noise offsets, drawn in order (base, warp, boundary), as the original does.
+                float ox = rng.nextFloat() * 200000.0 - 100000.0;
+                float oy = rng.nextFloat() * 200000.0 - 100000.0;
+                float warpOx = rng.nextFloat() * 200000.0 - 100000.0;
+                float warpOy = rng.nextFloat() * 200000.0 - 100000.0;
+                float boundaryOx = rng.nextFloat() * 200000.0 - 100000.0;
+                float boundaryOy = rng.nextFloat() * 200000.0 - 100000.0;
+
+                mutable int minWH = w;
+                if (h < w) {
+                    minWH = h;
+                }
+                float minWHd = cast<float>(minWH);
+                // 4 continent seeds on a 2x2 normalized grid + 7 island seeds at random positions.
+                int total = 11;
+                float[] sx = new float[total]();
+                float[] sy = new float[total]();
+                float[] sr = new float[total]();
+                int side = 2;
+                float sideD = 2.0;
+                mutable int placed = 0;
+                mutable int c = 0;
+                while (c < 4) {
+                    float cxN = (cast<float>(c % side) + 0.5) / sideD;
+                    float cyN = (cast<float>(c / side) + 0.5) / sideD;
+                    float jx = (rng.nextFloat() * 2.0 - 1.0) * 0.3 / sideD;
+                    float jy = (rng.nextFloat() * 2.0 - 1.0) * 0.3 / sideD;
+                    sx[placed] = (cxN + jx) * cast<float>(w);
+                    sy[placed] = (cyN + jy) * cast<float>(h);
+                    sr[placed] = (0.16 + rng.nextFloat() * 0.10) * minWHd;
+                    placed = placed + 1;
+                    c = c + 1;
+                }
+                mutable int isl = 0;
+                while (isl < 7) {
+                    sx[placed] = (0.1 + rng.nextFloat() * 0.8) * cast<float>(w);
+                    sy[placed] = (0.1 + rng.nextFloat() * 0.8) * cast<float>(h);
+                    sr[placed] = (0.025 + rng.nextFloat() * 0.035) * minWHd;
+                    placed = placed + 1;
+                    isl = isl + 1;
+                }
+
+                mutable float minV = 1000000000.0;
+                mutable float maxV = -1000000000.0;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        float dxf = cast<float>(x);
+                        float dyf = cast<float>(y);
+                        // Domain warp (3 octaves), scaled and strengthened.
+                        float wxn = Noise.fractal((dxf + warpOx) / 110.0, (dyf + warpOy) / 110.0,
+                                                   3, 0.5, 2.0) * 18.0;
+                        float wyn = Noise.fractal((dxf + warpOx + 5000.0) / 110.0, (dyf + warpOy) / 110.0,
+                                                   3, 0.5, 2.0) * 18.0;
+                        // Base height (6 octaves) over the warped domain.
+                        float base = Noise.fractal((dxf + ox + wxn) / 180.0, (dyf + oy + wyn) / 180.0,
+                                                    6, 0.5, 2.0);
+                        // Two boundary-noise layers perturb the coastlines.
+                        float bnLow = Noise.fractal((dxf + boundaryOx) / 38.0, (dyf + boundaryOy) / 38.0,
+                                                     2, 0.6, 2.0) * 0.45;
+                        float bnHigh = Noise.fractal((dxf + boundaryOx + 3000.0) / 12.0,
+                                                      (dyf + boundaryOy) / 12.0, 2, 0.5, 2.4) * 0.22;
+                        float bn = bnLow + bnHigh;
+                        mutable float v = base + bn;
+                        // Continent/island mask pushes ocean down outside the landmasses.
+                        float mask = this.continentMask(x, y, sx, sy, sr, total, bn);
+                        v = v - (1.0 - mask) * 0.65;
+                        this.hmap[y * w + x] = v;
+                        if (v < minV) {
+                            minV = v;
+                        }
+                        if (v > maxV) {
+                            maxV = v;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+
+                mutable float rangeV = maxV - minV;
+                if (rangeV < 0.000001) {
+                    rangeV = 1.0;
+                }
+                float oceanT = 0.42;
+                float beachT = 0.46;
+                float mountT = 0.62;
+                float snowT = 0.78;
+                float deepT = oceanT * 0.6;
+                int n = w * h;
+                mutable int i = 0;
+                while (i < n) {
+                    float hv = (this.hmap[i] - minV) / rangeV;
+                    this.biome[i] = Grid.classify(hv, deepT, oceanT, beachT, mountT, snowT);
+                    i = i + 1;
+                }
+                delete sx;
+                delete sy;
+                delete sr;
+            }
+
+            // Smoothstep continent mask: the max falloff over all seeds; bn perturbs the coastline.
+            private method continentMask(int x, int y, float[] sx, float[] sy, float[] sr, int total,
+                                         float bn) returns float {
+                mutable float best = 0.0;
+                mutable int s = 0;
+                while (s < total) {
+                    float r = sr[s];
+                    if (r > 0.0) {
+                        float dx = (cast<float>(x) - sx[s]) / r;
+                        float dy = (cast<float>(y) - sy[s]) / r;
+                        float d = Noise.sqrtF(dx * dx + dy * dy) + bn;
+                        if (d < 1.0) {
+                            float m = 1.0 - (3.0 * d * d - 2.0 * d * d * d);
+                            if (m > best) {
+                                best = m;
+                            }
+                        }
+                    }
+                    s = s + 1;
+                }
+                return best;
+            }
+
+            private static method classify(float v, float deepT, float oceanT, float beachT,
+                                           float mountT, float snowT) returns Biome {
+                if (v < deepT) {
+                    return Biome.DeepOcean;
+                }
+                if (v < oceanT) {
+                    return Biome.Ocean;
+                }
+                if (v < beachT) {
+                    return Biome.Beach;
+                }
+                if (v < mountT) {
+                    return Biome.Grassland;
+                }
+                if (v < snowT) {
+                    return Biome.Mountain;
+                }
+                return Biome.Snow;
+            }
+        }
+    }
+}

@@ -1,0 +1,93 @@
+import Agents.World.Grid;
+import Agents.World.Biome;
+import Agents.World.Camera;
+import Agents.Gfx.Batch2D;
+
+// Draws the world as an isometric map through the quad batcher. Each tile is a 2:1 diamond placed at
+// its projected screen centre; Mountain and Snow are raised by their elevation and get darker SE/SW
+// side-faces so they read as cliffs. Tiles are drawn back-to-front (by gx+gy diagonal) so raised tiles
+// correctly overlap the ones behind them, and each cell is tinted slightly by a position hash so the
+// terrain is not a flat colour. Off-screen tiles are culled.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class WorldRenderer {
+
+            private static method clamp(int v) returns int {
+                if (v < 0) {
+                    return 0;
+                }
+                if (v > 255) {
+                    return 255;
+                }
+                return v;
+            }
+
+            public static method draw(Batch2D* batch, Grid* g, Camera* cam) returns void {
+                int w = g.width;
+                int h = g.height;
+                int sw = cam.screenW;
+                int sh = cam.screenH;
+                mutable int hw = cast<int>(cam.halfW());
+                mutable int hh = cast<int>(cam.halfH);
+                if (hh < 1) {
+                    hh = 1;
+                }
+                if (hw < 1) {
+                    hw = 1;
+                }
+                int last = w + h - 2;
+                mutable int s = 0;
+                while (s <= last) {
+                    mutable int gx = 0;
+                    if (s - (h - 1) > 0) {
+                        gx = s - (h - 1);
+                    }
+                    mutable int gxEnd = s;
+                    if (gxEnd > w - 1) {
+                        gxEnd = w - 1;
+                    }
+                    while (gx <= gxEnd) {
+                        int gy = s - gx;
+                        WorldRenderer.tile(batch, g, cam, gx, gy, sw, sh, hw, hh);
+                        gx = gx + 1;
+                    }
+                    s = s + 1;
+                }
+            }
+
+            private static method tile(Batch2D* batch, Grid* g, Camera* cam, int gx, int gy,
+                                       int sw, int sh, int hw, int hh) returns void {
+                mutable Biome b = g.biomeAt(gx, gy);
+                int elev = b.elevation();
+                int sx = cam.screenX(gx, gy);
+                int sy = cam.screenY(gx, gy, elev);
+                int eh = elev * hh;
+                // Cull tiles fully off-screen (account for the raised body + side height).
+                if (sx + hw < 0 || sx - hw > sw || sy - hh > sh || sy + hh + eh < 0) {
+                    return;
+                }
+                long hsh = cast<long>(gx) * 73856093 ^ cast<long>(gy) * 19349663;
+                int shade = cast<int>(hsh & 7) - 3;
+                int r = WorldRenderer.clamp(b.red() + shade * 3);
+                int gg = WorldRenderer.clamp(b.green() + shade * 3);
+                int bb = WorldRenderer.clamp(b.blue() + shade * 3);
+                float rf = cast<float>(r) / 255.0;
+                float gf = cast<float>(gg) / 255.0;
+                float bf = cast<float>(bb) / 255.0;
+                if (elev > 0) {
+                    // SE (right) side face -- darker.
+                    batch.quad(sx + hw, sy, sx, sy + hh, sx, sy + hh + eh, sx + hw, sy + eh,
+                               rf * 0.55, gf * 0.55, bf * 0.55, 1.0);
+                    // SW (left) side face -- darkest.
+                    batch.quad(sx - hw, sy, sx, sy + hh, sx, sy + hh + eh, sx - hw, sy + eh,
+                               rf * 0.40, gf * 0.40, bf * 0.40, 1.0);
+                }
+                // Top diamond face (T, R, B, L).
+                batch.quad(sx, sy - hh, sx + hw, sy, sx, sy + hh, sx - hw, sy, rf, gf, bf, 1.0);
+            }
+        }
+    }
+}
