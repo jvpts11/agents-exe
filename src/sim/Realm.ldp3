@@ -380,6 +380,7 @@ public bundle Agents {
                 if (this.tick % 5 == 0) {
                     this.produce(n);
                     this.grow(n);
+                    this.advanceTech(n);
                 }
                 if (this.tick % 10 == 0) {
                     this.reassign(n);
@@ -442,11 +443,13 @@ public bundle Agents {
             }
 
             // Economy production: farms yield food, sawmills turn wood into planks, the people eat.
+            // A more advanced era makes every workshop more productive.
             private method produce(Nation* n) returns void {
                 int farms = n.countBuilding(1);
                 int sawmills = n.countBuilding(2);
-                n.stock.add(0, farms * 7 + 2);
-                mutable int convert = sawmills * 5;
+                int techBonus = 100 + n.era * 18;
+                n.stock.add(0, (farms * 7 + 2) * techBonus / 100);
+                mutable int convert = sawmills * 5 * techBonus / 100;
                 if (convert > n.stock.get(1)) {
                     convert = n.stock.get(1);
                 }
@@ -462,6 +465,30 @@ public bundle Agents {
                 if (n.casualties > 0 && this.tick % 20 == 0) {
                     n.casualties = n.casualties - 1;
                 }
+            }
+
+            // Knowledge accrues from a nation's people and works; crossing a threshold advances its era,
+            // which boosts production and war. (The original had no eras -- this is the missing progression.)
+            private method advanceTech(Nation* n) returns void {
+                n.knowledge = n.knowledge + n.livingCount() + n.buildings.size() * 2;
+                if (n.era < 4 && n.knowledge >= this.eraThreshold(n.era)) {
+                    n.era = n.era + 1;
+                    n.addEvent($"[{this.year()}y] enters the {n.eraName()} Age");
+                    this.pushFeed($"{n.name} enters the {n.eraName()} Age!");
+                }
+            }
+
+            private method eraThreshold(int era) returns int {
+                if (era == 0) {
+                    return 500;
+                }
+                if (era == 1) {
+                    return 1600;
+                }
+                if (era == 2) {
+                    return 3800;
+                }
+                return 7500;
             }
 
             private method starve(Nation* n) returns void {
@@ -1146,7 +1173,7 @@ public bundle Agents {
                 if (engaged == 0) {
                     return;
                 }
-                foe.townHallHp = foe.townHallHp - engaged * 4;
+                foe.townHallHp = foe.townHallHp - engaged * (4 + attacker.era);
                 // Defenders trade blows with the attackers.
                 int defenders = foe.soldierCount();
                 mutable int a = 0;
