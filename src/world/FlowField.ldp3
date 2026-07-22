@@ -1,0 +1,118 @@
+import System.IO.Console;
+
+// Flow-field pathfinding, as the original does it (FlowField.cs): an unweighted 8-neighbour BFS flood
+// from one target cell over the walkable grid, storing the distance to the target at every cell. Agents
+// follow the field downhill instead of running A* each. One field is built per common destination (a
+// nation's capital, a resource, a military target) and reused by everyone heading there; it is rebuilt
+// only when its target changes.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public class FlowField {
+            private mutable int w;
+            private mutable int h;
+            private mutable int[] dist;
+            public mutable int targetX;
+            public mutable int targetY;
+
+            public constructor FlowField(Grid* grid, int tx, int ty) {
+                this.w = grid.width;
+                this.h = grid.height;
+                this.targetX = tx;
+                this.targetY = ty;
+                int n = this.w * this.h;
+                this.dist = new int[n]();
+                mutable int i = 0;
+                while (i < n) {
+                    this.dist[i] = 2000000000;
+                    i = i + 1;
+                }
+                int[] qx = new int[n]();
+                int[] qy = new int[n]();
+                mutable int head = 0;
+                mutable int tail = 0;
+                if (grid.walkable(tx, ty)) {
+                    this.dist[ty * this.w + tx] = 0;
+                    qx[tail] = tx;
+                    qy[tail] = ty;
+                    tail = tail + 1;
+                }
+                while (head < tail) {
+                    int cx = qx[head];
+                    int cy = qy[head];
+                    head = head + 1;
+                    int cd = this.dist[cy * this.w + cx];
+                    mutable int oy = 0 - 1;
+                    while (oy <= 1) {
+                        mutable int ox = 0 - 1;
+                        while (ox <= 1) {
+                            if (!(ox == 0 && oy == 0)) {
+                                int nx = cx + ox;
+                                int ny = cy + oy;
+                                if (grid.walkable(nx, ny)) {
+                                    int idx = ny * this.w + nx;
+                                    if (this.dist[idx] > cd + 1) {
+                                        this.dist[idx] = cd + 1;
+                                        qx[tail] = nx;
+                                        qy[tail] = ny;
+                                        tail = tail + 1;
+                                    }
+                                }
+                            }
+                            ox = ox + 1;
+                        }
+                        oy = oy + 1;
+                    }
+                }
+                delete qx;
+                delete qy;
+            }
+
+            public destructor ~FlowField() returns void {
+                delete this.dist;
+            }
+
+            public method distanceAt(int x, int y) returns int {
+                if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
+                    return 2000000000;
+                }
+                return this.dist[y * this.w + x];
+            }
+
+            public method reachable(int x, int y) returns boolean {
+                return this.distanceAt(x, y) < 2000000000;
+            }
+
+            // The neighbour step that most reduces distance, packed as (dx+1)+(dy+1)*3 (4 = stay put).
+            public method stepToward(int x, int y) returns int {
+                mutable int bestDist = this.distanceAt(x, y);
+                mutable int best = 4;
+                mutable int oy = 0 - 1;
+                while (oy <= 1) {
+                    mutable int ox = 0 - 1;
+                    while (ox <= 1) {
+                        if (!(ox == 0 && oy == 0)) {
+                            int d = this.distanceAt(x + ox, y + oy);
+                            if (d < bestDist) {
+                                bestDist = d;
+                                best = (ox + 1) + (oy + 1) * 3;
+                            }
+                        }
+                        ox = ox + 1;
+                    }
+                    oy = oy + 1;
+                }
+                return best;
+            }
+
+            public static method stepDx(int packed) returns int {
+                return (packed % 3) - 1;
+            }
+            public static method stepDy(int packed) returns int {
+                return (packed / 3) - 1;
+            }
+        }
+    }
+}

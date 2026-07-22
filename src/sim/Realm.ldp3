@@ -2,16 +2,19 @@ import System.Collections.ArrayList;
 import Agents.World.Grid;
 import Agents.World.Biome;
 import Agents.World.Rng;
+import Agents.World.Noise;
+import Agents.World.FlowField;
 import Agents.World.ResourceNode;
+import Agents.World.ResourceKind;
 import Agents.World.ResourceSeeder;
 import Agents.People.Nation;
 import Agents.People.Worker;
 
-// The simulation container: it owns the world grid, the resource nodes, the nations and every worker,
-// and bootstraps a new game from a seed the way the original does -- generate the world, place the
-// nations on spread-out grassland, and spawn a starting population of workers around each capital. The
-// tick loop (economy, decisions, combat) and the rest of the systems build on top of this in the next
-// phases.
+// The simulation container and its tick. It owns the world grid, resource nodes, nations and workers,
+// bootstraps a game from a seed (generate -> seat nations -> spawn workers), and advances everyone each
+// tick: workers age and hunger, and the gatherers run the harvest loop -- seek the nearest reachable
+// node of their trade, walk to it, work it, carry the yield home to the capital and deposit it. Movement
+// is continuous in grid space; the return trip follows the capital's flow-field. Real-time: dt seconds.
 program AgentsExe;
 
 public bundle Agents {
@@ -23,6 +26,7 @@ public bundle Agents {
             public mutable ArrayList<Nation*> nations;
             public mutable ArrayList<Worker*> workers;
             public mutable int seed;
+            private mutable Rng* moveRng;
 
             public constructor Realm(int w, int h, int seed) {
                 this.seed = seed;
@@ -30,12 +34,11 @@ public bundle Agents {
                 this.nodes = ResourceSeeder.seed(this.grid, seed);
                 this.nations = new ArrayList<Nation*>() on heap;
                 this.workers = new ArrayList<Worker*>() on heap;
+                this.moveRng = new Rng(seed ^ 7788) on heap;
                 this.placeNations(4);
                 this.spawnWorkers(50);
             }
 
-            // The ArrayLists are RAII value fields (freed with the Realm); we only free the heap objects
-            // they hold. Each Worker lives once in `workers` (nation.members just points at them).
             public destructor ~Realm() returns void {
                 mutable int i = 0;
                 while (i < this.workers.size()) {
@@ -53,6 +56,7 @@ public bundle Agents {
                     i = i + 1;
                 }
                 delete this.grid;
+                delete this.moveRng;
             }
 
             private static method nationName(int i) returns String {
@@ -77,7 +81,6 @@ public bundle Agents {
                 return "Gilneas";
             }
 
-            // Seat `count` nations on grassland, each kept well apart from the others.
             private method placeNations(int count) returns void {
                 mutable Rng rng = new Rng(this.seed ^ 90124) on stack;
                 int w = this.grid.width;
@@ -101,14 +104,16 @@ public bundle Agents {
                             k = k + 1;
                         }
                         if (ok) {
-                            this.nations.add(new Nation(placed, Realm.nationName(placed), cx, cy) on heap);
+                            mutable Nation* n = new Nation(placed, Realm.nationName(placed), cx, cy,
+                                                           this.grid) on heap;
+                            n.stock.add(0, 60);   // a little starting food
+                            this.nations.add(n);
                             placed = placed + 1;
                         }
                     }
                 }
             }
 
-            // Spawn `per` workers around each capital, on nearby walkable cells.
             private method spawnWorkers(int per) returns void {
                 mutable Rng rng = new Rng(this.seed ^ 51237) on stack;
                 mutable int ni = 0;
@@ -121,8 +126,11 @@ public bundle Agents {
                         int sx = n.capX + rng.range(0 - 6, 6);
                         int sy = n.capY + rng.range(0 - 6, 6);
                         if (this.grid.walkable(sx, sy)) {
+                            float life = cast<float>(rng.range(360, 540));
                             mutable Worker* wk = new Worker(n.id, cast<float>(sx) + 0.5,
-                                                           cast<float>(sy) + 0.5) on heap;
+                                                           cast<float>(sy) + 0.5, life) on heap;
+                            wk.profession = Realm.startingProfession(spawned);
+                            wk.age = 120.0;   // start as adults so the economy runs immediately
                             this.workers.add(wk);
                             n.members.add(wk);
                             spawned = spawned + 1;
@@ -130,6 +138,246 @@ public bundle Agents {
                     }
                     ni = ni + 1;
                 }
+            }
+
+            // A starting mix of gatherers so the economy moves (the full profession selector is later).
+            private static method startingProfession(int k) returns int {
+                int m = k % 6;
+                if (m == 0 || m == 1) {
+                    return 1;   // Woodcutter
+                }
+                if (m == 2) {
+                    return 7;   // StoneMiner
+                }
+                if (m == 3) {
+                    return 8;   // IronMiner
+                }
+                if (m == 4) {
+                    return 3;   // Hunter
+                }
+                return 0;       // Civilian
+            }
+
+            // --- tick ---
+
+            public method tick(float dt) returns void {
+                mutable int i = 0;
+                while (i < this.workers.size()) {
+                    this.tickWorker(this.workers.get(i), dt);
+                    i = i + 1;
+                }
+            }
+
+            private method tickWorker(Worker* wk, float dt) returns void {
+                if (!wk.alive) {
+                    return;
+                }
+                wk.age = wk.age + dt;
+                if (wk.age >= wk.lifetime) {
+                    wk.alive = false;
+                    return;
+                }
+                // Hunger: +1 every 7s; starve at 100; eat from the nation store when hungry.
+                wk.hungerTimer = wk.hungerTimer + dt;
+                while (wk.hungerTimer >= 7.0) {
+                    wk.hungerTimer = wk.hungerTimer - 7.0;
+                    wk.hunger = wk.hunger + 1;
+                }
+                if (wk.hunger >= 100) {
+                    wk.alive = false;
+                    return;
+                }
+                mutable Nation* n = this.nations.get(wk.nationId);
+                if (wk.hunger >= 30 && n.stock.get(0) >= 1) {
+                    n.stock.spend(0, 1);
+                    wk.hunger = 0;
+                }
+                if (!wk.isAdult()) {
+                    this.wander(wk, dt);
+                    return;
+                }
+                if (!Realm.isGatherer(wk.profession)) {
+                    this.wander(wk, dt);
+                    return;
+                }
+                this.tickGatherer(n, wk, dt);
+            }
+
+            private method tickGatherer(Nation* n, Worker* wk, float dt) returns void {
+                // Carrying: head home to the capital and deposit.
+                if (wk.carryRes >= 0) {
+                    if (this.adjacentCell(wk, n.capX, n.capY)) {
+                        n.stock.add(wk.carryRes, wk.carryAmt);
+                        wk.carryRes = -1;
+                        wk.carryAmt = 0;
+                    } else {
+                        this.moveViaFlow(wk, n.capFlow, dt);
+                    }
+                    return;
+                }
+                // Need a target node.
+                if (wk.targetNode < 0 || !this.nodeValid(wk.targetNode)) {
+                    wk.targetNode = this.findNode(wk, Realm.gatherKind(wk.profession), n.capFlow);
+                    if (wk.targetNode < 0) {
+                        this.wander(wk, dt);
+                        return;
+                    }
+                    mutable ResourceNode* tn = this.nodes.get(wk.targetNode);
+                    tn.reservedBy = wk.nationId;
+                }
+                mutable ResourceNode* node = this.nodes.get(wk.targetNode);
+                if (this.adjacentCell(wk, node.gx, node.gy)) {
+                    wk.workTimer = wk.workTimer + dt;
+                    if (wk.workTimer >= 3.0) {
+                        wk.workTimer = 0.0;
+                        mutable int got = 10;
+                        if (got > node.amount) {
+                            got = node.amount;
+                        }
+                        node.amount = node.amount - got;
+                        wk.carryRes = Realm.resIndex(node.kind);
+                        wk.carryAmt = got;
+                        if (node.amount <= 0) {
+                            node.alive = false;
+                        }
+                        node.reservedBy = -1;
+                        wk.targetNode = -1;
+                    }
+                } else {
+                    this.moveToward(wk, node.gx, node.gy, dt);
+                }
+            }
+
+            // --- helpers ---
+
+            private static method isGatherer(int prof) returns boolean {
+                return prof == 1 || prof == 7 || prof == 8 || prof == 3;
+            }
+
+            private static method gatherKind(int prof) returns ResourceKind {
+                if (prof == 7) {
+                    return ResourceKind.StoneNode;
+                }
+                if (prof == 8) {
+                    return ResourceKind.IronNode;
+                }
+                if (prof == 3) {
+                    return ResourceKind.Fauna;
+                }
+                return ResourceKind.Tree;
+            }
+
+            private static method resIndex(ResourceKind k) returns int {
+                if (k == ResourceKind.StoneNode) {
+                    return 2;
+                }
+                if (k == ResourceKind.IronNode) {
+                    return 3;
+                }
+                if (k == ResourceKind.Tree) {
+                    return 1;
+                }
+                return 0;   // Bush / Fauna -> Food
+            }
+
+            private method nodeValid(int idx) returns boolean {
+                if (idx < 0 || idx >= this.nodes.size()) {
+                    return false;
+                }
+                return this.nodes.get(idx).alive;
+            }
+
+            // Nearest free node of a kind the worker's capital can reach over land.
+            private method findNode(Worker* wk, ResourceKind kind, FlowField* flow) returns int {
+                int cx = cast<int>(wk.px);
+                int cy = cast<int>(wk.py);
+                mutable int best = -1;
+                mutable int bestD = 2000000000;
+                mutable int i = 0;
+                while (i < this.nodes.size()) {
+                    mutable ResourceNode* nd = this.nodes.get(i);
+                    if (nd.alive && nd.kind == kind && nd.reservedBy < 0 && flow.reachable(nd.gx, nd.gy)) {
+                        int dx = nd.gx - cx;
+                        int dy = nd.gy - cy;
+                        int d = dx * dx + dy * dy;
+                        if (d < bestD) {
+                            bestD = d;
+                            best = i;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return best;
+            }
+
+            private method adjacentCell(Worker* wk, int tx, int ty) returns boolean {
+                mutable int dx = cast<int>(wk.px) - tx;
+                mutable int dy = cast<int>(wk.py) - ty;
+                if (dx < 0) {
+                    dx = 0 - dx;
+                }
+                if (dy < 0) {
+                    dy = 0 - dy;
+                }
+                return dx <= 1 && dy <= 1;
+            }
+
+            // Move continuously toward a target cell centre at walking speed; face the movement.
+            private method moveToward(Worker* wk, int tcx, int tcy, float dt) returns void {
+                float tx = cast<float>(tcx) + 0.5;
+                float ty = cast<float>(tcy) + 0.5;
+                float dx = tx - wk.px;
+                float dy = ty - wk.py;
+                float d = Noise.sqrtF(dx * dx + dy * dy);
+                float spd = 1.5 * dt;
+                if (d <= spd || d < 0.0001) {
+                    if (this.grid.walkable(tcx, tcy)) {
+                        wk.px = tx;
+                        wk.py = ty;
+                    }
+                } else {
+                    float nx = wk.px + dx / d * spd;
+                    float ny = wk.py + dy / d * spd;
+                    if (this.grid.walkable(cast<int>(nx), cast<int>(ny))) {
+                        wk.px = nx;
+                        wk.py = ny;
+                    }
+                }
+                wk.dir = Realm.faceOf(dx, dy);
+            }
+
+            // Follow a flow-field one cell at a time toward its target.
+            private method moveViaFlow(Worker* wk, FlowField* flow, float dt) returns void {
+                int cx = cast<int>(wk.px);
+                int cy = cast<int>(wk.py);
+                int packed = flow.stepToward(cx, cy);
+                int sdx = FlowField.stepDx(packed);
+                int sdy = FlowField.stepDy(packed);
+                if (sdx == 0 && sdy == 0) {
+                    this.moveToward(wk, flow.targetX, flow.targetY, dt);
+                } else {
+                    this.moveToward(wk, cx + sdx, cy + sdy, dt);
+                }
+            }
+
+            private method wander(Worker* wk, float dt) returns void {
+                int mv = this.moveRng.nextInt(9);
+                int mx = (mv % 3) - 1;
+                int my = (mv / 3) - 1;
+                this.moveToward(wk, cast<int>(wk.px) + mx, cast<int>(wk.py) + my, dt);
+            }
+
+            private static method faceOf(float dx, float dy) returns int {
+                if (dx >= 0.0 && dy >= 0.0) {
+                    return 0;   // NE
+                }
+                if (dx >= 0.0 && dy < 0.0) {
+                    return 1;   // SE
+                }
+                if (dx < 0.0 && dy < 0.0) {
+                    return 2;   // SW
+                }
+                return 3;       // NW
             }
         }
     }
