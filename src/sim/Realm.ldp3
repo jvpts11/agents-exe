@@ -257,6 +257,30 @@ public bundle Agents {
                 return best;
             }
 
+            // The weakest rival an army could actually march on: alive, not me, and whose capital my
+            // capital can reach over land (its flow-field floods to my seat). Foes across the sea are
+            // skipped, so nations pick winnable wars instead of declaring on an unreachable island.
+            public method weakestReachable(int myId) returns int {
+                mutable Nation* me = this.nations.get(myId);
+                mutable int best = -1;
+                mutable int bestStr = 2000000000;
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    if (i != myId) {
+                        mutable Nation* o = this.nations.get(i);
+                        if (o.alive && o.capFlow.reachable(me.capX, me.capY)) {
+                            int s = this.strengthOf(i);
+                            if (s < bestStr) {
+                                bestStr = s;
+                                best = i;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                return best;
+            }
+
             public method declareWar(int a, int b) returns void {
                 if (b < 0 || a == b || b >= this.nations.size()) {
                     return;
@@ -1186,7 +1210,20 @@ public bundle Agents {
                     this.wanderHome(n, w);
                     return;
                 }
-                this.moveGreedy(w, foe.capX, foe.capY);
+                // March on the foe's capital along the flow-field that already points at it, so soldiers
+                // route around mountains and lakes and actually arrive to lay siege. If the field never
+                // reaches this soldier (the foe is across the sea), the greedy fallback stalls him on his
+                // own coast -- land armies cannot cross open water, only naval colonies do.
+                int packed = foe.capFlow.stepToward(w.x, w.y);
+                int sdx = FlowField.stepDx(packed);
+                int sdy = FlowField.stepDy(packed);
+                if (sdx == 0 && sdy == 0) {
+                    this.moveGreedy(w, foe.capX, foe.capY);
+                    return;
+                }
+                w.x = w.x + sdx;
+                w.y = w.y + sdy;
+                w.stuck = 0;
             }
 
             private method wanderHome(Nation* n, Worker* w) returns void {
