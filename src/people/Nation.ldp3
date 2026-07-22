@@ -1,0 +1,169 @@
+import System.Collections.ArrayList;
+import Agents.Economy.Stockpile;
+import Agents.Economy.Building;
+import Agents.World.Grid;
+import Agents.World.FlowField;
+
+// A civilisation. The capital is (capX, capY); its stockpile, buildings and members live here. The
+// strategic knobs (desiredSoldiers, focusedRes, prioBuilding, attackTarget) are what Leader Intents
+// set; the tactical layer reads them. enemies[i] marks war with nation i.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace People {
+
+        public class Nation {
+            public mutable int id;
+            public mutable String name;
+            public mutable char glyph;
+            public mutable int capX;
+            public mutable int capY;
+            public mutable Stockpile* stock;
+            public mutable ArrayList<Building*> buildings;
+            public mutable ArrayList<Worker*> members;
+            public mutable int desiredSoldiers;
+            public mutable int focusedRes;      // -1 none
+            public mutable int prioBuilding;    // -1 none
+            public mutable int warsWon;
+            public mutable int warsLost;
+            public mutable String lastIntent;
+            public mutable String lastReason;
+            public mutable boolean alive;
+            public mutable FlowField* capFlow;
+            public mutable ArrayList<String> events;
+            public mutable int personality;
+            public mutable boolean[] enemies;
+            public mutable int townHallHp;
+            public mutable int casualties;
+            public mutable int nextDecisionTick;
+            public mutable int attackTarget;
+            public mutable int citiesFounded;
+
+            public constructor Nation(int id, String name, char glyph, Grid* grid, int capX, int capY,
+                                      int personality, int nationCount) {
+                this.id = id;
+                this.name = name;
+                this.glyph = glyph;
+                this.capX = capX;
+                this.capY = capY;
+                this.stock = new Stockpile() on heap;
+                this.buildings = new ArrayList<Building*>() on heap;
+                this.members = new ArrayList<Worker*>() on heap;
+                this.desiredSoldiers = 0;
+                this.focusedRes = -1;
+                this.prioBuilding = -1;
+                this.warsWon = 0;
+                this.warsLost = 0;
+                this.lastIntent = "none";
+                this.lastReason = "";
+                this.alive = true;
+                this.capFlow = new FlowField(grid, capX, capY) on heap;
+                this.events = new ArrayList<String>() on heap;
+                this.personality = personality;
+                this.enemies = new boolean[nationCount]();
+                this.townHallHp = 300;
+                this.casualties = 0;
+                this.nextDecisionTick = 20 + id * 5;
+                this.attackTarget = -1;
+                this.citiesFounded = 0;
+            }
+
+            public method addWorker(Worker* w) returns void {
+                this.members.add(w);
+            }
+
+            public method livingCount() returns int {
+                mutable int n = 0;
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    if (this.members.get(i).alive) {
+                        n = n + 1;
+                    }
+                    i = i + 1;
+                }
+                return n;
+            }
+
+            public method soldierCount() returns int {
+                mutable int n = 0;
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    mutable Worker* w = this.members.get(i);
+                    if (w.alive && w.isSoldier()) {
+                        n = n + 1;
+                    }
+                    i = i + 1;
+                }
+                return n;
+            }
+
+            public method countJob(int job) returns int {
+                mutable int n = 0;
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    mutable Worker* w = this.members.get(i);
+                    if (w.alive && w.job == job) {
+                        n = n + 1;
+                    }
+                    i = i + 1;
+                }
+                return n;
+            }
+
+            public method countBuilding(int kind) returns int {
+                mutable int n = 0;
+                mutable int i = 0;
+                while (i < this.buildings.size()) {
+                    mutable Building* b = this.buildings.get(i);
+                    if (b.built && b.kind == kind) {
+                        n = n + 1;
+                    }
+                    i = i + 1;
+                }
+                return n;
+            }
+
+            public method leader() returns Worker* {
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    mutable Worker* w = this.members.get(i);
+                    if (w.alive && w.royal && w.royalRole == 0) {
+                        return w;
+                    }
+                    i = i + 1;
+                }
+                return this.members.get(0);
+            }
+
+            public method hasLeader() returns boolean {
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    mutable Worker* w = this.members.get(i);
+                    if (w.alive && w.royal && w.royalRole == 0) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            public method atWarWithAny() returns boolean {
+                mutable int i = 0;
+                while (i < this.enemies.length()) {
+                    if (this.enemies[i]) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            public method addEvent(String e) returns void {
+                this.events.add(e);
+                if (this.events.size() > 10) {
+                    this.events.removeAt(0);
+                }
+            }
+        }
+    }
+}

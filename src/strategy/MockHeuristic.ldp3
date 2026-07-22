@@ -1,111 +1,17 @@
-import System.IO.Console;
+import Agents.World.Rng;
+import Agents.People.Nation;
+import Agents.Sim.Realm;
 
-// The strategic decision layer -- the seat the LLM occupied in agents.exe. Every ~45 ticks a nation's
-// Leader produces ONE Intent from the live nation/world state; IntentDispatcher applies it to the
-// world, nudging the tactical layer. In agents.exe this Intent came from a fine-tuned Phi-4-mini OR,
-// on any failure, from the deterministic MockHeuristic rule cascade -- which produces the identical
-// Intent from the identical input. This build has NO LLM: it always routes to the scripted decider,
-// which is a faithful port of MockHeuristic's R0..R5 priority cascade (agents.exe LLM/MockHeuristic).
+// The strategic decision layer -- the seat the LLM occupied in the original. Every ~45 ticks a
+// nation's Leader produces ONE Intent from the live nation/world state. In the original this came
+// from a fine-tuned Phi-4-mini OR, on any failure, from this deterministic MockHeuristic rule cascade,
+// which produces the identical Intent from the identical input. This build has NO LLM: it always
+// routes here. Reseeded per call from worldSeed ^ nationId ^ tick so decisions are reproducible.
 program AgentsExe;
 
 public bundle Agents {
-    public namespace Sim {
+    public namespace Strategy {
 
-        // Intent type ordinals (the subset agents.exe's IntentDispatcher actually implements + a few).
-        public class IType {
-            public static method declareWar() returns int {
-                return 0;
-            }
-            public static method makePeace() returns int {
-                return 1;
-            }
-            public static method buildArmy() returns int {
-                return 2;
-            }
-            public static method foundCity() returns int {
-                return 3;
-            }
-            public static method focusResource() returns int {
-                return 4;
-            }
-            public static method prioritizeBuilding() returns int {
-                return 5;
-            }
-            public static method attackCity() returns int {
-                return 6;
-            }
-            public static method conscript() returns int {
-                return 7;
-            }
-            public static method nameHeir() returns int {
-                return 8;
-            }
-            public static method retreat() returns int {
-                return 9;
-            }
-            public static method idle() returns int {
-                return 10;
-            }
-            public static method name(int t) returns String {
-                if (t == 0) {
-                    return "DeclareWar";
-                }
-                if (t == 1) {
-                    return "MakePeace";
-                }
-                if (t == 2) {
-                    return "BuildArmy";
-                }
-                if (t == 3) {
-                    return "FoundCity";
-                }
-                if (t == 4) {
-                    return "FocusResource";
-                }
-                if (t == 5) {
-                    return "PrioritizeBuilding";
-                }
-                if (t == 6) {
-                    return "AttackCity";
-                }
-                if (t == 7) {
-                    return "Conscript";
-                }
-                if (t == 8) {
-                    return "NameHeir";
-                }
-                if (t == 9) {
-                    return "Retreat";
-                }
-                return "Idle";
-            }
-        }
-
-        // One strategic order. Only the fields relevant to its type are meaningful.
-        public class Intent {
-            public mutable int type;
-            public mutable int targetNation;
-            public mutable int targetSize;
-            public mutable int resource;
-            public mutable int buildingType;
-            public mutable int count;
-            public mutable String reason;
-            public mutable String rulePath;
-
-            public constructor Intent(int type) {
-                this.type = type;
-                this.targetNation = -1;
-                this.targetSize = 0;
-                this.resource = -1;
-                this.buildingType = -1;
-                this.count = 0;
-                this.reason = "";
-                this.rulePath = "";
-            }
-        }
-
-        // The scripted strategy oracle: NationState (read live) -> one Intent. Reseeded per call from
-        // worldSeed ^ nationId ^ tick, exactly like MockHeuristic, so decisions are reproducible.
         public class MockHeuristic {
 
             public static method decide(Nation* n, Realm* world, int tick) returns Intent* {
@@ -303,45 +209,6 @@ public bundle Agents {
                 mutable Intent* it = MockHeuristic.simple(1, reason, rule);
                 it.targetNation = world.firstEnemy(n);
                 return it;
-            }
-        }
-
-        // Applies an Intent to the world (agents.exe IntentDispatcher). Records it on the nation and in
-        // the recent-events feed. Illegal intents are quietly rejected, matching the game.
-        public class IntentDispatcher {
-            public static method apply(Nation* n, Intent* it, Realm* world) returns void {
-                n.lastIntent = IType.name(it.type);
-                n.lastReason = it.reason;
-                if (it.type == 0) {
-                    world.declareWar(n.id, it.targetNation);
-                } else if (it.type == 1) {
-                    world.makePeace(n.id, it.targetNation);
-                } else if (it.type == 2) {
-                    mutable int s = it.targetSize;
-                    if (s > 60) {
-                        s = 60;
-                    }
-                    if (s > n.desiredSoldiers) {
-                        n.desiredSoldiers = s;
-                    }
-                } else if (it.type == 3) {
-                    world.foundCity(n);
-                } else if (it.type == 4) {
-                    n.focusedRes = it.resource;
-                } else if (it.type == 5) {
-                    n.prioBuilding = it.buildingType;
-                } else if (it.type == 6) {
-                    if (n.enemies[it.targetNation]) {
-                        n.attackTarget = it.targetNation;
-                    }
-                } else if (it.type == 7) {
-                    world.conscript(n, it.count);
-                } else if (it.type == 8) {
-                    world.nameHeir(n);
-                } else if (it.type == 9) {
-                    n.attackTarget = -1;
-                }
-                n.addEvent($"[{world.year()}y] {IType.name(it.type)}: {it.reason}");
             }
         }
     }

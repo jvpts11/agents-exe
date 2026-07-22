@@ -1,93 +1,16 @@
 import System.IO.Console;
+import System.Collections.ArrayList;
+import Agents.Math.Vec2;
 
-// The world: a biome grid generated from continent seeds, plus a deterministic RNG. This mirrors
-// agents.exe's HeightmapGenerator/BiomeMapper (a continent mask with radial falloff, thresholded into
-// biomes) but stays integer-only so it is fully deterministic and needs no float noise library.
+// The biome grid. Cells are row-major (y*width + x). Generation lays down a few continents and
+// islands as radial height blobs (their centres kept as Vec2), takes the max contribution per cell,
+// and thresholds the [0,1000] height into biomes -- a continent mask with radial falloff, all in
+// integers so it stays deterministic without a float noise library.
 program AgentsExe;
 
 public bundle Agents {
-    public namespace Sim {
+    public namespace World {
 
-        // A deterministic Park-Miller minimal-standard LCG. The multiply stays inside 2^46, so it never
-        // overflows a 64-bit long -- no trap, fully reproducible from a seed.
-        public class Rng {
-            private mutable long state;
-
-            public constructor Rng(int seed) {
-                mutable long s = cast<long>(seed);
-                if (s <= 0) {
-                    s = 1;
-                }
-                this.state = s % 2147483647;
-                if (this.state == 0) {
-                    this.state = 1;
-                }
-            }
-
-            public method next() returns int {
-                this.state = (this.state * 48271) % 2147483647;
-                return cast<int>(this.state);
-            }
-
-            // A value in [0, bound).
-            public method nextInt(int bound) returns int {
-                if (bound <= 0) {
-                    return 0;
-                }
-                return this.next() % bound;
-            }
-
-            // A value in [lo, hi].
-            public method range(int lo, int hi) returns int {
-                if (hi <= lo) {
-                    return lo;
-                }
-                return lo + this.nextInt(hi - lo + 1);
-            }
-
-            // Returns true with probability percent/100.
-            public method chance(int percent) returns boolean {
-                return this.nextInt(100) < percent;
-            }
-        }
-
-        // Biome ordinals, stored as ints in the grid (enum-free so they live in an int[] cheaply).
-        // 0 Ocean, 1 Beach, 2 Grassland, 3 Mountain, 4 Snow. Only Grassland and Beach are walkable.
-        public class Biomes {
-            public static method ocean() returns int {
-                return 0;
-            }
-            public static method beach() returns int {
-                return 1;
-            }
-            public static method grass() returns int {
-                return 2;
-            }
-            public static method mountain() returns int {
-                return 3;
-            }
-            public static method snow() returns int {
-                return 4;
-            }
-            public static method glyph(int b) returns char {
-                if (b == 0) {
-                    return '~';
-                }
-                if (b == 1) {
-                    return '.';
-                }
-                if (b == 2) {
-                    return ' ';
-                }
-                if (b == 3) {
-                    return '^';
-                }
-                return '*';
-            }
-        }
-
-        // The biome grid. Cells are row-major (y*width + x). Generation lays down a few continents and
-        // islands as radial height blobs, takes the max, and thresholds the [0,1000] height into biomes.
         public class Grid {
             public mutable int width;
             public mutable int height;
@@ -133,13 +56,13 @@ public bundle Agents {
                 int continents = 3;
                 int islands = 4;
                 int total = continents + islands;
-                int[] sx = new int[total]();
-                int[] sy = new int[total]();
+                mutable ArrayList<Vec2*> seeds = new ArrayList<Vec2*>() on heap;
                 int[] sr = new int[total]();
                 mutable int i = 0;
                 while (i < total) {
-                    sx[i] = rng.range(this.width / 8, this.width - this.width / 8);
-                    sy[i] = rng.range(this.height / 8, this.height - this.height / 8);
+                    int cx = rng.range(this.width / 8, this.width - this.width / 8);
+                    int cy = rng.range(this.height / 8, this.height - this.height / 8);
+                    seeds.add(new Vec2(cx, cy) on heap);
                     if (i < continents) {
                         sr[i] = rng.range(this.height / 2, (this.height * 3) / 4);
                     } else {
@@ -151,12 +74,11 @@ public bundle Agents {
                 while (y < this.height) {
                     mutable int x = 0;
                     while (x < this.width) {
+                        mutable Vec2 here = new Vec2(x, y) on stack;
                         mutable int best = 0;
                         mutable int s = 0;
                         while (s < total) {
-                            int dx = x - sx[s];
-                            int dy = y - sy[s];
-                            int distSq = dx * dx + dy * dy;
+                            int distSq = here.dist2(seeds.get(s));
                             int radSq = sr[s] * sr[s];
                             if (radSq > 0 && distSq < radSq) {
                                 int contribution = 1000 - (distSq * 1000) / radSq;
@@ -171,6 +93,12 @@ public bundle Agents {
                     }
                     y = y + 1;
                 }
+                mutable int si = 0;
+                while (si < seeds.size()) {
+                    delete seeds.get(si);
+                    si = si + 1;
+                }
+                delete sr;
             }
 
             private static method classify(int h) returns int {
