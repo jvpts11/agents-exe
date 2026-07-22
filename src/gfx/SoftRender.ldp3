@@ -1,0 +1,184 @@
+import System.IO.File;
+import System.Text.StringBuilder;
+import Agents.Sim.Realm;
+import Agents.World.Grid;
+import Agents.People.Nation;
+import Agents.People.Worker;
+import Agents.Economy.Building;
+
+// A CPU software renderer: rasterises the world to an RGB pixel buffer and writes it as a PPM, with no
+// GL context needed. It mirrors the graphical Game's colours and layout exactly, so it doubles as the
+// headless fallback (when no window is available) and as the way the visuals are checked. Same picture
+// the windowed game paints, drawn on the CPU.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class SoftRender {
+            private static method fill(byte[] buf, int cW, int cH, int x, int y, int rw, int rh,
+                                       int r, int g, int b) returns void {
+                mutable int py = y;
+                int ye = y + rh;
+                int xe = x + rw;
+                while (py < ye) {
+                    if (py >= 0 && py < cH) {
+                        mutable int px = x;
+                        while (px < xe) {
+                            if (px >= 0 && px < cW) {
+                                int i = (py * cW + px) * 3;
+                                buf[i] = cast<byte>(r);
+                                buf[i + 1] = cast<byte>(g);
+                                buf[i + 2] = cast<byte>(b);
+                            }
+                            px = px + 1;
+                        }
+                    }
+                    py = py + 1;
+                }
+            }
+
+            public static method render(Realm* world, String path) returns void {
+                mutable Grid* grid = world.grid;
+                int ts = Game.tile();
+                int cW = grid.width * ts;
+                int cH = grid.height * ts + 82;
+                mutable byte[] buf = new byte[cW * cH * 3]();
+                SoftRender.fill(buf, cW, cH, 0, 0, cW, cH, 13, 15, 20);
+
+                // Terrain.
+                mutable int y = 0;
+                while (y < grid.height) {
+                    mutable int x = 0;
+                    while (x < grid.width) {
+                        SoftRender.biome(buf, cW, cH, x * ts, y * ts, ts, grid.biomeAt(x, y));
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                // Buildings then people.
+                mutable int ni = 0;
+                while (ni < world.nations.size()) {
+                    mutable Nation* n = world.nations.get(ni);
+                    if (n.alive) {
+                        mutable int bi = 0;
+                        while (bi < n.buildings.size()) {
+                            mutable Building* b = n.buildings.get(bi);
+                            SoftRender.nation(buf, cW, cH, b.x * ts, b.y * ts, ts, ts, n.id);
+                            SoftRender.kind(buf, cW, cH, b.x * ts + 2, b.y * ts + 2, ts - 4, b.kind, b.built);
+                            bi = bi + 1;
+                        }
+                        mutable int mi = 0;
+                        while (mi < n.members.size()) {
+                            mutable Worker* w = n.members.get(mi);
+                            if (w.alive) {
+                                int off = (ts - 6) / 2;
+                                SoftRender.nation(buf, cW, cH, w.x * ts + off, w.y * ts + off, 6, 6, n.id);
+                                if (w.isSoldier()) {
+                                    SoftRender.fill(buf, cW, cH, w.x * ts + off + 2, w.y * ts + off + 2, 2, 2, 245, 245, 245);
+                                }
+                            }
+                            mi = mi + 1;
+                        }
+                    }
+                    ni = ni + 1;
+                }
+                // HUD.
+                int hy = grid.height * ts + 6;
+                SoftRender.fill(buf, cW, cH, 0, hy - 6, cW, 82, 26, 28, 33);
+                mutable int i = 0;
+                mutable int col = 8;
+                while (i < world.nations.size()) {
+                    mutable Nation* n = world.nations.get(i);
+                    SoftRender.nation(buf, cW, cH, col, hy, 14, 14, n.id);
+                    if (n.alive) {
+                        SoftRender.fill(buf, cW, cH, col + 20, hy, n.livingCount() * 3, 6, 89, 184, 82);
+                        SoftRender.fill(buf, cW, cH, col + 20, hy + 9, n.soldierCount() * 6, 6, 204, 64, 64);
+                        if (n.atWarWithAny()) {
+                            SoftRender.fill(buf, cW, cH, col, hy + 18, 14, 5, 217, 51, 51);
+                        }
+                    } else {
+                        SoftRender.fill(buf, cW, cH, col + 20, hy, 60, 15, 77, 77, 77);
+                    }
+                    col = col + cW / 4;
+                    i = i + 1;
+                }
+
+                SoftRender.writePpm(path, buf, cW, cH);
+                delete buf;
+            }
+
+            private static method biome(byte[] buf, int cW, int cH, int x, int y, int ts, int b) returns void {
+                if (b == 0) {
+                    SoftRender.fill(buf, cW, cH, x, y, ts, ts, 33, 82, 153);
+                } else if (b == 1) {
+                    SoftRender.fill(buf, cW, cH, x, y, ts, ts, 212, 194, 133);
+                } else if (b == 2) {
+                    SoftRender.fill(buf, cW, cH, x, y, ts, ts, 84, 148, 74);
+                } else if (b == 3) {
+                    SoftRender.fill(buf, cW, cH, x, y, ts, ts, 112, 105, 99);
+                } else {
+                    SoftRender.fill(buf, cW, cH, x, y, ts, ts, 235, 240, 247);
+                }
+            }
+
+            private static method nation(byte[] buf, int cW, int cH, int x, int y, int w, int h, int id) returns void {
+                if (id == 0) {
+                    SoftRender.fill(buf, cW, cH, x, y, w, h, 219, 56, 51);
+                } else if (id == 1) {
+                    SoftRender.fill(buf, cW, cH, x, y, w, h, 51, 122, 219);
+                } else if (id == 2) {
+                    SoftRender.fill(buf, cW, cH, x, y, w, h, 235, 194, 41);
+                } else {
+                    SoftRender.fill(buf, cW, cH, x, y, w, h, 148, 66, 184);
+                }
+            }
+
+            private static method kind(byte[] buf, int cW, int cH, int x, int y, int s, int k, boolean built) returns void {
+                if (!built) {
+                    SoftRender.fill(buf, cW, cH, x, y, s, s, 77, 77, 87);
+                    return;
+                }
+                if (k == 0) {
+                    SoftRender.fill(buf, cW, cH, x, y, s, s, 217, 199, 77);
+                } else if (k == 1) {
+                    SoftRender.fill(buf, cW, cH, x, y, s, s, 140, 204, 64);
+                } else if (k == 2) {
+                    SoftRender.fill(buf, cW, cH, x, y, s, s, 153, 107, 56);
+                } else if (k == 3) {
+                    SoftRender.fill(buf, cW, cH, x, y, s, s, 204, 179, 140);
+                } else {
+                    SoftRender.fill(buf, cW, cH, x, y, s, s, 179, 46, 46);
+                }
+            }
+
+            // Top-down PPM text (row 0 = top), so the CPU buffer maps straight through.
+            private static method writePpm(String path, byte[] buf, int w, int h) returns void {
+                mutable StringBuilder sb = new StringBuilder() on heap;
+                sb.append("P3\n");
+                sb.appendInt(w);
+                sb.append(" ");
+                sb.appendInt(h);
+                sb.append("\n255\n");
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        int i = (y * w + x) * 3;
+                        sb.appendInt(cast<int>(buf[i]) & 255);
+                        sb.append(" ");
+                        sb.appendInt(cast<int>(buf[i + 1]) & 255);
+                        sb.append(" ");
+                        sb.appendInt(cast<int>(buf[i + 2]) & 255);
+                        sb.append(" ");
+                        x = x + 1;
+                    }
+                    sb.append("\n");
+                    y = y + 1;
+                }
+                File.writeAll(path, sb.toString());
+                delete sb;
+            }
+        }
+    }
+}

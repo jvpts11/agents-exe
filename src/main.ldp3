@@ -1,8 +1,15 @@
 import System.IO.Console;
+import opengl.glfw.GlWindow;
+import opengl.gl.Gl;
+import opengl.gl.Wgl;
 import Agents.Sim.Realm;
+import Agents.Gfx.Game;
+import Agents.Gfx.Batch2D;
+import Agents.Gfx.SoftRender;
 
-// Entry point. Builds a world, seats four AI nations, and runs the simulation headless, painting the
-// world and dashboard every so often. The first game written in LDP3.
+// Entry point. Opens a window through ldp3-opengl and runs the live civilisation simulation, painting
+// the world every frame. The first game written in LDP3. Screenshots are dumped along the way so the
+// visuals can be checked. Falls back to a headless run if no window/GL context is available.
 program AgentsExe;
 
 public bundle Agents {
@@ -10,31 +17,62 @@ public bundle Agents {
 
         public class Main {
             public static method main(string[] args) returns void {
-                System.IO.Console.println("agents.exe -- the first game written in LDP3 (headless civilisation sandbox)");
-                System.IO.Console.println("Four AI nations grow, build, and war on a generated island. Their Leaders decide by");
-                System.IO.Console.println("a scripted rule cascade -- the same strategy oracle the original game falls back to.");
+                System.IO.Console.println("agents.exe -- the first game written in LDP3");
+                int ts = Game.tile();
                 mutable Realm* world = new Realm(78, 38, 20260722, 4) on heap;
+                int w = 78 * ts;
+                int h = 38 * ts + 82;
 
-                int totalTicks = 900;
-                int frameEvery = 180;
-                mutable int t = 0;
-                while (t < totalTicks) {
-                    world.advance();
-                    if (world.tick % frameEvery == 0) {
-                        System.IO.Console.println("");
-                        Renderer.frame(world);
-                        Renderer.dashboard(world);
+                mutable GlWindow* win = new GlWindow() on heap;
+                if (win.open("agents.exe", w, h, 3, 3) != 0) {
+                    System.IO.Console.println("No GL window available; software-rendering the run to PPM frames.");
+                    mutable int tk = 0;
+                    while (tk < 900) {
+                        world.advance();
+                        if (tk == 60 || tk == 450 || tk == 898) {
+                            SoftRender.render(world, $"C:/Users/jvpts/Desktop/erros_ldp3/soft_{tk}.ppm");
+                            System.IO.Console.println($"[soft] tick {tk} alive {world.aliveNations()}");
+                        }
+                        if (world.aliveNations() <= 1) {
+                            tk = 900;
+                        }
+                        tk = tk + 1;
                     }
-                    if (world.aliveNations() <= 1) {
-                        t = totalTicks;
+                    delete win;
+                    delete world;
+                    return;
+                }
+                win.setVSync(0);
+                mutable Batch2D* batch = new Batch2D(win.gl) on heap;
+
+                int maxFrames = 1400;
+                mutable int frame = 0;
+                while (win.isOpen() && frame < maxFrames) {
+                    win.pump();
+                    if (frame % 2 == 0 && world.aliveNations() > 1) {
+                        world.advance();
                     }
-                    t = t + 1;
+                    int ww = win.width();
+                    int wh = win.height();
+                    Wgl.glViewport(0, 0, ww, wh);
+                    Wgl.glClearColor(0.05, 0.06, 0.08, 1.0);
+                    Wgl.glClear(0x4000);
+                    batch.begin(ww, wh, 0);
+                    Game.draw(batch, world);
+                    batch.flush();
+                    if (frame == 4 || frame == 500 || frame == 1000 || frame == maxFrames - 2) {
+                        byte[] px = win.gl.readPixelsRgb(0, 0, ww, wh);
+                        Game.writePpm($"C:/Users/jvpts/Desktop/erros_ldp3/agents_{frame}.ppm", px, ww, wh);
+                        delete px;
+                        System.IO.Console.println($"[shot] frame {frame} tick {world.tick} alive {world.aliveNations()}");
+                    }
+                    win.swap();
+                    frame = frame + 1;
                 }
 
-                System.IO.Console.println("");
-                System.IO.Console.println("=== FINAL STATE ===");
-                Renderer.frame(world);
-                Renderer.dashboard(world);
+                System.IO.Console.println($"Done. tick {world.tick}, nations alive {world.aliveNations()}.");
+                delete batch;
+                delete win;
                 delete world;
                 return;
             }
