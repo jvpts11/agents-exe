@@ -1,0 +1,73 @@
+import System.Collections.ArrayList;
+import Agents.World.Grid;
+import Agents.World.Biome;
+import Agents.World.Camera;
+import Agents.Sim.Realm;
+import Agents.People.Nation;
+import Agents.People.Worker;
+import Agents.Gfx.Batch2D;
+
+// Draws the inhabitants over the world: each nation's capital as a banner-coloured marker, and every
+// living worker as a small nation-tinted diamond at its projected isometric position. (Directional
+// sprites and status overlays arrive with the agent FSM; this establishes agents on the map.)
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class AgentRenderer {
+
+            public static method draw(Batch2D* batch, Realm* realm, Camera* cam) returns void {
+                int sw = cam.screenW;
+                int sh = cam.screenH;
+                mutable int hh = cast<int>(cam.halfH);
+                if (hh < 1) {
+                    hh = 1;
+                }
+                // Capitals: a taller banner marker so each nation's seat stands out.
+                mutable int ci = 0;
+                while (ci < realm.nations.size()) {
+                    mutable Nation* n = realm.nations.get(ci);
+                    if (n.alive) {
+                        int elev = realm.grid.biomeAt(n.capX, n.capY).elevation();
+                        int sx = cam.screenX(n.capX, n.capY);
+                        int sy = cam.screenY(n.capX, n.capY, elev);
+                        int m = hh + 2;
+                        float rf = cast<float>(n.cr) / 255.0;
+                        float gf = cast<float>(n.cg) / 255.0;
+                        float bf = cast<float>(n.cb) / 255.0;
+                        // a pole with a banner diamond on top
+                        batch.rect(sx - 1, sy - m * 3, 2, m * 3, 0.15, 0.12, 0.1, 1.0);
+                        batch.quad(sx, sy - m * 3 - m, sx + m, sy - m * 3, sx, sy - m * 3 + m,
+                                   sx - m, sy - m * 3, rf, gf, bf, 1.0);
+                    }
+                    ci = ci + 1;
+                }
+                // Workers: small nation-tinted diamonds at their projected positions.
+                mutable int m = hh / 2;
+                if (m < 2) {
+                    m = 2;
+                }
+                mutable int wi = 0;
+                while (wi < realm.workers.size()) {
+                    mutable Worker* wk = realm.workers.get(wi);
+                    if (wk.alive) {
+                        int cx = cast<int>(wk.px);
+                        int cy = cast<int>(wk.py);
+                        int elev = realm.grid.biomeAt(cx, cy).elevation();
+                        int sx = cam.projX(wk.px, wk.py);
+                        int sy = cam.projY(wk.px, wk.py, elev) - hh / 2;
+                        if (!(sx + m < 0 || sx - m > sw || sy + m < 0 || sy - m > sh)) {
+                            mutable Nation* nn = realm.nations.get(wk.nationId);
+                            float rf = cast<float>(nn.cr) / 255.0;
+                            float gf = cast<float>(nn.cg) / 255.0;
+                            float bf = cast<float>(nn.cb) / 255.0;
+                            batch.quad(sx, sy - m, sx + m, sy, sx, sy + m, sx - m, sy, rf, gf, bf, 1.0);
+                        }
+                    }
+                    wi = wi + 1;
+                }
+            }
+        }
+    }
+}

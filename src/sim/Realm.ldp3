@@ -1,0 +1,136 @@
+import System.Collections.ArrayList;
+import Agents.World.Grid;
+import Agents.World.Biome;
+import Agents.World.Rng;
+import Agents.World.ResourceNode;
+import Agents.World.ResourceSeeder;
+import Agents.People.Nation;
+import Agents.People.Worker;
+
+// The simulation container: it owns the world grid, the resource nodes, the nations and every worker,
+// and bootstraps a new game from a seed the way the original does -- generate the world, place the
+// nations on spread-out grassland, and spawn a starting population of workers around each capital. The
+// tick loop (economy, decisions, combat) and the rest of the systems build on top of this in the next
+// phases.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        public class Realm {
+            public mutable Grid* grid;
+            public mutable ArrayList<ResourceNode*> nodes;
+            public mutable ArrayList<Nation*> nations;
+            public mutable ArrayList<Worker*> workers;
+            public mutable int seed;
+
+            public constructor Realm(int w, int h, int seed) {
+                this.seed = seed;
+                this.grid = new Grid(w, h, seed) on heap;
+                this.nodes = ResourceSeeder.seed(this.grid, seed);
+                this.nations = new ArrayList<Nation*>() on heap;
+                this.workers = new ArrayList<Worker*>() on heap;
+                this.placeNations(4);
+                this.spawnWorkers(50);
+            }
+
+            // The ArrayLists are RAII value fields (freed with the Realm); we only free the heap objects
+            // they hold. Each Worker lives once in `workers` (nation.members just points at them).
+            public destructor ~Realm() returns void {
+                mutable int i = 0;
+                while (i < this.workers.size()) {
+                    delete this.workers.get(i);
+                    i = i + 1;
+                }
+                i = 0;
+                while (i < this.nations.size()) {
+                    delete this.nations.get(i);
+                    i = i + 1;
+                }
+                i = 0;
+                while (i < this.nodes.size()) {
+                    delete this.nodes.get(i);
+                    i = i + 1;
+                }
+                delete this.grid;
+            }
+
+            private static method nationName(int i) returns String {
+                if (i == 0) {
+                    return "Aurelia";
+                }
+                if (i == 1) {
+                    return "Brenmark";
+                }
+                if (i == 2) {
+                    return "Cindara";
+                }
+                if (i == 3) {
+                    return "Dorne";
+                }
+                if (i == 4) {
+                    return "Eldros";
+                }
+                if (i == 5) {
+                    return "Farengar";
+                }
+                return "Gilneas";
+            }
+
+            // Seat `count` nations on grassland, each kept well apart from the others.
+            private method placeNations(int count) returns void {
+                mutable Rng rng = new Rng(this.seed ^ 90124) on stack;
+                int w = this.grid.width;
+                int h = this.grid.height;
+                mutable int placed = 0;
+                mutable int tries = 0;
+                while (placed < count && tries < 200000) {
+                    tries = tries + 1;
+                    int cx = rng.nextInt(w);
+                    int cy = rng.nextInt(h);
+                    if (this.grid.biomeAt(cx, cy) == Biome.Grassland) {
+                        mutable boolean ok = true;
+                        mutable int k = 0;
+                        while (k < this.nations.size()) {
+                            mutable Nation* o = this.nations.get(k);
+                            int dx = cx - o.capX;
+                            int dy = cy - o.capY;
+                            if (dx * dx + dy * dy < 6400) {
+                                ok = false;
+                            }
+                            k = k + 1;
+                        }
+                        if (ok) {
+                            this.nations.add(new Nation(placed, Realm.nationName(placed), cx, cy) on heap);
+                            placed = placed + 1;
+                        }
+                    }
+                }
+            }
+
+            // Spawn `per` workers around each capital, on nearby walkable cells.
+            private method spawnWorkers(int per) returns void {
+                mutable Rng rng = new Rng(this.seed ^ 51237) on stack;
+                mutable int ni = 0;
+                while (ni < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(ni);
+                    mutable int spawned = 0;
+                    mutable int att = 0;
+                    while (spawned < per && att < per * 20) {
+                        att = att + 1;
+                        int sx = n.capX + rng.range(0 - 6, 6);
+                        int sy = n.capY + rng.range(0 - 6, 6);
+                        if (this.grid.walkable(sx, sy)) {
+                            mutable Worker* wk = new Worker(n.id, cast<float>(sx) + 0.5,
+                                                           cast<float>(sy) + 0.5) on heap;
+                            this.workers.add(wk);
+                            n.members.add(wk);
+                            spawned = spawned + 1;
+                        }
+                    }
+                    ni = ni + 1;
+                }
+            }
+        }
+    }
+}
