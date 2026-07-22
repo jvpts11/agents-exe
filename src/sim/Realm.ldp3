@@ -646,6 +646,11 @@ public bundle Agents {
                 if (n.countJob(13) < wantFishers) {
                     this.retrain(n, 13, wantFishers - n.countJob(13));
                 }
+                // Keep a farmer working each field, so the land around a capital stays worked.
+                int wantFarmers = n.countBuilding(1);
+                if (n.countJob(2) < wantFarmers) {
+                    this.retrain(n, 2, wantFarmers - n.countJob(2));
+                }
                 if (soldiers < wantSoldiers) {
                     this.retrain(n, 7, wantSoldiers - soldiers);
                 }
@@ -761,6 +766,10 @@ public bundle Agents {
                 }
                 if (w.job == 13) {
                     this.tickFisher(n, w);
+                    return;
+                }
+                if (w.job == 2) {
+                    this.tickFarmer(n, w);
                     return;
                 }
                 if (w.job == 1 || w.job == 3 || w.job == 4 || w.job == 8) {
@@ -1025,6 +1034,56 @@ public bundle Agents {
                 } else {
                     this.moveGreedy(w, node.x, node.y);
                 }
+            }
+
+            // Farmer: works a field. Walks to the nearest of the nation's farms and tends it, adding a
+            // steady trickle of food where the crop actually grows, then now and then moves to another
+            // field. This is what fills the land around a capital with working people.
+            private method tickFarmer(Nation* n, Worker* w) returns void {
+                if (w.state != 1) {
+                    if (!this.findFarm(n, w)) {
+                        this.wanderHome(n, w);
+                        return;
+                    }
+                    w.state = 1;
+                }
+                if (this.adjacent(w, w.targetX, w.targetY) || (w.x == w.targetX && w.y == w.targetY)) {
+                    w.harvestTimer = w.harvestTimer + 1;
+                    if (w.harvestTimer >= 6) {
+                        w.harvestTimer = 0;
+                        n.stock.add(0, 3);
+                        if (this.rng.chance(18)) {
+                            w.state = 0;   // rotate to another field
+                        }
+                    }
+                } else {
+                    this.moveGreedy(w, w.targetX, w.targetY);
+                }
+            }
+
+            // The nation's nearest built farm to a worker, if any.
+            private method findFarm(Nation* n, Worker* w) returns boolean {
+                mutable int best = -1;
+                mutable int bestD = 1000000000;
+                mutable int i = 0;
+                while (i < n.buildings.size()) {
+                    mutable Building* b = n.buildings.get(i);
+                    if (b.built && b.kind == 1) {
+                        int d = (b.x - w.x) * (b.x - w.x) + (b.y - w.y) * (b.y - w.y);
+                        if (d < bestD) {
+                            bestD = d;
+                            best = i;
+                        }
+                    }
+                    i = i + 1;
+                }
+                if (best < 0) {
+                    return false;
+                }
+                mutable Building* fb = n.buildings.get(best);
+                w.targetX = fb.x;
+                w.targetY = fb.y;
+                return true;
             }
 
             // Fisher: walks out to the nearest shore, casts for a few ticks, and carries the catch back
