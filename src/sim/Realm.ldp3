@@ -160,9 +160,15 @@ public bundle Agents {
                 mutable Building* hall = new Building(0, n.capX, n.capY, n.id) on heap;
                 hall.markBuilt();
                 n.buildings.add(hall);
+                mutable Building* castle = new Building(6, n.capX - 1, n.capY, n.id) on heap;
+                castle.markBuilt();
+                n.buildings.add(castle);
                 mutable Building* farm = new Building(1, n.capX + 1, n.capY, n.id) on heap;
                 farm.markBuilt();
                 n.buildings.add(farm);
+                mutable Building* house0 = new Building(3, n.capX, n.capY + 1, n.id) on heap;
+                house0.markBuilt();
+                n.buildings.add(house0);
                 // Spawn the populace: a royal couple + a spread of professions.
                 int idBase = n.id * 1000;
                 mutable Worker* leader = this.spawnWorker(n, idBase, 0);
@@ -378,6 +384,58 @@ public bundle Agents {
                 if (this.tick % 10 == 0) {
                     this.reassign(n);
                 }
+                if (this.tick % 8 == 0) {
+                    this.births(n);
+                    this.promoteGeneral(n);
+                }
+            }
+
+            // The population a nation's finished houses can shelter (agents.exe HouseBehavior capacity).
+            private method housingCap(Nation* n) returns int {
+                mutable int cap = 4;   // the capital itself shelters a few
+                mutable int i = 0;
+                while (i < n.buildings.size()) {
+                    mutable Building* b = n.buildings.get(i);
+                    if (b.built) {
+                        cap = cap + Bld.housing(b.kind);
+                    }
+                    i = i + 1;
+                }
+                return cap;
+            }
+
+            // Births: a fed, well-housed nation grows. When there is spare housing and food, a new child
+            // (Civilian) is born at the capital -- the population is no longer merely held stable.
+            private method births(Nation* n) returns void {
+                int pop = n.livingCount();
+                if (pop >= this.housingCap(n) || n.stock.get(0) < 12 || pop >= 90) {
+                    return;
+                }
+                if (this.rng.chance(45)) {
+                    this.spawnWorker(n, n.id * 1000 + 600 + this.tick % 380, 0);
+                    n.stock.spend(0, 4);
+                }
+            }
+
+            // Promote the oldest soldier of a nation at war to General (agents.exe GeneralPromoter).
+            private method promoteGeneral(Nation* n) returns void {
+                if (!n.atWarWithAny() || n.countJob(11) >= 1) {
+                    return;
+                }
+                mutable int bestAge = -1;
+                mutable int best = -1;
+                mutable int i = 0;
+                while (i < n.members.size()) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && w.job == 7 && w.ageTicks > bestAge) {
+                        bestAge = w.ageTicks;
+                        best = i;
+                    }
+                    i = i + 1;
+                }
+                if (best >= 0) {
+                    n.members.get(best).job = 11;
+                }
             }
 
             // Economy production: farms yield food, sawmills turn wood into planks, the people eat.
@@ -514,6 +572,15 @@ public bundle Agents {
                 if (this.buildingBusy(n) && n.countJob(5) < 2) {
                     this.retrain(n, 5, 1);
                 }
+                // Staff the huntsmen's lodges and keep one forester per sawmill.
+                int wantHunters = n.countBuilding(5) * 2;
+                if (n.countJob(8) < wantHunters) {
+                    this.retrain(n, 8, wantHunters - n.countJob(8));
+                }
+                int wantPlanters = n.countBuilding(2);
+                if (n.countJob(9) < wantPlanters) {
+                    this.retrain(n, 9, wantPlanters - n.countJob(9));
+                }
                 if (soldiers < wantSoldiers) {
                     this.retrain(n, 7, wantSoldiers - soldiers);
                 }
@@ -610,7 +677,7 @@ public bundle Agents {
             // -------- tactical FSM --------
 
             private method tickWorker(Nation* n, Worker* w) returns void {
-                if (w.job == 7) {
+                if (w.job == 7 || w.job == 11) {
                     this.tickSoldier(n, w);
                     return;
                 }
@@ -618,13 +685,19 @@ public bundle Agents {
                     this.tickBuilder(n, w);
                     return;
                 }
-                if (w.job == 1 || w.job == 3 || w.job == 4) {
+                if (w.job == 9) {
+                    this.tickTreePlanter(n, w);
+                    return;
+                }
+                if (w.job == 1 || w.job == 3 || w.job == 4 || w.job == 8) {
                     this.tickGatherer(n, w);
                     return;
                 }
                 this.wanderHome(n, w);
             }
 
+            // A gatherer/hunter targets nodes of a fixed kind: woodcutter->Tree, stoneMiner->Stone,
+            // ironMiner->Iron, hunter->Fauna.
             private method gatherKind(int job) returns int {
                 if (job == 1) {
                     return 0;
@@ -632,7 +705,31 @@ public bundle Agents {
                 if (job == 3) {
                     return 1;
                 }
+                if (job == 8) {
+                    return 4;
+                }
                 return 2;
+            }
+
+            // TreePlanter: reforests around the capital so woodcutters do not run the forests dry. When
+            // standing on empty grassland near home, it plants a fresh Tree node (agents.exe TreePlanter).
+            private method tickTreePlanter(Nation* n, Worker* w) returns void {
+                int dx = w.x - n.capX;
+                int dy = w.y - n.capY;
+                if (dx * dx + dy * dy > 120) {
+                    this.moveGreedy(w, n.capX, n.capY);
+                    return;
+                }
+                if (this.grid.biomeAt(w.x, w.y) == 2 && this.findNode(w.x, w.y, 0) < 0 && this.rng.chance(4)) {
+                    this.resources.add(new ResourceNode(0, w.x, w.y, 30) on heap);
+                }
+                int mv = this.rng.nextInt(9);
+                int mx = (mv % 3) - 1;
+                int my = (mv / 3) - 1;
+                if (this.grid.passable(w.x + mx, w.y + my)) {
+                    w.x = w.x + mx;
+                    w.y = w.y + my;
+                }
             }
 
             private method tickGatherer(Nation* n, Worker* w) returns void {
