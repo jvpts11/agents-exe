@@ -30,6 +30,7 @@ public bundle Agents {
             public mutable int seed;
             private mutable Rng* moveRng;
             private mutable float reproTimer;
+            private mutable float prodTimer;
 
             public constructor Realm(int w, int h, int seed) {
                 this.seed = seed;
@@ -39,6 +40,7 @@ public bundle Agents {
                 this.workers = new ArrayList<Worker*>() on heap;
                 this.moveRng = new Rng(seed ^ 7788) on heap;
                 this.reproTimer = 0.0;
+                this.prodTimer = 0.0;
                 this.placeNations(4);
                 this.spawnWorkers(50);
             }
@@ -110,7 +112,11 @@ public bundle Agents {
                         if (ok) {
                             mutable Nation* n = new Nation(placed, Realm.nationName(placed), cx, cy,
                                                            this.grid) on heap;
-                            n.stock.add(0, 60);   // a little starting food
+                            n.stock.add(0, 60);   // a starting kit to bootstrap building
+                            n.stock.add(1, 40);
+                            n.stock.add(2, 20);
+                            n.stock.add(3, 10);
+                            n.stock.add(5, 30);
                             n.buildings.add(new Building(BuildingType.Castle, cx - 1, cy, true) on heap);
                             n.buildings.add(new Building(BuildingType.TownHall, cx, cy, true) on heap);
                             n.buildings.add(new Building(BuildingType.Farm, cx + 1, cy, true) on heap);
@@ -178,6 +184,13 @@ public bundle Agents {
                 while (this.reproTimer >= 3.0) {
                     this.reproTimer = this.reproTimer - 3.0;
                     this.reproduce();
+                }
+                this.prodTimer = this.prodTimer + dt;
+                while (this.prodTimer >= 5.0) {
+                    this.prodTimer = this.prodTimer - 5.0;
+                    this.produce();
+                    this.growth();
+                    this.reassign();
                 }
             }
 
@@ -250,6 +263,10 @@ public bundle Agents {
                 }
                 if (!wk.isAdult()) {
                     this.wander(wk, dt);
+                    return;
+                }
+                if (wk.profession == 4) {
+                    this.tickBuilder(n, wk, dt);
                     return;
                 }
                 if (!Realm.isGatherer(wk.profession)) {
@@ -434,6 +451,199 @@ public bundle Agents {
                     return 2;   // SW
                 }
                 return 3;       // NW
+            }
+
+            // --- economy: production, growth, construction ---
+
+            private method produce() returns void {
+                mutable int ni = 0;
+                while (ni < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(ni);
+                    if (n.alive) {
+                        int food = n.countBuilding(BuildingType.Farm) * 4
+                                 + n.countBuilding(BuildingType.HuntersLodge) * 3;
+                        n.stock.add(0, food);
+                        int cap = n.countBuilding(BuildingType.Sawmill) * 3;
+                        mutable int wood = n.stock.get(1);
+                        if (wood > cap) {
+                            wood = cap;
+                        }
+                        if (wood > 0) {
+                            n.stock.spend(1, wood);
+                            n.stock.add(5, wood * 4);
+                        }
+                    }
+                    ni = ni + 1;
+                }
+            }
+
+            private method growth() returns void {
+                mutable int ni = 0;
+                while (ni < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(ni);
+                    if (n.alive && !this.hasBlueprint(n)) {
+                        int pop = n.livingCount();
+                        int housingCap = n.countBuilding(BuildingType.House) * 2
+                                       + n.countBuilding(BuildingType.HouseMedium) * 4
+                                       + n.countBuilding(BuildingType.HouseLarge) * 8;
+                        if (pop + 2 > housingCap) {
+                            this.placeBlueprint(n, BuildingType.House);
+                        } else if (n.countBuilding(BuildingType.Farm) < 2) {
+                            this.placeBlueprint(n, BuildingType.Farm);
+                        } else if (n.countBuilding(BuildingType.Sawmill) < 1) {
+                            this.placeBlueprint(n, BuildingType.Sawmill);
+                        } else if (n.countBuilding(BuildingType.HuntersLodge) < 1) {
+                            this.placeBlueprint(n, BuildingType.HuntersLodge);
+                        } else if (n.countBuilding(BuildingType.Farm) < 4) {
+                            this.placeBlueprint(n, BuildingType.Farm);
+                        }
+                    }
+                    ni = ni + 1;
+                }
+            }
+
+            private method hasBlueprint(Nation* n) returns boolean {
+                mutable int i = 0;
+                while (i < n.buildings.size()) {
+                    if (!n.buildings.get(i).built) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            private method placeBlueprint(Nation* n, BuildingType t) returns void {
+                if (n.stock.get(5) < t.costPlanks() || n.stock.get(2) < t.costStone()
+                        || n.stock.get(3) < t.costIron()) {
+                    return;
+                }
+                int f = t.footprint();
+                mutable int att = 0;
+                while (att < 40) {
+                    att = att + 1;
+                    int bx = n.capX + this.moveRng.range(0 - 9, 9);
+                    int by = n.capY + this.moveRng.range(0 - 9, 9);
+                    if (this.footprintFree(n, bx, by, f)) {
+                        n.stock.spend(5, t.costPlanks());
+                        n.stock.spend(2, t.costStone());
+                        n.stock.spend(3, t.costIron());
+                        n.buildings.add(new Building(t, bx, by, false) on heap);
+                        return;
+                    }
+                }
+            }
+
+            private method footprintFree(Nation* n, int bx, int by, int f) returns boolean {
+                mutable int yy = 0;
+                while (yy < f) {
+                    mutable int xx = 0;
+                    while (xx < f) {
+                        if (!this.grid.walkable(bx + xx, by + yy)) {
+                            return false;
+                        }
+                        xx = xx + 1;
+                    }
+                    yy = yy + 1;
+                }
+                mutable int i = 0;
+                while (i < n.buildings.size()) {
+                    mutable Building* o = n.buildings.get(i);
+                    int dx = o.gx - bx;
+                    int dy = o.gy - by;
+                    if (dx > 0 - 3 && dx < f + 2 && dy > 0 - 3 && dy < f + 2) {
+                        return false;
+                    }
+                    i = i + 1;
+                }
+                return true;
+            }
+
+            private method findBlueprint(Nation* n, Worker* wk) returns int {
+                int cx = cast<int>(wk.px);
+                int cy = cast<int>(wk.py);
+                mutable int best = -1;
+                mutable int bestD = 2000000000;
+                mutable int i = 0;
+                while (i < n.buildings.size()) {
+                    mutable Building* b = n.buildings.get(i);
+                    if (!b.built) {
+                        int dx = b.gx - cx;
+                        int dy = b.gy - cy;
+                        int d = dx * dx + dy * dy;
+                        if (d < bestD) {
+                            bestD = d;
+                            best = i;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return best;
+            }
+
+            private method tickBuilder(Nation* n, Worker* wk, float dt) returns void {
+                int bi = this.findBlueprint(n, wk);
+                if (bi < 0) {
+                    this.wander(wk, dt);
+                    return;
+                }
+                mutable Building* bp = n.buildings.get(bi);
+                if (this.adjacentCell(wk, bp.gx, bp.gy)) {
+                    bp.progress = bp.progress + dt;
+                    if (bp.progress >= 8.0) {
+                        bp.markBuilt();
+                    }
+                } else {
+                    this.moveToward(wk, bp.gx, bp.gy, dt);
+                }
+            }
+
+            private method countJob(Nation* n, int prof) returns int {
+                mutable int c = 0;
+                mutable int i = 0;
+                while (i < n.members.size()) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && w.profession == prof) {
+                        c = c + 1;
+                    }
+                    i = i + 1;
+                }
+                return c;
+            }
+
+            // Keep enough builders while there is something to build; otherwise send them to the forests.
+            private method reassign() returns void {
+                mutable int ni = 0;
+                while (ni < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(ni);
+                    if (n.alive) {
+                        mutable int want = 0;
+                        if (this.hasBlueprint(n)) {
+                            want = 4;
+                        }
+                        mutable int have = this.countJob(n, 4);
+                        if (have < want) {
+                            this.retrain(n, 4, want - have);
+                        } else if (have > want) {
+                            this.retrain(n, 1, have - want);
+                        }
+                    }
+                    ni = ni + 1;
+                }
+            }
+
+            private method retrain(Nation* n, int toJob, int count) returns void {
+                mutable int done = 0;
+                mutable int i = 0;
+                while (i < n.members.size() && done < count) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && w.isAdult() && w.profession != toJob && w.carryRes < 0) {
+                        w.profession = toJob;
+                        w.targetNode = -1;
+                        done = done + 1;
+                    }
+                    i = i + 1;
+                }
             }
         }
     }
