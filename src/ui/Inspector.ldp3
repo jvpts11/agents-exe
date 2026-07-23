@@ -1,0 +1,155 @@
+import reflect;
+import System.Collections.ArrayList;
+import Agents.Gfx.Batch2D;
+import Agents.People.Worker;
+import Agents.People.Nation;
+import Agents.Economy.Building;
+import Agents.Ui.Font;
+import Agents.Ui.Win95;
+
+// The entity inspector: pick a worker, building or nation and read its live internal state. Reflection
+// (spec 31) supplies the identity -- `reflect.typeOf<T>()` gives the class name and enumerates its declared
+// fields, shown at the foot of the panel so the view stays honest about what the object actually holds.
+// The values themselves are read with their real types (the reflection Field.get accessor still misreads
+// offsets past reference fields on the current toolchain -- see the enum-array/aliasing notes -- so typed
+// reads keep the readout correct, no undefined behaviour). Win95 chrome, drawn in the HUD pass.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Ui {
+
+        public class Inspector {
+            public static method drawNation(Batch2D* b, Font* font, Nation* n, int x, int y) returns void {
+                Type t = reflect.typeOf<Nation>();
+                int lh = Inspector.frame(b, font, t.name(), n.name, x, y);
+                mutable int row = 0;
+                row = Inspector.kv(b, font, x, y, row, lh, "id", $"{n.id}");
+                row = Inspector.kv(b, font, x, y, row, lh, "capital", $"{n.capX}, {n.capY}");
+                row = Inspector.kv(b, font, x, y, row, lh, "personality", Inspector.persName(n.personality));
+                row = Inspector.kv(b, font, x, y, row, lh, "population", $"{n.livingCount()}");
+                row = Inspector.kv(b, font, x, y, row, lh, "army", $"{n.soldierCount()} / {n.desiredSoldiers}");
+                row = Inspector.kv(b, font, x, y, row, lh, "wars", $"won {n.warsWon}  lost {n.warsLost}");
+                row = Inspector.kv(b, font, x, y, row, lh, "reigns", $"{n.reigns}");
+                row = Inspector.kv(b, font, x, y, row, lh, "at war with", $"{n.firstEnemy()}");
+                row = Inspector.kv(b, font, x, y, row, lh, "food/wood", $"{n.stock.get(0)} / {n.stock.get(1)}");
+                Inspector.reflectFooter(b, font, t, x, y, lh);
+            }
+
+            public static method drawWorker(Batch2D* b, Font* font, Worker* w, int x, int y) returns void {
+                Type t = reflect.typeOf<Worker>();
+                int lh = Inspector.frame(b, font, t.name(), Inspector.profName(w.profession), x, y);
+                mutable int row = 0;
+                row = Inspector.kv(b, font, x, y, row, lh, "nation", $"{w.nationId}");
+                row = Inspector.kv(b, font, x, y, row, lh, "profession", Inspector.profName(w.profession));
+                row = Inspector.kv(b, font, x, y, row, lh, "cell", $"{cast<int>(w.px)}, {cast<int>(w.py)}");
+                row = Inspector.kv(b, font, x, y, row, lh, "hp", $"{w.hp}");
+                row = Inspector.kv(b, font, x, y, row, lh, "hunger", $"{w.hunger}");
+                row = Inspector.kv(b, font, x, y, row, lh, "carrying", $"{w.carryRes} x{w.carryAmt}");
+                row = Inspector.kv(b, font, x, y, row, lh, "adult", Inspector.yn(w.isAdult()));
+                Inspector.reflectFooter(b, font, t, x, y, lh);
+            }
+
+            public static method drawBuilding(Batch2D* b, Font* font, Building* bd, int x, int y) returns void {
+                Type t = reflect.typeOf<Building>();
+                int lh = Inspector.frame(b, font, t.name(), "structure", x, y);
+                mutable int row = 0;
+                row = Inspector.kv(b, font, x, y, row, lh, "cell", $"{bd.gx}, {bd.gy}");
+                row = Inspector.kv(b, font, x, y, row, lh, "hp", $"{bd.hp}");
+                row = Inspector.kv(b, font, x, y, row, lh, "built", Inspector.yn(bd.built));
+                Inspector.reflectFooter(b, font, t, x, y, lh);
+            }
+
+            private static method frame(Batch2D* b, Font* font, String cls, String caption, int x,
+                                        int y) returns int {
+                int w = 250;
+                int h = 300;
+                Win95.raised(b, x, y, w, h);
+                Win95.titleBar(b, x + 3, y + 3, w - 6, 18);
+                font.draw(b, x + 8, y + 5, 1, $"Inspector: {cls}", 1.0, 1.0, 1.0);
+                Win95.sunken(b, x + 6, y + 24, w - 12, h - 30, 0.96);
+                font.draw(b, x + 12, y + 30, 1, caption, 0.0, 0.0, 0.4);
+                return font.glyphH() + 3;
+            }
+
+            private static method kv(Batch2D* b, Font* font, int x, int y, int row, int lh, String k,
+                                     String v) returns int {
+                int ty = y + 46 + row * lh;
+                font.draw(b, x + 12, ty, 1, k, 0.28, 0.28, 0.28);
+                font.draw(b, x + 120, ty, 1, v, 0.0, 0.0, 0.0);
+                return row + 1;
+            }
+
+            // A reflection-driven footer: the declared field names, proving the panel reflects the type.
+            private static method reflectFooter(Batch2D* b, Font* font, Type t, int x, int y,
+                                                int lh) returns void {
+                int fy = y + 300 - 46;
+                font.draw(b, x + 12, fy, 1, $"reflected fields: {t.fieldCount()}", 0.3, 0.3, 0.5);
+                mutable String names = "";
+                mutable int i = 0;
+                while (i < t.fieldCount() && i < 6) {
+                    if (i > 0) {
+                        names = $"{names}, {t.fieldName(i)}";
+                    } else {
+                        names = t.fieldName(i);
+                    }
+                    i = i + 1;
+                }
+                font.draw(b, x + 12, fy + lh, 1, names, 0.3, 0.3, 0.5);
+            }
+
+            private static method yn(boolean v) returns String {
+                if (v) {
+                    return "yes";
+                }
+                return "no";
+            }
+
+            private static method persName(int p) returns String {
+                if (p == 0) {
+                    return "Aggressive";
+                }
+                if (p == 1) {
+                    return "Cautious";
+                }
+                if (p == 2) {
+                    return "Expansionist";
+                }
+                if (p == 3) {
+                    return "Mercantile";
+                }
+                if (p == 4) {
+                    return "Pious";
+                }
+                if (p == 5) {
+                    return "Cunning";
+                }
+                return "Stoic";
+            }
+
+            private static method profName(int p) returns String {
+                if (p == 1) {
+                    return "Woodcutter";
+                }
+                if (p == 3) {
+                    return "Hunter";
+                }
+                if (p == 4) {
+                    return "Builder";
+                }
+                if (p == 7) {
+                    return "Stone Miner";
+                }
+                if (p == 8) {
+                    return "Iron Miner";
+                }
+                if (p == 10) {
+                    return "Soldier";
+                }
+                if (p == 11) {
+                    return "General";
+                }
+                return "Civilian";
+            }
+        }
+    }
+}

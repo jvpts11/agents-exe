@@ -1,0 +1,162 @@
+import System.Collections.ArrayList;
+import Agents.Gfx.Batch2D;
+import Agents.Sim.Realm;
+import Agents.People.Nation;
+import Agents.Ui.Font;
+import Agents.Ui.Win95;
+
+// The Windows-95 HUD, drawn over the world in a single pass with the font texture bound: a top status bar
+// (title, real-time clock, speed), a left "Nations" roster (banner chip + population + army + war state),
+// and a right "Chronicle" well that scrolls the strategic feed (declarations, conquests, successions). It
+// only reads the realm, so it is pure presentation.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Ui {
+
+        public class Hud {
+            public static method draw(Batch2D* b, Realm* realm, Font* font, int speed, int sw,
+                                      int sh) returns void {
+                Hud.topBar(b, realm, font, speed, sw);
+                Hud.nationsPanel(b, realm, font);
+                Hud.chronicle(b, realm, font, sw, sh);
+            }
+
+            private static method topBar(Batch2D* b, Realm* realm, Font* font, int speed, int sw) returns void {
+                Win95.raised(b, 0, 0, sw, 30);
+                font.draw(b, 8, 8, 2, "agents.exe", 0.0, 0.0, 0.4);
+                mutable String spd = "Paused";
+                if (speed == 1) {
+                    spd = "1x";
+                } else if (speed == 2) {
+                    spd = "2x";
+                } else if (speed == 4) {
+                    spd = "4x";
+                }
+                mutable String clock = $"Year {realm.year()}    Tick {realm.tickCount()}    Speed {spd}";
+                font.draw(b, 220, 10, 1, clock, 0.0, 0.0, 0.0);
+                int alive = Hud.aliveCount(realm);
+                font.draw(b, sw - 210, 10, 1, $"Nations {alive}    Pop {Hud.totalPop(realm)}", 0.0, 0.0, 0.0);
+            }
+
+            private static method nationsPanel(Batch2D* b, Realm* realm, Font* font) returns void {
+                int x = 8;
+                int y = 40;
+                int w = 250;
+                int rows = realm.nations.size();
+                int h = 24 + rows * 34 + 8;
+                Win95.raised(b, x, y, w, h);
+                Win95.titleBar(b, x + 3, y + 3, w - 6, 18);
+                font.draw(b, x + 8, y + 5, 1, "Nations", 1.0, 1.0, 1.0);
+                mutable int i = 0;
+                while (i < rows) {
+                    mutable Nation* n = realm.nations.get(i);
+                    int ry = y + 26 + i * 34;
+                    Win95.sunken(b, x + 6, ry, w - 12, 30, 0.72);
+                    float cr = cast<float>(n.cr) / 255.0;
+                    float cg = cast<float>(n.cg) / 255.0;
+                    float cb = cast<float>(n.cb) / 255.0;
+                    Win95.chip(b, x + 12, ry + 6, 16, 16, cr, cg, cb);
+                    mutable float tr = 0.0;
+                    mutable String tag = n.name;
+                    if (!n.alive) {
+                        tr = 0.5;
+                        tag = $"{n.name} (fallen)";
+                    }
+                    font.draw(b, x + 36, ry + 3, 1, tag, tr, tr * 0.4, tr * 0.4);
+                    font.draw(b, x + 36, ry + 16, 1,
+                        $"pop {n.livingCount()}  army {n.soldierCount()}  won {n.warsWon}", 0.1, 0.1, 0.1);
+                    if (n.firstEnemy() >= 0) {
+                        font.draw(b, x + w - 60, ry + 9, 1, "AT WAR", 0.6, 0.0, 0.0);
+                    }
+                    i = i + 1;
+                }
+            }
+
+            private static method chronicle(Batch2D* b, Realm* realm, Font* font, int sw, int sh) returns void {
+                int w = 372;
+                int h = 250;
+                int x = sw - w - 8;
+                int y = 40;
+                Win95.raised(b, x, y, w, h);
+                Win95.titleBar(b, x + 3, y + 3, w - 6, 18);
+                font.draw(b, x + 8, y + 5, 1, "Chronicle", 1.0, 1.0, 1.0);
+                Win95.sunken(b, x + 6, y + 24, w - 12, h - 30, 0.96);
+                int lineH = font.glyphH() + 2;
+                int maxLines = (h - 40) / lineH;
+                int total = realm.intentLog.size();
+                mutable int start = total - maxLines;
+                if (start < 0) {
+                    start = 0;
+                }
+                mutable int li = start;
+                mutable int row = 0;
+                while (li < total) {
+                    String s = realm.intentLog.get(li);
+                    mutable float rr = 0.1;
+                    mutable float gg = 0.1;
+                    mutable float bb = 0.1;
+                    if (Hud.contains(s, "CONQUERS")) {
+                        rr = 0.6;
+                        gg = 0.0;
+                        bb = 0.0;
+                    } else if (Hud.contains(s, "war")) {
+                        rr = 0.5;
+                        gg = 0.2;
+                        bb = 0.0;
+                    }
+                    font.draw(b, x + 12, y + 30 + row * lineH, 1, s, rr, gg, bb);
+                    li = li + 1;
+                    row = row + 1;
+                }
+            }
+
+            private static method aliveCount(Realm* realm) returns int {
+                mutable int c = 0;
+                mutable int i = 0;
+                while (i < realm.nations.size()) {
+                    if (realm.nations.get(i).alive) {
+                        c = c + 1;
+                    }
+                    i = i + 1;
+                }
+                return c;
+            }
+
+            private static method totalPop(Realm* realm) returns int {
+                mutable int c = 0;
+                mutable int i = 0;
+                while (i < realm.nations.size()) {
+                    c = c + realm.nations.get(i).livingCount();
+                    i = i + 1;
+                }
+                return c;
+            }
+
+            // Minimal substring test (the stdlib String may expose contains, but keep the HUD self-reliant).
+            private static method contains(String s, String needle) returns boolean {
+                int n = s.length();
+                int m = needle.length();
+                if (m == 0) {
+                    return true;
+                }
+                mutable int i = 0;
+                while (i + m <= n) {
+                    mutable int j = 0;
+                    mutable boolean hit = true;
+                    while (j < m && hit) {
+                        if (s.charAt(i + j) != needle.charAt(j)) {
+                            hit = false;
+                        }
+                        j = j + 1;
+                    }
+                    if (hit) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+        }
+    }
+}

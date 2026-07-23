@@ -4,6 +4,8 @@ import System.Text.StringBuilder;
 import opengl.glfw.GlWindow;
 import opengl.gl.Wgl;
 import opengl.gltex.Texture;
+import opengl.gltext.FontAtlas;
+import opengl.gltext.GdiFont;
 import Agents.Sim.Realm;
 import Agents.People.Nation;
 import Agents.World.Camera;
@@ -12,6 +14,9 @@ import Agents.Gfx.Atlas;
 import Agents.Gfx.WorldRenderer;
 import Agents.Gfx.BuildingRenderer;
 import Agents.Gfx.AgentRenderer;
+import Agents.Ui.Font;
+import Agents.Ui.Hud;
+import Agents.Ui.Inspector;
 
 // Entry point: bootstrap a Realm (world + resources + nations + workers) from a seed, advance the
 // simulation, and render it isometrically through LDP3-OpenGL, reading the framebuffer back to PPMs for
@@ -48,10 +53,15 @@ public bundle Agents {
                 long gpToken = Texture.startup();
                 int atlasTex = Texture.load2DRGBA(win.gl, "C:/Users/jvpts/Documents/GitHub/agents-exe/assets/atlas.png");
                 mutable Atlas* atlas = new Atlas() on heap;
-                Main.renderView(win, batch, realm, atlas, atlasTex, 240.0, 240.0, 0.68, "C:/Users/jvpts/Desktop/erros_ldp3/world_full.ppm");
+                mutable FontAtlas* fa = GdiFont.rasterizeAscii("Consolas", 15);
+                int fontTex = Texture.upload2DRGBA(win.gl, fa.pixels, fa.atlasW, fa.atlasH);
+                mutable Font* font = new Font(fa, fontTex) on heap;
+                Main.renderView(win, batch, realm, atlas, atlasTex, font, fontTex, 240.0, 240.0, 0.68, "C:/Users/jvpts/Desktop/erros_ldp3/world_full.ppm");
                 mutable float cfx = cast<float>(n0.capX);
                 mutable float cfy = cast<float>(n0.capY);
-                Main.renderView(win, batch, realm, atlas, atlasTex, cfx, cfy, 14.0, "C:/Users/jvpts/Desktop/erros_ldp3/world_close.ppm");
+                Main.renderView(win, batch, realm, atlas, atlasTex, font, fontTex, cfx, cfy, 14.0, "C:/Users/jvpts/Desktop/erros_ldp3/world_close.ppm");
+                delete font;
+                delete fa;
                 delete atlas;
                 Texture.shutdown(gpToken);
                 delete batch;
@@ -76,8 +86,8 @@ public bundle Agents {
             }
 
             private static method renderView(GlWindow* win, Batch2D* batch, Realm* realm, Atlas* atlas,
-                                             int atlasTex, float fx, float fy, float halfH,
-                                             String path) returns void {
+                                             int atlasTex, Font* font, int fontTex, float fx, float fy,
+                                             float halfH, String path) returns void {
                 mutable Camera* cam = new Camera(1280, 720, fx, fy, halfH) on heap;
                 mutable int f = 0;
                 while (f < 3) {
@@ -85,11 +95,17 @@ public bundle Agents {
                     Wgl.glViewport(0, 0, win.width(), win.height());
                     Wgl.glClearColor(0.102, 0.227, 0.353, 1.0);
                     Wgl.glClear(0x4000);
+                    // World pass: the sprite atlas is bound for the whole terrain/agent draw.
                     batch.begin(win.width(), win.height(), atlasTex);
                     WorldRenderer.draw(batch, realm.grid, cam, atlas);
                     WorldRenderer.drawResources(batch, realm.grid, realm.nodes, cam, atlas);
                     BuildingRenderer.draw(batch, realm, cam, atlas);
                     AgentRenderer.draw(batch, realm, cam, atlas);
+                    batch.flush();
+                    // HUD pass: bind the glyph texture; solid panels ignore it, text samples it.
+                    batch.setTexture(fontTex);
+                    Hud.draw(batch, realm, font, 1, win.width(), win.height());
+                    Inspector.drawNation(batch, font, realm.nations.get(0), 8, win.height() - 308);
                     batch.flush();
                     if (f == 2) {
                         Main.dump(win, 1280, 720, path);

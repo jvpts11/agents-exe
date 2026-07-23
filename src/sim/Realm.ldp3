@@ -34,8 +34,9 @@ public bundle Agents {
             private mutable Rng* moveRng;
             private mutable float reproTimer;
             private mutable float prodTimer;
-            private mutable float clock;         // seconds of simulated real-time elapsed
+            public mutable float clock;          // seconds of simulated real-time elapsed
             private mutable float combatTimer;   // accumulates toward the next combat resolution
+            public mutable ArrayList<String>* intentLog;   // rolling feed of notable strategic events
 
             public constructor Realm(int w, int h, int seed) {
                 this.seed = seed;
@@ -48,6 +49,7 @@ public bundle Agents {
                 this.prodTimer = 0.0;
                 this.clock = 0.0;
                 this.combatTimer = 0.0;
+                this.intentLog = new ArrayList<String>() on heap;
                 this.placeNations(4);
                 this.spawnWorkers(50);
                 this.assignLeaders();
@@ -81,6 +83,23 @@ public bundle Agents {
                 delete this.nodes;
                 delete this.grid;
                 delete this.moveRng;
+                delete this.intentLog;
+            }
+
+            // Real-time clock, faithful to the original (tick = whole simulated seconds, 60 ticks = 1 year).
+            public method tickCount() returns int {
+                return cast<int>(this.clock);
+            }
+            public method year() returns int {
+                return this.tickCount() / 60;
+            }
+
+            // Append a line to the strategic feed, keeping only the most recent entries.
+            private method logEvent(String line) returns void {
+                this.intentLog.add(line);
+                while (this.intentLog.size() > 40) {
+                    this.intentLog.removeAt(0);
+                }
             }
 
             private static method nationName(int i) returns String {
@@ -313,6 +332,7 @@ public bundle Agents {
                     n.atWar[enemyId] = true;
                     n.warStartTime = this.clock;
                     n.casualties = 0;
+                    this.logEvent($"Y{this.year()}: {n.name} declares war on {e.name}");
                 }
                 if (!e.atWar[n.id]) {
                     e.atWar[n.id] = true;
@@ -334,11 +354,14 @@ public bundle Agents {
                 if (enemyId < 0 || enemyId >= this.nations.size()) {
                     return;
                 }
+                mutable Nation* e = this.nations.get(enemyId);
+                if (n.atWar[enemyId]) {
+                    this.logEvent($"Y{this.year()}: {n.name} makes peace with {e.name}");
+                }
                 n.atWar[enemyId] = false;
                 if (n.attackTarget == enemyId) {
                     n.attackTarget = -1;
                 }
-                mutable Nation* e = this.nations.get(enemyId);
                 e.atWar[n.id] = false;
                 if (e.attackTarget == n.id) {
                     e.attackTarget = -1;
@@ -400,6 +423,7 @@ public bundle Agents {
                     n.lastIntent = "succession";
                     n.lastReason = "A new leader takes the throne.";
                     n.nextDecision = 3.0;   // the new ruler acts soon
+                    this.logEvent($"Y{this.year()}: {n.name} crowns a new leader");
                 }
             }
 
@@ -434,6 +458,7 @@ public bundle Agents {
                 n.alive = false;
                 n.leaderIdx = -1;
                 n.attackTarget = -1;
+                this.logEvent($"Y{this.year()}: {n.name} fades into ruin");
                 mutable int k = 0;
                 while (k < this.nations.size()) {
                     mutable Nation* o = this.nations.get(k);
@@ -741,6 +766,7 @@ public bundle Agents {
             private method conquer(Nation* winner, Nation* loser) returns void {
                 winner.warsWon = winner.warsWon + 1;
                 loser.warsLost = loser.warsLost + 1;
+                this.logEvent($"Y{this.year()}: {winner.name} CONQUERS {loser.name}!");
                 mutable int i = 0;
                 while (i < loser.members.size()) {
                     mutable Worker* w = loser.members.get(i);

@@ -1,0 +1,70 @@
+import opengl.gltext.FontAtlas;
+import Agents.Gfx.Batch2D;
+
+// A monospace text drawer over a GDI-rasterized glyph atlas. It owns the FontAtlas (glyph metrics + UVs)
+// and the GL texture id it was uploaded to; text is drawn as one tinted quad per glyph through Batch2D's
+// glyph primitive (texFlag 1: the atlas alpha is coverage, the vertex colour is the ink). The font texture
+// must be bound on the batch before drawing -- the HUD binds it once for its whole pass, since solid
+// panels ignore the texture anyway. UVs are computed inline (no per-glyph allocation).
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Ui {
+
+        public class Font {
+            private mutable FontAtlas* atlas;
+            public mutable int tex;
+
+            public constructor Font(FontAtlas* atlas, int tex) {
+                this.atlas = atlas;
+                this.tex = tex;
+            }
+
+            public method glyphW() returns int {
+                return this.atlas.cellW;
+            }
+            public method glyphH() returns int {
+                return this.atlas.cellH;
+            }
+            public method width(String s) returns int {
+                return s.length() * this.atlas.cellW;
+            }
+
+            // Draw `s` at pixel (x, y) top-left, at integer `scale`, tinted (r,g,b). Returns the x past the
+            // last glyph so callers can chain runs.
+            public method draw(Batch2D* b, int x, int y, int scale, String s, float r, float g,
+                               float bl) returns int {
+                int cw = this.atlas.cellW;
+                int ch = this.atlas.cellH;
+                int aw = this.atlas.atlasW;
+                int ah = this.atlas.atlasH;
+                int cols = this.atlas.cols;
+                int first = this.atlas.first;
+                int count = this.atlas.count;
+                int gw = cw * scale;
+                int gh = ch * scale;
+                mutable int cx = x;
+                mutable int i = 0;
+                while (i < s.length()) {
+                    mutable int code = cast<int>(s.charAt(i));
+                    mutable int idx = code - first;
+                    if (idx < 0 || idx >= count) {
+                        idx = 0;
+                    }
+                    if (code != 32) {
+                        int col = idx % cols;
+                        int row = idx / cols;
+                        float u0 = cast<float>(col * cw) / cast<float>(aw);
+                        float v0 = cast<float>(row * ch) / cast<float>(ah);
+                        float u1 = cast<float>((col + 1) * cw) / cast<float>(aw);
+                        float v1 = cast<float>((row + 1) * ch) / cast<float>(ah);
+                        b.glyph(cx, y, gw, gh, u0, v0, u1, v1, r, g, bl, 1.0);
+                    }
+                    cx = cx + gw;
+                    i = i + 1;
+                }
+                return cx;
+            }
+        }
+    }
+}
