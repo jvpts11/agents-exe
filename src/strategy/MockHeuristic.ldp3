@@ -145,7 +145,11 @@ public bundle Agents {
                     return MockHeuristic.idle("We survey our borders.", "R5.idle");
                 }
                 if (p == 3) {                        // Mercantile
-                    if (roll < 10) {
+                    int ally = MockHeuristic.findPeacefulNeighbour(nations, n);
+                    if (roll < 18 && ally >= 0) {
+                        return MockHeuristic.alliance(ally, "Trade binds us -- let us be allies.", "R5.ally");
+                    }
+                    if (roll < 24) {
                         return MockHeuristic.found("New markets in new cities.", "R5.merc");
                     }
                     if (roll < 35) {
@@ -172,7 +176,14 @@ public bundle Agents {
                     }
                     return MockHeuristic.idle("We watch and wait.", "R5.idle");
                 }
-                // Cautious / Pious / Stoic: steady economy.
+                // Cautious / Pious / Stoic: steady economy (the pious also seek friends).
+                if (p == 4) {
+                    int ally = MockHeuristic.findPeacefulNeighbour(nations, n);
+                    if (roll < 15 && ally >= 0) {
+                        return MockHeuristic.alliance(ally, "May our peoples walk together in peace.",
+                                                     "R5.ally");
+                    }
+                }
                 if (roll < 5) {
                     return MockHeuristic.found("We settle new ground.", "R5");
                 }
@@ -192,10 +203,23 @@ public bundle Agents {
                 mutable int i = 0;
                 while (i < nations.size()) {
                     mutable Nation* o = nations.get(i);
-                    if (o.id != n.id && o.alive && !n.atWar[o.id]) {
+                    if (o.id != n.id && o.alive && !n.atWar[o.id] && !n.ally[o.id]) {
                         if (MockHeuristic.relStrength(n, o) < 1.2) {
                             return o.id;
                         }
+                    }
+                    i = i + 1;
+                }
+                return -1;
+            }
+
+            // First alive neighbour we are neither at war nor allied with (an alliance candidate).
+            private static method findPeacefulNeighbour(ArrayList<Nation*> nations, Nation* n) returns int {
+                mutable int i = 0;
+                while (i < nations.size()) {
+                    mutable Nation* o = nations.get(i);
+                    if (o.id != n.id && o.alive && !n.atWar[o.id] && !n.ally[o.id]) {
+                        return o.id;
                     }
                     i = i + 1;
                 }
@@ -305,6 +329,11 @@ public bundle Agents {
             }
             private static method found(String reason, String rule) returns Intent* {
                 return MockHeuristic.mk(Intent.foundCity(), reason, rule);
+            }
+            private static method alliance(int target, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.mk(Intent.makeAlliance(), reason, rule);
+                it.targetNation = target;
+                return it;
             }
             private static method idle(String reason, String rule) returns Intent* {
                 return MockHeuristic.mk(Intent.idle(), reason, rule);
