@@ -1,4 +1,5 @@
 import System.Collections.ArrayList;
+import System.IO.Console;
 import Agents.World.Grid;
 import Agents.World.Biome;
 import Agents.World.Rng;
@@ -11,6 +12,8 @@ import Agents.People.Nation;
 import Agents.People.Worker;
 import Agents.Economy.Building;
 import Agents.Economy.BuildingType;
+import Agents.Strategy.MockHeuristic;
+import Agents.Strategy.Intent;
 
 // The simulation container and its tick. It owns the world grid, resource nodes, nations and workers,
 // bootstraps a game from a seed (generate -> seat nations -> spawn workers), and advances everyone each
@@ -24,13 +27,15 @@ public bundle Agents {
 
         public class Realm {
             public mutable Grid* grid;
-            public mutable ArrayList<ResourceNode*> nodes;
+            public mutable ArrayList<ResourceNode*>* nodes;
             public mutable ArrayList<Nation*> nations;
             public mutable ArrayList<Worker*> workers;
             public mutable int seed;
             private mutable Rng* moveRng;
             private mutable float reproTimer;
             private mutable float prodTimer;
+            private mutable float clock;         // seconds of simulated real-time elapsed
+            private mutable float combatTimer;   // accumulates toward the next combat resolution
 
             public constructor Realm(int w, int h, int seed) {
                 this.seed = seed;
@@ -41,8 +46,20 @@ public bundle Agents {
                 this.moveRng = new Rng(seed ^ 7788) on heap;
                 this.reproTimer = 0.0;
                 this.prodTimer = 0.0;
+                this.clock = 0.0;
+                this.combatTimer = 0.0;
                 this.placeNations(4);
                 this.spawnWorkers(50);
+                this.assignLeaders();
+            }
+
+            // Seat the first leader of each nation: its eldest adult member. Later deaths trigger succession.
+            private method assignLeaders() returns void {
+                mutable int ni = 0;
+                while (ni < this.nations.size()) {
+                    this.electLeader(this.nations.get(ni));
+                    ni = ni + 1;
+                }
             }
 
             public destructor ~Realm() returns void {
@@ -61,6 +78,7 @@ public bundle Agents {
                     delete this.nodes.get(i);
                     i = i + 1;
                 }
+                delete this.nodes;
                 delete this.grid;
                 delete this.moveRng;
             }
@@ -175,6 +193,7 @@ public bundle Agents {
             // --- tick ---
 
             public method tick(float dt) returns void {
+                this.clock = this.clock + dt;
                 mutable int i = 0;
                 while (i < this.workers.size()) {
                     this.tickWorker(this.workers.get(i), dt);
@@ -191,6 +210,243 @@ public bundle Agents {
                     this.produce();
                     this.growth();
                     this.reassign();
+                }
+                this.strategyTick(dt);
+            }
+
+            // --- strategic layer: staggered per-nation decisions, war, siege, conquest ---
+
+            // Each living nation's leader runs the Mock heuristic on its own ~45s clock; the resulting
+            // Intent is executed at once. First decisions are staggered (nextDecision seeded per id) so
+            // the realms do not all move in lockstep.
+            private method strategyTick(float dt) returns void {
+                mutable int ni = 0;
+                while (ni < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(ni);
+                    if (n.alive) {
+                        this.checkSuccession(n);
+                        if (n.alive) {
+                            n.nextDecision = n.nextDecision - dt;
+                            if (n.nextDecision <= 0.0) {
+                                n.nextDecision = 45.0;
+                                mutable Intent* it = MockHeuristic.decide(this.nations, n,
+                                    cast<int>(this.clock * 4.0), this.seed, this.clock);
+                                this.applyIntent(n, it);
+                                delete it;
+                            }
+                        }
+                    }
+                    ni = ni + 1;
+                }
+                this.combatTimer = this.combatTimer + dt;
+                while (this.combatTimer >= 1.0) {
+                    this.combatTimer = this.combatTimer - 1.0;
+                    this.resolveConquests();
+                }
+            }
+
+            private method applyIntent(Nation* n, Intent* it) returns void {
+                n.lastIntent = it.rulePath;
+                n.lastReason = it.reason;
+                int t = it.type;
+                if (t == Intent.declareWar() || t == Intent.attackCity()) {
+                    this.beginWar(n, it.targetNation);
+                } else if (t == Intent.makePeace()) {
+                    this.endWar(n, it.targetNation);
+                } else if (t == Intent.buildArmy()) {
+                    mutable int want = it.targetSize;
+                    if (want < 0) {
+                        want = 0;
+                    }
+                    n.desiredSoldiers = want;
+                    this.conscript(n, want - n.soldierCount());
+                } else if (t == Intent.conscript()) {
+                    this.conscript(n, it.count);
+                } else if (t == Intent.disbandArmy()) {
+                    n.desiredSoldiers = 0;
+                    n.attackTarget = -1;
+                    this.disband(n);
+                } else if (t == Intent.focusResource()) {
+                    n.focusedRes = it.resource;
+                } else if (t == Intent.prioritizeBuilding()) {
+                    n.prioBuilding = it.building;
+                    if (!this.hasBlueprint(n)) {
+                        this.placeBlueprint(n, Realm.buildingOfId(it.building));
+                    }
+                }
+                // foundCity / nameHeir / idle: no state change yet
+            }
+
+            private static method buildingOfId(int id) returns BuildingType {
+                if (id == 2) {
+                    return BuildingType.Farm;
+                }
+                if (id == 3) {
+                    return BuildingType.HuntersLodge;
+                }
+                if (id == 4) {
+                    return BuildingType.Sawmill;
+                }
+                if (id == 6) {
+                    return BuildingType.HouseMedium;
+                }
+                if (id == 7) {
+                    return BuildingType.HouseLarge;
+                }
+                if (id == 8) {
+                    return BuildingType.Barracks;
+                }
+                return BuildingType.House;
+            }
+
+            // Declare (or press) a war: both sides enter the war, mobilise a levy, and the aggressor marks
+            // the enemy capital as its assault target.
+            private method beginWar(Nation* n, int enemyId) returns void {
+                if (enemyId < 0 || enemyId >= this.nations.size() || enemyId == n.id) {
+                    return;
+                }
+                mutable Nation* e = this.nations.get(enemyId);
+                if (!e.alive) {
+                    return;
+                }
+                if (!n.atWar[enemyId]) {
+                    n.atWar[enemyId] = true;
+                    n.warStartTime = this.clock;
+                    n.casualties = 0;
+                }
+                if (!e.atWar[n.id]) {
+                    e.atWar[n.id] = true;
+                    e.warStartTime = this.clock;
+                    e.casualties = 0;
+                }
+                n.attackTarget = enemyId;
+                if (n.desiredSoldiers < 12) {
+                    n.desiredSoldiers = 12;
+                }
+                if (e.desiredSoldiers < 10) {
+                    e.desiredSoldiers = 10;
+                }
+                this.conscript(n, n.desiredSoldiers - n.soldierCount());
+                this.conscript(e, e.desiredSoldiers - e.soldierCount());
+            }
+
+            private method endWar(Nation* n, int enemyId) returns void {
+                if (enemyId < 0 || enemyId >= this.nations.size()) {
+                    return;
+                }
+                n.atWar[enemyId] = false;
+                if (n.attackTarget == enemyId) {
+                    n.attackTarget = -1;
+                }
+                mutable Nation* e = this.nations.get(enemyId);
+                e.atWar[n.id] = false;
+                if (e.attackTarget == n.id) {
+                    e.attackTarget = -1;
+                }
+            }
+
+            // Turn idle adults into soldiers, up to `count`.
+            private method conscript(Nation* n, int count) returns void {
+                if (count <= 0) {
+                    return;
+                }
+                mutable int done = 0;
+                mutable int i = 0;
+                while (i < n.members.size() && done < count) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && w.isAdult() && w.profession != 10 && w.profession != 11
+                            && w.carryRes < 0) {
+                        w.profession = 10;   // Soldier
+                        w.targetNode = -1;
+                        done = done + 1;
+                    }
+                    i = i + 1;
+                }
+            }
+
+            private method disband(Nation* n) returns void {
+                mutable int i = 0;
+                while (i < n.members.size()) {
+                    mutable Worker* w = n.members.get(i);
+                    if (w.alive && (w.profession == 10 || w.profession == 11)) {
+                        w.profession = 0;
+                    }
+                    i = i + 1;
+                }
+            }
+
+            private static method isSoldier(int prof) returns boolean {
+                return prof == 10 || prof == 11;
+            }
+
+            // Succession: if the leader has died (or none is seated), crown the eldest adult -- the heir; if
+            // no adult remains, any survivor; if the bloodline is spent, the nation dissolves. A new leader
+            // may carry a different temperament, so the realm's policy can swing from one reign to the next.
+            private method checkSuccession(Nation* n) returns void {
+                boolean ok = n.leaderIdx >= 0 && n.leaderIdx < this.workers.size()
+                          && this.workers.get(n.leaderIdx).alive;
+                if (ok) {
+                    return;
+                }
+                boolean firstReign = n.leaderIdx < 0 && n.reigns == 0;
+                this.electLeader(n);
+                if (n.leaderIdx < 0) {
+                    this.dissolve(n);
+                    return;
+                }
+                if (!firstReign) {
+                    n.reigns = n.reigns + 1;
+                    n.personality = this.moveRng.nextInt(7);   // the heir's own temperament
+                    n.lastIntent = "succession";
+                    n.lastReason = "A new leader takes the throne.";
+                    n.nextDecision = 3.0;   // the new ruler acts soon
+                }
+            }
+
+            // Crown the eldest living adult of the nation (its members are workers of this nationId).
+            private method electLeader(Nation* n) returns void {
+                mutable int best = -1;
+                mutable float bestAge = 0.0 - 1.0;
+                mutable int i = 0;
+                while (i < this.workers.size()) {
+                    mutable Worker* w = this.workers.get(i);
+                    if (w.alive && w.nationId == n.id && w.isAdult() && w.age > bestAge) {
+                        bestAge = w.age;
+                        best = i;
+                    }
+                    i = i + 1;
+                }
+                if (best < 0) {
+                    i = 0;
+                    while (i < this.workers.size() && best < 0) {
+                        mutable Worker* w = this.workers.get(i);
+                        if (w.alive && w.nationId == n.id) {
+                            best = i;
+                        }
+                        i = i + 1;
+                    }
+                }
+                n.leaderIdx = best;
+            }
+
+            // The line has ended and no conqueror claimed them: the nation quietly dissolves.
+            private method dissolve(Nation* n) returns void {
+                n.alive = false;
+                n.leaderIdx = -1;
+                n.attackTarget = -1;
+                mutable int k = 0;
+                while (k < this.nations.size()) {
+                    mutable Nation* o = this.nations.get(k);
+                    if (n.id < o.atWar.length()) {
+                        o.atWar[n.id] = false;
+                        if (o.attackTarget == n.id) {
+                            o.attackTarget = -1;
+                        }
+                    }
+                    if (o.id < n.atWar.length()) {
+                        n.atWar[o.id] = false;
+                    }
+                    k = k + 1;
                 }
             }
 
@@ -265,6 +521,10 @@ public bundle Agents {
                     this.wander(wk, dt);
                     return;
                 }
+                if (Realm.isSoldier(wk.profession)) {
+                    this.tickSoldier(n, wk, dt);
+                    return;
+                }
                 if (wk.profession == 4) {
                     this.tickBuilder(n, wk, dt);
                     return;
@@ -319,6 +579,210 @@ public bundle Agents {
                 } else {
                     this.moveToward(wk, node.gx, node.gy, dt);
                 }
+            }
+
+            // --- military ---
+
+            // A soldier marches on its nation's assault target and besieges the enemy capital; with no war
+            // it garrisons its own capital.
+            private method tickSoldier(Nation* n, Worker* wk, float dt) returns void {
+                if (n.attackTarget < 0 || n.attackTarget >= this.nations.size()) {
+                    if (this.nearCell(wk, n.capX, n.capY, 4)) {
+                        this.wander(wk, dt);
+                    } else {
+                        this.moveToward(wk, n.capX, n.capY, dt);
+                    }
+                    return;
+                }
+                mutable Nation* e = this.nations.get(n.attackTarget);
+                if (!e.alive) {
+                    n.attackTarget = -1;
+                    return;
+                }
+                if (this.nearCell(wk, e.capX, e.capY, 2)) {
+                    this.siege(n, e, wk, dt);
+                } else {
+                    this.moveToward(wk, e.capX, e.capY, dt);
+                }
+            }
+
+            // Resolve one soldier's strike each ~second: cut down a nearby defender (who fights back if
+            // armed), else batter the nearest enemy building. Casualties feed the war's stalemate/collapse.
+            private method siege(Nation* n, Nation* e, Worker* wk, float dt) returns void {
+                wk.workTimer = wk.workTimer + dt;
+                if (wk.workTimer < 1.0) {
+                    return;
+                }
+                wk.workTimer = 0.0;
+                int di = this.nearestEnemyWorker(e, wk, 3);
+                if (di >= 0) {
+                    mutable Worker* def = e.members.get(di);
+                    def.hp = def.hp - 34;
+                    if (def.hp <= 0) {
+                        def.alive = false;
+                        e.casualties = e.casualties + 1;
+                    }
+                    if (Realm.isSoldier(def.profession)) {
+                        wk.hp = wk.hp - 25;
+                        if (wk.hp <= 0) {
+                            wk.alive = false;
+                            n.casualties = n.casualties + 1;
+                        }
+                    }
+                    return;
+                }
+                int bi = this.nearestBuilding(e, wk);
+                if (bi >= 0) {
+                    mutable Building* b = e.buildings.get(bi);
+                    b.hp = b.hp - 20;
+                    if (b.hp <= 0) {
+                        this.destroyBuilding(e, bi);
+                    }
+                }
+            }
+
+            // Nearest living enemy member within `r` cells of the soldier, else -1.
+            private method nearestEnemyWorker(Nation* e, Worker* wk, int r) returns int {
+                int cx = cast<int>(wk.px);
+                int cy = cast<int>(wk.py);
+                mutable int best = -1;
+                mutable int bestD = 2000000000;
+                mutable int i = 0;
+                while (i < e.members.size()) {
+                    mutable Worker* w = e.members.get(i);
+                    if (w.alive) {
+                        mutable int dx = cast<int>(w.px) - cx;
+                        mutable int dy = cast<int>(w.py) - cy;
+                        if (dx < 0) {
+                            dx = 0 - dx;
+                        }
+                        if (dy < 0) {
+                            dy = 0 - dy;
+                        }
+                        if (dx <= r && dy <= r) {
+                            int d = dx * dx + dy * dy;
+                            if (d < bestD) {
+                                bestD = d;
+                                best = i;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                return best;
+            }
+
+            private method nearestBuilding(Nation* e, Worker* wk) returns int {
+                int cx = cast<int>(wk.px);
+                int cy = cast<int>(wk.py);
+                mutable int best = -1;
+                mutable int bestD = 2000000000;
+                mutable int i = 0;
+                while (i < e.buildings.size()) {
+                    mutable Building* b = e.buildings.get(i);
+                    if (b.built) {
+                        int dx = b.gx - cx;
+                        int dy = b.gy - cy;
+                        int d = dx * dx + dy * dy;
+                        if (d < bestD) {
+                            bestD = d;
+                            best = i;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return best;
+            }
+
+            private method destroyBuilding(Nation* e, int idx) returns void {
+                delete e.buildings.get(idx);
+                e.buildings.removeAt(idx);
+            }
+
+            // The seats of power (Castle / TownHall) still standing; zero means the nation has fallen.
+            private method countSeats(Nation* n) returns int {
+                mutable int c = 0;
+                mutable int i = 0;
+                while (i < n.buildings.size()) {
+                    mutable Building* b = n.buildings.get(i);
+                    if (b.built && (b.type == BuildingType.Castle || b.type == BuildingType.TownHall)) {
+                        c = c + 1;
+                    }
+                    i = i + 1;
+                }
+                return c;
+            }
+
+            // Test every war for a decisive result: a nation with no seats, too few people, or that has bled
+            // out over a long war is conquered by its aggressor.
+            private method resolveConquests() returns void {
+                mutable int ni = 0;
+                while (ni < this.nations.size()) {
+                    mutable Nation* e = this.nations.get(ni);
+                    if (e.alive) {
+                        int agg = e.firstEnemy();
+                        if (agg >= 0 && agg < this.nations.size()) {
+                            mutable Nation* n = this.nations.get(agg);
+                            boolean noSeats = this.countSeats(e) == 0;
+                            boolean tiny = e.livingCount() < 10;
+                            boolean bledOut = (this.clock - e.warStartTime) > 300.0
+                                            && e.casualties > n.casualties * 2 + 6;
+                            if (n.alive && (noSeats || tiny || bledOut)) {
+                                this.conquer(n, e);
+                            }
+                        }
+                    }
+                    ni = ni + 1;
+                }
+            }
+
+            // Absorb the loser: its survivors defect to the winner, it leaves every war, and it is struck
+            // from the living nations.
+            private method conquer(Nation* winner, Nation* loser) returns void {
+                winner.warsWon = winner.warsWon + 1;
+                loser.warsLost = loser.warsLost + 1;
+                mutable int i = 0;
+                while (i < loser.members.size()) {
+                    mutable Worker* w = loser.members.get(i);
+                    if (w.alive) {
+                        w.nationId = winner.id;
+                        if (Realm.isSoldier(w.profession)) {
+                            w.profession = 0;
+                        }
+                        w.targetNode = -1;
+                        w.carryRes = -1;
+                        winner.members.add(w);
+                    }
+                    i = i + 1;
+                }
+                loser.alive = false;
+                mutable int k = 0;
+                while (k < this.nations.size()) {
+                    mutable Nation* o = this.nations.get(k);
+                    if (loser.id < o.atWar.length()) {
+                        o.atWar[loser.id] = false;
+                        if (o.attackTarget == loser.id) {
+                            o.attackTarget = -1;
+                        }
+                    }
+                    if (o.id < loser.atWar.length()) {
+                        loser.atWar[o.id] = false;
+                    }
+                    k = k + 1;
+                }
+                loser.attackTarget = -1;
+            }
+
+            private method nearCell(Worker* wk, int tx, int ty, int r) returns boolean {
+                mutable int dx = cast<int>(wk.px) - tx;
+                mutable int dy = cast<int>(wk.py) - ty;
+                if (dx < 0) {
+                    dx = 0 - dx;
+                }
+                if (dy < 0) {
+                    dy = 0 - dy;
+                }
+                return dx <= r && dy <= r;
             }
 
             // --- helpers ---

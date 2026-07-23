@@ -25,6 +25,22 @@ public bundle Agents {
             public mutable Stockpile* stock;
             public mutable FlowField* capFlow;   // BFS field toward the capital
             public mutable ArrayList<Building*> buildings;
+            // --- strategic layer ---
+            public mutable int personality;      // Personality ordinal (the leader's)
+            public mutable int desiredSoldiers;
+            public mutable int warsWon;
+            public mutable int warsLost;
+            public mutable boolean[] atWar;      // atWar[otherNationId]
+            public mutable int focusedRes;       // FocusResource: 0..5, else -1
+            public mutable int prioBuilding;     // PrioritizeBuilding: BuildingType ordinal, else -1
+            public mutable int attackTarget;     // enemy nation id currently being assaulted, else -1
+            public mutable int leaderIdx;        // index into Realm.workers of the reigning leader, -1 none
+            public mutable int reigns;           // how many leaders have held the throne (succession count)
+            public mutable float nextDecision;   // seconds until this nation's next strategic decision
+            public mutable float warStartTime;   // clock time the current war began (for stalemate peace)
+            public mutable int casualties;       // combat losses in the recent window
+            public mutable String lastIntent;
+            public mutable String lastReason;
 
             public constructor Nation(int id, String name, int capX, int capY, Grid* grid) {
                 this.id = id;
@@ -36,7 +52,57 @@ public bundle Agents {
                 this.alive = true;
                 this.stock = new Stockpile() on heap;
                 this.capFlow = new FlowField(grid, capX, capY) on heap;
+                this.personality = id % 7;
+                this.desiredSoldiers = 0;
+                this.warsWon = 0;
+                this.warsLost = 0;
+                this.atWar = new boolean[8]();
+                this.focusedRes = -1;
+                this.prioBuilding = -1;
+                this.attackTarget = -1;
+                this.leaderIdx = -1;
+                this.reigns = 0;
+                this.nextDecision = 20.0 + cast<float>(id) * 8.0;   // staggered first decision
+                this.warStartTime = 0.0;
+                this.casualties = 0;
+                this.lastIntent = "none";
+                this.lastReason = "";
                 this.setColor(id);
+            }
+
+            public method atWarWithAny() returns boolean {
+                mutable int i = 0;
+                while (i < this.atWar.length()) {
+                    if (this.atWar[i]) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            public method firstEnemy() returns int {
+                mutable int i = 0;
+                while (i < this.atWar.length()) {
+                    if (this.atWar[i]) {
+                        return i;
+                    }
+                    i = i + 1;
+                }
+                return -1;
+            }
+
+            public method soldierCount() returns int {
+                mutable int c = 0;
+                mutable int i = 0;
+                while (i < this.members.size()) {
+                    mutable Worker* w = this.members.get(i);
+                    if (w.alive && (w.profession == 10 || w.profession == 11)) {
+                        c = c + 1;
+                    }
+                    i = i + 1;
+                }
+                return c;
             }
 
             // Count finished buildings of a type.
@@ -61,6 +127,7 @@ public bundle Agents {
                 }
                 delete this.stock;
                 delete this.capFlow;
+                delete this.atWar;
             }
 
             // The fixed banner palette, keyed by nation id (NationPalette): seven distinct hues.

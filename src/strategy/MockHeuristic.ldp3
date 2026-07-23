@@ -1,0 +1,314 @@
+import System.Collections.ArrayList;
+import Agents.World.Rng;
+import Agents.People.Nation;
+import Agents.Economy.BuildingType;
+
+// The strategic brain. With no LLM, this deterministic cascade IS the AI: every ~45s each nation's leader
+// runs it and gets one Intent. First match wins, R0 -> R1 -> R3(war) -> R3.5(proactive war) -> R5(default
+// by personality), which always returns. Reproduces the original's thresholds; the RelativeStrength war
+// signal is (their soldiers + their pop) / (ours), so < 1.2 marks a weaker, temptable neighbour. Seeded by
+// worldSeed ^ nationId ^ tick, so decisions are reproducible.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Strategy {
+
+        public class MockHeuristic {
+
+            public static method decide(ArrayList<Nation*> nations, Nation* n, int tick, int seed,
+                                        float clock) returns Intent* {
+                mutable Rng rng = new Rng(seed ^ n.id ^ (tick * 131 + 7)) on stack;
+                int ownSoldiers = n.soldierCount();
+                int pop = n.livingCount();
+                boolean atWar = n.atWarWithAny();
+                int p = n.personality;
+
+                // R0 -- stalemate auto-peace: a long war drawing no fresh blood is not worth the upkeep.
+                if (atWar && n.casualties < 8 && (clock - n.warStartTime) > 300.0) {
+                    return MockHeuristic.peace(n.firstEnemy(),
+                        "This war drags on without progress. Better to seek peace.", "R0.stalemate_peace");
+                }
+
+                // R1 -- crisis reflex: a food collapse is an emergency (a stand-in for the event stream).
+                if (pop > 6 && n.stock.get(0) < 8) {
+                    if (rng.nextInt(2) == 0) {
+                        return MockHeuristic.build(2, "Famine threatens the people -- raise a farm.", "R1.food");
+                    }
+                    return MockHeuristic.focus(0, "Food stores are dangerously low.", "R1.food");
+                }
+
+                // R3 -- reactive war conduct (only while at war).
+                if (atWar) {
+                    return MockHeuristic.warIntent(nations, n, rng, ownSoldiers, p);
+                }
+
+                // R3.5 -- proactive war: prey on a weaker neighbour we can reach.
+                int prey = MockHeuristic.findWeakNeighbour(nations, n);
+                if (ownSoldiers >= 4 && prey >= 0) {
+                    mutable int chance = 0;
+                    if (p == 0) {
+                        chance = 25;
+                    } else if (p == 5) {
+                        chance = 15;
+                    } else if (p == 2) {
+                        chance = 15;
+                    } else if (p == 4) {
+                        chance = 8;
+                    }
+                    if (chance > 0) {
+                        int dist = MockHeuristic.dist(n, nations.get(prey));
+                        if (dist < 80) {
+                            chance = chance + 10;
+                        }
+                        if (dist < 40) {
+                            chance = chance + 10;
+                        }
+                        if (rng.nextInt(100) < chance) {
+                            return MockHeuristic.war(prey, "A weaker neighbour tempts us -- we declare war.",
+                                                    "R3.5.proactive_war");
+                        }
+                    }
+                }
+
+                // R5 -- personality default (always returns).
+                return MockHeuristic.defaultByPersonality(nations, n, rng, p);
+            }
+
+            // R3 -- war conduct.
+            private static method warIntent(ArrayList<Nation*> nations, Nation* n, Rng* rng,
+                                            int ownSoldiers, int p) returns Intent* {
+                int enemy = n.firstEnemy();
+                mutable int enemySoldiers = 0;
+                if (enemy >= 0) {
+                    enemySoldiers = nations.get(enemy).soldierCount();
+                }
+                // (a) losing badly
+                if (ownSoldiers < (enemySoldiers * 4) / 10) {
+                    if ((p == 1 || p == 4) && rng.nextInt(100) < 30) {
+                        return MockHeuristic.peace(enemy, "We cannot sustain these losses.", "R3.surrender");
+                    }
+                    mutable int t = (ownSoldiers * 3) / 2;
+                    if (ownSoldiers + 8 > t) {
+                        t = ownSoldiers + 8;
+                    }
+                    return MockHeuristic.army(t, "Rally the legions before we are overrun.", "R3.losing");
+                }
+                // (d) army ready (>= 80% of desired) and no order -> assault the enemy capital
+                if (n.desiredSoldiers > 0 && ownSoldiers >= (n.desiredSoldiers * 8) / 10 && n.attackTarget < 0) {
+                    return MockHeuristic.attack(enemy, "The host is ready -- march on the enemy capital!",
+                                                "R3.attack");
+                }
+                // (c) keep pressing an existing assault
+                if (n.attackTarget >= 0) {
+                    return MockHeuristic.attack(n.attackTarget, "Press the attack.", "R3.press");
+                }
+                // (h) no army and none to raise -> sue for peace
+                if (ownSoldiers == 0) {
+                    return MockHeuristic.peace(enemy, "We have no army left to fight -- sue for peace.",
+                                              "R3.noarmy");
+                }
+                // (f) build up
+                return MockHeuristic.army(n.desiredSoldiers + 8, "Reinforce the front before we strike.",
+                                          "R3.build");
+            }
+
+            // R5 -- peacetime default, weighted by personality; always returns.
+            private static method defaultByPersonality(ArrayList<Nation*> nations, Nation* n, Rng* rng,
+                                                       int p) returns Intent* {
+                int roll = rng.nextInt(100);
+                if (p == 0) {                        // Aggressive
+                    int w = MockHeuristic.findWeakNeighbour(nations, n);
+                    if (roll < 15 && w >= 0) {
+                        return MockHeuristic.war(w, "A strong host keeps us feared.", "R5.mil");
+                    }
+                    if (roll < 25) {
+                        return MockHeuristic.found("We spread to new lands.", "R5");
+                    }
+                    if (roll < 50) {
+                        return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Raise up the realm.", "R5");
+                    }
+                    if (roll < 60) {
+                        return MockHeuristic.focus(MockHeuristic.scarcest(n), "Stockpile for war.", "R5");
+                    }
+                    return MockHeuristic.idle("We hold and watch.", "R5.idle");
+                }
+                if (p == 2) {                        // Expansionist
+                    if (roll < 40) {
+                        return MockHeuristic.found("New lands call to us.", "R5.exp");
+                    }
+                    if (roll < 65) {
+                        return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Grow the settlement.", "R5");
+                    }
+                    if (roll < 75) {
+                        return MockHeuristic.focus(MockHeuristic.scarcest(n), "Feed the expansion.", "R5");
+                    }
+                    return MockHeuristic.idle("We survey our borders.", "R5.idle");
+                }
+                if (p == 3) {                        // Mercantile
+                    if (roll < 10) {
+                        return MockHeuristic.found("New markets in new cities.", "R5.merc");
+                    }
+                    if (roll < 35) {
+                        return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Build up trade.", "R5");
+                    }
+                    if (roll < 70) {
+                        return MockHeuristic.focus(MockHeuristic.scarcest(n), "Balance the ledgers.", "R5");
+                    }
+                    return MockHeuristic.idle("We tend the markets.", "R5.idle");
+                }
+                if (p == 5) {                        // Cunning
+                    int w = MockHeuristic.findWeakNeighbour(nations, n);
+                    if (roll < 10 && w >= 0) {
+                        return MockHeuristic.war(w, "The moment is ripe to strike.", "R5.mil");
+                    }
+                    if (roll < 25) {
+                        return MockHeuristic.found("Quietly we spread.", "R5");
+                    }
+                    if (roll < 45) {
+                        return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Build in the shadows.", "R5");
+                    }
+                    if (roll < 60) {
+                        return MockHeuristic.focus(MockHeuristic.scarcest(n), "Hoard what we lack.", "R5");
+                    }
+                    return MockHeuristic.idle("We watch and wait.", "R5.idle");
+                }
+                // Cautious / Pious / Stoic: steady economy.
+                if (roll < 5) {
+                    return MockHeuristic.found("We settle new ground.", "R5");
+                }
+                if (roll < 40) {
+                    return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Build steadily and endure.", "R5");
+                }
+                if (roll < 60) {
+                    return MockHeuristic.focus(MockHeuristic.scarcest(n), "See to what we lack.", "R5");
+                }
+                return MockHeuristic.idle("We hold and endure.", "R5.idle");
+            }
+
+            // --- signals ---
+
+            // First alive peaceful neighbour weaker than us (RelativeStrength < 1.2).
+            private static method findWeakNeighbour(ArrayList<Nation*> nations, Nation* n) returns int {
+                mutable int i = 0;
+                while (i < nations.size()) {
+                    mutable Nation* o = nations.get(i);
+                    if (o.id != n.id && o.alive && !n.atWar[o.id]) {
+                        if (MockHeuristic.relStrength(n, o) < 1.2) {
+                            return o.id;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return -1;
+            }
+
+            private static method relStrength(Nation* self, Nation* other) returns float {
+                int ourTotal = self.soldierCount() + self.livingCount();
+                int theirTotal = other.soldierCount() * 1 + other.livingCount();
+                if (ourTotal <= 0) {
+                    return 1.0;
+                }
+                return cast<float>(theirTotal) / cast<float>(ourTotal);
+            }
+
+            private static method dist(Nation* a, Nation* b) returns int {
+                mutable int dx = a.capX - b.capX;
+                mutable int dy = a.capY - b.capY;
+                if (dx < 0) {
+                    dx = 0 - dx;
+                }
+                if (dy < 0) {
+                    dy = 0 - dy;
+                }
+                return dx + dy;
+            }
+
+            // Which building the capital most needs (PickBuildingNeed, simplified): food -> Farm(2),
+            // crowding -> House(5), else Sawmill(4).
+            private static method buildingNeed(Nation* n) returns int {
+                int pop = n.livingCount();
+                if (n.stock.get(0) < pop) {
+                    return 2;
+                }
+                int housing = n.countBuilding(BuildingType.House) * 2
+                            + n.countBuilding(BuildingType.HouseMedium) * 4
+                            + n.countBuilding(BuildingType.HouseLarge) * 8;
+                if (pop + 2 > housing) {
+                    return 5;
+                }
+                if (n.countBuilding(BuildingType.Sawmill) < 2) {
+                    return 4;
+                }
+                return 2;
+            }
+
+            // The resource the nation is shortest on (Food/Wood/Planks/Stone/Iron priority).
+            private static method scarcest(Nation* n) returns int {
+                int[] order = new int[5]();
+                order[0] = 0;
+                order[1] = 1;
+                order[2] = 5;
+                order[3] = 2;
+                order[4] = 3;
+                mutable int best = order[0];
+                mutable int bestAmt = n.stock.get(order[0]);
+                mutable int i = 1;
+                while (i < 5) {
+                    int a = n.stock.get(order[i]);
+                    if (a < bestAmt) {
+                        bestAmt = a;
+                        best = order[i];
+                    }
+                    i = i + 1;
+                }
+                delete order;
+                return best;
+            }
+
+            // --- intent builders ---
+
+            private static method mk(int type, String reason, String rule) returns Intent* {
+                mutable Intent* it = new Intent(type) on heap;
+                it.reason = reason;
+                it.rulePath = rule;
+                return it;
+            }
+            private static method war(int target, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.mk(Intent.declareWar(), reason, rule);
+                it.targetNation = target;
+                return it;
+            }
+            private static method peace(int target, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.mk(Intent.makePeace(), reason, rule);
+                it.targetNation = target;
+                return it;
+            }
+            private static method attack(int target, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.mk(Intent.attackCity(), reason, rule);
+                it.targetNation = target;
+                return it;
+            }
+            private static method army(int size, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.mk(Intent.buildArmy(), reason, rule);
+                it.targetSize = size;
+                return it;
+            }
+            private static method build(int building, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.mk(Intent.prioritizeBuilding(), reason, rule);
+                it.building = building;
+                return it;
+            }
+            private static method focus(int res, String reason, String rule) returns Intent* {
+                mutable Intent* it = MockHeuristic.mk(Intent.focusResource(), reason, rule);
+                it.resource = res;
+                return it;
+            }
+            private static method found(String reason, String rule) returns Intent* {
+                return MockHeuristic.mk(Intent.foundCity(), reason, rule);
+            }
+            private static method idle(String reason, String rule) returns Intent* {
+                return MockHeuristic.mk(Intent.idle(), reason, rule);
+            }
+        }
+    }
+}
