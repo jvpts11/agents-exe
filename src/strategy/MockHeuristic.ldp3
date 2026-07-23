@@ -21,7 +21,7 @@ public bundle Agents {
                 int ownSoldiers = n.army;
                 int pop = n.population;
                 boolean atWar = n.isAtWar;
-                int p = n.personality;
+                Personality p = n.personality;
 
                 // R0 -- stalemate auto-peace: a long war drawing no fresh blood is not worth the upkeep.
                 if (atWar && n.casualties < 8 && (clock - n.warStartTime) > 300.0) {
@@ -45,16 +45,7 @@ public bundle Agents {
                 // R3.5 -- proactive war: prey on a weaker neighbour we can reach.
                 int prey = MockHeuristic.findWeakNeighbour(nations, n);
                 if (ownSoldiers >= 4 && prey >= 0) {
-                    mutable int chance = 0;
-                    if (p == 0) {
-                        chance = 25;
-                    } else if (p == 5) {
-                        chance = 15;
-                    } else if (p == 2) {
-                        chance = 15;
-                    } else if (p == 4) {
-                        chance = 8;
-                    }
+                    mutable int chance = p.proactiveWarChance();
                     if (chance > 0) {
                         int dist = MockHeuristic.dist(n, nations.get(prey));
                         if (dist < 80) {
@@ -76,7 +67,7 @@ public bundle Agents {
 
             // R3 -- war conduct.
             private static method warIntent(ArrayList<Nation*> nations, Nation* n, Rng* rng,
-                                            int ownSoldiers, int p) returns Intent* {
+                                            int ownSoldiers, Personality p) returns Intent* {
                 int enemy = n.firstEnemy();
                 mutable int enemySoldiers = 0;
                 if (enemy >= 0) {
@@ -84,7 +75,7 @@ public bundle Agents {
                 }
                 // (a) losing badly
                 if (ownSoldiers < (enemySoldiers * 4) / 10) {
-                    if ((p == 1 || p == 4) && rng.nextInt(100) < 30) {
+                    if ((p == Personality.Cautious || p == Personality.Pious) && rng.nextInt(100) < 30) {
                         return MockHeuristic.peace(enemy, "We cannot sustain these losses.", "R3.surrender");
                     }
                     mutable int t = (ownSoldiers * 3) / 2;
@@ -114,85 +105,91 @@ public bundle Agents {
 
             // R5 -- peacetime default, weighted by personality; always returns.
             private static method defaultByPersonality(ArrayList<Nation*> nations, Nation* n, Rng* rng,
-                                                       int p) returns Intent* {
+                                                       Personality p) returns Intent* {
                 int roll = rng.nextInt(100);
-                if (p == 0) {                        // Aggressive
-                    int w = MockHeuristic.findWeakNeighbour(nations, n);
-                    if (roll < 15 && w >= 0) {
-                        return MockHeuristic.war(w, "A strong host keeps us feared.", "R5.mil");
+                switch (p) {
+                    case Personality.Aggressive {
+                        int w = MockHeuristic.findWeakNeighbour(nations, n);
+                        if (roll < 15 && w >= 0) {
+                            return MockHeuristic.war(w, "A strong host keeps us feared.", "R5.mil");
+                        }
+                        if (roll < 25) {
+                            return MockHeuristic.found("We spread to new lands.", "R5");
+                        }
+                        if (roll < 50) {
+                            return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Raise up the realm.", "R5");
+                        }
+                        if (roll < 60) {
+                            return MockHeuristic.focus(MockHeuristic.scarcest(n), "Stockpile for war.", "R5");
+                        }
+                        return MockHeuristic.idle("We hold and watch.", "R5.idle");
                     }
-                    if (roll < 25) {
-                        return MockHeuristic.found("We spread to new lands.", "R5");
+                    case Personality.Expansionist {
+                        if (roll < 40) {
+                            return MockHeuristic.found("New lands call to us.", "R5.exp");
+                        }
+                        if (roll < 65) {
+                            return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Grow the settlement.", "R5");
+                        }
+                        if (roll < 75) {
+                            return MockHeuristic.focus(MockHeuristic.scarcest(n), "Feed the expansion.", "R5");
+                        }
+                        return MockHeuristic.idle("We survey our borders.", "R5.idle");
                     }
-                    if (roll < 50) {
-                        return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Raise up the realm.", "R5");
+                    case Personality.Mercantile {
+                        int ally = MockHeuristic.findPeacefulNeighbour(nations, n);
+                        if (roll < 6 && ally >= 0) {
+                            return MockHeuristic.trade(ally, "Let our merchants exchange wares.", "R5.trade");
+                        }
+                        if (roll < 12 && ally >= 0 && n.stock.get(4) >= 30) {
+                            return MockHeuristic.gift(ally, "A gift of gold to seal our friendship.", "R5.gift");
+                        }
+                        if (roll < 18 && ally >= 0) {
+                            return MockHeuristic.alliance(ally, "Trade binds us -- let us be allies.", "R5.ally");
+                        }
+                        if (roll < 24) {
+                            return MockHeuristic.found("New markets in new cities.", "R5.merc");
+                        }
+                        if (roll < 35) {
+                            return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Build up trade.", "R5");
+                        }
+                        if (roll < 70) {
+                            return MockHeuristic.focus(MockHeuristic.scarcest(n), "Balance the ledgers.", "R5");
+                        }
+                        return MockHeuristic.idle("We tend the markets.", "R5.idle");
                     }
-                    if (roll < 60) {
-                        return MockHeuristic.focus(MockHeuristic.scarcest(n), "Stockpile for war.", "R5");
+                    case Personality.Cunning {
+                        int w = MockHeuristic.findWeakNeighbour(nations, n);
+                        if (roll < 10 && w >= 0) {
+                            return MockHeuristic.war(w, "The moment is ripe to strike.", "R5.mil");
+                        }
+                        if (roll < 18 && w >= 0 && n.army >= 3) {
+                            return MockHeuristic.tribute(w, "Pay us, and we stay our blades.", "R5.tribute");
+                        }
+                        if (roll < 25) {
+                            return MockHeuristic.found("Quietly we spread.", "R5");
+                        }
+                        if (roll < 45) {
+                            return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Build in the shadows.", "R5");
+                        }
+                        if (roll < 60) {
+                            return MockHeuristic.focus(MockHeuristic.scarcest(n), "Hoard what we lack.", "R5");
+                        }
+                        return MockHeuristic.idle("We watch and wait.", "R5.idle");
                     }
-                    return MockHeuristic.idle("We hold and watch.", "R5.idle");
+                    case Personality.Pious {
+                        // The pious seek friends first, then fall through to the steady economy below.
+                        int ally = MockHeuristic.findPeacefulNeighbour(nations, n);
+                        if (roll < 15 && ally >= 0) {
+                            return MockHeuristic.alliance(ally, "May our peoples walk together in peace.",
+                                                         "R5.ally");
+                        }
+                    }
+                    default {
+                        // Cautious / Stoic (and the pious that made no ally): the steady economy below.
+                    }
                 }
-                if (p == 2) {                        // Expansionist
-                    if (roll < 40) {
-                        return MockHeuristic.found("New lands call to us.", "R5.exp");
-                    }
-                    if (roll < 65) {
-                        return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Grow the settlement.", "R5");
-                    }
-                    if (roll < 75) {
-                        return MockHeuristic.focus(MockHeuristic.scarcest(n), "Feed the expansion.", "R5");
-                    }
-                    return MockHeuristic.idle("We survey our borders.", "R5.idle");
-                }
-                if (p == 3) {                        // Mercantile
-                    int ally = MockHeuristic.findPeacefulNeighbour(nations, n);
-                    if (roll < 6 && ally >= 0) {
-                        return MockHeuristic.trade(ally, "Let our merchants exchange wares.", "R5.trade");
-                    }
-                    if (roll < 12 && ally >= 0 && n.stock.get(4) >= 30) {
-                        return MockHeuristic.gift(ally, "A gift of gold to seal our friendship.", "R5.gift");
-                    }
-                    if (roll < 18 && ally >= 0) {
-                        return MockHeuristic.alliance(ally, "Trade binds us -- let us be allies.", "R5.ally");
-                    }
-                    if (roll < 24) {
-                        return MockHeuristic.found("New markets in new cities.", "R5.merc");
-                    }
-                    if (roll < 35) {
-                        return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Build up trade.", "R5");
-                    }
-                    if (roll < 70) {
-                        return MockHeuristic.focus(MockHeuristic.scarcest(n), "Balance the ledgers.", "R5");
-                    }
-                    return MockHeuristic.idle("We tend the markets.", "R5.idle");
-                }
-                if (p == 5) {                        // Cunning
-                    int w = MockHeuristic.findWeakNeighbour(nations, n);
-                    if (roll < 10 && w >= 0) {
-                        return MockHeuristic.war(w, "The moment is ripe to strike.", "R5.mil");
-                    }
-                    if (roll < 18 && w >= 0 && n.army >= 3) {
-                        return MockHeuristic.tribute(w, "Pay us, and we stay our blades.", "R5.tribute");
-                    }
-                    if (roll < 25) {
-                        return MockHeuristic.found("Quietly we spread.", "R5");
-                    }
-                    if (roll < 45) {
-                        return MockHeuristic.build(MockHeuristic.buildingNeed(n), "Build in the shadows.", "R5");
-                    }
-                    if (roll < 60) {
-                        return MockHeuristic.focus(MockHeuristic.scarcest(n), "Hoard what we lack.", "R5");
-                    }
-                    return MockHeuristic.idle("We watch and wait.", "R5.idle");
-                }
-                // Cautious / Pious / Stoic: steady economy (the pious also seek friends).
-                if (p == 4) {
-                    int ally = MockHeuristic.findPeacefulNeighbour(nations, n);
-                    if (roll < 15 && ally >= 0) {
-                        return MockHeuristic.alliance(ally, "May our peoples walk together in peace.",
-                                                     "R5.ally");
-                    }
-                }
+                // Steady peacetime economy: reached by Cautious/Stoic, and by the Pious fall-through.
                 if (roll < 5) {
                     return MockHeuristic.found("We settle new ground.", "R5");
                 }
