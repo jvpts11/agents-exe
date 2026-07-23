@@ -1,26 +1,18 @@
 import System.IO.Console;
-import System.IO.File;
-import System.Text.StringBuilder;
 import opengl.glfw.GlWindow;
-import opengl.gl.Wgl;
 import opengl.gltex.Texture;
 import opengl.gltext.FontAtlas;
 import opengl.gltext.GdiFont;
 import Agents.Sim.Realm;
 import Agents.People.Nation;
-import Agents.World.Camera;
 import Agents.Gfx.Batch2D;
 import Agents.Gfx.Atlas;
-import Agents.Gfx.WorldRenderer;
-import Agents.Gfx.BuildingRenderer;
-import Agents.Gfx.AgentRenderer;
 import Agents.Ui.Font;
-import Agents.Ui.Hud;
-import Agents.Ui.Inspector;
+import Agents.Shell.Game;
 
-// Entry point: bootstrap a Realm (world + resources + nations + workers) from a seed, advance the
-// simulation, and render it isometrically through LDP3-OpenGL, reading the framebuffer back to PPMs for
-// headless verification -- a whole-map view and a close-up on a nation's capital.
+// Entry point: bootstrap a Realm from a seed, open a GL window, and hand everything to the interactive
+// shell (Game) -- a real-time, playable isometric civilisation. A compile-time switch runs a headless
+// pass instead that advances the sim and dumps framebuffer snapshots, for offline verification.
 program AgentsExe;
 
 public bundle Agents {
@@ -28,19 +20,11 @@ public bundle Agents {
 
         public class Main {
             public static method main(string[] args) returns void {
+                boolean headless = false;
+                int seed = 42;
                 System.IO.Console.println("agents.exe -- a generative-agents civilisation, in LDP3");
-                mutable Realm* realm = new Realm(480, 480, 42) on heap;
+                mutable Realm* realm = new Realm(480, 480, seed) on heap;
                 System.IO.Console.println($"realm: {realm.nations.size()} nations, {realm.workers.size()} workers, {realm.nodes.size()} nodes");
-                // Advance ~180 simulated seconds: gatherers stock the capital, the growth system raises
-                // farms/sawmills/houses, builders construct them, and the population climbs.
-                mutable int t = 0;
-                while (t < 5400) {
-                    realm.tick(0.0333);
-                    t = t + 1;
-                }
-                mutable Nation* n0 = realm.nations.get(0);
-                System.IO.Console.println($"{n0.name}: living={n0.livingCount()} buildings={n0.buildings.size()} food={n0.stock.get(0)} wood={n0.stock.get(1)} planks={n0.stock.get(5)}");
-                Main.reportNations(realm);
                 mutable GlWindow* win = new GlWindow() on heap;
                 if (win.open("agents.exe", 1280, 720, 4, 6) == 0) {
                     System.IO.Console.println("No GL window available.");
@@ -51,27 +35,38 @@ public bundle Agents {
                 win.setVSync(1);
                 mutable Batch2D* batch = new Batch2D(win.gl) on heap;
                 long gpToken = Texture.startup();
-                int atlasTex = Texture.load2DRGBA(win.gl, "C:/Users/jvpts/Documents/GitHub/agents-exe/assets/atlas.png");
+                int atlasTex = Texture.load2DRGBA(win.gl,
+                    "C:/Users/jvpts/Documents/GitHub/agents-exe/assets/atlas.png");
                 mutable Atlas* atlas = new Atlas() on heap;
                 mutable FontAtlas* fa = GdiFont.rasterizeAscii("Consolas", 15);
                 int fontTex = Texture.upload2DRGBA(win.gl, fa.pixels, fa.atlasW, fa.atlasH);
                 mutable Font* font = new Font(fa, fontTex) on heap;
-                Main.renderView(win, batch, realm, atlas, atlasTex, font, fontTex, 240.0, 240.0, 0.68, "C:/Users/jvpts/Desktop/erros_ldp3/world_full.ppm");
-                mutable float cfx = cast<float>(n0.capX);
-                mutable float cfy = cast<float>(n0.capY);
-                Main.renderView(win, batch, realm, atlas, atlasTex, font, fontTex, cfx, cfy, 14.0, "C:/Users/jvpts/Desktop/erros_ldp3/world_close.ppm");
+                mutable Game* game = new Game(realm, win, batch, atlas, atlasTex, font, fontTex,
+                                              1280, 720, seed) on heap;
+                if (headless) {
+                    game.beginPlaying();
+                    game.advance(9000);
+                    Main.reportNations(realm);
+                    game.setFocus(240.0, 240.0);
+                    game.setZoom(0.68);
+                    game.snapshot("C:/Users/jvpts/Desktop/erros_ldp3/world_full.ppm");
+                    game.focusCapital(0);
+                    game.setZoom(14.0);
+                    game.snapshot("C:/Users/jvpts/Desktop/erros_ldp3/world_close.ppm");
+                } else {
+                    game.runInteractive();
+                }
+                delete game;   // the game owns the realm and deletes it
                 delete font;
                 delete fa;
                 delete atlas;
                 Texture.shutdown(gpToken);
                 delete batch;
                 delete win;
-                delete realm;
                 return;
             }
 
-            // A snapshot of the strategic state after the run: who is alive, their armies, wars and the
-            // last decision each leader took. Confirms the Mock heuristic is driving the realms.
+            // A snapshot of the strategic state, for the headless verification path.
             private static method reportNations(Realm* realm) returns void {
                 mutable int i = 0;
                 while (i < realm.nations.size()) {
@@ -80,69 +75,9 @@ public bundle Agents {
                     if (!n.alive) {
                         state = "conquered";
                     }
-                    System.IO.Console.println($"  [{n.id}] {n.name} ({state}) pop={n.livingCount()} soldiers={n.soldierCount()} war={n.firstEnemy()} won={n.warsWon} lost={n.warsLost} reigns={n.reigns} last={n.lastIntent}");
+                    System.IO.Console.println($"  [{n.id}] {n.name} ({state}) pop={n.livingCount()} soldiers={n.soldierCount()} war={n.firstEnemy()} won={n.warsWon} reigns={n.reigns} last={n.lastIntent}");
                     i = i + 1;
                 }
-            }
-
-            private static method renderView(GlWindow* win, Batch2D* batch, Realm* realm, Atlas* atlas,
-                                             int atlasTex, Font* font, int fontTex, float fx, float fy,
-                                             float halfH, String path) returns void {
-                mutable Camera* cam = new Camera(1280, 720, fx, fy, halfH) on heap;
-                mutable int f = 0;
-                while (f < 3) {
-                    win.pump();
-                    Wgl.glViewport(0, 0, win.width(), win.height());
-                    Wgl.glClearColor(0.102, 0.227, 0.353, 1.0);
-                    Wgl.glClear(0x4000);
-                    // World pass: the sprite atlas is bound for the whole terrain/agent draw.
-                    batch.begin(win.width(), win.height(), atlasTex);
-                    WorldRenderer.draw(batch, realm.grid, cam, atlas);
-                    WorldRenderer.drawResources(batch, realm.grid, realm.nodes, cam, atlas);
-                    BuildingRenderer.draw(batch, realm, cam, atlas);
-                    AgentRenderer.draw(batch, realm, cam, atlas);
-                    batch.flush();
-                    // HUD pass: bind the glyph texture; solid panels ignore it, text samples it.
-                    batch.setTexture(fontTex);
-                    Hud.draw(batch, realm, font, 1, win.width(), win.height());
-                    Inspector.drawNation(batch, font, realm.nations.get(0), 8, win.height() - 308);
-                    batch.flush();
-                    if (f == 2) {
-                        Main.dump(win, 1280, 720, path);
-                    }
-                    win.swap();
-                    f = f + 1;
-                }
-                delete cam;
-                System.IO.Console.println($"wrote {path}");
-            }
-
-            private static method dump(GlWindow* win, int w, int h, String path) returns void {
-                byte[] px = win.gl.readPixelsRgb(0, 0, w, h);
-                mutable StringBuilder sb = new StringBuilder() on heap;
-                sb.append("P3\n");
-                sb.appendInt(w);
-                sb.append(" ");
-                sb.appendInt(h);
-                sb.append("\n255\n");
-                mutable int y = h - 1;
-                while (y >= 0) {
-                    mutable int x = 0;
-                    while (x < w) {
-                        int i = (y * w + x) * 3;
-                        sb.appendInt(cast<int>(px[i]) & 255);
-                        sb.append(" ");
-                        sb.appendInt(cast<int>(px[i + 1]) & 255);
-                        sb.append(" ");
-                        sb.appendInt(cast<int>(px[i + 2]) & 255);
-                        sb.append(" ");
-                        x = x + 1;
-                    }
-                    sb.append("\n");
-                    y = y - 1;
-                }
-                File.writeAll(path, sb.toString());
-                delete sb;
             }
         }
     }

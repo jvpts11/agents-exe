@@ -1,0 +1,452 @@
+import System.IO.Console;
+import System.IO.File;
+import System.Text.StringBuilder;
+import opengl.glfw.GlWindow;
+import opengl.gl.Wgl;
+import Agents.Sim.Realm;
+import Agents.People.Nation;
+import Agents.People.Worker;
+import Agents.World.Camera;
+import Agents.Gfx.Batch2D;
+import Agents.Gfx.Atlas;
+import Agents.Gfx.WorldRenderer;
+import Agents.Gfx.BuildingRenderer;
+import Agents.Gfx.AgentRenderer;
+import Agents.Ui.Font;
+import Agents.Ui.Hud;
+import Agents.Ui.Inspector;
+import Agents.Ui.Win95;
+import Agents.Shell.Save;
+
+// The interactive shell: a real-time loop over a live Realm. It owns the window, the renderers and the
+// camera, and turns raw input into camera pans, zoom, a scaled clock speed (pause/1x/2x/4x) and entity
+// picking for the inspector. The clock advances one 1/60s frame times the speed each tick, so a paused
+// game freezes and 4x runs four sim-seconds per real second -- faithful to the original's time scale.
+// State runs Menu -> Playing <-> Paused; Menu offers a fresh seed-42 game. A headless entry advances a
+// fixed number of frames and dumps the framebuffer, for offline verification.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Shell {
+
+        public class Game {
+            private mutable Realm* realm;
+            private mutable GlWindow* win;
+            private mutable Batch2D* batch;
+            private mutable Atlas* atlas;
+            private mutable int atlasTex;
+            private mutable Font* font;
+            private mutable int fontTex;
+            private mutable Camera* cam;
+            private mutable int worldW;
+            private mutable int worldH;
+            private mutable int worldSeed;
+            private mutable int state;      // 0 menu, 1 playing, 2 paused
+            private mutable int speed;      // 0 paused-speed, 1, 2, 4
+            // selection: 0 none, 1 nation, 2 worker
+            private mutable int selKind;
+            private mutable int selNation;
+            private mutable int selWorker;
+            // edge-detection of the previous frame's key/mouse state
+            private mutable boolean pSpace;
+            private mutable boolean pMouse;
+            private mutable boolean pKey1;
+            private mutable boolean pKey2;
+            private mutable boolean pKey3;
+            private mutable boolean pKey0;
+            private mutable boolean pEnter;
+            private mutable boolean pEsc;
+            private mutable boolean pSave;
+            private mutable boolean pLoad;
+            private mutable String flash;      // a transient status line (Saved / Loaded)
+            private mutable int flashTimer;    // frames the flash remains visible
+
+            public constructor Game(Realm* realm, GlWindow* win, Batch2D* batch, Atlas* atlas, int atlasTex,
+                                    Font* font, int fontTex, int worldW, int worldH, int seed) {
+                this.realm = realm;
+                this.win = win;
+                this.batch = batch;
+                this.atlas = atlas;
+                this.atlasTex = atlasTex;
+                this.font = font;
+                this.fontTex = fontTex;
+                this.worldW = worldW;
+                this.worldH = worldH;
+                this.worldSeed = seed;
+                mutable Nation* n0 = realm.nations.get(0);
+                this.cam = new Camera(worldW, worldH, cast<float>(n0.capX), cast<float>(n0.capY), 14.0) on heap;
+                this.state = 0;
+                this.speed = 1;
+                this.selKind = 1;
+                this.selNation = 0;
+                this.selWorker = -1;
+                this.pSpace = false;
+                this.pMouse = false;
+                this.pKey1 = false;
+                this.pKey2 = false;
+                this.pKey3 = false;
+                this.pKey0 = false;
+                this.pEnter = false;
+                this.pEsc = false;
+                this.pSave = false;
+                this.pLoad = false;
+                this.flash = "";
+                this.flashTimer = 0;
+            }
+
+            public destructor ~Game() returns void {
+                delete this.cam;
+                delete this.realm;
+            }
+
+            // The interactive main loop: run until the window closes.
+            public method runInteractive() returns void {
+                System.IO.Console.println("agents.exe: interactive shell (Space pause, 1/2/3 speed, WASD pan, scroll zoom, click select, Esc menu)");
+                while (this.win.isOpen()) {
+                    this.win.pump();
+                    this.handleInput();
+                    this.update(0.0166667);
+                    this.renderFrame();
+                    this.win.swap();
+                    this.win.sleep(2);
+                }
+            }
+
+            // Headless verification helpers: drive the game without input.
+            public method beginPlaying() returns void {
+                this.state = 1;
+            }
+            public method advance(int frames) returns void {
+                mutable int f = 0;
+                while (f < frames) {
+                    this.update(0.0166667);
+                    f = f + 1;
+                }
+            }
+            public method snapshot(String path) returns void {
+                this.renderFrame();
+                this.dump(path);
+                this.win.swap();
+            }
+
+            public method focusCapital(int nationId) returns void {
+                mutable Nation* n = this.realm.nations.get(nationId);
+                this.cam.focusX = cast<float>(n.capX);
+                this.cam.focusY = cast<float>(n.capY);
+            }
+            public method setFocus(float fx, float fy) returns void {
+                this.cam.focusX = fx;
+                this.cam.focusY = fy;
+            }
+            public method setZoom(float halfH) returns void {
+                this.cam.halfH = halfH;
+            }
+
+            // --- input ---
+
+            private method handleInput() returns void {
+                // speed / pause
+                boolean space = this.win.keyDown(0x20);
+                if (space && !this.pSpace) {
+                    this.togglePause();
+                }
+                this.pSpace = space;
+                boolean k1 = this.win.keyDown(0x31);
+                if (k1 && !this.pKey1) {
+                    this.setSpeed(1);
+                }
+                this.pKey1 = k1;
+                boolean k2 = this.win.keyDown(0x32);
+                if (k2 && !this.pKey2) {
+                    this.setSpeed(2);
+                }
+                this.pKey2 = k2;
+                boolean k3 = this.win.keyDown(0x33);
+                if (k3 && !this.pKey3) {
+                    this.setSpeed(4);
+                }
+                this.pKey3 = k3;
+                boolean k0 = this.win.keyDown(0x30);
+                if (k0 && !this.pKey0) {
+                    this.setSpeed(0);
+                }
+                this.pKey0 = k0;
+                // menu / back
+                boolean esc = this.win.keyDown(0x1B);
+                if (esc && !this.pEsc) {
+                    this.state = 0;
+                }
+                this.pEsc = esc;
+                boolean enter = this.win.keyDown(0x0D);
+                if (enter && !this.pEnter && this.state == 0) {
+                    this.state = 1;
+                }
+                this.pEnter = enter;
+                // camera pan (WASD + arrows), in screen pixels per frame
+                mutable float px = 0.0;
+                mutable float py = 0.0;
+                if (this.win.keyDown(0x41) || this.win.keyDown(0x25)) {
+                    px = px + 16.0;
+                }
+                if (this.win.keyDown(0x44) || this.win.keyDown(0x27)) {
+                    px = px - 16.0;
+                }
+                if (this.win.keyDown(0x57) || this.win.keyDown(0x26)) {
+                    py = py + 16.0;
+                }
+                if (this.win.keyDown(0x53) || this.win.keyDown(0x28)) {
+                    py = py - 16.0;
+                }
+                if (px != 0.0 || py != 0.0) {
+                    this.cam.pan(px, py);
+                }
+                // zoom: scroll wheel + PgUp/PgDn
+                int scroll = this.win.takeScroll();
+                if (scroll > 0 || this.win.keyDown(0x21)) {
+                    this.cam.zoom(1.08);
+                }
+                if (scroll < 0 || this.win.keyDown(0x22)) {
+                    this.cam.zoom(0.926);
+                }
+                // save / load (F5 / F9)
+                boolean f5 = this.win.keyDown(0x74);
+                if (f5 && !this.pSave) {
+                    this.saveGame();
+                }
+                this.pSave = f5;
+                boolean f9 = this.win.keyDown(0x78);
+                if (f9 && !this.pLoad) {
+                    this.loadGame();
+                }
+                this.pLoad = f9;
+                // click to select
+                boolean mouse = this.win.keyDown(0x01);
+                if (mouse && !this.pMouse) {
+                    this.pick(this.win.cursorX(), this.win.cursorY());
+                }
+                this.pMouse = mouse;
+            }
+
+            private method setFlash(String msg) returns void {
+                this.flash = msg;
+                this.flashTimer = 180;
+            }
+
+            private method saveGame() returns void {
+                Save.write(this.worldSeed, this.realm.tickCount(), 1);
+                this.setFlash("Saved to slot 1");
+            }
+
+            // Rebuild the world from the saved seed and fast-forward it to the saved tick (seed-based load).
+            private method loadGame() returns void {
+                if (!Save.exists(1)) {
+                    this.setFlash("No save in slot 1");
+                    return;
+                }
+                int s = Save.readSeed(1);
+                int tk = Save.readTick(1);
+                delete this.realm;
+                this.realm = new Realm(480, 480, s) on heap;
+                this.worldSeed = s;
+                mutable int k = 0;
+                while (k < tk && k < 1200) {
+                    this.realm.tick(1.0);
+                    k = k + 1;
+                }
+                this.selKind = 1;
+                this.selNation = 0;
+                this.selWorker = -1;
+                this.state = 2;
+                this.focusCapital(0);
+                this.setFlash($"Loaded slot 1 (seed {s}, tick {tk})");
+            }
+
+            private method togglePause() returns void {
+                if (this.state == 1) {
+                    this.state = 2;
+                } else if (this.state == 2) {
+                    this.state = 1;
+                }
+            }
+            private method setSpeed(int s) returns void {
+                this.speed = s;
+                if (this.state == 0) {
+                    this.state = 1;
+                }
+                if (s == 0) {
+                    this.state = 2;
+                } else if (this.state == 2) {
+                    this.state = 1;
+                }
+            }
+
+            private method pick(int mx, int my) returns void {
+                int gx = this.cam.pickGx(mx, my);
+                int gy = this.cam.pickGy(mx, my);
+                int wi = this.realm.pickWorker(gx, gy, 2);
+                if (wi >= 0) {
+                    this.selKind = 2;
+                    this.selWorker = wi;
+                    return;
+                }
+                int ni = this.realm.pickNation(gx, gy, 4);
+                if (ni >= 0) {
+                    this.selKind = 1;
+                    this.selNation = ni;
+                    return;
+                }
+            }
+
+            // --- update ---
+
+            private method update(float dt) returns void {
+                if (this.state == 1 && this.speed > 0) {
+                    this.realm.tick(dt * cast<float>(this.speed));
+                }
+            }
+
+            // --- render ---
+
+            private method renderFrame() returns void {
+                Wgl.glViewport(0, 0, this.win.width(), this.win.height());
+                Wgl.glClearColor(0.102, 0.227, 0.353, 1.0);
+                Wgl.glClear(0x4000);
+                int w = this.win.width();
+                int h = this.win.height();
+                this.cam.screenW = w;
+                this.cam.screenH = h;
+                // world pass
+                this.batch.begin(w, h, this.atlasTex);
+                WorldRenderer.draw(this.batch, this.realm.grid, this.cam, this.atlas);
+                WorldRenderer.drawResources(this.batch, this.realm.grid, this.realm.nodes, this.cam, this.atlas);
+                BuildingRenderer.draw(this.batch, this.realm, this.cam, this.atlas);
+                AgentRenderer.draw(this.batch, this.realm, this.cam, this.atlas);
+                this.batch.flush();
+                // ui pass (font texture bound; solid panels ignore it)
+                this.batch.setTexture(this.fontTex);
+                if (this.state == 0) {
+                    this.drawMenu(w, h);
+                } else {
+                    this.drawSelectionMarker();
+                    Hud.draw(this.batch, this.realm, this.font, this.speed, w, h);
+                    this.drawInspector(h);
+                    if (this.state == 2) {
+                        this.drawPauseOverlay(w, h);
+                    }
+                    this.drawHelp(w, h);
+                    if (this.flashTimer > 0) {
+                        this.font.draw(this.batch, w / 2 - this.font.width(this.flash) / 2, 40, 1,
+                                       this.flash, 1.0, 1.0, 0.4);
+                        this.flashTimer = this.flashTimer - 1;
+                    }
+                }
+                this.batch.flush();
+            }
+
+            private method drawInspector(int h) returns void {
+                if (this.selKind == 2 && this.selWorker >= 0
+                        && this.selWorker < this.realm.workers.size()) {
+                    Inspector.drawWorker(this.batch, this.font, this.realm.workers.get(this.selWorker),
+                                         8, h - 308);
+                } else {
+                    Inspector.drawNation(this.batch, this.font, this.realm.nations.get(this.selNation),
+                                         8, h - 308);
+                }
+            }
+
+            // A small highlight box over the selected entity.
+            private method drawSelectionMarker() returns void {
+                mutable int sx = 0;
+                mutable int sy = 0;
+                mutable boolean has = false;
+                if (this.selKind == 2 && this.selWorker >= 0
+                        && this.selWorker < this.realm.workers.size()) {
+                    mutable Worker* wk = this.realm.workers.get(this.selWorker);
+                    if (wk.alive) {
+                        sx = this.cam.projX(wk.px, wk.py);
+                        sy = this.cam.projY(wk.px, wk.py, 0);
+                        has = true;
+                    }
+                } else if (this.selKind == 1) {
+                    mutable Nation* n = this.realm.nations.get(this.selNation);
+                    sx = this.cam.screenX(n.capX, n.capY);
+                    sy = this.cam.screenY(n.capX, n.capY, 0);
+                    has = true;
+                }
+                if (has) {
+                    Win95.chip(this.batch, sx - 10, sy - 22, 20, 3, 1.0, 0.95, 0.2);
+                }
+            }
+
+            private method drawHelp(int w, int h) returns void {
+                Win95.raised(this.batch, 0, h - 22, w, 22);
+                this.font.draw(this.batch, 8, h - 16, 1,
+                    "Space pause  1/2/3 speed  WASD pan  scroll zoom  click select  F5 save  F9 load  Esc menu",
+                    0.0, 0.0, 0.0);
+            }
+
+            private method drawPauseOverlay(int w, int h) returns void {
+                this.batch.rect(w / 2 - 70, h / 2 - 24, 140, 48, 0.0, 0.0, 0.5, 0.85);
+                this.font.draw(this.batch, w / 2 - 44, h / 2 - 8, 2, "PAUSED", 1.0, 1.0, 1.0);
+            }
+
+            private method drawMenu(int w, int h) returns void {
+                this.batch.rect(0, 0, w, h, 0.05, 0.09, 0.16, 1.0);
+                int cx = w / 2;
+                int tw = this.font.width("agents.exe") * 5;
+                this.font.draw(this.batch, cx - tw / 2, h / 2 - 160, 5, "agents.exe", 0.92, 0.72, 0.26);
+                String sub = "a generative-agents civilisation, in LDP3";
+                this.font.draw(this.batch, cx - this.font.width(sub) / 2, h / 2 - 70, 1, sub, 0.8, 0.8, 0.85);
+                Win95.raised(this.batch, cx - 90, h / 2 - 20, 180, 34);
+                this.font.draw(this.batch, cx - this.font.width("New Game"), h / 2 - 10, 2, "New Game",
+                               0.0, 0.0, 0.0);
+                String hint = "press Enter or click to begin (seed 42)";
+                this.font.draw(this.batch, cx - this.font.width(hint) / 2, h / 2 + 44, 1, hint,
+                               0.7, 0.7, 0.75);
+                // clicking the button starts
+                boolean mouse = this.win.keyDown(0x01);
+                if (mouse && !this.pMouse) {
+                    int mx = this.win.cursorX();
+                    int my = this.win.cursorY();
+                    if (mx > cx - 90 && mx < cx + 90 && my > h / 2 - 20 && my < h / 2 + 14) {
+                        this.state = 1;
+                    }
+                }
+                this.pMouse = mouse;
+            }
+
+            // --- framebuffer dump (headless verification) ---
+
+            private method dump(String path) returns void {
+                int w = 1280;
+                int h = 720;
+                byte[] px = this.win.gl.readPixelsRgb(0, 0, w, h);
+                mutable StringBuilder sb = new StringBuilder() on heap;
+                sb.append("P3\n");
+                sb.appendInt(w);
+                sb.append(" ");
+                sb.appendInt(h);
+                sb.append("\n255\n");
+                mutable int y = h - 1;
+                while (y >= 0) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        int i = (y * w + x) * 3;
+                        sb.appendInt(cast<int>(px[i]) & 255);
+                        sb.append(" ");
+                        sb.appendInt(cast<int>(px[i + 1]) & 255);
+                        sb.append(" ");
+                        sb.appendInt(cast<int>(px[i + 2]) & 255);
+                        sb.append(" ");
+                        x = x + 1;
+                    }
+                    sb.append("\n");
+                    y = y - 1;
+                }
+                File.writeAll(path, sb.toString());
+                delete sb;
+                System.IO.Console.println($"wrote {path}");
+            }
+        }
+    }
+}
