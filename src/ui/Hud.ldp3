@@ -5,10 +5,11 @@ import Agents.People.Nation;
 import Agents.Ui.Font;
 import Agents.Ui.Win95;
 
-// The Windows-95 HUD, drawn over the world in a single pass with the font texture bound: a top status bar
-// (title, real-time clock, speed), a left "Nations" roster (banner chip + population + army + war state),
-// and a right "Chronicle" well that scrolls the strategic feed (declarations, conquests, successions). It
-// only reads the realm, so it is pure presentation.
+// The Windows-95 HUD, drawn over the world in a single pass with the font texture bound, laid out like
+// the original's in-game HUD (HUDController): a top status bar (Year / Tick / Source), and two stacked
+// left-hand panels -- "Active Wars" and "Recent Intents" -- that mirror the original's collapsible side
+// panels. The clicked entity's inspector is drawn separately on the right (Game.drawInspector). This
+// class only reads the realm, so it is pure presentation.
 program AgentsExe;
 
 public bundle Agents {
@@ -18,8 +19,8 @@ public bundle Agents {
             public static method draw(Batch2D* b, Realm* realm, Font* font, int speed, int sw,
                                       int sh) returns void {
                 Hud.topBar(b, realm, font, speed, sw);
-                Hud.nationsPanel(b, realm, font);
-                Hud.chronicle(b, realm, font, sw, sh);
+                int warsBottom = Hud.warsPanel(b, realm, font);
+                Hud.intentsPanel(b, realm, font, warsBottom + 8);
             }
 
             private static method topBar(Batch2D* b, Realm* realm, Font* font, int speed, int sw) returns void {
@@ -39,45 +40,48 @@ public bundle Agents {
                 font.draw(b, sw - 210, 10, 1, $"Nations {alive}    Pop {Hud.totalPop(realm)}", 0.0, 0.0, 0.0);
             }
 
-            private static method nationsPanel(Batch2D* b, Realm* realm, Font* font) returns void {
+            // The "Active Wars" panel (top-left): one line per active war pair, like the original's
+            // Wars panel. Returns the y just below the panel so the intents feed can stack under it.
+            private static method warsPanel(Batch2D* b, Realm* realm, Font* font) returns int {
                 int x = 8;
                 int y = 40;
-                int w = 250;
-                int rows = realm.nations.size();
-                int h = 24 + rows * 34 + 8;
+                int w = 280;
+                int lineH = font.glyphH() + 3;
+                int bodyH = 6 * lineH;
+                int h = 26 + bodyH;
                 Win95.raised(b, x, y, w, h);
                 Win95.titleBar(b, x + 3, y + 3, w - 6, 18);
-                font.draw(b, x + 8, y + 5, 1, "Nations", 1.0, 1.0, 1.0);
+                font.draw(b, x + 8, y + 5, 1, "Active Wars", 1.0, 1.0, 1.0);
+                Win95.sunken(b, x + 6, y + 24, w - 12, bodyH, 0.96);
+                mutable int row = 0;
                 mutable int i = 0;
-                while (i < rows) {
-                    mutable Nation* n = realm.nations.get(i);
-                    int ry = y + 26 + i * 34;
-                    Win95.sunken(b, x + 6, ry, w - 12, 30, 0.72);
-                    float cr = cast<float>(n.cr) / 255.0;
-                    float cg = cast<float>(n.cg) / 255.0;
-                    float cb = cast<float>(n.cb) / 255.0;
-                    Win95.chip(b, x + 12, ry + 6, 16, 16, cr, cg, cb);
-                    mutable float tr = 0.0;
-                    mutable String tag = n.name;
-                    if (!n.alive) {
-                        tr = 0.5;
-                        tag = $"{n.name} (fallen)";
+                while (i < realm.nations.size() && row < 6) {
+                    mutable Nation* na = realm.nations.get(i);
+                    if (na.alive) {
+                        mutable int j = i + 1;
+                        while (j < realm.nations.size() && row < 6) {
+                            mutable Nation* nb = realm.nations.get(j);
+                            if (nb.alive && j < na.atWar.length() && na.atWar[j]) {
+                                font.draw(b, x + 12, y + 28 + row * lineH, 1,
+                                          $"{na.name}  vs  {nb.name}", 0.55, 0.1, 0.0);
+                                row = row + 1;
+                            }
+                            j = j + 1;
+                        }
                     }
-                    font.draw(b, x + 36, ry + 3, 1, tag, tr, tr * 0.4, tr * 0.4);
-                    if (n.firstEnemy() >= 0) {
-                        font.draw(b, x + w - 58, ry + 3, 1, "AT WAR", 0.75, 0.0, 0.0);
-                    }
-                    font.draw(b, x + 36, ry + 16, 1,
-                        $"pop {n.livingCount()} sol {n.soldierCount()} au {n.stock.get(4)}", 0.1, 0.1, 0.1);
                     i = i + 1;
                 }
+                if (row == 0) {
+                    font.draw(b, x + 12, y + 28, 1, "(peace -- no active wars)", 0.3, 0.3, 0.3);
+                }
+                return y + h;
             }
 
-            private static method chronicle(Batch2D* b, Realm* realm, Font* font, int sw, int sh) returns void {
-                int w = 372;
-                int h = 250;
-                int x = sw - w - 8;
-                int y = 40;
+            // The "Recent Intents" feed (left, below the wars panel): the rolling strategic-event log.
+            private static method intentsPanel(Batch2D* b, Realm* realm, Font* font, int y) returns void {
+                int x = 8;
+                int w = 280;
+                int h = 240;
                 Win95.raised(b, x, y, w, h);
                 Win95.titleBar(b, x + 3, y + 3, w - 6, 18);
                 font.draw(b, x + 8, y + 5, 1, "Recent Intents", 1.0, 1.0, 1.0);
@@ -90,7 +94,7 @@ public bundle Agents {
                     start = 0;
                 }
                 mutable int li = start;
-                mutable int row = 0;
+                mutable int rowi = 0;
                 while (li < total) {
                     String s = realm.intentLog.get(li);
                     mutable float rr = 0.1;
@@ -105,9 +109,9 @@ public bundle Agents {
                         gg = 0.2;
                         bb = 0.0;
                     }
-                    font.draw(b, x + 12, y + 30 + row * lineH, 1, s, rr, gg, bb);
+                    font.draw(b, x + 12, y + 30 + rowi * lineH, 1, s, rr, gg, bb);
                     li = li + 1;
-                    row = row + 1;
+                    rowi = rowi + 1;
                 }
             }
 
