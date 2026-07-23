@@ -10,6 +10,7 @@ import Agents.World.ResourceKind;
 import Agents.World.ResourceSeeder;
 import Agents.People.Nation;
 import Agents.People.Worker;
+import Agents.People.Profession;
 import Agents.Economy.Building;
 import Agents.Economy.BuildingType;
 import Agents.Strategy.MockHeuristic;
@@ -477,7 +478,7 @@ public bundle Agents {
                             float life = cast<float>(rng.range(360, 540));
                             mutable Worker* wk = new Worker(n.id, cast<float>(sx) + 0.5,
                                                            cast<float>(sy) + 0.5, life) on heap;
-                            wk.profession = Realm.startingProfession(spawned);
+                            wk.profession = Profession.startingFor(spawned);
                             wk.age = 120.0;   // start as adults so the economy runs immediately
                             this.workers.add(wk);
                             n.members.add(wk);
@@ -486,24 +487,6 @@ public bundle Agents {
                     }
                     ni = ni + 1;
                 }
-            }
-
-            // A starting mix of gatherers so the economy moves (the full profession selector is later).
-            private static method startingProfession(int k) returns int {
-                int m = k % 6;
-                if (m == 0 || m == 1) {
-                    return 1;   // Woodcutter
-                }
-                if (m == 2) {
-                    return 7;   // StoneMiner
-                }
-                if (m == 3) {
-                    return 8;   // IronMiner
-                }
-                if (m == 4) {
-                    return 3;   // Hunter
-                }
-                return 0;       // Civilian
             }
 
             // --- tick ---
@@ -777,9 +760,9 @@ public bundle Agents {
                 mutable int i = 0;
                 while (i < n.members.size() && done < count) {
                     mutable Worker* w = n.members.get(i);
-                    if (w.alive && w.isAdult && w.profession != 10 && w.profession != 11
+                    if (w.alive && w.isAdult && !w.profession.isSoldier()
                             && w.carryRes < 0) {
-                        w.profession = 10;   // Soldier
+                        w.profession = Profession.Soldier;   // Soldier
                         w.targetNode = -1;
                         done = done + 1;
                     }
@@ -791,16 +774,13 @@ public bundle Agents {
                 mutable int i = 0;
                 while (i < n.members.size()) {
                     mutable Worker* w = n.members.get(i);
-                    if (w.alive && (w.profession == 10 || w.profession == 11)) {
-                        w.profession = 0;
+                    if (w.alive && (w.profession.isSoldier())) {
+                        w.profession = Profession.Civilian;
                     }
                     i = i + 1;
                 }
             }
 
-            private static method isSoldier(int prof) returns boolean {
-                return prof == 10 || prof == 11;
-            }
 
             // Succession: if the leader has died (or none is seated), crown the eldest adult -- the heir; if
             // no adult remains, any survivor; if the bloodline is spent, the nation dissolves. A new leader
@@ -911,7 +891,7 @@ public bundle Agents {
                         float life = cast<float>(this.moveRng.range(360, 540));
                         mutable Worker* wk = new Worker(n.id, cast<float>(sx) + 0.5,
                                                        cast<float>(sy) + 0.5, life) on heap;
-                        wk.profession = Realm.startingProfession(this.workers.size());
+                        wk.profession = Profession.startingFor(this.workers.size());
                         this.workers.add(wk);
                         n.members.add(wk);
                         return;
@@ -978,7 +958,7 @@ public bundle Agents {
                     return;
                 }
                 // Exhaustion: a spent worker (not a soldier on campaign) trudges home to rest.
-                if (wk.energy < 12 && !Realm.isSoldier(wk.profession)) {
+                if (wk.energy < 12 && !wk.profession.isSoldier()) {
                     if (this.nearCell(wk, n.capX, n.capY, 2)) {
                         this.wander(wk, dt);
                     } else {
@@ -986,15 +966,15 @@ public bundle Agents {
                     }
                     return;
                 }
-                if (Realm.isSoldier(wk.profession)) {
+                if (wk.profession.isSoldier()) {
                     this.tickSoldier(n, wk, dt);
                     return;
                 }
-                if (wk.profession == 4) {
+                if (wk.profession == Profession.Builder) {
                     this.tickBuilder(n, wk, dt);
                     return;
                 }
-                if (!Realm.isGatherer(wk.profession)) {
+                if (!wk.profession.isGatherer()) {
                     this.wander(wk, dt);
                     return;
                 }
@@ -1015,7 +995,7 @@ public bundle Agents {
                 }
                 // Need a target node.
                 if (wk.targetNode < 0 || !this.nodeValid(wk.targetNode)) {
-                    wk.targetNode = this.findNode(wk, Realm.gatherKind(wk.profession), n.capFlow);
+                    wk.targetNode = this.findNode(wk, wk.profession.gatherKind(), n.capFlow);
                     if (wk.targetNode < 0) {
                         this.wander(wk, dt);
                         return;
@@ -1087,7 +1067,7 @@ public bundle Agents {
                         def.alive = false;
                         e.casualties = e.casualties + 1;
                     }
-                    if (Realm.isSoldier(def.profession)) {
+                    if (def.profession.isSoldier()) {
                         wk.hp = wk.hp - 25;
                         if (wk.hp <= 0) {
                             wk.alive = false;
@@ -1212,8 +1192,8 @@ public bundle Agents {
                     mutable Worker* w = loser.members.get(i);
                     if (w.alive) {
                         w.nationId = winner.id;
-                        if (Realm.isSoldier(w.profession)) {
-                            w.profession = 0;
+                        if (w.profession.isSoldier()) {
+                            w.profession = Profession.Civilian;
                         }
                         w.targetNode = -1;
                         w.carryRes = -1;
@@ -1254,22 +1234,6 @@ public bundle Agents {
 
             // --- helpers ---
 
-            private static method isGatherer(int prof) returns boolean {
-                return prof == 1 || prof == 7 || prof == 8 || prof == 3;
-            }
-
-            private static method gatherKind(int prof) returns ResourceKind {
-                if (prof == 7) {
-                    return ResourceKind.StoneNode;
-                }
-                if (prof == 8) {
-                    return ResourceKind.IronNode;
-                }
-                if (prof == 3) {
-                    return ResourceKind.Fauna;
-                }
-                return ResourceKind.Tree;
-            }
 
             private static method resIndex(ResourceKind k) returns int {
                 if (k == ResourceKind.StoneNode) {
@@ -1665,7 +1629,7 @@ public bundle Agents {
                 }
             }
 
-            private method countJob(Nation* n, int prof) returns int {
+            private method countJob(Nation* n, Profession prof) returns int {
                 mutable int c = 0;
                 mutable int i = 0;
                 while (i < n.members.size()) {
@@ -1688,18 +1652,18 @@ public bundle Agents {
                         if (this.hasBlueprint(n)) {
                             want = 4;
                         }
-                        mutable int have = this.countJob(n, 4);
+                        mutable int have = this.countJob(n, Profession.Builder);
                         if (have < want) {
-                            this.retrain(n, 4, want - have);
+                            this.retrain(n, Profession.Builder, want - have);
                         } else if (have > want) {
-                            this.retrain(n, 1, have - want);
+                            this.retrain(n, Profession.Woodcutter, have - want);
                         }
                     }
                     ni = ni + 1;
                 }
             }
 
-            private method retrain(Nation* n, int toJob, int count) returns void {
+            private method retrain(Nation* n, Profession toJob, int count) returns void {
                 mutable int done = 0;
                 mutable int i = 0;
                 while (i < n.members.size() && done < count) {
