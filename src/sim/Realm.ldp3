@@ -63,7 +63,7 @@ public bundle Agents {
             public method computeTerritory() returns void {
                 int w = this.grid.width;
                 int h = this.grid.height;
-                int r2 = 46 * 46;
+                int r2 = 18 * 18;
                 mutable int idx = 0;
                 mutable int y = 0;
                 while (y < h) {
@@ -1163,7 +1163,11 @@ public bundle Agents {
                         wk.py = ny;
                     }
                 }
-                wk.dir = Realm.faceOf(dx, dy);
+                // Only re-face on meaningful movement, so a near-stationary worker's sprite does not
+                // flip direction every frame (the flicker).
+                if (d > 0.08) {
+                    wk.dir = Realm.faceOf(dx, dy);
+                }
             }
 
             // Follow a flow-field one cell at a time toward its target.
@@ -1180,10 +1184,20 @@ public bundle Agents {
                 }
             }
 
+            // Wander in a held direction for a second or two before re-rolling, so agents drift smoothly
+            // instead of jittering (and their facing stays put) -- the flicker fix.
             private method wander(Worker* wk, float dt) returns void {
-                int mv = this.moveRng.nextInt(9);
+                wk.wanderTimer = wk.wanderTimer - dt;
+                if (wk.wanderTimer <= 0.0 || wk.wanderDir < 0) {
+                    wk.wanderDir = this.moveRng.nextInt(9);
+                    wk.wanderTimer = 1.0 + this.moveRng.nextFloat() * 1.6;
+                }
+                int mv = wk.wanderDir;
                 int mx = (mv % 3) - 1;
                 int my = (mv / 3) - 1;
+                if (mx == 0 && my == 0) {
+                    return;   // a brief pause
+                }
                 this.moveToward(wk, cast<int>(wk.px) + mx, cast<int>(wk.py) + my, dt);
             }
 
