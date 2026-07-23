@@ -1007,7 +1007,9 @@ public bundle Agents {
                     mutable Nation* n = this.nations.get(ni);
                     if (n.alive) {
                         int food = n.countBuilding(BuildingType.Farm) * 4
-                                 + n.countBuilding(BuildingType.HuntersLodge) * 3;
+                                 + n.countBuilding(BuildingType.HuntersLodge) * 3
+                                 + n.countBuilding(BuildingType.FishingHut) * 3
+                                 + n.countBuilding(BuildingType.Bakery) * 3;
                         n.stock.add(0, food);
                         int cap = n.countBuilding(BuildingType.Sawmill) * 3;
                         mutable int wood = n.stock.get(1);
@@ -1018,8 +1020,41 @@ public bundle Agents {
                             n.stock.spend(1, wood);
                             n.stock.add(5, wood * 4);
                         }
+                        this.trade(n);
                     }
                     ni = ni + 1;
+                }
+            }
+
+            // The Gold economy: a marketplace draws trade and taxes (a base income), metalworkers coin their
+            // iron when they have it, and brewers sell ale from surplus food.
+            private method trade(Nation* n) returns void {
+                int markets = n.countBuilding(BuildingType.Marketplace);
+                if (markets > 0) {
+                    n.stock.add(4, markets * 6);          // trade income
+                    mutable int m = markets;
+                    while (m > 0 && n.stock.get(5) >= 8) {
+                        n.stock.spend(5, 4);              // sell surplus planks for a bonus
+                        n.stock.add(4, 8);
+                        m = m - 1;
+                    }
+                }
+                mutable int smiths = n.countBuilding(BuildingType.Smithy)
+                                   + n.countBuilding(BuildingType.Forge);
+                while (smiths > 0) {
+                    if (n.stock.get(3) >= 2) {
+                        n.stock.spend(3, 2);              // iron -> tools -> coin
+                        n.stock.add(4, 6);
+                    } else {
+                        n.stock.add(4, 2);               // idle metalwork still earns a little
+                    }
+                    smiths = smiths - 1;
+                }
+                mutable int brews = n.countBuilding(BuildingType.Brewery);
+                while (brews > 0 && n.stock.get(0) >= 12) {
+                    n.stock.spend(0, 4);                 // surplus food -> ale -> coin
+                    n.stock.add(4, 5);
+                    brews = brews - 1;
                 }
             }
 
@@ -1032,20 +1067,52 @@ public bundle Agents {
                         int housingCap = n.countBuilding(BuildingType.House) * 2
                                        + n.countBuilding(BuildingType.HouseMedium) * 4
                                        + n.countBuilding(BuildingType.HouseLarge) * 8;
-                        if (pop + 2 > housingCap) {
-                            this.placeBlueprint(n, BuildingType.House);
-                        } else if (n.countBuilding(BuildingType.Farm) < 2) {
+                        if (n.countBuilding(BuildingType.Farm) < 2) {
                             this.placeBlueprint(n, BuildingType.Farm);
                         } else if (n.countBuilding(BuildingType.Sawmill) < 1) {
                             this.placeBlueprint(n, BuildingType.Sawmill);
                         } else if (n.countBuilding(BuildingType.HuntersLodge) < 1) {
                             this.placeBlueprint(n, BuildingType.HuntersLodge);
-                        } else if (n.countBuilding(BuildingType.Farm) < 4) {
+                        } else if (n.countBuilding(BuildingType.Marketplace) < 1) {
+                            this.placeBlueprint(n, BuildingType.Marketplace);
+                        } else if (n.countBuilding(BuildingType.Smithy) < 1
+                                && n.stock.get(3) >= 4) {
+                            this.placeBlueprint(n, BuildingType.Smithy);
+                        } else if (n.countBuilding(BuildingType.FishingHut) < 1
+                                && this.nearWater(n.capX, n.capY)) {
+                            this.placeBlueprint(n, BuildingType.FishingHut);
+                        } else if (n.countBuilding(BuildingType.Bakery) < 1) {
+                            this.placeBlueprint(n, BuildingType.Bakery);
+                        } else if (n.countBuilding(BuildingType.Brewery) < 1) {
+                            this.placeBlueprint(n, BuildingType.Brewery);
+                        } else if (n.countBuilding(BuildingType.Forge) < 1
+                                && n.stock.get(3) >= 6) {
+                            this.placeBlueprint(n, BuildingType.Forge);
+                        } else if (n.countBuilding(BuildingType.Farm) < 5) {
                             this.placeBlueprint(n, BuildingType.Farm);
+                        } else if (pop > housingCap) {
+                            this.placeBlueprint(n, BuildingType.House);
                         }
                     }
                     ni = ni + 1;
                 }
+            }
+
+            // Is there ocean within ~12 cells of a cell (for siting a fishing hut)?
+            private method nearWater(int cx, int cy) returns boolean {
+                mutable int dy = 0 - 12;
+                while (dy <= 12) {
+                    mutable int dx = 0 - 12;
+                    while (dx <= 12) {
+                        int id = this.grid.biomeIdAt(cx + dx, cy + dy);
+                        if (id == 0 || id == 1) {
+                            return true;
+                        }
+                        dx = dx + 4;
+                    }
+                    dy = dy + 4;
+                }
+                return false;
             }
 
             private method hasBlueprint(Nation* n) returns boolean {
