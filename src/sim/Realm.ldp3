@@ -1166,7 +1166,7 @@ public bundle Agents {
                 // Only re-face on meaningful movement, so a near-stationary worker's sprite does not
                 // flip direction every frame (the flicker).
                 if (d > 0.08) {
-                    wk.dir = Realm.faceOf(dx, dy);
+                    wk.dir = Realm.faceHyst(wk.dir, dx, dy);
                 }
             }
 
@@ -1201,14 +1201,50 @@ public bundle Agents {
                 this.moveToward(wk, cast<int>(wk.px) + mx, cast<int>(wk.py) + my, dt);
             }
 
-            private static method faceOf(float dx, float dy) returns int {
-                if (dx >= 0.0 && dy >= 0.0) {
+            // Facing with per-axis hysteresis. The four iso quadrants split exactly on the x=0 and y=0
+            // axes, so a near-cardinal move (one component hovering around zero) makes the raw sign
+            // quadrant flip every frame -- the flicker. Here each axis' sign is only re-decided when its
+            // component is decisively strong (>=30% of the other); when a component is weak, the previous
+            // sign for that axis is kept, giving a ~17-degree dead-zone around each axis.
+            private static method faceHyst(int curDir, float dx, float dy) returns int {
+                // Decompose the current facing into per-axis signs (NE=+ +, SE=+ -, SW=- -, NW=- +).
+                mutable int sx = -1;
+                if (curDir == 0 || curDir == 1) {
+                    sx = 1;
+                }
+                mutable int sy = -1;
+                if (curDir == 0 || curDir == 3) {
+                    sy = 1;
+                }
+                mutable float adx = dx;
+                if (adx < 0.0) {
+                    adx = -adx;
+                }
+                mutable float ady = dy;
+                if (ady < 0.0) {
+                    ady = -ady;
+                }
+                if (adx >= 0.30 * ady) {
+                    if (dx >= 0.0) {
+                        sx = 1;
+                    } else {
+                        sx = -1;
+                    }
+                }
+                if (ady >= 0.30 * adx) {
+                    if (dy >= 0.0) {
+                        sy = 1;
+                    } else {
+                        sy = -1;
+                    }
+                }
+                if (sx >= 0 && sy >= 0) {
                     return 0;   // NE
                 }
-                if (dx >= 0.0 && dy < 0.0) {
+                if (sx >= 0 && sy < 0) {
                     return 1;   // SE
                 }
-                if (dx < 0.0 && dy < 0.0) {
+                if (sx < 0 && sy < 0) {
                     return 2;   // SW
                 }
                 return 3;       // NW
