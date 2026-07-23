@@ -106,6 +106,32 @@ public bundle Agents {
                     isl = isl + 1;
                 }
 
+                // Tectonic plates: a dozen drifting plates over the map. Near a plate boundary, plates
+                // converging pile up mountain ranges and diverging plates open ocean trenches; each plate
+                // also carries a base elevation (continental vs oceanic). Layered onto the noise heightmap.
+                int plates = 12;
+                float[] px = new float[plates]();
+                float[] py = new float[plates]();
+                float[] dvx = new float[plates]();
+                float[] dvy = new float[plates]();
+                float[] pbase = new float[plates]();
+                mutable int p = 0;
+                while (p < plates) {
+                    px[p] = rng.nextFloat() * cast<float>(w);
+                    py[p] = rng.nextFloat() * cast<float>(h);
+                    float ax = rng.nextFloat() * 2.0 - 1.0;
+                    float ay = rng.nextFloat() * 2.0 - 1.0;
+                    mutable float al = Noise.sqrtF(ax * ax + ay * ay);
+                    if (al < 0.0001) {
+                        al = 1.0;
+                    }
+                    dvx[p] = ax / al;
+                    dvy[p] = ay / al;
+                    pbase[p] = rng.nextFloat() * 2.0 - 1.0;
+                    p = p + 1;
+                }
+                float boundW = 0.06 * minWHd;
+
                 mutable float minV = 1000000000.0;
                 mutable float maxV = -1000000000.0;
                 mutable int y = 0;
@@ -132,6 +158,7 @@ public bundle Agents {
                         // Continent/island mask pushes ocean down outside the landmasses.
                         float mask = this.continentMask(x, y, sx, sy, sr, total, bn);
                         v = v - (1.0 - mask) * 0.65;
+                        v = v + this.tectonic(x, y, px, py, dvx, dvy, pbase, plates, boundW);
                         this.hmap[y * w + x] = v;
                         if (v < minV) {
                             minV = v;
@@ -163,6 +190,54 @@ public bundle Agents {
                 delete sx;
                 delete sy;
                 delete sr;
+                delete px;
+                delete py;
+                delete dvx;
+                delete dvy;
+                delete pbase;
+            }
+
+            // Plate-tectonics contribution to elevation at (x,y): find the two nearest plates; near their
+            // shared boundary, converging drift (rel>0) raises a mountain range and diverging drift (rel<0)
+            // sinks a trench, strongest right at the boundary; plus the owning plate's base elevation.
+            private method tectonic(int x, int y, float[] px, float[] py, float[] dvx, float[] dvy,
+                                    float[] pbase, int plates, float boundW) returns float {
+                float fx = cast<float>(x);
+                float fy = cast<float>(y);
+                mutable int n1 = 0;
+                mutable int n2 = 0;
+                mutable float d1 = 1000000000.0;
+                mutable float d2 = 1000000000.0;
+                mutable int p = 0;
+                while (p < plates) {
+                    float ddx = fx - px[p];
+                    float ddy = fy - py[p];
+                    float d = Noise.sqrtF(ddx * ddx + ddy * ddy);
+                    if (d < d1) {
+                        d2 = d1;
+                        n2 = n1;
+                        d1 = d;
+                        n1 = p;
+                    } else if (d < d2) {
+                        d2 = d;
+                        n2 = p;
+                    }
+                    p = p + 1;
+                }
+                float bx = px[n2] - px[n1];
+                float by = py[n2] - py[n1];
+                mutable float bl = Noise.sqrtF(bx * bx + by * by);
+                if (bl < 0.0001) {
+                    bl = 1.0;
+                }
+                float nx = bx / bl;
+                float ny = by / bl;
+                float rel = (dvx[n1] - dvx[n2]) * nx + (dvy[n1] - dvy[n2]) * ny;
+                mutable float ridge = 1.0 - (d2 - d1) / boundW;
+                if (ridge < 0.0) {
+                    ridge = 0.0;
+                }
+                return rel * ridge * 0.55 + pbase[n1] * 0.14;
             }
 
             // Smoothstep continent mask: the max falloff over all seeds; bn perturbs the coastline.
