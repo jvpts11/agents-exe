@@ -187,6 +187,22 @@ public bundle Agents {
                     this.biome[i] = Grid.classify(hv, deepT, oceanT, beachT, mountT, snowT).id();
                     i = i + 1;
                 }
+                // Rivers: from the high peaks, trace steepest descent to the sea, carving water channels.
+                mutable Rng rrng = new Rng(this.seed ^ 4242) on stack;
+                mutable int rivers = 0;
+                mutable int ry = 2;
+                while (ry < h - 2 && rivers < 55) {
+                    mutable int rx = 2;
+                    while (rx < w - 2 && rivers < 55) {
+                        float hn = (this.hmap[ry * w + rx] - minV) / rangeV;
+                        if (hn > mountT && rrng.nextFloat() < 0.05) {
+                            this.carveRiver(rx, ry, minV, rangeV, oceanT);
+                            rivers = rivers + 1;
+                        }
+                        rx = rx + 6;
+                    }
+                    ry = ry + 6;
+                }
                 delete sx;
                 delete sy;
                 delete sr;
@@ -261,6 +277,57 @@ public bundle Agents {
                     s = s + 1;
                 }
                 return best;
+            }
+
+            // Trace one river from (sx,sy) down the steepest descent, carving each land cell to water
+            // until it reaches the sea or a local minimum (which reads as a lake).
+            private method carveRiver(int sx, int sy, float minV, float rangeV, float oceanT) returns void {
+                int w = this.width;
+                int h = this.height;
+                int ocean = Biome.Ocean.id();
+                int deep = Biome.DeepOcean.id();
+                mutable int cx = sx;
+                mutable int cy = sy;
+                mutable int steps = 0;
+                while (steps < 500) {
+                    int idx = cy * w + cx;
+                    float hn = (this.hmap[idx] - minV) / rangeV;
+                    if (hn < oceanT) {
+                        return;
+                    }
+                    if (this.biome[idx] != ocean && this.biome[idx] != deep) {
+                        this.biome[idx] = ocean;
+                    }
+                    mutable int bx = cx;
+                    mutable int by = cy;
+                    mutable float best = hn;
+                    mutable int dy = -1;
+                    while (dy <= 1) {
+                        mutable int dx = -1;
+                        while (dx <= 1) {
+                            if (!(dx == 0 && dy == 0)) {
+                                int nx = cx + dx;
+                                int ny = cy + dy;
+                                if (nx >= 0 && ny >= 0 && nx < w && ny < h) {
+                                    float nh = (this.hmap[ny * w + nx] - minV) / rangeV;
+                                    if (nh < best) {
+                                        best = nh;
+                                        bx = nx;
+                                        by = ny;
+                                    }
+                                }
+                            }
+                            dx = dx + 1;
+                        }
+                        dy = dy + 1;
+                    }
+                    if (bx == cx && by == cy) {
+                        return;
+                    }
+                    cx = bx;
+                    cy = by;
+                    steps = steps + 1;
+                }
             }
 
             private static method classify(float v, float deepT, float oceanT, float beachT,
