@@ -27,6 +27,7 @@ public bundle Agents {
 
         public class Realm {
             public mutable Grid* grid;
+            public mutable int[] owner;          // nation id owning each cell (nearest capital), -1 neutral
             public mutable ArrayList<ResourceNode*>* nodes;
             public mutable ArrayList<Nation*> nations;
             public mutable ArrayList<Worker*> workers;
@@ -50,9 +51,54 @@ public bundle Agents {
                 this.clock = 0.0;
                 this.combatTimer = 0.0;
                 this.intentLog = new ArrayList<String>() on heap;
+                this.owner = new int[w * h]();
                 this.placeNations(4);
                 this.spawnWorkers(50);
                 this.assignLeaders();
+                this.computeTerritory();
+            }
+
+            // Assign each cell to the nearest living capital within a radius (its nation's territory), else
+            // neutral (-1). Recomputed at bootstrap and whenever the map of nations changes (conquest).
+            public method computeTerritory() returns void {
+                int w = this.grid.width;
+                int h = this.grid.height;
+                int r2 = 46 * 46;
+                mutable int idx = 0;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        mutable int best = -1;
+                        mutable int bestD = r2 + 1;
+                        mutable int ni = 0;
+                        while (ni < this.nations.size()) {
+                            mutable Nation* n = this.nations.get(ni);
+                            if (n.alive) {
+                                int dx = x - n.capX;
+                                int dy = y - n.capY;
+                                int d = dx * dx + dy * dy;
+                                if (d < bestD) {
+                                    bestD = d;
+                                    best = n.id;
+                                }
+                            }
+                            ni = ni + 1;
+                        }
+                        this.owner[idx] = best;
+                        idx = idx + 1;
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+            }
+
+            // The owning nation of a cell (-1 neutral / out of bounds) -- for the territory renderer.
+            public method ownerAt(int x, int y) returns int {
+                if (x < 0 || y < 0 || x >= this.grid.width || y >= this.grid.height) {
+                    return -1;
+                }
+                return this.owner[y * this.grid.width + x];
             }
 
             // Seat the first leader of each nation: its eldest adult member. Later deaths trigger succession.
@@ -82,6 +128,7 @@ public bundle Agents {
                 }
                 delete this.nodes;
                 delete this.grid;
+                delete this.owner;
                 delete this.moveRng;
                 delete this.intentLog;
             }
@@ -624,6 +671,7 @@ public bundle Agents {
                     }
                     k = k + 1;
                 }
+                this.computeTerritory();
             }
 
             // Population growth (Worldbox-style): a nation with food to spare and room under the cap
@@ -986,6 +1034,7 @@ public bundle Agents {
                     k = k + 1;
                 }
                 loser.attackTarget = -1;
+                this.computeTerritory();
             }
 
             private method nearCell(Worker* wk, int tx, int ty, int r) returns boolean {

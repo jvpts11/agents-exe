@@ -10,6 +10,7 @@ import Agents.World.Camera;
 import Agents.Gfx.Batch2D;
 import Agents.Gfx.Atlas;
 import Agents.Gfx.WorldRenderer;
+import Agents.Gfx.TerritoryRenderer;
 import Agents.Gfx.BuildingRenderer;
 import Agents.Gfx.AgentRenderer;
 import Agents.Ui.Font;
@@ -229,16 +230,16 @@ public bundle Agents {
                     this.loadGame();
                 }
                 this.pLoad = f9;
-                // god-powers (only while a game is running)
+                // god-powers + click-to-select only while a game is running; the menu owns its own click
+                // (so the left-button edge is tracked in exactly one place per state -- no lost clicks).
                 if (this.state != 0) {
                     this.handlePowers();
+                    boolean mouse = this.win.keyDown(0x01);
+                    if (mouse && !this.pMouse) {
+                        this.pick(this.win.cursorX(), this.win.cursorY());
+                    }
+                    this.pMouse = mouse;
                 }
-                // click to select
-                boolean mouse = this.win.keyDown(0x01);
-                if (mouse && !this.pMouse) {
-                    this.pick(this.win.cursorX(), this.win.cursorY());
-                }
-                this.pMouse = mouse;
             }
 
             // Worldbox powers: B conjure at cursor, K smite at cursor, G drought, Q quake, L flood.
@@ -335,20 +336,25 @@ public bundle Agents {
             }
 
             private method pick(int mx, int my) returns void {
+                this.cam.screenW = this.win.width();
+                this.cam.screenH = this.win.height();
                 int gx = this.cam.pickGx(mx, my);
                 int gy = this.cam.pickGy(mx, my);
-                int wi = this.realm.pickWorker(gx, gy, 2);
+                int wi = this.realm.pickWorker(gx, gy, 3);
                 if (wi >= 0) {
                     this.selKind = 2;
                     this.selWorker = wi;
+                    this.setFlash("selected a worker");
                     return;
                 }
-                int ni = this.realm.pickNation(gx, gy, 4);
+                int ni = this.realm.pickNation(gx, gy, 8);
                 if (ni >= 0) {
                     this.selKind = 1;
                     this.selNation = ni;
+                    this.setFlash($"selected {this.realm.nations.get(ni).name}");
                     return;
                 }
+                this.setFlash("nothing there");
             }
 
             // --- update ---
@@ -372,6 +378,7 @@ public bundle Agents {
                 // world pass
                 this.batch.begin(w, h, this.atlasTex);
                 WorldRenderer.draw(this.batch, this.realm.grid, this.cam, this.atlas);
+                TerritoryRenderer.draw(this.batch, this.realm, this.cam);
                 WorldRenderer.drawResources(this.batch, this.realm.grid, this.realm.nodes, this.cam, this.atlas);
                 BuildingRenderer.draw(this.batch, this.realm, this.cam, this.atlas);
                 AgentRenderer.draw(this.batch, this.realm, this.cam, this.atlas);

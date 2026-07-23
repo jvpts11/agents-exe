@@ -1,0 +1,69 @@
+import Agents.World.Camera;
+import Agents.Sim.Realm;
+import Agents.People.Nation;
+import Agents.Gfx.Batch2D;
+
+// Draws nation territory as a translucent banner-colour wash over owned cells, with the boundary cells
+// (where a neighbour belongs to a different nation, or none) drawn far more strongly -- so each realm's
+// borders read at a glance. Owned cells come from Realm.owner (nearest-capital). Drawn over the terrain
+// but under resources/buildings/agents. Off-screen cells are culled, like the terrain pass.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class TerritoryRenderer {
+            public static method draw(Batch2D* batch, Realm* realm, Camera* cam) returns void {
+                int w = realm.grid.width;
+                int h = realm.grid.height;
+                int sw = cam.screenW;
+                int sh = cam.screenH;
+                mutable int hw = cast<int>(cam.halfW());
+                mutable int hh = cast<int>(cam.halfH);
+                if (hw < 1) {
+                    hw = 1;
+                }
+                if (hh < 1) {
+                    hh = 1;
+                }
+                int last = w + h - 2;
+                mutable int s = 0;
+                while (s <= last) {
+                    mutable int gx = 0;
+                    if (s - (h - 1) > 0) {
+                        gx = s - (h - 1);
+                    }
+                    mutable int gxEnd = s;
+                    if (gxEnd > w - 1) {
+                        gxEnd = w - 1;
+                    }
+                    while (gx <= gxEnd) {
+                        int gy = s - gx;
+                        int own = realm.ownerAt(gx, gy);
+                        if (own >= 0) {
+                            int sx = cam.screenX(gx, gy);
+                            int sy = cam.screenY(gx, gy, 0);
+                            if (!(sx + hw < 0 || sx - hw > sw || sy - hh > sh || sy + hh < 0)) {
+                                boolean edge = realm.ownerAt(gx + 1, gy) != own
+                                            || realm.ownerAt(gx - 1, gy) != own
+                                            || realm.ownerAt(gx, gy + 1) != own
+                                            || realm.ownerAt(gx, gy - 1) != own;
+                                mutable Nation* n = realm.nations.get(own);
+                                float r = cast<float>(n.cr) / 255.0;
+                                float g = cast<float>(n.cg) / 255.0;
+                                float b = cast<float>(n.cb) / 255.0;
+                                mutable float a = 0.14;
+                                if (edge) {
+                                    a = 0.55;
+                                }
+                                batch.quad(sx, sy - hh, sx + hw, sy, sx, sy + hh, sx - hw, sy, r, g, b, a);
+                            }
+                        }
+                        gx = gx + 1;
+                    }
+                    s = s + 1;
+                }
+            }
+        }
+    }
+}

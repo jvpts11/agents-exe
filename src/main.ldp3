@@ -1,5 +1,6 @@
 import System.IO.Console;
 import opengl.glfw.GlWindow;
+import opengl.gl.Wgl;
 import opengl.gltex.Texture;
 import opengl.gltext.FontAtlas;
 import opengl.gltext.GdiFont;
@@ -23,24 +24,28 @@ public bundle Agents {
                 boolean headless = false;
                 int seed = 42;
                 System.IO.Console.println("agents.exe -- a generative-agents civilisation, in LDP3");
-                mutable Realm* realm = new Realm(480, 480, seed) on heap;
-                System.IO.Console.println($"realm: {realm.nations.size()} nations, {realm.workers.size()} workers, {realm.nodes.size()} nodes");
+                // Open the window and the font FIRST, so it appears instantly, then show a loading frame
+                // while the (heavy) world is generated -- worldgen no longer blocks the window from opening.
                 mutable GlWindow* win = new GlWindow() on heap;
                 if (win.open("agents.exe", 1280, 720, 4, 6) == 0) {
                     System.IO.Console.println("No GL window available.");
                     delete win;
-                    delete realm;
                     return;
                 }
                 win.setVSync(1);
                 mutable Batch2D* batch = new Batch2D(win.gl) on heap;
                 long gpToken = Texture.startup();
-                int atlasTex = Texture.load2DRGBA(win.gl,
-                    "C:/Users/jvpts/Documents/GitHub/agents-exe/assets/atlas.png");
-                mutable Atlas* atlas = new Atlas() on heap;
                 mutable FontAtlas* fa = GdiFont.rasterizeAscii("Consolas", 15);
                 int fontTex = Texture.upload2DRGBA(win.gl, fa.pixels, fa.atlasW, fa.atlasH);
                 mutable Font* font = new Font(fa, fontTex) on heap;
+                if (!headless) {
+                    Main.drawLoading(win, batch, font, fontTex);
+                }
+                int atlasTex = Texture.load2DRGBA(win.gl,
+                    "C:/Users/jvpts/Documents/GitHub/agents-exe/assets/atlas.png");
+                mutable Atlas* atlas = new Atlas() on heap;
+                mutable Realm* realm = new Realm(480, 480, seed) on heap;
+                System.IO.Console.println($"realm: {realm.nations.size()} nations, {realm.workers.size()} workers, {realm.nodes.size()} nodes");
                 mutable Game* game = new Game(realm, win, batch, atlas, atlasTex, font, fontTex,
                                               1280, 720, seed) on heap;
                 if (headless) {
@@ -64,6 +69,24 @@ public bundle Agents {
                 delete batch;
                 delete win;
                 return;
+            }
+
+            // Show a loading frame immediately after the window opens, before the world is generated.
+            private static method drawLoading(GlWindow* win, Batch2D* batch, Font* font,
+                                              int fontTex) returns void {
+                int w = win.width();
+                int h = win.height();
+                win.pump();
+                Wgl.glViewport(0, 0, w, h);
+                Wgl.glClearColor(0.05, 0.09, 0.16, 1.0);
+                Wgl.glClear(0x4000);
+                batch.begin(w, h, fontTex);
+                String title = "agents.exe";
+                font.draw(batch, w / 2 - font.width(title) * 5 / 2, h / 2 - 90, 5, title, 0.92, 0.72, 0.26);
+                String msg = "generating world...";
+                font.draw(batch, w / 2 - font.width(msg) * 2 / 2, h / 2 + 10, 2, msg, 0.8, 0.8, 0.85);
+                batch.flush();
+                win.swap();
             }
 
             // A snapshot of the strategic state, for the headless verification path.
