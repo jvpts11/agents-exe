@@ -1,0 +1,190 @@
+import System.Collections.ArrayList;
+import Agents.People.Nation;
+import Agents.People.Worker;
+import Agents.People.Profession;
+import Agents.Economy.Building;
+import Agents.Economy.BuildingType;
+
+// The combat layer, extracted from Realm so the sim container is not also the battle referee. Soldiers
+// strike, buildings fall, and a war reaches a decisive result -- no seats of power left, a population
+// collapse, or a long bleed-out -- that lets the aggressor absorb the loser. Most of it is pure over the
+// nations it is handed; only resolveConquests/conquer read the realm's clock and write the chronicle, so
+// those take the Realm.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        public class CombatSystem {
+
+            // Resolve one soldier's strike each ~second: cut down a nearby defender (who fights back if
+            // armed), else batter the nearest enemy building. Casualties feed the war's stalemate/collapse.
+            public static method siege(Nation* n, Nation* e, Worker* wk, float dt) returns void {
+                wk.workTimer = wk.workTimer + dt;
+                if (wk.workTimer < 1.0) {
+                    return;
+                }
+                wk.workTimer = 0.0;
+                int di = CombatSystem.nearestEnemyWorker(e, wk, 3);
+                if (di >= 0) {
+                    mutable Worker* def = e.members.get(di);
+                    def.hp = def.hp - 34;
+                    if (def.hp <= 0) {
+                        def.alive = false;
+                        e.casualties = e.casualties + 1;
+                    }
+                    if (def.profession.isSoldier()) {
+                        wk.hp = wk.hp - 25;
+                        if (wk.hp <= 0) {
+                            wk.alive = false;
+                            n.casualties = n.casualties + 1;
+                        }
+                    }
+                    return;
+                }
+                int bi = CombatSystem.nearestBuilding(e, wk);
+                if (bi >= 0) {
+                    mutable Building* b = e.buildings.get(bi);
+                    b.hp = b.hp - 20;
+                    if (b.hp <= 0) {
+                        CombatSystem.destroyBuilding(e, bi);
+                    }
+                }
+            }
+
+            // Nearest living enemy member within `r` cells of the soldier, else -1.
+            public static method nearestEnemyWorker(Nation* e, Worker* wk, int r) returns int {
+                int cx = cast<int>(wk.px);
+                int cy = cast<int>(wk.py);
+                mutable int best = -1;
+                mutable int bestD = 2000000000;
+                mutable int i = 0;
+                while (i < e.members.size()) {
+                    mutable Worker* w = e.members.get(i);
+                    if (w.alive) {
+                        mutable int dx = cast<int>(w.px) - cx;
+                        mutable int dy = cast<int>(w.py) - cy;
+                        if (dx < 0) {
+                            dx = 0 - dx;
+                        }
+                        if (dy < 0) {
+                            dy = 0 - dy;
+                        }
+                        if (dx <= r && dy <= r) {
+                            int d = dx * dx + dy * dy;
+                            if (d < bestD) {
+                                bestD = d;
+                                best = i;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                return best;
+            }
+
+            public static method nearestBuilding(Nation* e, Worker* wk) returns int {
+                int cx = cast<int>(wk.px);
+                int cy = cast<int>(wk.py);
+                mutable int best = -1;
+                mutable int bestD = 2000000000;
+                mutable int i = 0;
+                while (i < e.buildings.size()) {
+                    mutable Building* b = e.buildings.get(i);
+                    if (b.built) {
+                        int dx = b.gx - cx;
+                        int dy = b.gy - cy;
+                        int d = dx * dx + dy * dy;
+                        if (d < bestD) {
+                            bestD = d;
+                            best = i;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return best;
+            }
+
+            public static method destroyBuilding(Nation* e, int idx) returns void {
+                delete e.buildings.get(idx);
+                e.buildings.removeAt(idx);
+            }
+
+            // The seats of power (Castle / TownHall) still standing; zero means the nation has fallen.
+            public static method countSeats(Nation* n) returns int {
+                mutable int c = 0;
+                mutable int i = 0;
+                while (i < n.buildings.size()) {
+                    mutable Building* b = n.buildings.get(i);
+                    if (b.built && (b.type == BuildingType.Castle || b.type == BuildingType.TownHall)) {
+                        c = c + 1;
+                    }
+                    i = i + 1;
+                }
+                return c;
+            }
+
+            // Test every war for a decisive result: a nation with no seats, too few people, or that has bled
+            // out over a long war is conquered by its aggressor.
+            public static method resolveConquests(Realm* realm) returns void {
+                mutable int ni = 0;
+                while (ni < realm.nations.size()) {
+                    mutable Nation* e = realm.nations.get(ni);
+                    if (e.alive) {
+                        int agg = e.firstEnemy();
+                        if (agg >= 0 && agg < realm.nations.size()) {
+                            mutable Nation* n = realm.nations.get(agg);
+                            boolean noSeats = CombatSystem.countSeats(e) == 0;
+                            boolean tiny = e.population < 10;
+                            boolean bledOut = (realm.clock - e.warStartTime) > 300.0
+                                            && e.casualties > n.casualties * 2 + 6;
+                            if (n.alive && (noSeats || tiny || bledOut)) {
+                                CombatSystem.conquer(realm, n, e);
+                            }
+                        }
+                    }
+                    ni = ni + 1;
+                }
+            }
+
+            // Absorb the loser: its survivors defect to the winner, it leaves every war, and it is struck
+            // from the living nations.
+            public static method conquer(Realm* realm, Nation* winner, Nation* loser) returns void {
+                winner.warsWon = winner.warsWon + 1;
+                loser.warsLost = loser.warsLost + 1;
+                realm.logEvent($"Y{realm.year()}: {winner.name} CONQUERS {loser.name}!");
+                mutable int i = 0;
+                while (i < loser.members.size()) {
+                    mutable Worker* w = loser.members.get(i);
+                    if (w.alive) {
+                        w.nationId = winner.id;
+                        if (w.profession.isSoldier()) {
+                            w.profession = Profession.Civilian;
+                        }
+                        w.targetNode = -1;
+                        w.carryRes = -1;
+                        winner.members.add(w);
+                    }
+                    i = i + 1;
+                }
+                loser.alive = false;
+                mutable int k = 0;
+                while (k < realm.nations.size()) {
+                    mutable Nation* o = realm.nations.get(k);
+                    if (loser.id < o.atWar.length()) {
+                        o.atWar[loser.id] = false;
+                        if (o.attackTarget == loser.id) {
+                            o.attackTarget = -1;
+                        }
+                    }
+                    if (o.id < loser.atWar.length()) {
+                        loser.atWar[o.id] = false;
+                    }
+                    k = k + 1;
+                }
+                loser.attackTarget = -1;
+                realm.transferTiles(loser.id, winner.id);
+            }
+        }
+    }
+}
