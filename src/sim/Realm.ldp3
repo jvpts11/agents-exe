@@ -33,6 +33,7 @@ public bundle Agents {
             public mutable ArrayList<Worker*> workers;
             public mutable int seed;
             private mutable Rng* moveRng;
+            private mutable int pn;              // scratch: pick count out-param for territory sampling
             private mutable float reproTimer;
             private mutable float prodTimer;
             public mutable float clock;          // seconds of simulated real-time elapsed
@@ -90,6 +91,120 @@ public bundle Agents {
                         x = x + 1;
                     }
                     y = y + 1;
+                }
+            }
+
+            // Territory expansion (TerritoryExpansionSystem): every few seconds each living nation pushes
+            // its frontier one ring outward into adjacent unowned walkable land, paying wood per tile at a
+            // cost that rises with how much it already holds (2 + owned/50). Up to five tiles per tick,
+            // sampled around the whole frontier so borders creep out evenly and only meet -- never overlap
+            // -- where two realms' claims collide. (Contested tiles change hands only through conquest.)
+            public method expandTerritory() returns void {
+                int w = this.grid.width;
+                int h = this.grid.height;
+                int total = w * h;
+                mutable int ni = 0;
+                while (ni < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(ni);
+                    if (n.alive) {
+                        this.expandNation(n, w, h, total);
+                    }
+                    ni = ni + 1;
+                }
+            }
+
+            private method expandNation(Nation* n, int w, int h, int total) returns void {
+                // Rising per-tile wood cost from how much the nation already holds.
+                mutable int owned = 0;
+                mutable int c = 0;
+                while (c < total) {
+                    if (this.owner[c] == n.id) {
+                        owned = owned + 1;
+                    }
+                    c = c + 1;
+                }
+                int costPer = 2 + owned / 50;
+                // Reservoir-sample up to 5 frontier candidates from around the whole border.
+                mutable int[] picks = new int[5]();
+                mutable int np = 0;
+                mutable int seen = 0;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        if (this.owner[y * w + x] == n.id) {
+                            seen = this.offer(n, x + 1, y, picks, np, seen);
+                            np = this.pn;
+                            seen = this.offer(n, x - 1, y, picks, np, seen);
+                            np = this.pn;
+                            seen = this.offer(n, x, y + 1, picks, np, seen);
+                            np = this.pn;
+                            seen = this.offer(n, x, y - 1, picks, np, seen);
+                            np = this.pn;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                // Claim the sampled tiles, paying wood; skip any already taken this pass.
+                mutable int j = 0;
+                while (j < np) {
+                    int idx = picks[j];
+                    if (this.owner[idx] == -1) {
+                        if (n.stock.spend(1, costPer)) {
+                            this.owner[idx] = n.id;
+                        }
+                    }
+                    j = j + 1;
+                }
+                delete picks;
+            }
+
+            // A single reservoir-sampling step: consider cell (x,y) as an expansion candidate. Returns the
+            // updated `seen` count; the running pick count is left in `this.pn` (LDP3 has no out-params).
+            private method offer(Nation* n, int x, int y, int[] picks, int np, int seen) returns int {
+                this.pn = np;
+                if (x < 0 || y < 0 || x >= this.grid.width || y >= this.grid.height) {
+                    return seen;
+                }
+                int idx = y * this.grid.width + x;
+                if (this.owner[idx] != -1 || !this.grid.walkable(x, y)) {
+                    return seen;
+                }
+                mutable int s = seen + 1;
+                if (np < 5) {
+                    picks[np] = idx;
+                    this.pn = np + 1;
+                } else {
+                    int r = this.moveRng.nextInt(s);
+                    if (r < 5) {
+                        picks[r] = idx;
+                    }
+                }
+                return s;
+            }
+
+            // Hand every tile a defeated nation held to its conqueror (ConquestSystem.FlipOwnership).
+            public method transferTiles(int fromId, int toId) returns void {
+                mutable int i = 0;
+                int total = this.grid.width * this.grid.height;
+                while (i < total) {
+                    if (this.owner[i] == fromId) {
+                        this.owner[i] = toId;
+                    }
+                    i = i + 1;
+                }
+            }
+
+            // Release a dissolved nation's tiles back to neutral.
+            public method releaseTiles(int id) returns void {
+                mutable int i = 0;
+                int total = this.grid.width * this.grid.height;
+                while (i < total) {
+                    if (this.owner[i] == id) {
+                        this.owner[i] = -1;
+                    }
+                    i = i + 1;
                 }
             }
 
@@ -410,6 +525,7 @@ public bundle Agents {
                     this.produce();
                     this.growth();
                     this.reassign();
+                    this.expandTerritory();
                 }
                 this.strategyTick(dt);
             }
@@ -671,7 +787,7 @@ public bundle Agents {
                     }
                     k = k + 1;
                 }
-                this.computeTerritory();
+                this.releaseTiles(n.id);
             }
 
             // Population growth (Worldbox-style): a nation with food to spare and room under the cap
@@ -1034,7 +1150,7 @@ public bundle Agents {
                     k = k + 1;
                 }
                 loser.attackTarget = -1;
-                this.computeTerritory();
+                this.transferTiles(loser.id, winner.id);
             }
 
             private method nearCell(Worker* wk, int tx, int ty, int r) returns boolean {
