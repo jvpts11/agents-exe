@@ -150,6 +150,84 @@ public bundle Agents {
                 return best;
             }
 
+            // --- Worldbox god-powers (player-invoked from the shell) ---
+
+            // Conjure an adult worker for a nation at a grid cell.
+            public method spawnWorkerAt(int gx, int gy, int nationId) returns void {
+                if (nationId < 0 || nationId >= this.nations.size()) {
+                    return;
+                }
+                mutable Nation* n = this.nations.get(nationId);
+                if (!n.alive || !this.grid.walkable(gx, gy)) {
+                    return;
+                }
+                float life = cast<float>(this.moveRng.range(360, 540));
+                mutable Worker* wk = new Worker(nationId, cast<float>(gx) + 0.5,
+                                               cast<float>(gy) + 0.5, life) on heap;
+                wk.age = 120.0;
+                this.workers.add(wk);
+                n.members.add(wk);
+                this.logEvent($"Y{this.year()}: a soul is conjured for {n.name}");
+            }
+
+            // Strike down the worker nearest a cell.
+            public method smiteAt(int gx, int gy) returns void {
+                int wi = this.pickWorker(gx, gy, 3);
+                if (wi >= 0) {
+                    this.workers.get(wi).alive = false;
+                    this.logEvent($"Y{this.year()}: lightning smites a wanderer");
+                }
+            }
+
+            // A drought halves every nation's food stores.
+            public method eventDrought() returns void {
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(i);
+                    n.stock.spend(0, n.stock.get(0) / 2);
+                    i = i + 1;
+                }
+                this.logEvent($"Y{this.year()}: a drought withers the fields");
+            }
+
+            // An earthquake damages a random building in each realm (sparing the seats of power).
+            public method eventQuake() returns void {
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(i);
+                    if (n.buildings.size() > 0) {
+                        int idx = this.moveRng.nextInt(n.buildings.size());
+                        mutable Building* b = n.buildings.get(idx);
+                        b.hp = b.hp - 90;
+                        if (b.hp <= 0 && b.type != BuildingType.Castle
+                                && b.type != BuildingType.TownHall) {
+                            delete b;
+                            n.buildings.removeAt(idx);
+                        }
+                    }
+                    i = i + 1;
+                }
+                this.logEvent($"Y{this.year()}: an earthquake rocks the world");
+            }
+
+            // A flood claims a fraction of the population on low ground.
+            public method eventFlood() returns void {
+                mutable int killed = 0;
+                mutable int i = 0;
+                while (i < this.workers.size()) {
+                    mutable Worker* w = this.workers.get(i);
+                    if (w.alive) {
+                        int id = this.grid.biomeIdAt(cast<int>(w.px), cast<int>(w.py));
+                        if ((id == 2 || id == 3) && this.moveRng.chance(18)) {
+                            w.alive = false;
+                            killed = killed + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                this.logEvent($"Y{this.year()}: floodwaters claim {killed} souls");
+            }
+
             // Append a line to the strategic feed, keeping only the most recent entries.
             private method logEvent(String line) returns void {
                 this.intentLog.add(line);
