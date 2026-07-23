@@ -3,10 +3,13 @@ import Agents.Sim.Realm;
 import Agents.People.Nation;
 import Agents.Gfx.Batch2D;
 
-// Draws nation territory as a translucent banner-colour wash over owned cells, with the boundary cells
-// (where a neighbour belongs to a different nation, or none) drawn far more strongly -- so each realm's
-// borders read at a glance. Owned cells come from Realm.owner (nearest-capital). Drawn over the terrain
-// but under resources/buildings/agents. Off-screen cells are culled, like the terrain pass.
+// Draws nation territory exactly as the original's TerritoryPainter: two layers over the terrain.
+//  1. A FILL: the owning nation's colour at alpha 0.40 (translucent) over every owned cell.
+//  2. A BORDER: the nation's colour SOLID (alpha 1.0) drawn as a thin band along each diamond edge
+//     that faces a differently-owned neighbour (a different nation, none, or off-map) -- the crisp
+//     outline the original gets from its directional NE/SE/SW/NW border tiles.
+// Owned cells come from Realm.owner (the integer territory grid). Drawn over terrain, under
+// resources/buildings/agents. Off-screen cells are culled like the terrain pass.
 program AgentsExe;
 
 public bundle Agents {
@@ -26,6 +29,15 @@ public bundle Agents {
                 if (hh < 1) {
                     hh = 1;
                 }
+                // How far each border band reaches in from the diamond edge toward its centre.
+                mutable int bw = hw * 22 / 100;
+                mutable int bh = hh * 22 / 100;
+                if (bw < 1) {
+                    bw = 1;
+                }
+                if (bh < 1) {
+                    bh = 1;
+                }
                 int last = w + h - 2;
                 mutable int s = 0;
                 while (s <= last) {
@@ -40,31 +52,65 @@ public bundle Agents {
                     while (gx <= gxEnd) {
                         int gy = s - gx;
                         int own = realm.ownerAt(gx, gy);
-                        // Like the original's TerritoryPainter: a faint colour fill over owned tiles plus a
-                        // stronger tint on the boundary tiles, so the region reads with a clear border.
                         if (own >= 0) {
                             int sx = cam.screenX(gx, gy);
                             int sy = cam.screenY(gx, gy, 0);
                             if (!(sx + hw < 0 || sx - hw > sw || sy - hh > sh || sy + hh < 0)) {
-                                boolean edge = realm.ownerAt(gx + 1, gy) != own
-                                            || realm.ownerAt(gx - 1, gy) != own
-                                            || realm.ownerAt(gx, gy + 1) != own
-                                            || realm.ownerAt(gx, gy - 1) != own;
                                 mutable Nation* n = realm.nations.get(own);
                                 float r = cast<float>(n.cr) / 255.0;
                                 float g = cast<float>(n.cg) / 255.0;
                                 float b = cast<float>(n.cb) / 255.0;
-                                mutable float a = 0.12;
-                                if (edge) {
-                                    a = 0.5;
+                                // Diamond corners.
+                                int tx = sx;
+                                int ty = sy - hh;
+                                int rx = sx + hw;
+                                int ry = sy;
+                                int bx = sx;
+                                int by = sy + hh;
+                                int lx = sx - hw;
+                                int ly = sy;
+                                // Layer 1: translucent fill over the whole owned cell.
+                                batch.quad(tx, ty, rx, ry, bx, by, lx, ly, r, g, b, 0.40);
+                                // Layer 2: a solid border band on each edge facing a different owner.
+                                // Edge orientation matches the original's directional border tiles.
+                                if (realm.ownerAt(gx, gy - 1) != own) {
+                                    TerritoryRenderer.edge(batch, tx, ty, rx, ry, sx, sy, bw, bh, r, g, b);
                                 }
-                                batch.quad(sx, sy - hh, sx + hw, sy, sx, sy + hh, sx - hw, sy, r, g, b, a);
+                                if (realm.ownerAt(gx + 1, gy) != own) {
+                                    TerritoryRenderer.edge(batch, rx, ry, bx, by, sx, sy, bw, bh, r, g, b);
+                                }
+                                if (realm.ownerAt(gx, gy + 1) != own) {
+                                    TerritoryRenderer.edge(batch, bx, by, lx, ly, sx, sy, bw, bh, r, g, b);
+                                }
+                                if (realm.ownerAt(gx - 1, gy) != own) {
+                                    TerritoryRenderer.edge(batch, lx, ly, tx, ty, sx, sy, bw, bh, r, g, b);
+                                }
                             }
                         }
                         gx = gx + 1;
                     }
                     s = s + 1;
                 }
+            }
+
+            // A thin solid band along the diamond edge P->Q, pulled in toward the centre (cx,cy).
+            private static method edge(Batch2D* batch, int px, int py, int qx, int qy,
+                                       int cx, int cy, int bw, int bh, float r, float g, float b) returns void {
+                int pix = px + TerritoryRenderer.sgn(cx - px) * bw;
+                int piy = py + TerritoryRenderer.sgn(cy - py) * bh;
+                int qix = qx + TerritoryRenderer.sgn(cx - qx) * bw;
+                int qiy = qy + TerritoryRenderer.sgn(cy - qy) * bh;
+                batch.quad(px, py, qx, qy, qix, qiy, pix, piy, r, g, b, 1.0);
+            }
+
+            private static method sgn(int v) returns int {
+                if (v > 0) {
+                    return 1;
+                }
+                if (v < 0) {
+                    return -1;
+                }
+                return 0;
             }
         }
     }
