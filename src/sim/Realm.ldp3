@@ -514,6 +514,56 @@ public bundle Agents {
                     this.expandTerritory();
                 }
                 this.strategyTick(dt);
+                this.compactDeadWorkers();
+            }
+
+            // Reclaim dead workers at the end of a tick: return each one's pool-region slot to the
+            // free-list, drop it from its nation's roster and from the flat worker list, and keep every
+            // nation's leaderIdx valid across the swap-remove. A newborn then reuses the freed slot, so
+            // both the roster and the arena stay bounded over a long game -- dead agents no longer pile
+            // up forever. (Deaths are marked in the tick above; succession has already run this tick.)
+            private method compactDeadWorkers() returns void {
+                mutable int i = 0;
+                while (i < this.workers.size()) {
+                    mutable Worker* w = this.workers.get(i);
+                    if (w.alive) {
+                        i = i + 1;
+                    } else {
+                        if (w.nationId >= 0 && w.nationId < this.nations.size()) {
+                            mutable Nation* n = this.nations.get(w.nationId);
+                            this.dropMember(n, w);
+                            if (n.leaderIdx == i) {
+                                n.leaderIdx = -1;   // the crown passes; succession re-elects
+                            }
+                        }
+                        delete w from region this.workerPool;   // slot returns to the pool free-list
+                        int last = this.workers.size() - 1;
+                        if (i != last) {
+                            this.workers.set(i, this.workers.get(last));
+                            mutable int k = 0;
+                            while (k < this.nations.size()) {
+                                if (this.nations.get(k).leaderIdx == last) {
+                                    this.nations.get(k).leaderIdx = i;
+                                }
+                                k = k + 1;
+                            }
+                        }
+                        this.workers.removeAt(this.workers.size() - 1);
+                        // do not advance i: re-check the worker now occupying slot i
+                    }
+                }
+            }
+
+            // Remove worker w from nation n's roster by identity (pointer equality), if present.
+            private method dropMember(Nation* n, Worker* w) returns void {
+                mutable int j = 0;
+                while (j < n.members.size()) {
+                    if (n.members.get(j) == w) {
+                        n.members.removeAt(j);
+                        return;
+                    }
+                    j = j + 1;
+                }
             }
 
             // --- strategic layer: staggered per-nation decisions, war, siege, conquest ---
