@@ -18,6 +18,7 @@ import Agents.Strategy.MockHeuristic;
 import Agents.Strategy.Intent;
 import Agents.Strategy.IntentType;
 import Agents.Strategy.Personality;
+import System.Memory.Units.kilobytes;
 
 // The simulation container and its tick. It owns the world grid, resource nodes, nations and workers,
 // bootstraps a game from a seed (generate -> seat nations -> spawn workers), and advances everyone each
@@ -35,6 +36,7 @@ public bundle Agents {
             public mutable ArrayList<ResourceNode*>* nodes;
             public mutable ArrayList<Nation*> nations;
             public mutable ArrayList<Worker*> workers;
+            private mutable growable pool region workerPool;   // arena backing every Worker; a dead worker's slot returns to the free-list for a newborn
             public mutable int seed;
             private mutable Rng* moveRng;
             private mutable int pn;              // scratch: pick count out-param for territory sampling
@@ -50,6 +52,7 @@ public bundle Agents {
                 this.nodes = ResourceSeeder.seed(this.grid, seed);
                 this.nations = new ArrayList<Nation*>() on heap;
                 this.workers = new ArrayList<Worker*>() on heap;
+                this.workerPool = itself.allocate(256 kilobytes);
                 this.moveRng = new Rng(seed ^ 7788) on heap;
                 this.reproTimer = 0.0;
                 this.prodTimer = 0.0;
@@ -230,12 +233,8 @@ public bundle Agents {
             }
 
             public destructor ~Realm() returns void {
+                release region this.workerPool;   // frees every Worker's arena memory in one shot
                 mutable int i = 0;
-                while (i < this.workers.size()) {
-                    delete this.workers.get(i);
-                    i = i + 1;
-                }
-                i = 0;
                 while (i < this.nations.size()) {
                     delete this.nations.get(i);
                     i = i + 1;
@@ -329,7 +328,7 @@ public bundle Agents {
                 }
                 float life = cast<float>(this.moveRng.range(360, 540));
                 mutable Worker* wk = new Worker(nationId, cast<float>(gx) + 0.5,
-                                               cast<float>(gy) + 0.5, life) on heap;
+                                               cast<float>(gy) + 0.5, life) in region this.workerPool;
                 wk.age = 120.0;
                 this.workers.add(wk);
                 n.members.add(wk);
@@ -479,7 +478,7 @@ public bundle Agents {
                         if (this.grid.walkable(sx, sy)) {
                             float life = cast<float>(rng.range(360, 540));
                             mutable Worker* wk = new Worker(n.id, cast<float>(sx) + 0.5,
-                                                           cast<float>(sy) + 0.5, life) on heap;
+                                                           cast<float>(sy) + 0.5, life) in region this.workerPool;
                             wk.profession = Profession.startingFor(spawned);
                             wk.age = 120.0;   // start as adults so the economy runs immediately
                             this.workers.add(wk);
@@ -902,7 +901,7 @@ public bundle Agents {
                     if (this.grid.walkable(sx, sy)) {
                         float life = cast<float>(this.moveRng.range(360, 540));
                         mutable Worker* wk = new Worker(n.id, cast<float>(sx) + 0.5,
-                                                       cast<float>(sy) + 0.5, life) on heap;
+                                                       cast<float>(sy) + 0.5, life) in region this.workerPool;
                         wk.profession = Profession.startingFor(this.workers.size());
                         this.workers.add(wk);
                         n.members.add(wk);
