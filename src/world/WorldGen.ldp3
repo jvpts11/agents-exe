@@ -393,16 +393,30 @@ public bundle Agents {
                         int x = i % this.w;
                         int y = i / this.w;
                         mutable int bestj = 0 - 1;
-                        mutable float beste = this.eb[i];
+                        // Steepest descent by SLOPE (drop / distance), not raw drop. On a smooth slope the
+                        // diagonal neighbour is always the lowest-valued (it sits further downhill), so a
+                        // raw-drop D8 sends every cell down the same diagonal -- rivers come out as straight
+                        // parallel diagonals. Dividing the drop by the step length (1 orthogonal, sqrt(2)
+                        // diagonal) removes that bias and lets rivers follow the real terrain.
+                        mutable float bestSlope = 0.0;
+                        float here = this.eb[i];
                         mutable int oy = 0 - 1;
                         while (oy <= 1) {
                             mutable int ox = 0 - 1;
                             while (ox <= 1) {
                                 if (!(ox == 0 && oy == 0)) {
                                     int j = this.sidx(x + ox, y + oy);
-                                    if (this.eb[j] < beste) {
-                                        beste = this.eb[j];
-                                        bestj = j;
+                                    float drop = here - this.eb[j];
+                                    if (drop > 0.0) {
+                                        mutable float dist = 1.0;
+                                        if (ox != 0 && oy != 0) {
+                                            dist = 1.41421356;
+                                        }
+                                        float slope = drop / dist;
+                                        if (slope > bestSlope) {
+                                            bestSlope = slope;
+                                            bestj = j;
+                                        }
                                     }
                                 }
                                 ox = ox + 1;
@@ -459,8 +473,21 @@ public bundle Agents {
                         int x = q % this.w;
                         int y = q / this.w;
                         g.setFlag(x, y, Grid.FLAG_RIVER);
+                        // Record which of the 8 neighbours the water flows into, so the renderer can draw a
+                        // connected channel. Normalize the X delta for the cylinder wrap (east<->west).
+                        int d = this.dn[q];
+                        mutable int gdx = d % this.w - x;
+                        if (gdx > 1) {
+                            gdx = gdx - this.w;
+                        }
+                        if (gdx < 0 - 1) {
+                            gdx = gdx + this.w;
+                        }
+                        g.setFlowDir(x, y, gdx, d / this.w - y);
                         this.eb[q] = this.eb[q] - 0.02;
-                        if (this.eb[q] < 0.0) { this.eb[q] = 0.0; }
+                        if (this.eb[q] < 0.0) {
+                            this.eb[q] = 0.0;
+                        }
                     }
                     q = q + 1;
                 }
@@ -489,9 +516,10 @@ public bundle Agents {
             }
 
             private method classify(float e, float t, float m, int fg, int distw) returns int {
-                // hard overrides
+                // hard overrides. NOTE: a river cell keeps its terrain biome -- the renderer draws a blue
+                // channel over the land following the stored flow direction (spec: rivers wind through
+                // terrain, they don't paint the whole tile). Lakes and vents still recolour the cell.
                 if ((fg & Grid.FLAG_VENT) != 0) { return cast<int>(Biome.Volcanic); }
-                if ((fg & Grid.FLAG_RIVER) != 0) { return cast<int>(Biome.River); }
                 if ((fg & Grid.FLAG_LAKE) != 0 && e >= this.sea) { return cast<int>(Biome.Lake); }
                 // water
                 if (e < this.sea) {

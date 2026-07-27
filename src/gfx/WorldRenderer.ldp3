@@ -1,5 +1,6 @@
 import System.IO.Console;
 import Agents.World.Grid;
+import Agents.World.Biome;
 import Agents.World.Biomes;
 import Agents.Gfx.Painter;
 import Agents.Gfx.Camera;
@@ -8,6 +9,9 @@ import Agents.Gfx.Camera;
 // verification). Only the cells the camera can see are visited (bounded from the four screen corners),
 // and rows are drawn back-to-front so overlap resolves correctly. The world wraps in X, so the grid
 // is sampled with wrap while diamonds are placed at their unwrapped screen positions -- seamless.
+// A second pass draws river channels over the finished terrain, following each cell's stored flow
+// direction toward its downstream neighbour, so rivers wind through the land instead of painting whole
+// tiles blue.
 program AgentsExe;
 
 public bundle Agents {
@@ -30,6 +34,23 @@ public bundle Agents {
                 return m;
             }
 
+            // A river channel: small water diamonds stepped from this cell's centre to the downstream
+            // neighbour's centre, so consecutive river cells join into a continuous stream.
+            private static method channel(Painter p, int x0, int y0, int x1, int y1, int thw, int thh,
+                                          int r, int g, int b) returns void {
+                mutable int chw = thw / 3;
+                if (chw < 2) { chw = 2; }
+                mutable int chh = thh / 3;
+                if (chh < 1) { chh = 1; }
+                mutable int s = 0;
+                while (s <= 6) {
+                    int px = x0 + (x1 - x0) * s / 6;
+                    int py = y0 + (y1 - y0) * s / 6;
+                    p.fillDiamond(px, py, chw, chh, r, g, b);
+                    s = s + 1;
+                }
+            }
+
             public static method draw(Painter p, Grid* g, Camera cam, int sw, int sh) returns void {
                 float ax = cam.gridXAt(0, 0);
                 float bx = cam.gridXAt(sw, 0);
@@ -46,6 +67,8 @@ public bundle Agents {
                 int thw = cam.tileHalfW();
                 int thh = cam.tileHalfH();
                 int h = g.height();
+
+                // Pass 1: terrain diamonds, back-to-front.
                 mutable int gy = gyMin;
                 while (gy <= gyMax) {
                     if (gy >= 0 && gy < h) {
@@ -62,6 +85,33 @@ public bundle Agents {
                         }
                     }
                     gy = gy + 1;
+                }
+
+                // Pass 2: river channels over the terrain, following each cell's flow direction.
+                int river = cast<int>(Biome.River);
+                int rr = Biomes.red(river);
+                int rg = Biomes.green(river);
+                int rb = Biomes.blue(river);
+                mutable int qy = gyMin;
+                while (qy <= gyMax) {
+                    if (qy >= 0 && qy < h) {
+                        mutable int qx = gxMin;
+                        while (qx <= gxMax) {
+                            if (g.hasFlow(qx, qy)) {
+                                int sx = cam.screenX(qx, qy);
+                                int sy = cam.screenY(qx, qy);
+                                if (sx > 0 - thw && sx < sw + thw && sy > 0 - thh && sy < sh + thh) {
+                                    int fdx = g.flowDx(qx, qy);
+                                    int fdy = g.flowDy(qx, qy);
+                                    int dsx = cam.screenX(qx + fdx, qy + fdy);
+                                    int dsy = cam.screenY(qx + fdx, qy + fdy);
+                                    WorldRenderer.channel(p, sx, sy, dsx, dsy, thw, thh, rr, rg, rb);
+                                }
+                            }
+                            qx = qx + 1;
+                        }
+                    }
+                    qy = qy + 1;
                 }
             }
         }
