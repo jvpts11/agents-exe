@@ -287,7 +287,66 @@ public bundle Agents {
             // Archipelago (2) sinks the field and mixes in high-frequency noise to fragment it into islands.
             private method applyWorldShape() returns void {
                 int n = this.w * this.h;
-                if (this.worldType == 1) {
+                if (this.worldType == 0) {
+                    // Continents: a handful of well-spaced land blobs combined by MAX (not the plate
+                    // field's averaging, which fuses everything into one globe-spanning mass). Each blob
+                    // has a domain-warped, noise-modulated radius so coasts are organic, and ocean fills
+                    // the gaps between blobs -- distinct continents, like the real world.
+                    int nc = 6;
+                    Rng2 rng = new Rng2(this.seed ^ 0x2C0F) on stack;
+                    int[] ccx = new int[nc]();
+                    int[] ccy = new int[nc]();
+                    float[] ccr = new float[nc]();
+                    mutable int c = 0;
+                    while (c < nc) {
+                        ccx[c] = rng.nextInt(this.w);
+                        ccy[c] = this.h / 6 + rng.nextInt(this.h * 2 / 3);
+                        ccr[c] = 0.16 + 0.10 * rng.unit();
+                        c = c + 1;
+                    }
+                    mutable int i = 0;
+                    while (i < n) {
+                        int x = i % this.w;
+                        int y = i / this.w;
+                        float nx = cast<float>(x) / cast<float>(this.w);
+                        float ny = cast<float>(y) / cast<float>(this.h);
+                        float wxf = nx + (this.vnoise(nx * 3.0, ny * 3.0, 3) - 0.5) * 0.30
+                                    + (this.vnoise(nx * 7.0 + 2.0, ny * 7.0 + 4.0, 7) - 0.5) * 0.14;
+                        float wyf = ny + (this.vnoise(nx * 3.0 + 5.0, ny * 3.0 + 9.0, 3) - 0.5) * 0.30
+                                    + (this.vnoise(nx * 7.0 + 8.0, ny * 7.0 + 1.0, 7) - 0.5) * 0.14;
+                        mutable float mask = 0.0;
+                        mutable int k = 0;
+                        while (k < nc) {
+                            float cxn = cast<float>(ccx[k]) / cast<float>(this.w);
+                            float cyn = cast<float>(ccy[k]) / cast<float>(this.h);
+                            mutable float dxn = wxf - cxn;
+                            if (dxn > 0.5) {
+                                dxn = dxn - 1.0;
+                            }
+                            if (dxn < 0.0 - 0.5) {
+                                dxn = dxn + 1.0;
+                            }
+                            float dyn = wyf - cyn;
+                            float dist = this.fsqrt(dxn * dxn + dyn * dyn);
+                            float m = 1.0 - dist / ccr[k];
+                            if (m > mask) {
+                                mask = m;
+                            }
+                            k = k + 1;
+                        }
+                        if (mask < 0.0) {
+                            mask = 0.0;
+                        }
+                        if (mask > 1.0) {
+                            mask = 1.0;
+                        }
+                        this.eb[i] = this.eb[i] * 0.30 + mask * 0.70;
+                        i = i + 1;
+                    }
+                    delete ccx;
+                    delete ccy;
+                    delete ccr;
+                } else if (this.worldType == 1) {
                     int cx = this.w / 2;
                     int cy = this.h / 2;
                     mutable int i = 0;
