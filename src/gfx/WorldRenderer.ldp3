@@ -1,0 +1,69 @@
+import System.IO.Console;
+import Agents.World.Grid;
+import Agents.World.Biomes;
+import Agents.Gfx.Painter;
+import Agents.Gfx.Camera;
+
+// Draws the world as isometric diamonds through a Painter (GL on screen, or software for headless
+// verification). Only the cells the camera can see are visited (bounded from the four screen corners),
+// and rows are drawn back-to-front so overlap resolves correctly. The world wraps in X, so the grid
+// is sampled with wrap while diamonds are placed at their unwrapped screen positions -- seamless.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class WorldRenderer {
+            private static method min4(float a, float b, float c, float d) returns float {
+                mutable float m = a;
+                if (b < m) { m = b; }
+                if (c < m) { m = c; }
+                if (d < m) { m = d; }
+                return m;
+            }
+
+            private static method max4(float a, float b, float c, float d) returns float {
+                mutable float m = a;
+                if (b > m) { m = b; }
+                if (c > m) { m = c; }
+                if (d > m) { m = d; }
+                return m;
+            }
+
+            public static method draw(Painter p, Grid* g, Camera cam, int sw, int sh) returns void {
+                float ax = cam.gridXAt(0, 0);
+                float bx = cam.gridXAt(sw, 0);
+                float cx = cam.gridXAt(0, sh);
+                float dx = cam.gridXAt(sw, sh);
+                float ay = cam.gridYAt(0, 0);
+                float by = cam.gridYAt(sw, 0);
+                float cy = cam.gridYAt(0, sh);
+                float dy = cam.gridYAt(sw, sh);
+                int gxMin = cast<int>(WorldRenderer.min4(ax, bx, cx, dx)) - 2;
+                int gxMax = cast<int>(WorldRenderer.max4(ax, bx, cx, dx)) + 2;
+                int gyMin = cast<int>(WorldRenderer.min4(ay, by, cy, dy)) - 2;
+                int gyMax = cast<int>(WorldRenderer.max4(ay, by, cy, dy)) + 2;
+                int thw = cam.tileHalfW();
+                int thh = cam.tileHalfH();
+                int h = g.height();
+                mutable int gy = gyMin;
+                while (gy <= gyMax) {
+                    if (gy >= 0 && gy < h) {
+                        mutable int gx = gxMin;
+                        while (gx <= gxMax) {
+                            int sx = cam.screenX(gx, gy);
+                            int sy = cam.screenY(gx, gy);
+                            if (sx > 0 - thw && sx < sw + thw && sy > 0 - thh && sy < sh + thh) {
+                                int bo = g.biomeAt(gx, gy);
+                                p.fillDiamond(sx, sy, thw, thh, Biomes.red(bo), Biomes.green(bo),
+                                              Biomes.blue(bo));
+                            }
+                            gx = gx + 1;
+                        }
+                    }
+                    gy = gy + 1;
+                }
+            }
+        }
+    }
+}
