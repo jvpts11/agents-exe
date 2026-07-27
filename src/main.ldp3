@@ -1,13 +1,18 @@
 import System.IO.Console;
+import opengl.glfw.GlWindow;
+import opengl.gl.Wgl;
 import Agents.World.Grid;
 import Agents.World.WorldGen;
 import Agents.Gfx.SoftPainter;
+import Agents.Gfx.GlPainter;
+import Agents.Gfx.Batch2D;
 import Agents.Gfx.Camera;
 import Agents.Gfx.WorldRenderer;
 
-// Entry point. Slice 4 headless-verification build: generate a world and draw it ISOMETRICALLY through
-// the software painter to a PPM -- the exact scene the on-screen GL renderer draws. The GL window loop
-// is added on top of this same WorldRenderer once the iso projection is verified.
+// Entry point. Slice 4: generate a world and show it ISOMETRICALLY in a GL window -- pan with
+// WASD/arrows, zoom with the scroll wheel or +/-, ESC to quit. Running with any argument (or when no
+// GL window is available) instead writes a software snapshot PPM, the same scene the window draws --
+// used for headless verification.
 program AgentsExe;
 
 public bundle Agents {
@@ -17,20 +22,84 @@ public bundle Agents {
             public static method main(string[] args) returns void {
                 int w = 512;
                 int h = 512;
-                int sw = 1024;
-                int sh = 768;
+                System.IO.Console.println("agents.exe -- generating a world...");
                 WorldGen gen = new WorldGen(42) on stack;
                 Grid* g = gen.generate(w, h);
+                System.IO.Console.println("world ready.");
+
+                boolean snapshot = args.length() > 0;
+                if (!snapshot) {
+                    if (Main.runWindow(g, w, h)) {
+                        delete g;
+                        return;
+                    }
+                    // no GL window available -> fall through to a snapshot so we still produce output
+                    System.IO.Console.println("no GL window; writing a snapshot instead.");
+                }
+                Main.writeSnapshot(g, w, h);
+                delete g;
+                return;
+            }
+
+            // The interactive isometric window. Returns false if no GL window could be opened.
+            private static method runWindow(Grid* g, int w, int h) returns boolean {
+                int sw = 1280;
+                int sh = 720;
+                GlWindow* win = new GlWindow() on heap;
+                if (win.open("agents.exe -- world", sw, sh, 3, 3) == 0) {
+                    delete win;
+                    return false;
+                }
+                win.setVSync(1);
+                Batch2D* batch = new Batch2D(win.gl) on heap;
+                GlPainter* gp = new GlPainter(batch) on heap;
+                Camera cam = new Camera(sw, sh) on heap;
+                cam.focusCell(w / 2, h / 2);
+                cam.setZoom(0.42);
+                int pan = 18;
+                while (win.isOpen()) {
+                    win.pump();
+                    if (win.keyDown(0x1B)) {           // ESC
+                        break;
+                    }
+                    if (win.keyDown(0x57) || win.keyDown(0x26)) { cam.panPixels(0, pan); }        // W / Up
+                    if (win.keyDown(0x53) || win.keyDown(0x28)) { cam.panPixels(0, 0 - pan); }    // S / Down
+                    if (win.keyDown(0x41) || win.keyDown(0x25)) { cam.panPixels(pan, 0); }        // A / Left
+                    if (win.keyDown(0x44) || win.keyDown(0x27)) { cam.panPixels(0 - pan, 0); }    // D / Right
+                    int sc = win.takeScroll();
+                    if (sc > 0) { cam.zoomBy(1.12); }
+                    if (sc < 0) { cam.zoomBy(0.89); }
+                    if (win.keyDown(0xBB) || win.keyDown(0x6B)) { cam.zoomBy(1.03); }             // +
+                    if (win.keyDown(0xBD) || win.keyDown(0x6D)) { cam.zoomBy(0.97); }             // -
+                    int cw = win.width();
+                    int ch = win.height();
+                    cam.resize(cw, ch);
+                    Wgl.glViewport(0, 0, cw, ch);
+                    Wgl.glClearColor(0.07, 0.16, 0.26, 1.0);
+                    Wgl.glClear(0x4000);
+                    batch.begin(cw, ch, 0);
+                    WorldRenderer.draw(gp, g, cam, cw, ch);
+                    batch.flush();
+                    win.swap();
+                }
+                delete cam;
+                delete gp;
+                delete batch;
+                delete win;
+                return true;
+            }
+
+            private static method writeSnapshot(Grid* g, int w, int h) returns void {
+                int sw = 1280;
+                int sh = 720;
                 SoftPainter sp = new SoftPainter(sw, sh) on stack;
-                sp.fillRect(0, 0, sw, sh, 26, 58, 90);   // desktop-blue background
+                sp.fillRect(0, 0, sw, sh, 18, 41, 66);
                 Camera cam = new Camera(sw, sh) on stack;
                 cam.focusCell(w / 2, h / 2);
-                cam.setZoom(0.28);
+                cam.setZoom(0.42);
                 WorldRenderer.draw(sp, g, cam, sw, sh);
                 sp.save("world_iso.ppm");
                 System.IO.Console.println("wrote world_iso.ppm");
-                delete g;
-                return;
             }
         }
     }
