@@ -2,10 +2,11 @@ import System.IO.Console;
 import Agents.World.Grid;
 import Agents.World.Biome;
 
-// World generation, slice 2: a seamless-in-X fractal heightmap + latitude/moisture climate + the
-// BIOME_CATALOG classification pipeline. Deterministic from the seed. Plates, thermal erosion and
-// hydrology (rivers/lakes) come in the next slice; this already yields recognizable continents,
-// coasts, mountains and climate-banded biomes. All work in normalized [0,1] so it is size-agnostic.
+// World generation (slices 2+3): deterministic, size-agnostic, cylinder (X wraps).
+// Pipeline: tectonic plates -> fractal detail -> thermal erosion -> climate (latitude/lapse temp,
+// moisture with belts + coastal bonus) -> hydrology (steepest-descent rivers + lake pits) ->
+// BIOME_CATALOG classification (with river/lake/vent/endorheic overrides). Scratch buffers live in
+// fields (freed at the end) so passes share them without array-copy semantics.
 program AgentsExe;
 
 public bundle Agents {
@@ -15,17 +16,36 @@ public bundle Agents {
             private mutable int seed;
             private mutable int octaves;
             private mutable int baseCells;
-            private mutable int seaLevel10k;   // sea level as elevation units (0..10000)
+            private mutable float sea;          // sea level in [0,1]
+            private mutable int nPlates;
+
+            private mutable int w;
+            private mutable int h;
+
+            // scratch (allocated in generate, freed at the end)
+            private mutable float[] eb;         // elevation 0..1
+            private mutable int[] wtr;          // ring distance to water
+            private mutable int[] dn;           // downstream cell index, or -1
+            private mutable float[] fl;         // flow accumulation
+            private mutable int[] plateId;
+
+            // plate descriptors
+            private mutable int[] px;
+            private mutable int[] py;
+            private mutable int[] ptype;        // 0 oceanic, 1 continental
+            private mutable float[] pbase;
+            private mutable float[] pdx;
+            private mutable float[] pdy;
 
             public constructor WorldGen(int seed) {
                 this.seed = seed;
                 this.octaves = 6;
-                this.baseCells = 3;         // lattice cells across the width at octave 0
-                this.seaLevel10k = 4200;    // ~0.42; the player-facing land/water knob later
+                this.baseCells = 3;
+                this.sea = 0.42;
+                this.nPlates = 12;
             }
 
-            // A wrapping integer hash of a lattice point -> [0,1). Integer overflow wraps by definition
-            // in LDP3 (defined, not UB), which is exactly what a hash wants.
+            // ---- integer hash / value noise / fbm (seamless in X) ----
             private method hash01(int xi, int yi) returns float {
                 mutable int n = xi * 374761393;
                 n = n + yi * 668265263;
@@ -41,7 +61,6 @@ public bundle Agents {
                 return t * t * (3.0 - 2.0 * t);
             }
 
-            // Value noise at lattice coord (fx,fy); X wraps over `period` cells (seamless cylinder).
             private method vnoise(float fx, float fy, int period) returns float {
                 int x0 = cast<int>(fx);
                 int y0 = cast<int>(fy);
@@ -60,11 +79,9 @@ public bundle Agents {
                 return ab + (cd - ab) * sy;
             }
 
-            // Fractal Brownian motion in [0,1]; each octave doubles the (integer) X period, so the
-            // whole field stays seamless across the east<->west wrap.
-            private method fbm(int x, int y, int w, int h, int salt) returns float {
-                float nx = cast<float>(x) / cast<float>(w);
-                float ny = cast<float>(y) / cast<float>(h);
+            private method fbm(int x, int y, int salt) returns float {
+                float nx = cast<float>(x) / cast<float>(this.w);
+                float ny = cast<float>(y) / cast<float>(this.h);
                 mutable float sum = 0.0;
                 mutable float amp = 1.0;
                 mutable float tot = 0.0;
@@ -81,84 +98,419 @@ public bundle Agents {
                 return sum / tot;
             }
 
-            // Latitudinal moisture belt: wet equator (ITCZ), dry ~30 deg (horse latitudes), wet ~55 deg
-            // (temperate), dry poles. `alat` is |latitude| in [0,1] (0 = equator, 1 = pole).
+            // scratch index with X wrap, Y clamp (parallel to Grid layout)
+            private method sidx(int x, int y) returns int {
+                mutable int xx = x % this.w;
+                if (xx < 0) {
+                    xx = xx + this.w;
+                }
+                mutable int yy = y;
+                if (yy < 0) {
+                    yy = 0;
+                }
+                if (yy >= this.h) {
+                    yy = this.h - 1;
+                }
+                return yy * this.w + xx;
+            }
+
+            // toroidal X distance between two columns
+            private method dxWrap(int a, int b) returns int {
+                mutable int d = a - b;
+                if (d < 0) {
+                    d = 0 - d;
+                }
+                if (d > this.w - d) {
+                    d = this.w - d;
+                }
+                return d;
+            }
+
+            // ---- pass 1: tectonic plates -> base elevation + boundary mountains/trenches ----
+            private method buildPlates(Grid* g) returns void {
+                Rng2 rng = new Rng2(this.seed ^ 0x51ED) on stack;
+                mutable int p = 0;
+                while (p < this.nPlates) {
+                    this.px[p] = rng.nextInt(this.w);
+                    this.py[p] = rng.nextInt(this.h);
+                    boolean cont = rng.nextInt(100) < 45;
+                    if (cont) {
+                        this.ptype[p] = 1;
+                        this.pbase[p] = 0.52 + 0.10 * rng.unit();
+                    } else {
+                        this.ptype[p] = 0;
+                        this.pbase[p] = 0.24 + 0.08 * rng.unit();
+                    }
+                    this.pdx[p] = rng.unit() * 2.0 - 1.0;
+                    this.pdy[p] = rng.unit() * 2.0 - 1.0;
+                    p = p + 1;
+                }
+                mutable int y = 0;
+                while (y < this.h) {
+                    mutable int x = 0;
+                    while (x < this.w) {
+                        int i = y * this.w + x;
+                        // Domain-warp the sample point so plate boundaries (and thus coastlines) are
+                        // organic wiggles, not straight Voronoi edges.
+                        float nx = cast<float>(x) / cast<float>(this.w);
+                        float ny = cast<float>(y) / cast<float>(this.h);
+                        float warp = cast<float>(this.w) * 0.12;
+                        mutable int wx = x + cast<int>((this.vnoise(nx * 3.0, ny * 3.0, 3) - 0.5) * 2.0 * warp);
+                        mutable int wy = y + cast<int>((this.vnoise(nx * 3.0 + 11.0, ny * 3.0 + 7.0, 3) - 0.5) * 2.0 * warp);
+                        wx = ((wx % this.w) + this.w) % this.w;
+                        if (wy < 0) { wy = 0; }
+                        if (wy >= this.h) { wy = this.h - 1; }
+                        mutable int best = 0;
+                        mutable int bestd = 2000000000;
+                        mutable int second = 0;
+                        mutable int secondd = 2000000000;
+                        mutable float sumW = 0.0;
+                        mutable float sumB = 0.0;
+                        mutable int k = 0;
+                        while (k < this.nPlates) {
+                            int ddx = this.dxWrap(wx, this.px[k]);
+                            int ddy = wy - this.py[k];
+                            int dist = ddx * ddx + ddy * ddy;
+                            // inverse-distance-weighted blend of plate bases -> smooth continental field
+                            float wgt = 1.0 / (cast<float>(dist) + 64.0);
+                            sumW = sumW + wgt;
+                            sumB = sumB + this.pbase[k] * wgt;
+                            if (dist < bestd) {
+                                secondd = bestd;
+                                second = best;
+                                bestd = dist;
+                                best = k;
+                            } else {
+                                if (dist < secondd) {
+                                    secondd = dist;
+                                    second = k;
+                                }
+                            }
+                            k = k + 1;
+                        }
+                        this.plateId[i] = best;
+                        mutable float base = sumB / sumW;
+                        // boundary: closeness of the two nearest plates -> mountain ridges where they converge
+                        float db = cast<float>(bestd);
+                        float ds = cast<float>(secondd);
+                        mutable float border = 0.0;
+                        if (ds > 0.0) {
+                            border = 1.0 - (ds - db) / ds;
+                        }
+                        if (border > 0.55) {
+                            float conv = this.convergence(best, second);
+                            float edge = (border - 0.55) / 0.45;
+                            if (conv > 0.0) {
+                                base = base + 0.30 * conv * edge;
+                                if (conv > 0.5 && this.hash01(x * 7 + 1, y * 13 + 3) > 0.985) {
+                                    g.setFlag(x, y, Grid.FLAG_VENT);
+                                }
+                            }
+                        }
+                        if (base < 0.0) { base = 0.0; }
+                        if (base > 1.0) { base = 1.0; }
+                        this.eb[i] = base;
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+            }
+
+            // do plates `a` and `b` push together (+) or apart (-)? Sign of relative drift along the link.
+            private method convergence(int a, int b) returns float {
+                float lx = cast<float>(this.px[b] - this.px[a]);
+                float ly = cast<float>(this.py[b] - this.py[a]);
+                float len = lx * lx + ly * ly;
+                if (len < 0.001) {
+                    return 0.0;
+                }
+                float inv = 1.0 / this.fsqrt(len);
+                float ux = lx * inv;
+                float uy = ly * inv;
+                float toward = (this.pdx[a] * ux + this.pdy[a] * uy) - (this.pdx[b] * ux + this.pdy[b] * uy);
+                return toward;   // >0 converging
+            }
+
+            private method fsqrt(float v) returns float {
+                if (v <= 0.0) {
+                    return 0.0;
+                }
+                mutable float g = v;
+                mutable int i = 0;
+                while (i < 12) {
+                    g = 0.5 * (g + v / g);
+                    i = i + 1;
+                }
+                return g;
+            }
+
+            // ---- pass 2: blend in fractal detail, normalize ----
+            private method addDetail() returns void {
+                mutable int i = 0;
+                int n = this.w * this.h;
+                while (i < n) {
+                    int x = i % this.w;
+                    int y = i / this.w;
+                    float d = this.fbm(x, y, 0);
+                    this.eb[i] = 0.62 * this.eb[i] + 0.38 * d;
+                    i = i + 1;
+                }
+            }
+
+            // ---- pass 3: thermal erosion (a few relaxation passes, 4-neighbour) ----
+            private method erode(int passes) returns void {
+                mutable int p = 0;
+                while (p < passes) {
+                    mutable int y = 0;
+                    while (y < this.h) {
+                        mutable int x = 0;
+                        while (x < this.w) {
+                            int i = y * this.w + x;
+                            float c = this.eb[i];
+                            float l = this.eb[this.sidx(x - 1, y)];
+                            float r = this.eb[this.sidx(x + 1, y)];
+                            float u = this.eb[this.sidx(x, y - 1)];
+                            float dn2 = this.eb[this.sidx(x, y + 1)];
+                            float avg = (l + r + u + dn2) * 0.25;
+                            this.eb[i] = c * 0.6 + avg * 0.4;
+                            x = x + 1;
+                        }
+                        y = y + 1;
+                    }
+                    p = p + 1;
+                }
+            }
+
+            // ---- pass 4: climate (temperature, moisture with belts + coastal bonus) ----
             private method belt(float alat) returns float {
                 if (alat < 0.12) {
                     return 0.90;
                 }
                 if (alat < 0.36) {
                     float t = (alat - 0.12) / 0.24;
-                    return 0.90 - 0.70 * t;      // ramp down to the ~30 deg dry band
+                    return 0.90 - 0.70 * t;
                 }
                 if (alat < 0.66) {
                     float t = (alat - 0.36) / 0.30;
-                    return 0.20 + 0.50 * t;      // rise to the temperate wet band
+                    return 0.20 + 0.50 * t;
                 }
                 float t = (alat - 0.66) / 0.34;
-                return 0.70 - 0.50 * t;          // fall to the dry poles
+                return 0.70 - 0.50 * t;
             }
 
-            public method generate(int w, int h) returns Grid* {
-                Grid* g = new Grid(w, h) on heap;
-                float sea = cast<float>(this.seaLevel10k) / 10000.0;
+            private method absLat(int y) returns float {
+                float ny = cast<float>(y) / cast<float>(this.h - 1);
+                mutable float d = 2.0 * ny - 1.0;
+                if (d < 0.0) {
+                    d = 0.0 - d;
+                }
+                return d;
+            }
+
+            // ring distance to the nearest water cell (approximate, K dilation passes)
+            private method distToWater(int rings) returns void {
+                mutable int i = 0;
+                int n = this.w * this.h;
+                while (i < n) {
+                    if (this.eb[i] < this.sea) {
+                        this.wtr[i] = 0;
+                    } else {
+                        this.wtr[i] = 9999;
+                    }
+                    i = i + 1;
+                }
+                mutable int p = 0;
+                while (p < rings) {
+                    mutable int y = 0;
+                    while (y < this.h) {
+                        mutable int x = 0;
+                        while (x < this.w) {
+                            int idx = y * this.w + x;
+                            mutable int m = this.wtr[idx];
+                            int a = this.wtr[this.sidx(x - 1, y)] + 1;
+                            int b = this.wtr[this.sidx(x + 1, y)] + 1;
+                            int c = this.wtr[this.sidx(x, y - 1)] + 1;
+                            int e = this.wtr[this.sidx(x, y + 1)] + 1;
+                            if (a < m) { m = a; }
+                            if (b < m) { m = b; }
+                            if (c < m) { m = c; }
+                            if (e < m) { m = e; }
+                            this.wtr[idx] = m;
+                            x = x + 1;
+                        }
+                        y = y + 1;
+                    }
+                    p = p + 1;
+                }
+            }
+
+            private method climate(Grid* g) returns void {
+                int rings = 8;
+                this.distToWater(rings);
                 mutable int y = 0;
-                while (y < h) {
-                    float alat = this.absLat(y, h);
-                    float latBand = 1.0 - alat;                 // 1 at equator, 0 at poles
+                while (y < this.h) {
+                    float alat = this.absLat(y);
+                    float latBand = 1.0 - alat;
                     float beltM = this.belt(alat);
                     mutable int x = 0;
-                    while (x < w) {
-                        float e = this.fbm(x, y, w, h, 0);
-                        float mn = this.fbm(x, y, w, h, 37);
+                    while (x < this.w) {
+                        int i = y * this.w + x;
+                        float e = this.eb[i];
                         mutable float lapse = 0.0;
-                        if (e > sea) {
-                            lapse = 0.9 * (e - sea);
+                        if (e > this.sea) {
+                            lapse = 0.9 * (e - this.sea);
                         }
-                        mutable float t = latBand - lapse;
+                        float tnoise = (this.fbm(x, y, 17) - 0.5) * 0.14;   // wavy climate bands, not straight lines
+                        mutable float t = latBand - lapse + tnoise;
                         if (t < 0.0) { t = 0.0; }
                         if (t > 1.0) { t = 1.0; }
-                        mutable float m = 0.55 * mn + 0.45 * beltM;
+                        float mn = this.fbm(x, y, 37);
+                        mutable float coast = 0.0;
+                        if (this.wtr[i] < rings) {
+                            coast = 1.0 - cast<float>(this.wtr[i]) / cast<float>(rings);
+                        }
+                        mutable float m = 0.5 * mn + 0.3 * beltM + 0.2 * coast;
                         if (m > 1.0) { m = 1.0; }
-                        g.setElev(x, y, cast<int>(e * 10000.0));
+                        if (m < 0.0) { m = 0.0; }
                         g.setTemp(x, y, cast<int>(t * 100.0));
                         g.setMoist(x, y, cast<int>(m * 100.0));
-                        g.setBiome(x, y, this.classify(e, t, m, sea));
                         x = x + 1;
                     }
                     y = y + 1;
                 }
-                return g;
             }
 
-            private method absLat(int y, int h) returns float {
-                float ny = cast<float>(y) / cast<float>(h - 1);
-                mutable float d = 2.0 * ny - 1.0;
-                if (d < 0.0) { d = 0.0 - d; }
-                return d;   // |latitude| in [0,1]
+            // ---- pass 5: hydrology (steepest descent -> rivers; pits -> lakes) ----
+            private method hydrology(Grid* g) returns void {
+                int n = this.w * this.h;
+                // downstream + init flow
+                mutable int i = 0;
+                while (i < n) {
+                    this.fl[i] = 1.0;
+                    if (this.eb[i] < this.sea) {
+                        this.dn[i] = 0 - 1;
+                    } else {
+                        int x = i % this.w;
+                        int y = i / this.w;
+                        mutable int bestj = 0 - 1;
+                        mutable float beste = this.eb[i];
+                        mutable int oy = 0 - 1;
+                        while (oy <= 1) {
+                            mutable int ox = 0 - 1;
+                            while (ox <= 1) {
+                                if (!(ox == 0 && oy == 0)) {
+                                    int j = this.sidx(x + ox, y + oy);
+                                    if (this.eb[j] < beste) {
+                                        beste = this.eb[j];
+                                        bestj = j;
+                                    }
+                                }
+                                ox = ox + 1;
+                            }
+                            oy = oy + 1;
+                        }
+                        this.dn[i] = bestj;
+                        if (bestj == 0 - 1) {
+                            g.setFlag(x, y, Grid.FLAG_LAKE);
+                            g.setFlag(x, y, Grid.FLAG_ENDORHEIC);
+                        }
+                    }
+                    i = i + 1;
+                }
+                // process cells high -> low via a counting sort on quantized elevation
+                int bins = 1024;
+                int[] cnt = new int[bins]();
+                mutable int k = 0;
+                while (k < n) {
+                    int bi = cast<int>(this.eb[k] * cast<float>(bins - 1));
+                    cnt[bi] = cnt[bi] + 1;
+                    k = k + 1;
+                }
+                // positions: highest bin first
+                int[] pos = new int[bins]();
+                mutable int acc = 0;
+                mutable int b = bins - 1;
+                while (b >= 0) {
+                    pos[b] = acc;
+                    acc = acc + cnt[b];
+                    b = b - 1;
+                }
+                int[] order = new int[n]();
+                mutable int c2 = 0;
+                while (c2 < n) {
+                    int bi = cast<int>(this.eb[c2] * cast<float>(bins - 1));
+                    order[pos[bi]] = c2;
+                    pos[bi] = pos[bi] + 1;
+                    c2 = c2 + 1;
+                }
+                mutable int oi = 0;
+                while (oi < n) {
+                    int cell = order[oi];
+                    int d = this.dn[cell];
+                    if (d != 0 - 1) {
+                        this.fl[d] = this.fl[d] + this.fl[cell];
+                    }
+                    oi = oi + 1;
+                }
+                float riverThr = cast<float>(this.w) * 0.10;
+                mutable int q = 0;
+                while (q < n) {
+                    if (this.eb[q] >= this.sea && this.dn[q] != 0 - 1 && this.fl[q] > riverThr) {
+                        int x = q % this.w;
+                        int y = q / this.w;
+                        g.setFlag(x, y, Grid.FLAG_RIVER);
+                        this.eb[q] = this.eb[q] - 0.02;
+                        if (this.eb[q] < 0.0) { this.eb[q] = 0.0; }
+                    }
+                    q = q + 1;
+                }
+                delete cnt;
+                delete pos;
+                delete order;
             }
 
-            // The BIOME_CATALOG priority pipeline (slice 2: no river/lake/vent flags yet). Returns a
-            // Biome ordinal. E/T/M are normalized [0,1]; `sea` is the sea-level threshold.
-            private method classify(float e, float t, float m, float sea) returns int {
-                // A. Below sea level -> water by depth (+ SeaIce polar, CoralReef warm shallow).
-                if (e < sea) {
+            // ---- pass 6: classify every cell into a Biome ordinal ----
+            private method classifyAll(Grid* g) returns void {
+                mutable int y = 0;
+                while (y < this.h) {
+                    mutable int x = 0;
+                    while (x < this.w) {
+                        int i = y * this.w + x;
+                        float e = this.eb[i];
+                        float t = cast<float>(g.tempAt(x, y)) / 100.0;
+                        float m = cast<float>(g.moistAt(x, y)) / 100.0;
+                        int fg = g.flagsAt(x, y);
+                        g.setElev(x, y, cast<int>(e * 10000.0));
+                        g.setBiome(x, y, this.classify(e, t, m, fg, this.wtr[i]));
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+            }
+
+            private method classify(float e, float t, float m, int fg, int distw) returns int {
+                // hard overrides
+                if ((fg & Grid.FLAG_VENT) != 0) { return cast<int>(Biome.Volcanic); }
+                if ((fg & Grid.FLAG_RIVER) != 0) { return cast<int>(Biome.River); }
+                if ((fg & Grid.FLAG_LAKE) != 0 && e >= this.sea) { return cast<int>(Biome.Lake); }
+                // water
+                if (e < this.sea) {
                     if (e < 0.08) { return cast<int>(Biome.MarineTrench); }
                     if (e < 0.20) { return cast<int>(Biome.DeepOcean); }
                     if (t < 0.15) { return cast<int>(Biome.SeaIce); }
-                    if (e >= sea - 0.06) {
+                    if (e >= this.sea - 0.06) {
                         if (t >= 0.85) { return cast<int>(Biome.CoralReef); }
                         return cast<int>(Biome.ShallowSea);
                     }
                     return cast<int>(Biome.Ocean);
                 }
-                // C. Coast fringe.
-                if (e < sea + 0.03) {
+                // coast
+                if (e < this.sea + 0.03) {
                     if (t >= 0.85 && m >= 0.60) { return cast<int>(Biome.Mangrove); }
                     if (t < 0.35) { return cast<int>(Biome.RockyShore); }
                     return cast<int>(Biome.Beach);
                 }
-                // D. Peaks & mountains.
+                // peaks & mountains
                 if (e >= 0.90) {
                     if (t < 0.35) { return cast<int>(Biome.SnowPeak); }
                     return cast<int>(Biome.Mountain);
@@ -172,7 +524,10 @@ public bundle Agents {
                     if (m < 0.20) { return cast<int>(Biome.Badlands); }
                     return cast<int>(Biome.Hills);
                 }
-                // E. Lowland: wetland override, then Whittaker(T, M).
+                // lowland specials
+                if (m < 0.20 && (fg & Grid.FLAG_ENDORHEIC) != 0) { return cast<int>(Biome.SaltFlat); }
+                if (m < 0.25 && distw <= 2) { return cast<int>(Biome.Oasis); }
+                // wetlands
                 if (m >= 0.90) {
                     if (t >= 0.78) { return cast<int>(Biome.Swamp); }
                     if (t < 0.35) { return cast<int>(Biome.Bog); }
@@ -181,38 +536,103 @@ public bundle Agents {
                 return this.whittaker(t, m);
             }
 
-            // The 17 lowland land biomes over temperature (rows) x moisture (columns).
             private method whittaker(float t, float m) returns int {
-                if (t < 0.15) {                                   // Polar
+                if (t < 0.15) {
                     if (m < 0.20) { return cast<int>(Biome.ColdDesert); }
                     if (m < 0.60) { return cast<int>(Biome.Tundra); }
                     if (m < 0.80) { return cast<int>(Biome.Snowfield); }
                     return cast<int>(Biome.IceCap);
                 }
-                if (t < 0.35) {                                   // Boreal
+                if (t < 0.35) {
                     if (m < 0.20) { return cast<int>(Biome.ColdDesert); }
                     if (m < 0.40) { return cast<int>(Biome.Steppe); }
                     return cast<int>(Biome.Taiga);
                 }
-                if (t < 0.55) {                                   // Cool temperate
+                if (t < 0.55) {
                     if (m < 0.20) { return cast<int>(Biome.ColdDesert); }
                     if (m < 0.40) { return cast<int>(Biome.Steppe); }
                     if (m < 0.60) { return cast<int>(Biome.Prairie); }
                     if (m < 0.80) { return cast<int>(Biome.DeciduousForest); }
                     return cast<int>(Biome.TemperateRainforest);
                 }
-                if (t < 0.78) {                                   // Warm temperate
+                if (t < 0.78) {
                     if (m < 0.20) { return cast<int>(Biome.HotDesert); }
                     if (m < 0.40) { return cast<int>(Biome.ThornScrub); }
                     if (m < 0.60) { return cast<int>(Biome.MedShrubland); }
                     if (m < 0.80) { return cast<int>(Biome.WarmGrassland); }
                     return cast<int>(Biome.LaurelForest);
                 }
-                // Tropical
                 if (m < 0.20) { return cast<int>(Biome.HotDesert); }
                 if (m < 0.40) { return cast<int>(Biome.Savanna); }
                 if (m < 0.60) { return cast<int>(Biome.TropSeasonalForest); }
                 return cast<int>(Biome.TropicalRainforest);
+            }
+
+            public method generate(int w, int h) returns Grid* {
+                this.w = w;
+                this.h = h;
+                int n = w * h;
+                Grid* g = new Grid(w, h) on heap;
+                this.eb = new float[n]();
+                this.wtr = new int[n]();
+                this.dn = new int[n]();
+                this.fl = new float[n]();
+                this.plateId = new int[n]();
+                this.px = new int[this.nPlates]();
+                this.py = new int[this.nPlates]();
+                this.ptype = new int[this.nPlates]();
+                this.pbase = new float[this.nPlates]();
+                this.pdx = new float[this.nPlates]();
+                this.pdy = new float[this.nPlates]();
+
+                this.buildPlates(g);
+                this.addDetail();
+                this.erode(3);
+                this.climate(g);
+                this.hydrology(g);
+                this.classifyAll(g);
+
+                delete this.eb;
+                delete this.wtr;
+                delete this.dn;
+                delete this.fl;
+                delete this.plateId;
+                delete this.px;
+                delete this.py;
+                delete this.ptype;
+                delete this.pbase;
+                delete this.pdx;
+                delete this.pdy;
+                return g;
+            }
+        }
+
+        // A tiny local RNG for plate seeding (unit float helper), independent of the spatial hash.
+        public class Rng2 {
+            private mutable long state;
+
+            public constructor Rng2(int seed) {
+                mutable long s = cast<long>(seed);
+                if (s <= 0) {
+                    s = 1;
+                }
+                this.state = s % 2147483647;
+                if (this.state == 0) {
+                    this.state = 1;
+                }
+            }
+
+            public method nextInt(int bound) returns int {
+                this.state = (this.state * 48271) % 2147483647;
+                if (bound <= 0) {
+                    return 0;
+                }
+                return cast<int>(this.state) % bound;
+            }
+
+            public method unit() returns float {
+                this.state = (this.state * 48271) % 2147483647;
+                return cast<float>(this.state) / 2147483647.0;
             }
         }
     }
