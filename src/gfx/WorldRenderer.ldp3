@@ -5,13 +5,13 @@ import Agents.World.Biomes;
 import Agents.Gfx.Painter;
 import Agents.Gfx.Camera;
 
-// Draws the world as isometric diamonds through a Painter (GL on screen, or software for headless
-// verification). Only the cells the camera can see are visited (bounded from the four screen corners),
-// and rows are drawn back-to-front so overlap resolves correctly. The world wraps in X, so the grid
-// is sampled with wrap while diamonds are placed at their unwrapped screen positions -- seamless.
-// A second pass draws river channels over the finished terrain, following each cell's stored flow
-// direction toward its downstream neighbour, so rivers wind through the land instead of painting whole
-// tiles blue.
+// Draws the finite rectangular world as isometric tiles through a Painter (GL on screen, or software for
+// headless verification). Each tile is drawn as the quad of its FOUR SHARED grid-lattice corners, so
+// neighbours tessellate exactly -- no per-column vertical seams like a centre+half diamond leaves. A
+// subtle darker border (the outer lattice quad) delimits each tile; the tile colour fills an inset quad
+// on top. A second pass draws river channels as auto-connecting tiles: each river cell links to every
+// neighbour it exchanges water with (its downstream cell and every upstream tributary), so junctions and
+// confluences render correctly. The world no longer wraps -- cells outside [0,w) / [0,h) are skipped.
 program AgentsExe;
 
 public bundle Agents {
@@ -20,38 +20,60 @@ public bundle Agents {
         public class WorldRenderer {
             private static method min4(float a, float b, float c, float d) returns float {
                 mutable float m = a;
-                if (b < m) { m = b; }
-                if (c < m) { m = c; }
-                if (d < m) { m = d; }
+                m = b < m ? b : m;
+                m = c < m ? c : m;
+                m = d < m ? d : m;
                 return m;
             }
 
             private static method max4(float a, float b, float c, float d) returns float {
                 mutable float m = a;
-                if (b > m) { m = b; }
-                if (c > m) { m = c; }
-                if (d > m) { m = d; }
+                m = b > m ? b : m;
+                m = c > m ? c : m;
+                m = d > m ? d : m;
                 return m;
             }
 
-            // A river channel: small water diamonds stepped from this cell's centre to the downstream
-            // neighbour's centre, so consecutive river cells join into a continuous stream.
-            private static method channel(Painter p, int x0, int y0, int x1, int y1, int thw, int thh,
+            // Draw one bordered iso tile from its four lattice corners (in order). The border is the full
+            // quad in a 3/4-brightness shade (it tessellates with neighbours, seam-free); the tile colour
+            // fills a quad inset toward the centre, leaving a thin delimiting edge that fades when zoomed
+            // far out.
+            private static method tile(Painter p, int ax, int ay, int bx, int by, int cx, int cy,
+                                       int dx, int dy, int r, int g, int b) returns void {
+                p.fillQuad(ax, ay, bx, by, cx, cy, dx, dy, r * 3 / 4, g * 3 / 4, b * 3 / 4);
+                int mx = (ax + cx) / 2;
+                int my = (ay + cy) / 2;
+                int t = 13;
+                int iax = ax + (mx - ax) * t / 100;
+                int iay = ay + (my - ay) * t / 100;
+                int ibx = bx + (mx - bx) * t / 100;
+                int iby = by + (my - by) * t / 100;
+                int icx = cx + (mx - cx) * t / 100;
+                int icy = cy + (my - cy) * t / 100;
+                int idx = dx + (mx - dx) * t / 100;
+                int idy = dy + (my - dy) * t / 100;
+                p.fillQuad(iax, iay, ibx, iby, icx, icy, idx, idy, r, g, b);
+            }
+
+            // A river channel from a river cell's centre to the midpoint of the edge it shares with a
+            // connected neighbour: small water diamonds stepped along the way. Both cells draw to the same
+            // shared-edge midpoint, so the segments meet and the network is continuous.
+            private static method channel(Painter p, int cx, int cy, int nx, int ny, int chw, int chh,
                                           int r, int g, int b) returns void {
-                mutable int chw = thw / 3;
-                if (chw < 2) { chw = 2; }
-                mutable int chh = thh / 3;
-                if (chh < 1) { chh = 1; }
+                int mx = (cx + nx) / 2;
+                int my = (cy + ny) / 2;
                 mutable int s = 0;
-                while (s <= 6) {
-                    int px = x0 + (x1 - x0) * s / 6;
-                    int py = y0 + (y1 - y0) * s / 6;
+                while (s <= 5) {
+                    int px = cx + (mx - cx) * s / 5;
+                    int py = cy + (my - cy) * s / 5;
                     p.fillDiamond(px, py, chw, chh, r, g, b);
                     s = s + 1;
                 }
             }
 
             public static method draw(Painter p, Grid* g, Camera cam, int sw, int sh) returns void {
+                int w = g.width();
+                int h = g.height();
                 float ax = cam.gridXAt(0, 0);
                 float bx = cam.gridXAt(sw, 0);
                 float cx = cam.gridXAt(0, sh);
@@ -60,58 +82,95 @@ public bundle Agents {
                 float by = cam.gridYAt(sw, 0);
                 float cy = cam.gridYAt(0, sh);
                 float dy = cam.gridYAt(sw, sh);
-                int gxMin = cast<int>(WorldRenderer.min4(ax, bx, cx, dx)) - 2;
-                int gxMax = cast<int>(WorldRenderer.max4(ax, bx, cx, dx)) + 2;
-                int gyMin = cast<int>(WorldRenderer.min4(ay, by, cy, dy)) - 2;
-                int gyMax = cast<int>(WorldRenderer.max4(ay, by, cy, dy)) + 2;
-                int thw = cam.tileHalfW();
-                int thh = cam.tileHalfH();
-                int h = g.height();
+                mutable int gxMin = cast<int>(WorldRenderer.min4(ax, bx, cx, dx)) - 2;
+                mutable int gxMax = cast<int>(WorldRenderer.max4(ax, bx, cx, dx)) + 2;
+                mutable int gyMin = cast<int>(WorldRenderer.min4(ay, by, cy, dy)) - 2;
+                mutable int gyMax = cast<int>(WorldRenderer.max4(ay, by, cy, dy)) + 2;
+                gxMin = gxMin < 0 ? 0 : gxMin;
+                gyMin = gyMin < 0 ? 0 : gyMin;
+                gxMax = gxMax > w - 1 ? w - 1 : gxMax;
+                gyMax = gyMax > h - 1 ? h - 1 : gyMax;
 
-                // Pass 1: terrain diamonds, back-to-front.
+                // Pass 1: terrain tiles, back-to-front (increasing gx+gy).
                 mutable int gy = gyMin;
                 while (gy <= gyMax) {
-                    if (gy >= 0 && gy < h) {
-                        mutable int gx = gxMin;
-                        while (gx <= gxMax) {
-                            int sx = cam.screenX(gx, gy);
-                            int sy = cam.screenY(gx, gy);
-                            if (sx > 0 - thw && sx < sw + thw && sy > 0 - thh && sy < sh + thh) {
-                                int bo = g.biomeAt(gx, gy);
-                                p.fillDiamond(sx, sy, thw, thh, Biomes.red(bo), Biomes.green(bo),
-                                              Biomes.blue(bo));
-                            }
-                            gx = gx + 1;
+                    mutable int gx = gxMin;
+                    while (gx <= gxMax) {
+                        int ax0 = cam.screenX(gx, gy);
+                        int ay0 = cam.screenY(gx, gy);
+                        int bx0 = cam.screenX(gx + 1, gy);
+                        int by0 = cam.screenY(gx + 1, gy);
+                        int cx0 = cam.screenX(gx + 1, gy + 1);
+                        int cy0 = cam.screenY(gx + 1, gy + 1);
+                        int dx0 = cam.screenX(gx, gy + 1);
+                        int dy0 = cam.screenY(gx, gy + 1);
+                        int loX = ax0 < dx0 ? ax0 : dx0;
+                        int hiX = bx0 > cx0 ? bx0 : cx0;
+                        if (hiX >= 0 && loX <= sw && by0 <= sh && dy0 >= 0) {
+                            int bo = g.biomeAt(gx, gy);
+                            WorldRenderer.tile(p, ax0, ay0, bx0, by0, cx0, cy0, dx0, dy0,
+                                               Biomes.red(bo), Biomes.green(bo), Biomes.blue(bo));
                         }
+                        gx = gx + 1;
                     }
                     gy = gy + 1;
                 }
 
-                // Pass 2: river channels over the terrain, following each cell's flow direction.
+                // Pass 2: river channels (auto-connecting) over the terrain.
                 int river = cast<int>(Biome.River);
                 int rr = Biomes.red(river);
                 int rg = Biomes.green(river);
                 int rb = Biomes.blue(river);
+                mutable int chw = cam.tileHalfW() / 3;
+                chw = chw < 2 ? 2 : chw;
+                mutable int chh = cam.tileHalfH() / 3;
+                chh = chh < 1 ? 1 : chh;
                 mutable int qy = gyMin;
                 while (qy <= gyMax) {
-                    if (qy >= 0 && qy < h) {
-                        mutable int qx = gxMin;
-                        while (qx <= gxMax) {
-                            if (g.hasFlow(qx, qy)) {
-                                int sx = cam.screenX(qx, qy);
-                                int sy = cam.screenY(qx, qy);
-                                if (sx > 0 - thw && sx < sw + thw && sy > 0 - thh && sy < sh + thh) {
-                                    int fdx = g.flowDx(qx, qy);
-                                    int fdy = g.flowDy(qx, qy);
-                                    int dsx = cam.screenX(qx + fdx, qy + fdy);
-                                    int dsy = cam.screenY(qx + fdx, qy + fdy);
-                                    WorldRenderer.channel(p, sx, sy, dsx, dsy, thw, thh, rr, rg, rb);
-                                }
+                    mutable int qx = gxMin;
+                    while (qx <= gxMax) {
+                        if (g.hasFlow(qx, qy)) {
+                            int ccx = (cam.screenX(qx, qy) + cam.screenX(qx + 1, qy + 1)) / 2;
+                            int ccy = (cam.screenY(qx, qy) + cam.screenY(qx + 1, qy + 1)) / 2;
+                            if (ccx > 0 - 40 && ccx < sw + 40 && ccy > 0 - 40 && ccy < sh + 40) {
+                                WorldRenderer.drawCell(p, g, cam, qx, qy, w, h, ccx, ccy, chw, chh, rr, rg, rb);
                             }
-                            qx = qx + 1;
                         }
+                        qx = qx + 1;
                     }
                     qy = qy + 1;
+                }
+            }
+
+            // Draw the channels out of one river cell: toward its downstream neighbour and toward every
+            // upstream neighbour that drains into it (auto-tiling across all 8 directions).
+            private static method drawCell(Painter p, Grid* g, Camera cam, int qx, int qy, int w, int h,
+                                           int ccx, int ccy, int chw, int chh, int r, int gg, int b) returns void {
+                // downstream
+                int fdx = g.flowDx(qx, qy);
+                int fdy = g.flowDy(qx, qy);
+                int dcx = (cam.screenX(qx + fdx, qy + fdy) + cam.screenX(qx + fdx + 1, qy + fdy + 1)) / 2;
+                int dcy = (cam.screenY(qx + fdx, qy + fdy) + cam.screenY(qx + fdx + 1, qy + fdy + 1)) / 2;
+                WorldRenderer.channel(p, ccx, ccy, dcx, dcy, chw, chh, r, gg, b);
+                // upstream tributaries
+                mutable int oy = 0 - 1;
+                while (oy <= 1) {
+                    mutable int ox = 0 - 1;
+                    while (ox <= 1) {
+                        if (!(ox == 0 && oy == 0)) {
+                            int nx = qx + ox;
+                            int ny = qy + oy;
+                            if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
+                                if (g.hasFlow(nx, ny) && nx + g.flowDx(nx, ny) == qx && ny + g.flowDy(nx, ny) == qy) {
+                                    int ncx = (cam.screenX(nx, ny) + cam.screenX(nx + 1, ny + 1)) / 2;
+                                    int ncy = (cam.screenY(nx, ny) + cam.screenY(nx + 1, ny + 1)) / 2;
+                                    WorldRenderer.channel(p, ccx, ccy, ncx, ncy, chw, chh, r, gg, b);
+                                }
+                            }
+                        }
+                        ox = ox + 1;
+                    }
+                    oy = oy + 1;
                 }
             }
         }

@@ -84,6 +84,62 @@ public bundle Agents {
                 }
             }
 
+            // X where edge (ax,ay)-(bx,by) crosses scanline y, or a large-negative sentinel if it does
+            // not cross. Half-open in y ([lo,hi)) so a shared vertex is counted by only one edge.
+            private method edgeX(int ax, int ay, int bx, int by, int y) returns int {
+                if (ay == by) {
+                    return 0 - 2000000000;
+                }
+                mutable int lo = ay;
+                mutable int hi = by;
+                if (lo > hi) {
+                    lo = by;
+                    hi = ay;
+                }
+                if (y < lo || y >= hi) {
+                    return 0 - 2000000000;
+                }
+                return ax + (bx - ax) * (y - ay) / (by - ay);
+            }
+
+            // Scanline-fill a convex quad. Adjacent tiles pass identical shared corners, so the integer
+            // edge intersections match exactly on shared edges -- seamless tessellation, no vertical gaps.
+            public override method fillQuad(int x0, int y0, int x1, int y1, int x2, int y2, int x3, int y3,
+                                            int r, int g, int b) returns void {
+                mutable int minY = y0;
+                minY = y1 < minY ? y1 : minY;
+                minY = y2 < minY ? y2 : minY;
+                minY = y3 < minY ? y3 : minY;
+                mutable int maxY = y0;
+                maxY = y1 > maxY ? y1 : maxY;
+                maxY = y2 > maxY ? y2 : maxY;
+                maxY = y3 > maxY ? y3 : maxY;
+                minY = minY < 0 ? 0 : minY;
+                maxY = maxY >= this.cH ? this.cH - 1 : maxY;
+                int sentinel = 0 - 1000000000;
+                mutable int y = minY;
+                while (y <= maxY) {
+                    int e0 = this.edgeX(x0, y0, x1, y1, y);
+                    int e1 = this.edgeX(x1, y1, x2, y2, y);
+                    int e2 = this.edgeX(x2, y2, x3, y3, y);
+                    int e3 = this.edgeX(x3, y3, x0, y0, y);
+                    mutable int lo = 2000000000;
+                    mutable int hi = 0 - 2000000000;
+                    lo = (e0 > sentinel && e0 < lo) ? e0 : lo;
+                    hi = (e0 > sentinel && e0 > hi) ? e0 : hi;
+                    lo = (e1 > sentinel && e1 < lo) ? e1 : lo;
+                    hi = (e1 > sentinel && e1 > hi) ? e1 : hi;
+                    lo = (e2 > sentinel && e2 < lo) ? e2 : lo;
+                    hi = (e2 > sentinel && e2 > hi) ? e2 : hi;
+                    lo = (e3 > sentinel && e3 < lo) ? e3 : lo;
+                    hi = (e3 > sentinel && e3 > hi) ? e3 : hi;
+                    if (hi >= lo) {
+                        this.fillRect(lo, y, hi - lo + 1, 1, r, g, b);
+                    }
+                    y = y + 1;
+                }
+            }
+
             // Top-down PPM text (row 0 = top), so the buffer maps straight through.
             public method save(String path) returns void {
                 mutable StringBuilder sb = new StringBuilder() on heap;

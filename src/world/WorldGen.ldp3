@@ -127,9 +127,12 @@ public bundle Agents {
 
             // scratch index with X wrap, Y clamp (parallel to Grid layout)
             private method sidx(int x, int y) returns int {
-                mutable int xx = x % this.w;
+                mutable int xx = x;
                 if (xx < 0) {
-                    xx = xx + this.w;
+                    xx = 0;
+                }
+                if (xx >= this.w) {
+                    xx = this.w - 1;
                 }
                 mutable int yy = y;
                 if (yy < 0) {
@@ -141,14 +144,11 @@ public bundle Agents {
                 return yy * this.w + xx;
             }
 
-            // toroidal X distance between two columns
+            // Plain X distance between two columns (no wrap -- finite rectangular world).
             private method dxWrap(int a, int b) returns int {
                 mutable int d = a - b;
                 if (d < 0) {
                     d = 0 - d;
-                }
-                if (d > this.w - d) {
-                    d = this.w - d;
                 }
                 return d;
             }
@@ -184,9 +184,18 @@ public bundle Agents {
                         float warp = cast<float>(this.w) * 0.12;
                         mutable int wx = x + cast<int>((this.vnoise(nx * 3.0, ny * 3.0, 3) - 0.5) * 2.0 * warp);
                         mutable int wy = y + cast<int>((this.vnoise(nx * 3.0 + 11.0, ny * 3.0 + 7.0, 3) - 0.5) * 2.0 * warp);
-                        wx = ((wx % this.w) + this.w) % this.w;
-                        if (wy < 0) { wy = 0; }
-                        if (wy >= this.h) { wy = this.h - 1; }
+                        if (wx < 0) {
+                            wx = 0;
+                        }
+                        if (wx >= this.w) {
+                            wx = this.w - 1;
+                        }
+                        if (wy < 0) {
+                            wy = 0;
+                        }
+                        if (wy >= this.h) {
+                            wy = this.h - 1;
+                        }
                         mutable int best = 0;
                         mutable int bestd = 2000000000;
                         mutable int second = 0;
@@ -295,7 +304,7 @@ public bundle Agents {
                     // field's averaging, which fuses everything into one globe-spanning mass). Each blob
                     // has a domain-warped, noise-modulated radius so coasts are organic, and ocean fills
                     // the gaps between blobs -- distinct continents, like the real world.
-                    int nc = 6;
+                    int nc = 5 + cast<int>(cast<float>(this.w) / cast<float>(this.h) * 2.0);
                     Rng2 rng = new Rng2(this.seed ^ 0x2C0F) on stack;
                     int[] ccx = new int[nc]();
                     int[] ccy = new int[nc]();
@@ -322,13 +331,9 @@ public bundle Agents {
                         while (k < nc) {
                             float cxn = cast<float>(ccx[k]) / cast<float>(this.w);
                             float cyn = cast<float>(ccy[k]) / cast<float>(this.h);
-                            mutable float dxn = wxf - cxn;
-                            if (dxn > 0.5) {
-                                dxn = dxn - 1.0;
-                            }
-                            if (dxn < 0.0 - 0.5) {
-                                dxn = dxn + 1.0;
-                            }
+                            // Scale X by the aspect ratio so continents stay round (not stretched) on a
+                            // wide rectangular world; radius ccr is then in height-fractions.
+                            float dxn = (wxf - cxn) * cast<float>(this.w) / cast<float>(this.h);
                             float dyn = wyf - cyn;
                             float dist = this.fsqrt(dxn * dxn + dyn * dyn);
                             float m = 1.0 - dist / ccr[k];
