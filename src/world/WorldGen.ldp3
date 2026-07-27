@@ -30,6 +30,9 @@ public bundle Agents {
             private mutable int[] dn;           // downstream cell index, or -1
             private mutable float[] fl;         // flow accumulation
             private mutable int[] plateId;
+            private mutable float[] fld;        // pit/flat-filled elevation (priority-flood)
+            private mutable float[] hkey;       // binary min-heap: keys (flood elevation)
+            private mutable int[] hval;         // binary min-heap: values (cell index)
 
             // plate descriptors
             private mutable int[] px;
@@ -542,118 +545,164 @@ public bundle Agents {
             }
 
             // ---- pass 5: hydrology (steepest descent -> rivers; pits -> lakes) ----
+            // Binary min-heap over (flood-elevation key, cell value). Push bubbles the new leaf up.
+            private method heapPush(int hn, float key, int val) returns int {
+                mutable int c = hn;
+                while (c > 0) {
+                    int p = (c - 1) / 2;
+                    if (this.hkey[p] <= key) {
+                        break;
+                    }
+                    this.hkey[c] = this.hkey[p];
+                    this.hval[c] = this.hval[p];
+                    c = p;
+                }
+                this.hkey[c] = key;
+                this.hval[c] = val;
+                return hn + 1;
+            }
+
+            // Remove the minimum (already read from index 0 by the caller): move the last leaf to the root
+            // and sift it down. Returns the new size.
+            private method heapPop(int hn) returns int {
+                int newn = hn - 1;
+                float key = this.hkey[newn];
+                int val = this.hval[newn];
+                mutable int c = 0;
+                while (true) {
+                    int l = 2 * c + 1;
+                    if (l >= newn) {
+                        break;
+                    }
+                    mutable int child = l;
+                    int rr = l + 1;
+                    if (rr < newn && this.hkey[rr] < this.hkey[l]) {
+                        child = rr;
+                    }
+                    if (this.hkey[child] >= key) {
+                        break;
+                    }
+                    this.hkey[c] = this.hkey[child];
+                    this.hval[c] = this.hval[child];
+                    c = child;
+                }
+                this.hkey[c] = key;
+                this.hval[c] = val;
+                return newn;
+            }
+
+            // Priority-Flood + epsilon (Barnes et al.): flood inward from the sea through a min-heap, so
+            // every land cell gets a monotonic downhill path to the ocean. This fills pits AND resolves
+            // flats (a tiny epsilon gradient), and the order in which cells are discovered IS the drainage
+            // tree -- each cell drains to the neighbour that reached it -- giving convergent, dendritic
+            // rivers with no straight parallel-diagonal artifacts. Filled depressions become lakes.
             private method hydrology(Grid* g) returns void {
                 int n = this.w * this.h;
-                // downstream + init flow
+                float eps = 0.00001;
+                // wtr is free after climate(): reuse it as the visited flag.
                 mutable int i = 0;
                 while (i < n) {
+                    this.wtr[i] = 0;
+                    this.fld[i] = this.eb[i];
+                    this.dn[i] = 0 - 1;
                     this.fl[i] = 1.0;
-                    if (this.eb[i] < this.sea) {
-                        this.dn[i] = 0 - 1;
-                    } else {
-                        int x = i % this.w;
-                        int y = i / this.w;
-                        mutable int bestj = 0 - 1;
-                        // Steepest descent by SLOPE (drop / distance), not raw drop. On a smooth slope the
-                        // diagonal neighbour is always the lowest-valued (it sits further downhill), so a
-                        // raw-drop D8 sends every cell down the same diagonal -- rivers come out as straight
-                        // parallel diagonals. Dividing the drop by the step length (1 orthogonal, sqrt(2)
-                        // diagonal) removes that bias and lets rivers follow the real terrain.
-                        mutable float bestSlope = 0.0;
-                        float here = this.eb[i];
-                        mutable int oy = 0 - 1;
-                        while (oy <= 1) {
-                            mutable int ox = 0 - 1;
-                            while (ox <= 1) {
-                                if (!(ox == 0 && oy == 0)) {
-                                    int j = this.sidx(x + ox, y + oy);
-                                    float drop = here - this.eb[j];
-                                    if (drop > 0.0) {
-                                        mutable float dist = 1.0;
-                                        if (ox != 0 && oy != 0) {
-                                            dist = 1.41421356;
-                                        }
-                                        float slope = drop / dist;
-                                        if (slope > bestSlope) {
-                                            bestSlope = slope;
-                                            bestj = j;
-                                        }
-                                    }
-                                }
-                                ox = ox + 1;
-                            }
-                            oy = oy + 1;
-                        }
-                        this.dn[i] = bestj;
-                        if (bestj == 0 - 1) {
-                            g.setFlag(x, y, Grid.FLAG_LAKE);
-                            g.setFlag(x, y, Grid.FLAG_ENDORHEIC);
-                        }
-                    }
                     i = i + 1;
                 }
-                // process cells high -> low via a counting sort on quantized elevation
-                int bins = 1024;
-                int[] cnt = new int[bins]();
-                mutable int k = 0;
-                while (k < n) {
-                    int bi = cast<int>(this.eb[k] * cast<float>(bins - 1));
-                    cnt[bi] = cnt[bi] + 1;
-                    k = k + 1;
+                // Seed the heap with every sea cell (the outlets, at their true elevation).
+                mutable int hn = 0;
+                mutable int s = 0;
+                while (s < n) {
+                    if (this.eb[s] < this.sea) {
+                        this.wtr[s] = 1;
+                        hn = this.heapPush(hn, this.eb[s], s);
+                    }
+                    s = s + 1;
                 }
-                // positions: highest bin first
-                int[] pos = new int[bins]();
-                mutable int acc = 0;
-                mutable int b = bins - 1;
-                while (b >= 0) {
-                    pos[b] = acc;
-                    acc = acc + cnt[b];
-                    b = b - 1;
+                // A fully-land world (no sea) still needs an outlet: seed the single lowest cell.
+                if (hn == 0) {
+                    mutable int lo = 0;
+                    mutable int k = 1;
+                    while (k < n) {
+                        if (this.eb[k] < this.eb[lo]) {
+                            lo = k;
+                        }
+                        k = k + 1;
+                    }
+                    this.wtr[lo] = 1;
+                    hn = this.heapPush(hn, this.eb[lo], lo);
                 }
-                int[] order = new int[n]();
-                mutable int c2 = 0;
-                while (c2 < n) {
-                    int bi = cast<int>(this.eb[c2] * cast<float>(bins - 1));
-                    order[pos[bi]] = c2;
-                    pos[bi] = pos[bi] + 1;
-                    c2 = c2 + 1;
+                int[] order = new int[n]();   // pop order, for downstream flow accumulation in reverse
+                mutable int oc = 0;
+                while (hn > 0) {
+                    int cell = this.hval[0];
+                    float cfld = this.hkey[0];
+                    hn = this.heapPop(hn);
+                    order[oc] = cell;
+                    oc = oc + 1;
+                    int cx = cell % this.w;
+                    int cy = cell / this.w;
+                    mutable int oy = 0 - 1;
+                    while (oy <= 1) {
+                        mutable int ox = 0 - 1;
+                        while (ox <= 1) {
+                            if (!(ox == 0 && oy == 0)) {
+                                int nyy = cy + oy;
+                                if (nyy >= 0 && nyy < this.h) {
+                                    int j = this.sidx(cx + ox, nyy);
+                                    if (this.wtr[j] == 0) {
+                                        this.wtr[j] = 1;
+                                        mutable float nf = this.eb[j];
+                                        if (nf < cfld + eps) {
+                                            nf = cfld + eps;
+                                        }
+                                        this.fld[j] = nf;
+                                        this.dn[j] = cell;
+                                        hn = this.heapPush(hn, nf, j);
+                                    }
+                                }
+                            }
+                            ox = ox + 1;
+                        }
+                        oy = oy + 1;
+                    }
                 }
-                mutable int oi = 0;
-                while (oi < n) {
-                    int cell = order[oi];
+                // Flow accumulation: leaves first (reverse discovery order), pushing flow downstream.
+                mutable int r = oc - 1;
+                while (r >= 0) {
+                    int cell = order[r];
                     int d = this.dn[cell];
                     if (d != 0 - 1) {
                         this.fl[d] = this.fl[d] + this.fl[cell];
                     }
-                    oi = oi + 1;
+                    r = r - 1;
                 }
-                float riverThr = cast<float>(this.w) * 0.10;
+                // Classify hydrographic features: a cell filled well above its real height is a lake;
+                // otherwise a land cell carrying enough flow is a river, drawn toward its downstream cell.
+                float riverThr = cast<float>(this.w) * 0.14;
                 mutable int q = 0;
                 while (q < n) {
-                    if (this.eb[q] >= this.sea && this.dn[q] != 0 - 1 && this.fl[q] > riverThr) {
-                        int x = q % this.w;
-                        int y = q / this.w;
-                        g.setFlag(x, y, Grid.FLAG_RIVER);
-                        // Record which of the 8 neighbours the water flows into, so the renderer can draw a
-                        // connected channel. Normalize the X delta for the cylinder wrap (east<->west).
-                        int d = this.dn[q];
-                        mutable int gdx = d % this.w - x;
-                        if (gdx > 1) {
-                            gdx = gdx - this.w;
-                        }
-                        if (gdx < 0 - 1) {
-                            gdx = gdx + this.w;
-                        }
-                        g.setFlowDir(x, y, gdx, d / this.w - y);
-                        this.eb[q] = this.eb[q] - 0.02;
-                        if (this.eb[q] < 0.0) {
-                            this.eb[q] = 0.0;
+                    int x = q % this.w;
+                    int y = q / this.w;
+                    if (this.eb[q] >= this.sea) {
+                        if (this.fld[q] > this.eb[q] + 0.010) {
+                            g.setFlag(x, y, Grid.FLAG_LAKE);
+                        } else {
+                            if (this.dn[q] != 0 - 1 && this.fl[q] > riverThr) {
+                                g.setFlag(x, y, Grid.FLAG_RIVER);
+                                int d = this.dn[q];
+                                mutable int gdx = d % this.w - x;
+                                if (gdx > 1) {
+                                    gdx = gdx - this.w;
+                                }
+                                if (gdx < 0 - 1) {
+                                    gdx = gdx + this.w;
+                                }
+                                g.setFlowDir(x, y, gdx, d / this.w - y);
+                            }
                         }
                     }
                     q = q + 1;
                 }
-                delete cnt;
-                delete pos;
                 delete order;
             }
 
@@ -767,6 +816,9 @@ public bundle Agents {
                 this.dn = new int[n]();
                 this.fl = new float[n]();
                 this.plateId = new int[n]();
+                this.fld = new float[n]();
+                this.hkey = new float[n]();
+                this.hval = new int[n]();
                 this.px = new int[this.nPlates]();
                 this.py = new int[this.nPlates]();
                 this.ptype = new int[this.nPlates]();
@@ -792,6 +844,9 @@ public bundle Agents {
                 delete this.dn;
                 delete this.fl;
                 delete this.plateId;
+                delete this.fld;
+                delete this.hkey;
+                delete this.hval;
                 delete this.px;
                 delete this.py;
                 delete this.ptype;
