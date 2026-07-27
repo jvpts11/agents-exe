@@ -1,0 +1,77 @@
+import System.IO.File;
+import System.Text.StringBuilder;
+import Agents.Gfx.Painter;
+
+// The CPU painter: fills rectangles into an owned RGB buffer and can dump it as a PPM. This is both
+// the headless fallback and how the visuals are checked -- the exact picture the windowed game draws.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class SoftPainter implements Painter {
+            private mutable byte[] buf;
+            private mutable int cW;
+            private mutable int cH;
+
+            public constructor SoftPainter(int cW, int cH) {
+                this.cW = cW;
+                this.cH = cH;
+                this.buf = new byte[cW * cH * 3]();
+            }
+
+            public destructor ~SoftPainter() returns void {
+                delete this.buf;
+            }
+
+            public override method fillRect(int x, int y, int w, int h, int r, int g, int b) returns void {
+                mutable int py = y;
+                int ye = y + h;
+                int xe = x + w;
+                while (py < ye) {
+                    if (py >= 0 && py < this.cH) {
+                        mutable int px = x;
+                        while (px < xe) {
+                            if (px >= 0 && px < this.cW) {
+                                int i = (py * this.cW + px) * 3;
+                                this.buf[i] = cast<byte>(r);
+                                this.buf[i + 1] = cast<byte>(g);
+                                this.buf[i + 2] = cast<byte>(b);
+                            }
+                            px = px + 1;
+                        }
+                    }
+                    py = py + 1;
+                }
+            }
+
+            // Top-down PPM text (row 0 = top), so the buffer maps straight through.
+            public method save(String path) returns void {
+                mutable StringBuilder sb = new StringBuilder() on heap;
+                sb.append("P3\n");
+                sb.appendInt(this.cW);
+                sb.append(" ");
+                sb.appendInt(this.cH);
+                sb.append("\n255\n");
+                mutable int y = 0;
+                while (y < this.cH) {
+                    mutable int x = 0;
+                    while (x < this.cW) {
+                        int i = (y * this.cW + x) * 3;
+                        sb.appendInt(cast<int>(this.buf[i]) & 255);
+                        sb.append(" ");
+                        sb.appendInt(cast<int>(this.buf[i + 1]) & 255);
+                        sb.append(" ");
+                        sb.appendInt(cast<int>(this.buf[i + 2]) & 255);
+                        sb.append(" ");
+                        x = x + 1;
+                    }
+                    sb.append("\n");
+                    y = y + 1;
+                }
+                File.writeAll(path, sb.toString());
+                delete sb;
+            }
+        }
+    }
+}

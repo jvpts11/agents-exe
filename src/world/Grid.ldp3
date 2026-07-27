@@ -1,0 +1,118 @@
+import System.IO.Console;
+
+// The world as Structure-of-Arrays: five parallel flat arrays over a W x H grid, indexed y*W + x.
+// The world is a CYLINDER -- X wraps (east<->west), Y clamps at the poles. Compact element types
+// (short/byte) keep a 1920x1920 world near ~9 MB with no GC and a layout we control -- the LDP3
+// memory showcase. Elevation is quantized to 0..10000; temp/moist to 0..100; biome is a Biome
+// ordinal; flags is a bitset.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public class Grid {
+            // Flag bits packed into the `flags` byte array.
+            public static fixed int FLAG_RIVER = 1;
+            public static fixed int FLAG_LAKE = 2;
+            public static fixed int FLAG_VENT = 4;
+            public static fixed int FLAG_ENDORHEIC = 8;
+            public static fixed int FLAG_COAST = 16;
+
+            private mutable int w;
+            private mutable int h;
+            private mutable short[] elevation;   // 0..10000 (normalized height * 10000)
+            private mutable byte[] temp;          // 0..100
+            private mutable byte[] moist;         // 0..100
+            private mutable byte[] biome;         // Biome ordinal
+            private mutable byte[] flags;         // bitset (FLAG_*)
+
+            public constructor Grid(int w, int h) {
+                this.w = w;
+                this.h = h;
+                int n = w * h;
+                this.elevation = new short[n]();
+                this.temp = new byte[n]();
+                this.moist = new byte[n]();
+                this.biome = new byte[n]();
+                this.flags = new byte[n]();
+            }
+
+            public destructor ~Grid() returns void {
+                delete this.elevation;
+                delete this.temp;
+                delete this.moist;
+                delete this.biome;
+                delete this.flags;
+            }
+
+            public method width() returns int {
+                return this.w;
+            }
+
+            public method height() returns int {
+                return this.h;
+            }
+
+            // Cylinder index: X wraps, Y clamps.
+            public method idx(int x, int y) returns int {
+                mutable int xx = x % this.w;
+                if (xx < 0) {
+                    xx = xx + this.w;
+                }
+                mutable int yy = y;
+                if (yy < 0) {
+                    yy = 0;
+                }
+                if (yy >= this.h) {
+                    yy = this.h - 1;
+                }
+                return yy * this.w + xx;
+            }
+
+            public method elevAt(int x, int y) returns int {
+                return cast<int>(this.elevation[this.idx(x, y)]);
+            }
+
+            public method setElev(int x, int y, int v) returns void {
+                this.elevation[this.idx(x, y)] = cast<short>(v);
+            }
+
+            public method tempAt(int x, int y) returns int {
+                return cast<int>(this.temp[this.idx(x, y)]);
+            }
+
+            public method setTemp(int x, int y, int v) returns void {
+                this.temp[this.idx(x, y)] = cast<byte>(v);
+            }
+
+            public method moistAt(int x, int y) returns int {
+                return cast<int>(this.moist[this.idx(x, y)]);
+            }
+
+            public method setMoist(int x, int y, int v) returns void {
+                this.moist[this.idx(x, y)] = cast<byte>(v);
+            }
+
+            public method biomeAt(int x, int y) returns int {
+                return cast<int>(this.biome[this.idx(x, y)]);
+            }
+
+            public method setBiome(int x, int y, int ordinal) returns void {
+                this.biome[this.idx(x, y)] = cast<byte>(ordinal);
+            }
+
+            public method flagsAt(int x, int y) returns int {
+                return cast<int>(this.flags[this.idx(x, y)]);
+            }
+
+            public method setFlag(int x, int y, int bit) returns void {
+                int i = this.idx(x, y);
+                this.flags[i] = cast<byte>(cast<int>(this.flags[i]) | bit);
+            }
+
+            public method hasFlag(int x, int y, int bit) returns boolean {
+                return (this.flagsAt(x, y) & bit) != 0;
+            }
+        }
+    }
+}

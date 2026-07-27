@@ -1,0 +1,219 @@
+import System.IO.Console;
+import Agents.World.Grid;
+import Agents.World.Biome;
+
+// World generation, slice 2: a seamless-in-X fractal heightmap + latitude/moisture climate + the
+// BIOME_CATALOG classification pipeline. Deterministic from the seed. Plates, thermal erosion and
+// hydrology (rivers/lakes) come in the next slice; this already yields recognizable continents,
+// coasts, mountains and climate-banded biomes. All work in normalized [0,1] so it is size-agnostic.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public class WorldGen {
+            private mutable int seed;
+            private mutable int octaves;
+            private mutable int baseCells;
+            private mutable int seaLevel10k;   // sea level as elevation units (0..10000)
+
+            public constructor WorldGen(int seed) {
+                this.seed = seed;
+                this.octaves = 6;
+                this.baseCells = 3;         // lattice cells across the width at octave 0
+                this.seaLevel10k = 4200;    // ~0.42; the player-facing land/water knob later
+            }
+
+            // A wrapping integer hash of a lattice point -> [0,1). Integer overflow wraps by definition
+            // in LDP3 (defined, not UB), which is exactly what a hash wants.
+            private method hash01(int xi, int yi) returns float {
+                mutable int n = xi * 374761393;
+                n = n + yi * 668265263;
+                n = n + this.seed * 1442695041;
+                n = n ^ (n >> 13);
+                n = n * 1274126177;
+                n = n ^ (n >> 16);
+                int m = n & 2147483647;
+                return cast<float>(m) / 2147483647.0;
+            }
+
+            private method smooth(float t) returns float {
+                return t * t * (3.0 - 2.0 * t);
+            }
+
+            // Value noise at lattice coord (fx,fy); X wraps over `period` cells (seamless cylinder).
+            private method vnoise(float fx, float fy, int period) returns float {
+                int x0 = cast<int>(fx);
+                int y0 = cast<int>(fy);
+                float tx = fx - cast<float>(x0);
+                float ty = fy - cast<float>(y0);
+                int x0w = x0 % period;
+                int x1w = (x0 + 1) % period;
+                float sx = this.smooth(tx);
+                float sy = this.smooth(ty);
+                float a = this.hash01(x0w, y0);
+                float b = this.hash01(x1w, y0);
+                float c = this.hash01(x0w, y0 + 1);
+                float d = this.hash01(x1w, y0 + 1);
+                float ab = a + (b - a) * sx;
+                float cd = c + (d - c) * sx;
+                return ab + (cd - ab) * sy;
+            }
+
+            // Fractal Brownian motion in [0,1]; each octave doubles the (integer) X period, so the
+            // whole field stays seamless across the east<->west wrap.
+            private method fbm(int x, int y, int w, int h, int salt) returns float {
+                float nx = cast<float>(x) / cast<float>(w);
+                float ny = cast<float>(y) / cast<float>(h);
+                mutable float sum = 0.0;
+                mutable float amp = 1.0;
+                mutable float tot = 0.0;
+                mutable int cells = this.baseCells + salt;
+                mutable int o = 0;
+                while (o < this.octaves) {
+                    float v = this.vnoise(nx * cast<float>(cells), ny * cast<float>(cells), cells);
+                    sum = sum + v * amp;
+                    tot = tot + amp;
+                    amp = amp * 0.5;
+                    cells = cells * 2;
+                    o = o + 1;
+                }
+                return sum / tot;
+            }
+
+            // Latitudinal moisture belt: wet equator (ITCZ), dry ~30 deg (horse latitudes), wet ~55 deg
+            // (temperate), dry poles. `alat` is |latitude| in [0,1] (0 = equator, 1 = pole).
+            private method belt(float alat) returns float {
+                if (alat < 0.12) {
+                    return 0.90;
+                }
+                if (alat < 0.36) {
+                    float t = (alat - 0.12) / 0.24;
+                    return 0.90 - 0.70 * t;      // ramp down to the ~30 deg dry band
+                }
+                if (alat < 0.66) {
+                    float t = (alat - 0.36) / 0.30;
+                    return 0.20 + 0.50 * t;      // rise to the temperate wet band
+                }
+                float t = (alat - 0.66) / 0.34;
+                return 0.70 - 0.50 * t;          // fall to the dry poles
+            }
+
+            public method generate(int w, int h) returns Grid* {
+                Grid* g = new Grid(w, h) on heap;
+                float sea = cast<float>(this.seaLevel10k) / 10000.0;
+                mutable int y = 0;
+                while (y < h) {
+                    float alat = this.absLat(y, h);
+                    float latBand = 1.0 - alat;                 // 1 at equator, 0 at poles
+                    float beltM = this.belt(alat);
+                    mutable int x = 0;
+                    while (x < w) {
+                        float e = this.fbm(x, y, w, h, 0);
+                        float mn = this.fbm(x, y, w, h, 37);
+                        mutable float lapse = 0.0;
+                        if (e > sea) {
+                            lapse = 0.9 * (e - sea);
+                        }
+                        mutable float t = latBand - lapse;
+                        if (t < 0.0) { t = 0.0; }
+                        if (t > 1.0) { t = 1.0; }
+                        mutable float m = 0.55 * mn + 0.45 * beltM;
+                        if (m > 1.0) { m = 1.0; }
+                        g.setElev(x, y, cast<int>(e * 10000.0));
+                        g.setTemp(x, y, cast<int>(t * 100.0));
+                        g.setMoist(x, y, cast<int>(m * 100.0));
+                        g.setBiome(x, y, this.classify(e, t, m, sea));
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                return g;
+            }
+
+            private method absLat(int y, int h) returns float {
+                float ny = cast<float>(y) / cast<float>(h - 1);
+                mutable float d = 2.0 * ny - 1.0;
+                if (d < 0.0) { d = 0.0 - d; }
+                return d;   // |latitude| in [0,1]
+            }
+
+            // The BIOME_CATALOG priority pipeline (slice 2: no river/lake/vent flags yet). Returns a
+            // Biome ordinal. E/T/M are normalized [0,1]; `sea` is the sea-level threshold.
+            private method classify(float e, float t, float m, float sea) returns int {
+                // A. Below sea level -> water by depth (+ SeaIce polar, CoralReef warm shallow).
+                if (e < sea) {
+                    if (e < 0.08) { return cast<int>(Biome.MarineTrench); }
+                    if (e < 0.20) { return cast<int>(Biome.DeepOcean); }
+                    if (t < 0.15) { return cast<int>(Biome.SeaIce); }
+                    if (e >= sea - 0.06) {
+                        if (t >= 0.85) { return cast<int>(Biome.CoralReef); }
+                        return cast<int>(Biome.ShallowSea);
+                    }
+                    return cast<int>(Biome.Ocean);
+                }
+                // C. Coast fringe.
+                if (e < sea + 0.03) {
+                    if (t >= 0.85 && m >= 0.60) { return cast<int>(Biome.Mangrove); }
+                    if (t < 0.35) { return cast<int>(Biome.RockyShore); }
+                    return cast<int>(Biome.Beach);
+                }
+                // D. Peaks & mountains.
+                if (e >= 0.90) {
+                    if (t < 0.35) { return cast<int>(Biome.SnowPeak); }
+                    return cast<int>(Biome.Mountain);
+                }
+                if (e >= 0.75) {
+                    if (t < 0.15) { return cast<int>(Biome.Glacier); }
+                    if (t >= 0.55 && m >= 0.60) { return cast<int>(Biome.AlpineMeadow); }
+                    return cast<int>(Biome.Mountain);
+                }
+                if (e >= 0.62) {
+                    if (m < 0.20) { return cast<int>(Biome.Badlands); }
+                    return cast<int>(Biome.Hills);
+                }
+                // E. Lowland: wetland override, then Whittaker(T, M).
+                if (m >= 0.90) {
+                    if (t >= 0.78) { return cast<int>(Biome.Swamp); }
+                    if (t < 0.35) { return cast<int>(Biome.Bog); }
+                    return cast<int>(Biome.Marsh);
+                }
+                return this.whittaker(t, m);
+            }
+
+            // The 17 lowland land biomes over temperature (rows) x moisture (columns).
+            private method whittaker(float t, float m) returns int {
+                if (t < 0.15) {                                   // Polar
+                    if (m < 0.20) { return cast<int>(Biome.ColdDesert); }
+                    if (m < 0.60) { return cast<int>(Biome.Tundra); }
+                    if (m < 0.80) { return cast<int>(Biome.Snowfield); }
+                    return cast<int>(Biome.IceCap);
+                }
+                if (t < 0.35) {                                   // Boreal
+                    if (m < 0.20) { return cast<int>(Biome.ColdDesert); }
+                    if (m < 0.40) { return cast<int>(Biome.Steppe); }
+                    return cast<int>(Biome.Taiga);
+                }
+                if (t < 0.55) {                                   // Cool temperate
+                    if (m < 0.20) { return cast<int>(Biome.ColdDesert); }
+                    if (m < 0.40) { return cast<int>(Biome.Steppe); }
+                    if (m < 0.60) { return cast<int>(Biome.Prairie); }
+                    if (m < 0.80) { return cast<int>(Biome.DeciduousForest); }
+                    return cast<int>(Biome.TemperateRainforest);
+                }
+                if (t < 0.78) {                                   // Warm temperate
+                    if (m < 0.20) { return cast<int>(Biome.HotDesert); }
+                    if (m < 0.40) { return cast<int>(Biome.ThornScrub); }
+                    if (m < 0.60) { return cast<int>(Biome.MedShrubland); }
+                    if (m < 0.80) { return cast<int>(Biome.WarmGrassland); }
+                    return cast<int>(Biome.LaurelForest);
+                }
+                // Tropical
+                if (m < 0.20) { return cast<int>(Biome.HotDesert); }
+                if (m < 0.40) { return cast<int>(Biome.Savanna); }
+                if (m < 0.60) { return cast<int>(Biome.TropSeasonalForest); }
+                return cast<int>(Biome.TropicalRainforest);
+            }
+        }
+    }
+}
