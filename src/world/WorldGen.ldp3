@@ -16,8 +16,10 @@ public bundle Agents {
             private mutable int seed;
             private mutable int octaves;
             private mutable int baseCells;
-            private mutable float sea;          // sea level in [0,1]
+            private mutable float sea;          // sea level in [0,1] -- derived from landRatio per world
             private mutable int nPlates;
+            private mutable int worldType;      // 0 Continents, 1 Pangaea, 2 Archipelago, 3 InlandSeas
+            private mutable float landRatio;    // fraction of the map that is land; < 0 = use world default
 
             private mutable int w;
             private mutable int h;
@@ -43,6 +45,28 @@ public bundle Agents {
                 this.baseCells = 3;
                 this.sea = 0.42;
                 this.nPlates = 12;
+                this.worldType = 0;
+                this.landRatio = 0.0 - 1.0;
+            }
+
+            // Pick a world shape (0 Continents, 1 Pangaea, 2 Archipelago, 3 InlandSeas) and the fraction of
+            // the map that should be land. A land < 0 keeps the world's default ratio.
+            public method setWorld(int worldType, float land) returns void {
+                this.worldType = worldType;
+                this.landRatio = land;
+            }
+
+            private method defaultLand(int t) returns float {
+                if (t == 1) {
+                    return 0.40;
+                }
+                if (t == 2) {
+                    return 0.22;
+                }
+                if (t == 3) {
+                    return 0.72;
+                }
+                return 0.45;
             }
 
             // ---- integer hash / value noise / fbm (seamless in X) ----
@@ -255,6 +279,84 @@ public bundle Agents {
                     this.eb[i] = 0.62 * this.eb[i] + 0.38 * d;
                     i = i + 1;
                 }
+            }
+
+            // Reshape the large-scale elevation for the chosen world type, before detail noise is added.
+            // Continents (0) and InlandSeas (3) keep the raw plate field -- they differ only in land ratio;
+            // Pangaea (1) blends in one big central blob (its radius wobbled so the coast is organic);
+            // Archipelago (2) sinks the field and mixes in high-frequency noise to fragment it into islands.
+            private method applyWorldShape() returns void {
+                int n = this.w * this.h;
+                if (this.worldType == 1) {
+                    int cx = this.w / 2;
+                    int cy = this.h / 2;
+                    mutable int i = 0;
+                    while (i < n) {
+                        int x = i % this.w;
+                        int y = i / this.w;
+                        float fx = cast<float>(this.dxWrap(x, cx)) / (cast<float>(this.w) * 0.5);
+                        float fy = cast<float>(y - cy) / (cast<float>(this.h) * 0.5);
+                        float r = this.fsqrt(fx * fx + fy * fy);
+                        float nx = cast<float>(x) / cast<float>(this.w);
+                        float ny = cast<float>(y) / cast<float>(this.h);
+                        float wob = 0.78 + 0.55 * this.vnoise(nx * 2.0, ny * 2.0, 2);
+                        mutable float blob = wob - r;
+                        if (blob < 0.0) {
+                            blob = 0.0;
+                        }
+                        if (blob > 1.0) {
+                            blob = 1.0;
+                        }
+                        this.eb[i] = this.eb[i] * 0.28 + blob * 0.72;
+                        i = i + 1;
+                    }
+                } else if (this.worldType == 2) {
+                    mutable int i = 0;
+                    while (i < n) {
+                        int x = i % this.w;
+                        int y = i / this.w;
+                        float nx = cast<float>(x) / cast<float>(this.w);
+                        float ny = cast<float>(y) / cast<float>(this.h);
+                        float hi = this.vnoise(nx * 11.0, ny * 11.0, 11);
+                        this.eb[i] = this.eb[i] * 0.35 + hi * 0.65;
+                        i = i + 1;
+                    }
+                }
+            }
+
+            // Choose the sea level so that exactly `land` fraction of cells sit above it, via a histogram of
+            // the final elevation field. This makes the land/water ratio exact regardless of world shape.
+            private method computeSeaLevel(float land) returns float {
+                int n = this.w * this.h;
+                int bins = 2048;
+                int[] hist = new int[bins]();
+                mutable int i = 0;
+                while (i < n) {
+                    mutable int bi = cast<int>(this.eb[i] * cast<float>(bins));
+                    if (bi < 0) {
+                        bi = 0;
+                    }
+                    if (bi >= bins) {
+                        bi = bins - 1;
+                    }
+                    hist[bi] = hist[bi] + 1;
+                    i = i + 1;
+                }
+                int waterTarget = cast<int>(cast<float>(n) * (1.0 - land));
+                mutable int acc = 0;
+                mutable int seaBin = bins - 1;
+                mutable int b = 0;
+                while (b < bins) {
+                    acc = acc + hist[b];
+                    if (acc >= waterTarget) {
+                        seaBin = b;
+                        b = bins;
+                    } else {
+                        b = b + 1;
+                    }
+                }
+                delete hist;
+                return cast<float>(seaBin) / cast<float>(bins);
             }
 
             // ---- pass 3: thermal erosion (a few relaxation passes, 4-neighbour) ----
@@ -614,8 +716,14 @@ public bundle Agents {
                 this.pdy = new float[this.nPlates]();
 
                 this.buildPlates(g);
+                this.applyWorldShape();
                 this.addDetail();
                 this.erode(3);
+                mutable float land = this.landRatio;
+                if (land < 0.0) {
+                    land = this.defaultLand(this.worldType);
+                }
+                this.sea = this.computeSeaLevel(land);
                 this.climate(g);
                 this.hydrology(g);
                 this.classifyAll(g);
