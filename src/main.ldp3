@@ -1,4 +1,5 @@
 import System.IO.Console;
+import System.Text.StringBuilder;
 import opengl.glfw.GlWindow;
 import opengl.gl.Wgl;
 import Agents.World.Grid;
@@ -8,6 +9,9 @@ import Agents.Gfx.GlPainter;
 import Agents.Gfx.Batch2D;
 import Agents.Gfx.Camera;
 import Agents.Gfx.WorldRenderer;
+import Agents.Gfx.MeshAtlas;
+import Agents.Gfx.Raster3D;
+import Agents.Gfx.World3D;
 
 // Entry point. Slice 4: generate a world and show it ISOMETRICALLY in a GL window -- pan with
 // WASD/arrows, zoom with the scroll wheel or +/-, ESC to quit. Running with any argument (or when no
@@ -20,6 +24,12 @@ public bundle Agents {
 
         public class Main {
             public static method main(string[] args) returns void {
+                if (args.length() > 0) {
+                    if (args[0].equals("gen3d")) {
+                        Main.render3dSnapshot();
+                        return;
+                    }
+                }
                 int w = 2560;
                 int h = 1080;
                 System.IO.Console.println("agents.exe -- generating a world...");
@@ -88,6 +98,64 @@ public bundle Agents {
                 delete batch;
                 delete win;
                 return true;
+            }
+
+            // Headless verification of the TRUE-3D path: generate a small real world and render it with
+            // the baked biome models (elevation -> height), writing world3d.ppm.
+            private static method render3dSnapshot() returns void {
+                int w = 64;
+                int h = 40;
+                System.IO.Console.println("gen3d: generating a small world...");
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(w, h);
+                Main.worldStats(g, w, h);
+                System.IO.Console.println("gen3d: loading models...");
+                MeshAtlas* atlas = MeshAtlas.loadTerrain("assets/models");
+                System.IO.Console.println("gen3d: rendering in 3D...");
+                Raster3D* r = new Raster3D(960, 600, 2) on heap;
+                World3D.render(r, g, atlas, 0, 0, w, h, 9.0);
+                r.savePPM("world3d.ppm", 20, 26, 36);
+                System.IO.Console.println("gen3d: wrote world3d.ppm");
+                delete r;
+                delete atlas;
+                delete g;
+                return;
+            }
+
+            private static method worldStats(Grid* g, int w, int h) returns void {
+                mutable int water = 0;
+                mutable int land = 0;
+                mutable int emin = 100000;
+                mutable int emax = 0;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        int e = g.elevAt(x, y);
+                        if (e < emin) { emin = e; }
+                        if (e > emax) { emax = e; }
+                        if (g.biomeAt(x, y) <= 6) {
+                            water = water + 1;
+                        } else {
+                            land = land + 1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("gen3d: water=");
+                sb.appendInt(water);
+                sb.append(" land=");
+                sb.appendInt(land);
+                sb.append(" elev[");
+                sb.appendInt(emin);
+                sb.append("..");
+                sb.appendInt(emax);
+                sb.append("]");
+                System.IO.Console.println(sb.toString());
+                delete sb;
             }
 
             private static method writeSnapshot(Grid* g, int w, int h) returns void {
