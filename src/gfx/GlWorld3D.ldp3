@@ -1,0 +1,247 @@
+import opengl.gl.Gl;
+import opengl.gl.Wgl;
+import opengl.gl.GL;
+import opengl.glsl.Shader;
+import opengl.glm.GlMat4;
+import Agents.World.Grid;
+import System.Memory;
+
+// True-3D GL renderer for the world: bakes every cell's biome tile mesh (+ a skirt down to z=0) into
+// one static VBO (position, world normal, baked colour), then draws it with an orbit camera and cel
+// shading -- the same look as the software Raster3D, now on the GPU. Z is up (tiles rest on z=0, height
+// is +z), matching the baked meshes. v1 draws straight to the bound framebuffer; the pixel post-process
+// (low-res FBO + nearest upscale + outline) is layered on top next.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class GlWorld3D {
+            private mutable Gl gl;
+            private mutable int prog;
+            private mutable int vao;
+            private mutable int vbo;
+            private mutable int uProj;
+            private mutable int uView;
+            private mutable int nverts;
+            // world framing
+            private mutable float cx;
+            private mutable float cy;
+            private mutable float cz;
+            private mutable float radius;
+
+            public constructor GlWorld3D(Gl gl) {
+                this.gl = gl;
+                this.prog = Shader.fromSource(gl, GlWorld3D.vertSrc(), GlWorld3D.fragSrc());
+                this.vao = gl.genVertexArray();
+                this.vbo = gl.genBuffer();
+                gl.bindVertexArray(this.vao);
+                gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
+                gl.vertexAttribPointer(0, 3, GL.FLOAT, cast<byte>(0), 36, 0);    // position
+                gl.enableVertexAttribArray(0);
+                gl.vertexAttribPointer(1, 3, GL.FLOAT, cast<byte>(0), 36, 12);   // normal
+                gl.enableVertexAttribArray(1);
+                gl.vertexAttribPointer(2, 3, GL.FLOAT, cast<byte>(0), 36, 24);   // colour
+                gl.enableVertexAttribArray(2);
+                gl.bindVertexArray(0);
+                this.uProj = gl.getUniformLocation(this.prog, "uProj");
+                this.uView = gl.getUniformLocation(this.prog, "uView");
+                this.nverts = 0;
+                this.cx = 0.0;
+                this.cy = 0.0;
+                this.cz = 0.0;
+                this.radius = 10.0;
+            }
+
+            // Count the vertices a cell contributes: its tile mesh, plus a 4-quad skirt when raised.
+            private method cellVerts(MeshAtlas* a, int ord, boolean raised) returns int {
+                mutable int v = a.triCount[ord] * 3;
+                if (raised) {
+                    v = v + 24;
+                }
+                return v;
+            }
+
+            // Bake the whole world window into one interleaved VBO (pos3, nrm3, col3 per vertex).
+            public method bake(Grid* g, MeshAtlas* atlas, int wc, int hc, float vscale) returns void {
+                float waterZ = 0.30 * vscale;
+                // pass 1: total vertex count
+                mutable int total = 0;
+                mutable int gy = 0;
+                while (gy < hc) {
+                    mutable int gx = 0;
+                    while (gx < wc) {
+                        int ord = g.biomeAt(gx, gy);
+                        float e = cast<float>(g.elevAt(gx, gy)) / 10000.0;
+                        mutable float wz = e * vscale;
+                        if (ord <= 6) { wz = waterZ; }
+                        if (wz < waterZ) { wz = waterZ; }
+                        total = total + this.cellVerts(atlas, ord, wz > 0.02);
+                        gx = gx + 1;
+                    }
+                    gy = gy + 1;
+                }
+                float[] buf = new float[total * 9]();
+                mutable int w = 0;   // float write cursor
+                gy = 0;
+                while (gy < hc) {
+                    mutable int gx = 0;
+                    while (gx < wc) {
+                        int ord = g.biomeAt(gx, gy);
+                        float e = cast<float>(g.elevAt(gx, gy)) / 10000.0;
+                        mutable float wz = e * vscale;
+                        if (ord <= 6) { wz = waterZ; }
+                        if (wz < waterZ) { wz = waterZ; }
+                        float wx = cast<float>(gx) * 2.0;
+                        float wy = cast<float>(gy) * 2.0;
+                        w = this.emitCell(buf, w, atlas, ord, wx, wy, wz);
+                        gx = gx + 1;
+                    }
+                    gy = gy + 1;
+                }
+                this.gl.bindVertexArray(this.vao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
+                this.gl.bufferDataFloats(GL.ARRAY_BUFFER, buf, GL.STATIC_DRAW);
+                this.gl.bindVertexArray(0);
+                this.nverts = total;
+                delete buf;
+                // framing
+                this.cx = cast<float>(wc - 1);
+                this.cy = cast<float>(hc - 1);
+                this.cz = vscale * 0.4;
+                this.radius = this.fsqrt(this.cx * this.cx + this.cy * this.cy) + vscale + 2.0;
+            }
+
+            private method fsqrt(float v) returns float {
+                if (v <= 0.0) { return 0.0; }
+                mutable float g = v;
+                mutable int i = 0;
+                while (i < 14) {
+                    g = 0.5 * (g + v / g);
+                    i = i + 1;
+                }
+                return g;
+            }
+
+            private method wr(float[] buf, int w, float x, float y, float z,
+                              float nx, float ny, float nz, float r, float g, float b) returns int {
+                buf[w] = x;
+                buf[w + 1] = y;
+                buf[w + 2] = z;
+                buf[w + 3] = nx;
+                buf[w + 4] = ny;
+                buf[w + 5] = nz;
+                buf[w + 6] = r;
+                buf[w + 7] = g;
+                buf[w + 8] = b;
+                return w + 9;
+            }
+
+            private method emitQuad(float[] buf, int w, float ax, float ay, float az, float bx, float by, float bz,
+                                    float cx, float cy, float cz, float dx, float dy, float dz,
+                                    float nx, float ny, float nz, float r, float g, float b) returns int {
+                mutable int p = w;
+                p = this.wr(buf, p, ax, ay, az, nx, ny, nz, r, g, b);
+                p = this.wr(buf, p, bx, by, bz, nx, ny, nz, r, g, b);
+                p = this.wr(buf, p, cx, cy, cz, nx, ny, nz, r, g, b);
+                p = this.wr(buf, p, ax, ay, az, nx, ny, nz, r, g, b);
+                p = this.wr(buf, p, cx, cy, cz, nx, ny, nz, r, g, b);
+                p = this.wr(buf, p, dx, dy, dz, nx, ny, nz, r, g, b);
+                return p;
+            }
+
+            private method emitCell(float[] buf, int w, MeshAtlas* a, int ord, float wx, float wy, float wz) returns int {
+                int t0 = a.triStart[ord];
+                int tn = a.triCount[ord];
+                mutable int p = w;
+                if (wz > 0.02) {
+                    float sr = cast<float>(a.cr[t0]) / 255.0;
+                    float sg = cast<float>(a.cg[t0]) / 255.0;
+                    float sb = cast<float>(a.cb[t0]) / 255.0;
+                    float x0 = wx - 1.0;
+                    float x1 = wx + 1.0;
+                    float y0 = wy - 1.0;
+                    float y1 = wy + 1.0;
+                    p = this.emitQuad(buf, p, x1, y0, 0.0, x1, y1, 0.0, x1, y1, wz, x1, y0, wz, 1.0, 0.0, 0.0, sr, sg, sb);
+                    p = this.emitQuad(buf, p, x0, y0, 0.0, x0, y0, wz, x0, y1, wz, x0, y1, 0.0, 0.0 - 1.0, 0.0, 0.0, sr, sg, sb);
+                    p = this.emitQuad(buf, p, x0, y1, 0.0, x0, y1, wz, x1, y1, wz, x1, y1, 0.0, 0.0, 1.0, 0.0, sr, sg, sb);
+                    p = this.emitQuad(buf, p, x0, y0, 0.0, x1, y0, 0.0, x1, y0, wz, x0, y0, wz, 0.0, 0.0 - 1.0, 0.0, sr, sg, sb);
+                }
+                mutable int t = 0;
+                while (t < tn) {
+                    int tri = t0 + t;
+                    int vb = tri * 3;
+                    float r = cast<float>(a.cr[tri]) / 255.0;
+                    float g = cast<float>(a.cg[tri]) / 255.0;
+                    float b = cast<float>(a.cb[tri]) / 255.0;
+                    mutable int k = 0;
+                    while (k < 3) {
+                        int vi = vb + k;
+                        p = this.wr(buf, p, a.px[vi] + wx, a.py[vi] + wy, a.pz[vi] + wz,
+                                    a.nx[vi], a.ny[vi], a.nz[vi], r, g, b);
+                        k = k + 1;
+                    }
+                    t = t + 1;
+                }
+                return p;
+            }
+
+            // Draw the baked world into the bound framebuffer at (fbW x fbH), orbit camera at az/el degrees.
+            public method render(int fbW, int fbH, float az, float el) returns void {
+                Wgl.glViewport(0, 0, fbW, fbH);
+                Wgl.glEnable(GL.DEPTH_TEST);
+                Wgl.glDepthFunc(GL.LESS);
+                Wgl.glClearColor(0.08, 0.10, 0.14, 1.0);
+                Wgl.glClear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
+
+                float pi = 3.14159265;
+                float a = az * pi / 180.0;
+                float e = el * pi / 180.0;
+                float ce = this.fcos(e);
+                float d = this.radius * 1.7;
+                float ex = this.cx + d * ce * this.fsin(a);
+                float ey = this.cy + d * ce * this.fcos(a);
+                float ez = this.cz + d * this.fsin(e);
+
+                GlMat4* proj = new GlMat4() on heap;
+                float aspect = cast<float>(fbW) / cast<float>(fbH);
+                proj.perspective(42.0, aspect, 0.5, d * 3.0);
+                GlMat4* view = new GlMat4() on heap;
+                view.lookAt(ex, ey, ez, this.cx, this.cy, this.cz, 0.0, 0.0, 1.0);
+
+                this.gl.useProgram(this.prog);
+                this.gl.uniformMatrix4fv(this.uProj, 1, cast<byte>(0), proj.ptr());
+                this.gl.uniformMatrix4fv(this.uView, 1, cast<byte>(0), view.ptr());
+                this.gl.bindVertexArray(this.vao);
+                Wgl.glDrawArrays(GL.TRIANGLES, 0, this.nverts);
+                this.gl.bindVertexArray(0);
+                proj.dispose();
+                delete proj;
+                view.dispose();
+                delete view;
+            }
+
+            private method fsin(float x) returns float {
+                mutable float t = x;
+                float pi = 3.14159265;
+                float two = 2.0 * pi;
+                while (t > pi) { t = t - two; }
+                while (t < 0.0 - pi) { t = t + two; }
+                float t2 = t * t;
+                return t - t * t2 / 6.0 + t * t2 * t2 / 120.0 - t * t2 * t2 * t2 / 5040.0;
+            }
+
+            private method fcos(float x) returns float {
+                return this.fsin(x + 1.5707963);
+            }
+
+            private static method vertSrc() returns String {
+                return "#version 330 core\nlayout(location=0) in vec3 aPos;\nlayout(location=1) in vec3 aNrm;\nlayout(location=2) in vec3 aCol;\nuniform mat4 uProj;\nuniform mat4 uView;\nout vec3 vNrm;\nout vec3 vCol;\nvoid main(){\n  gl_Position = uProj * uView * vec4(aPos,1.0);\n  vNrm=aNrm; vCol=aCol;\n}\n";
+            }
+
+            private static method fragSrc() returns String {
+                return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nout vec4 FragColor;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.60 + 0.42*ndl);\n  FragColor = vec4(vCol*sh, 1.0);\n}\n";
+            }
+        }
+    }
+}

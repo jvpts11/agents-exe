@@ -1,4 +1,5 @@
 import System.IO.Console;
+import System.IO.File;
 import System.Text.StringBuilder;
 import opengl.glfw.GlWindow;
 import opengl.gl.Wgl;
@@ -12,6 +13,7 @@ import Agents.Gfx.WorldRenderer;
 import Agents.Gfx.MeshAtlas;
 import Agents.Gfx.Raster3D;
 import Agents.Gfx.World3D;
+import Agents.Gfx.GlWorld3D;
 
 // Entry point. Slice 4: generate a world and show it ISOMETRICALLY in a GL window -- pan with
 // WASD/arrows, zoom with the scroll wheel or +/-, ESC to quit. Running with any argument (or when no
@@ -27,6 +29,10 @@ public bundle Agents {
                 if (args.length() > 0) {
                     if (args[0].equals("gen3d")) {
                         Main.render3dSnapshot();
+                        return;
+                    }
+                    if (args[0].equals("glworld")) {
+                        Main.renderGlWorld();
                         return;
                     }
                 }
@@ -121,6 +127,92 @@ public bundle Agents {
                 delete atlas;
                 delete g;
                 return;
+            }
+
+            // GL true-3D path: generate a world, bake it into a VBO, render one frame with the orbit
+            // camera + cel shading, and read it back to gl_world.ppm (headless-verifiable). The free
+            // camera loop runs when a real window is present.
+            private static method renderGlWorld() returns void {
+                int w = 96;
+                int h = 60;
+                System.IO.Console.println("glworld: generating a world...");
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(w, h);
+                int sw = 960;
+                int sh = 600;
+                GlWindow* win = new GlWindow() on heap;
+                if (win.open("agents.exe -- world 3D", sw, sh, 3, 3) == 0) {
+                    System.IO.Console.println("glworld: no GL window available.");
+                    delete win;
+                    delete g;
+                    return;
+                }
+                win.setVSync(1);
+                System.IO.Console.println("glworld: loading models + baking VBO...");
+                MeshAtlas* atlas = MeshAtlas.loadTerrain("assets/models");
+                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
+                r.bake(g, atlas, w, h, 9.0);
+                System.IO.Console.println("glworld: rendering...");
+                int cw = win.width();
+                int ch = win.height();
+                r.render(cw, ch, 42.0, 32.0);
+                byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
+                Main.writePpmFlipped(px, cw, ch, "gl_world.ppm");
+                delete px;
+                win.swap();
+                System.IO.Console.println("glworld: wrote gl_world.ppm");
+
+                // Free orbit camera: A/D or Left/Right spin, W/S or Up/Down tilt, ESC quits. (No-op headless.)
+                mutable float az = 42.0;
+                mutable float el = 32.0;
+                while (win.isOpen()) {
+                    win.pump();
+                    if (win.keyDown(0x1B)) {
+                        break;
+                    }
+                    if (win.keyDown(0x41) || win.keyDown(0x25)) { az = az - 2.0; }
+                    if (win.keyDown(0x44) || win.keyDown(0x27)) { az = az + 2.0; }
+                    if (win.keyDown(0x57) || win.keyDown(0x26)) { el = el + 1.5; }
+                    if (win.keyDown(0x53) || win.keyDown(0x28)) { el = el - 1.5; }
+                    if (el > 85.0) { el = 85.0; }
+                    if (el < 6.0) { el = 6.0; }
+                    r.render(win.width(), win.height(), az, el);
+                    win.swap();
+                }
+                delete r;
+                delete atlas;
+                delete g;
+                delete win;
+                return;
+            }
+
+            private static method writePpmFlipped(byte[] px, int w, int h, String path) returns void {
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("P3\n");
+                sb.appendInt(w);
+                sb.append(" ");
+                sb.appendInt(h);
+                sb.append("\n255\n");
+                mutable int y = 0;
+                while (y < h) {
+                    int srcRow = h - 1 - y;
+                    mutable int x = 0;
+                    while (x < w) {
+                        int i = (srcRow * w + x) * 3;
+                        sb.appendInt(cast<int>(px[i]) & 255);
+                        sb.append(" ");
+                        sb.appendInt(cast<int>(px[i + 1]) & 255);
+                        sb.append(" ");
+                        sb.appendInt(cast<int>(px[i + 2]) & 255);
+                        sb.append(" ");
+                        x = x + 1;
+                    }
+                    sb.append("\n");
+                    y = y + 1;
+                }
+                File.writeAll(path, sb.toString());
+                delete sb;
             }
 
             private static method worldStats(Grid* g, int w, int h) returns void {
