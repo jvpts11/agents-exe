@@ -32,6 +32,9 @@ public bundle Agents {
             private mutable int dvao;
             private mutable int dvbo;
             private mutable int dnverts;
+            private mutable int hvao;           // far-view forest hint trees (hidden when the detail is up)
+            private mutable int hvbo;
+            private mutable int hnverts;
             // world + sources
             private mutable Grid* grid;
             private mutable MeshAtlas* terr;
@@ -39,9 +42,11 @@ public bundle Agents {
             private mutable int srcW;
             private mutable int srcH;
             private mutable int stride;
-            private mutable float vscale;
-            private mutable float waterZ;
+            private mutable float stepH;        // height of one mountain stack step
             private mutable float[] tileTop;    // per-terrain-model top-plate height (z of the box top)
+            // per-frame matrices, allocated once (a heap alloc per frame is how leaks are born)
+            private mutable GlMat4* projM;
+            private mutable GlMat4* viewM;
             // scatter tables, indexed by biome ordinal
             private mutable int[] sProp;
             private mutable int[] sMilli;
@@ -88,6 +93,16 @@ public bundle Agents {
                 this.dvao = gl.genVertexArray();
                 this.dvbo = gl.genBuffer();
                 this.setupVao(this.dvao, this.dvbo);
+                this.hvao = gl.genVertexArray();
+                this.hvbo = gl.genBuffer();
+                this.setupVao(this.hvao, this.hvbo);
+                this.hnverts = 0;
+                this.projM = new GlMat4() on heap;
+                this.viewM = new GlMat4() on heap;
+                this.tileTop = new float[1]();
+                this.sProp = new int[1]();
+                this.sMilli = new int[1]();
+                this.sScale = new float[1]();
                 this.uProj = gl.getUniformLocation(this.prog, "uProj");
                 this.uView = gl.getUniformLocation(this.prog, "uView");
                 this.nverts = 0;
@@ -117,6 +132,17 @@ public bundle Agents {
                 this.uTexel = 0;
             }
 
+            public destructor ~GlWorld3D() returns void {
+                this.projM.dispose();
+                delete this.projM;
+                this.viewM.dispose();
+                delete this.viewM;
+                delete this.tileTop;
+                delete this.sProp;
+                delete this.sMilli;
+                delete this.sScale;
+            }
+
             private method setupVao(int vao, int vbo) returns void {
                 this.gl.bindVertexArray(vao);
                 this.gl.bindBuffer(GL.ARRAY_BUFFER, vbo);
@@ -130,15 +156,18 @@ public bundle Agents {
             }
 
             // ---- setup: store sources, build the scatter tables, bake the coarse world ----
-            public method setup(Grid* g, MeshAtlas* terr, MeshAtlas* props, int stride, float vscale) returns void {
+            // Terrain model (matches the original agents): every non-mountain tile sits at the SAME
+            // ground level -- coasts read from the tiles' own art heights -- and only the mountain
+            // family stacks up, in discrete steps of `stepH` derived from the cell's elevation.
+            public method setup(Grid* g, MeshAtlas* terr, MeshAtlas* props, int stride, float stepH) returns void {
                 this.grid = g;
                 this.terr = terr;
                 this.props = props;
                 this.srcW = g.width();
                 this.srcH = g.height();
                 this.stride = stride;
-                this.vscale = vscale;
-                this.waterZ = 0.30 * vscale;
+                this.stepH = stepH;
+                delete this.tileTop;
                 this.tileTop = new float[terr.count]();
                 mutable int m = 0;
                 while (m < terr.count) {
@@ -152,13 +181,31 @@ public bundle Agents {
                 this.bakeCoarse();
                 this.cx = cast<float>(this.srcW);
                 this.cy = cast<float>(this.srcH);
-                this.cz = vscale * 0.4;
-                this.radius = this.fsqrt(this.cx * this.cx + this.cy * this.cy) + vscale + 2.0;
+                this.cz = 1.5;
+                this.radius = this.fsqrt(this.cx * this.cx + this.cy * this.cy) + stepH * 8.0 + 2.0;
                 this.camTx = this.cx;
                 this.camTy = this.cy;
                 this.camDist = this.radius * 1.6;
                 this.camAz = 0.0;                    // start facing NORTH (looking toward the top edge)
                 this.haveDetail = false;
+            }
+
+            // Mountain-family stack level for a cell (0 = flat ground). Quantized from elevation so
+            // neighbouring mountain cells step like stacked blocks.
+            private method stackLvl(int ord, int x, int y) returns int {
+                mutable int base = 0;
+                if (ord == 32) { base = 1; }                    // Hills
+                if (ord == 33 || ord == 34) { base = 2; }       // Mountain / AlpineMeadow
+                if (ord == 36) { base = 3; }                    // Volcanic
+                if (ord == 35) { base = 4; }                    // SnowPeak
+                if (base == 0) {
+                    return 0;
+                }
+                float e = cast<float>(this.grid.elevAt(x, y)) / 10000.0;
+                mutable int q = cast<int>((e - 0.62) * 8.0);
+                if (q < 0) { q = 0; }
+                if (q > 4) { q = 4; }
+                return base + q;
             }
 
             private method setScatter(int ord, String prop, int milli, float scale) returns void {
@@ -171,6 +218,9 @@ public bundle Agents {
             }
 
             private method initScatter() returns void {
+                delete this.sProp;
+                delete this.sMilli;
+                delete this.sScale;
                 this.sProp = new int[40]();
                 this.sMilli = new int[40]();
                 this.sScale = new float[40]();
@@ -220,8 +270,10 @@ public bundle Agents {
                 return cast<float>(v) / 2147483647.0;
             }
 
-            // Biome ordinal for a cell, with river cells recoloured to the River tile so rivers read in 3D.
-            private method ordAt(int x, int y) returns int {
+            // Detail-LOD biome for a cell: river cells recolour to the River tile (oriented later by the
+            // flow direction). The coarse LOD keeps the plain biome -- a stride-sampled river turns into
+            // broken dashes, so rivers only appear close up.
+            private method detailOrd(int x, int y) returns int {
                 int ord = this.grid.biomeAt(x, y);
                 if (ord > 9) {
                     if (this.grid.hasFlag(x, y, Grid.FLAG_RIVER)) {
@@ -229,18 +281,6 @@ public bundle Agents {
                     }
                 }
                 return ord;
-            }
-
-            private method topAt(int x, int y, int ord) returns float {
-                float e = cast<float>(this.grid.elevAt(x, y)) / 10000.0;
-                mutable float wz = e * this.vscale;
-                if (ord <= 7) {
-                    wz = this.waterZ;
-                }
-                if (wz < this.waterZ) {
-                    wz = this.waterZ;
-                }
-                return wz;
             }
 
             private method isForest(int ord) returns boolean {
@@ -258,18 +298,47 @@ public bundle Agents {
             }
 
             // ---- shared bake pieces --------------------------------------------------------------
-            private method countTile(int ord, boolean dropFoam) returns int {
+            // Is triangle `tri` of terrain model `ord` a 3D decoration ABOVE the top plate (coral, oasis
+            // palm, rocks, cones...)? Flat surface features sit within 0.02 of the plate and stay.
+            private method isDecor(int ord, int tri) returns boolean {
+                float top = this.tileTop[ord] + 0.02;
+                int vb = tri * 3;
+                if (this.terr.pz[vb] > top && this.terr.pz[vb + 1] > top && this.terr.pz[vb + 2] > top) {
+                    return true;
+                }
+                return false;
+            }
+
+            private method isMountainOrd(int ord) returns boolean {
+                if (ord == 33 || ord == 35 || ord == 36) {
+                    return true;
+                }
+                return false;
+            }
+
+            // dropExtras = coarse LOD: drop water foam AND above-plate decorations (they scale up into
+            // giants); mountain-family tiles keep their peak cones (stretched back up in emitTile).
+            private method countTile(int ord, boolean dropExtras) returns int {
                 int t0 = this.terr.triStart[ord];
                 int tn = this.terr.triCount[ord];
-                mutable int c = 8;                       // skirt: 4 quads
+                boolean keepDecor = this.isMountainOrd(ord);
+                mutable int c = 0;
                 mutable int t = 0;
                 while (t < tn) {
-                    if (dropFoam && this.isFoam(t0 + t)) {
-                        t = t + 1;
-                    } else {
-                        c = c + 1;
-                        t = t + 1;
+                    int tri = t0 + t;
+                    mutable boolean skip = false;
+                    if (dropExtras) {
+                        if (this.isFoam(tri)) {
+                            skip = true;
+                        }
+                        if (!keepDecor && this.isDecor(ord, tri)) {
+                            skip = true;
+                        }
                     }
+                    if (!skip) {
+                        c = c + 1;
+                    }
+                    t = t + 1;
                 }
                 return c;
             }
@@ -301,32 +370,45 @@ public bundle Agents {
                 return p;
             }
 
-            // Emit one terrain tile at world centre (wx,wy), top face at height wz, mesh scaled by
-            // `scale` in all axes, plus a skirt column down to z=0.
-            private method emitTile(float[] buf, int w, int ord, float wx, float wy, float wz,
-                                    float scale, boolean dropFoam) returns int {
+            // Emit one terrain tile at world centre (wx,wy), its BASE raised to zOff (mountain stack;
+            // 0 = flat ground). The mesh is scaled by `scale` in x/y only, so the plate heights match
+            // across LODs. `rot` = 1 rotates the tile 90 degrees (river channels follow the flow).
+            // When zOff > 0 a skirt column fills 0..zOff (count it as +8 tris).
+            private method emitTile(float[] buf, int w, int ord, float wx, float wy, float zOff,
+                                    float scale, boolean dropExtras, int rot) returns int {
                 int t0 = this.terr.triStart[ord];
                 int tn = this.terr.triCount[ord];
-                float zOff = wz - this.tileTop[ord] * scale;
+                boolean keepDecor = this.isMountainOrd(ord);
+                float top = this.tileTop[ord];
                 mutable int p = w;
-                float sr = cast<float>(this.terr.cr[t0]) / 255.0;
-                float sg = cast<float>(this.terr.cg[t0]) / 255.0;
-                float sb = cast<float>(this.terr.cb[t0]) / 255.0;
-                float x0 = wx - scale;
-                float x1 = wx + scale;
-                float y0 = wy - scale;
-                float y1 = wy + scale;
-                float zt = zOff + 0.05;
-                p = this.emitQuad(buf, p, x1, y0, 0.0, x1, y1, 0.0, x1, y1, zt, x1, y0, zt, 1.0, 0.0, 0.0, sr, sg, sb);
-                p = this.emitQuad(buf, p, x0, y0, 0.0, x0, y0, zt, x0, y1, zt, x0, y1, 0.0, 0.0 - 1.0, 0.0, 0.0, sr, sg, sb);
-                p = this.emitQuad(buf, p, x0, y1, 0.0, x0, y1, zt, x1, y1, zt, x1, y1, 0.0, 0.0, 1.0, 0.0, sr, sg, sb);
-                p = this.emitQuad(buf, p, x0, y0, 0.0, x1, y0, 0.0, x1, y0, zt, x0, y0, zt, 0.0, 0.0 - 1.0, 0.0, sr, sg, sb);
+                if (zOff > 0.5) {                    // a real stack step, not the tiny detail lift
+                    float sr = cast<float>(this.terr.cr[t0]) / 255.0;
+                    float sg = cast<float>(this.terr.cg[t0]) / 255.0;
+                    float sb = cast<float>(this.terr.cb[t0]) / 255.0;
+                    float x0 = wx - scale;
+                    float x1 = wx + scale;
+                    float y0 = wy - scale;
+                    float y1 = wy + scale;
+                    float zt = zOff + 0.05;
+                    p = this.emitQuad(buf, p, x1, y0, 0.0, x1, y1, 0.0, x1, y1, zt, x1, y0, zt, 1.0, 0.0, 0.0, sr, sg, sb);
+                    p = this.emitQuad(buf, p, x0, y0, 0.0, x0, y0, zt, x0, y1, zt, x0, y1, 0.0, 0.0 - 1.0, 0.0, 0.0, sr, sg, sb);
+                    p = this.emitQuad(buf, p, x0, y1, 0.0, x0, y1, zt, x1, y1, zt, x1, y1, 0.0, 0.0, 1.0, 0.0, sr, sg, sb);
+                    p = this.emitQuad(buf, p, x0, y0, 0.0, x1, y0, 0.0, x1, y0, zt, x0, y0, zt, 0.0, 0.0 - 1.0, 0.0, sr, sg, sb);
+                }
                 mutable int t = 0;
                 while (t < tn) {
                     int tri = t0 + t;
-                    if (dropFoam && this.isFoam(tri)) {
-                        t = t + 1;
-                    } else {
+                    mutable boolean skip = false;
+                    boolean decor = this.isDecor(ord, tri);
+                    if (dropExtras) {
+                        if (this.isFoam(tri)) {
+                            skip = true;
+                        }
+                        if (!keepDecor && decor) {
+                            skip = true;
+                        }
+                    }
+                    if (!skip) {
                         int vb = tri * 3;
                         float r = cast<float>(this.terr.cr[tri]) / 255.0;
                         float g = cast<float>(this.terr.cg[tri]) / 255.0;
@@ -334,13 +416,29 @@ public bundle Agents {
                         mutable int k = 0;
                         while (k < 3) {
                             int vi = vb + k;
-                            p = this.wr(buf, p, this.terr.px[vi] * scale + wx, this.terr.py[vi] * scale + wy,
-                                        this.terr.pz[vi] * scale + zOff,
-                                        this.terr.nx[vi], this.terr.ny[vi], this.terr.nz[vi], r, g, b);
+                            mutable float lx = this.terr.px[vi];
+                            mutable float ly = this.terr.py[vi];
+                            mutable float lnx = this.terr.nx[vi];
+                            mutable float lny = this.terr.ny[vi];
+                            if (rot == 1) {
+                                float tx = lx;
+                                lx = ly;
+                                ly = 0.0 - tx;
+                                float tnx = lnx;
+                                lnx = lny;
+                                lny = 0.0 - tnx;
+                            }
+                            mutable float lz = this.terr.pz[vi];
+                            if (decor && dropExtras) {
+                                // coarse mountain peak: stretch the cone back up so it keeps its profile
+                                lz = top + (lz - top) * scale;
+                            }
+                            p = this.wr(buf, p, lx * scale + wx, ly * scale + wy, lz + zOff,
+                                        lnx, lny, this.terr.nz[vi], r, g, b);
                             k = k + 1;
                         }
-                        t = t + 1;
                     }
+                    t = t + 1;
                 }
                 return p;
             }
@@ -387,35 +485,44 @@ public bundle Agents {
                 int bw = this.srcW / this.stride;
                 int bh = this.srcH / this.stride;
                 mutable int tris = 0;
+                mutable int htris = 0;
                 mutable int by = 0;
                 while (by < bh) {
                     mutable int bx = 0;
                     while (bx < bw) {
-                        int ord = this.ordAt(bx * this.stride, by * this.stride);
+                        int sx = bx * this.stride;
+                        int sy = by * this.stride;
+                        int ord = this.grid.biomeAt(sx, sy);
                         tris = tris + this.countTile(ord, true);
+                        if (this.stackLvl(ord, sx, sy) > 0) {
+                            tris = tris + 8;
+                        }
                         if (this.coarseHint(bx, by, ord)) {
-                            tris = tris + this.props.triCount[this.hintProp];
+                            htris = htris + this.props.triCount[this.hintProp];
                         }
                         bx = bx + 1;
                     }
                     by = by + 1;
                 }
                 float[] buf = new float[tris * 27]();
+                float[] hbuf = new float[htris * 27]();
                 mutable int w = 0;
+                mutable int hw = 0;
                 by = 0;
                 while (by < bh) {
                     mutable int bx = 0;
                     while (bx < bw) {
                         int sx = bx * this.stride;
                         int sy = by * this.stride;
-                        int ord = this.ordAt(sx, sy);
-                        float wz = this.topAt(sx, sy, ord);
+                        int ord = this.grid.biomeAt(sx, sy);
+                        float zOff = cast<float>(this.stackLvl(ord, sx, sy)) * this.stepH;
                         float wx = cast<float>(sx * 2 + this.stride);
                         float wy = cast<float>(sy * 2 + this.stride);
                         float sc = cast<float>(this.stride);
-                        w = this.emitTile(buf, w, ord, wx, wy, wz, sc, true);
+                        w = this.emitTile(buf, w, ord, wx, wy, zOff, sc, true, 0);
                         if (this.coarseHint(bx, by, ord)) {
-                            w = this.emitProp(buf, w, this.hintProp, wx, wy, wz, sc * 0.55);
+                            float topZ = this.tileTop[ord] + zOff;
+                            hw = this.emitProp(hbuf, hw, this.hintProp, wx, wy, topZ, sc * 0.55);
                         }
                         bx = bx + 1;
                     }
@@ -424,9 +531,14 @@ public bundle Agents {
                 this.gl.bindVertexArray(this.vao);
                 this.gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
                 this.gl.bufferDataFloats(GL.ARRAY_BUFFER, buf, GL.STATIC_DRAW);
+                this.gl.bindVertexArray(this.hvao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.hvbo);
+                this.gl.bufferDataFloats(GL.ARRAY_BUFFER, hbuf, GL.STATIC_DRAW);
                 this.gl.bindVertexArray(0);
                 this.nverts = tris * 3;
+                this.hnverts = htris * 3;
                 delete buf;
+                delete hbuf;
             }
 
             // ---- detail LOD: full-res window around the camera target, foam + scattered props ----
@@ -453,8 +565,11 @@ public bundle Agents {
                     while (x < this.detW) {
                         int gx = ox + x;
                         int gy = oy + y;
-                        int ord = this.ordAt(gx, gy);
+                        int ord = this.detailOrd(gx, gy);
                         tris = tris + this.countTile(ord, false);
+                        if (this.stackLvl(ord, gx, gy) > 0) {
+                            tris = tris + 8;
+                        }
                         int p = this.detailPropAt(gx, gy, ord);
                         if (p >= 0) {
                             tris = tris + this.props.triCount[p];
@@ -471,16 +586,27 @@ public bundle Agents {
                     while (x < this.detW) {
                         int gx = ox + x;
                         int gy = oy + y;
-                        int ord = this.ordAt(gx, gy);
-                        float wz = this.topAt(gx, gy, ord) + 0.06;       // lift over the coarse layer
+                        int ord = this.detailOrd(gx, gy);
+                        float zOff = cast<float>(this.stackLvl(ord, gx, gy)) * this.stepH + 0.02;   // hair above coarse
                         float wx = cast<float>(gx * 2 + 1);
                         float wy = cast<float>(gy * 2 + 1);
-                        w = this.emitTile(buf, w, ord, wx, wy, wz, 1.0, false);
+                        mutable int rot = 0;
+                        if (ord == 7) {
+                            mutable int fdx = this.grid.flowDx(gx, gy);
+                            if (fdx < 0) { fdx = 0 - fdx; }
+                            mutable int fdy = this.grid.flowDy(gx, gy);
+                            if (fdy < 0) { fdy = 0 - fdy; }
+                            if (fdx > fdy) {
+                                rot = 1;                          // channel follows an east-west flow
+                            }
+                        }
+                        w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false, rot);
                         int p = this.detailPropAt(gx, gy, ord);
                         if (p >= 0) {
                             float jx = (this.hash01(gx * 3 + 1, gy * 5 + 2) - 0.5) * 1.2;
                             float jy = (this.hash01(gx * 5 + 4, gy * 3 + 7) - 0.5) * 1.2;
-                            w = this.emitProp(buf, w, p, wx + jx, wy + jy, wz, this.sScale[ord]);
+                            float topZ = this.tileTop[ord] + zOff;
+                            w = this.emitProp(buf, w, p, wx + jx, wy + jy, topZ, this.sScale[ord]);
                         }
                         x = x + 1;
                     }
@@ -594,30 +720,27 @@ public bundle Agents {
                 float ey = this.camTy + d * ce * this.fcos(a);
                 float ez = this.cz + d * this.fsin(e);
 
-                GlMat4* proj = new GlMat4() on heap;
                 float aspect = cast<float>(fbW) / cast<float>(fbH);
                 mutable float nearP = d * 0.004;
                 if (nearP < 0.5) {
                     nearP = 0.5;
                 }
-                proj.perspective(42.0, aspect, nearP, (d + this.radius) * 3.0);
-                GlMat4* view = new GlMat4() on heap;
-                view.lookAt(ex, ey, ez, this.camTx, this.camTy, this.cz, 0.0, 0.0, 1.0);
+                this.projM.perspective(42.0, aspect, nearP, (d + this.radius) * 3.0);
+                this.viewM.lookAt(ex, ey, ez, this.camTx, this.camTy, this.cz, 0.0, 0.0, 1.0);
 
                 this.gl.useProgram(this.prog);
-                this.gl.uniformMatrix4fv(this.uProj, 1, cast<byte>(0), proj.ptr());
-                this.gl.uniformMatrix4fv(this.uView, 1, cast<byte>(0), view.ptr());
+                this.gl.uniformMatrix4fv(this.uProj, 1, cast<byte>(0), this.projM.ptr());
+                this.gl.uniformMatrix4fv(this.uView, 1, cast<byte>(0), this.viewM.ptr());
                 this.gl.bindVertexArray(this.vao);
                 Wgl.glDrawArrays(GL.TRIANGLES, 0, this.nverts);
                 if (this.camDist <= this.detailDist && this.haveDetail) {
                     this.gl.bindVertexArray(this.dvao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.dnverts);
+                } else {
+                    this.gl.bindVertexArray(this.hvao);
+                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.hnverts);
                 }
                 this.gl.bindVertexArray(0);
-                proj.dispose();
-                delete proj;
-                view.dispose();
-                delete view;
 
                 if (!this.pixelate) {
                     // raw render went straight to the screen; just drop depth so the HUD draws on top

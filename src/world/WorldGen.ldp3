@@ -332,8 +332,12 @@ public bundle Agents {
                     while (c < nc) {
                         int gxi = c % cols;
                         int gyi = c / cols;
-                        float cxn = (cast<float>(gxi) + 0.5) / cast<float>(cols) + (rng.unit() - 0.5) * 0.6 / cast<float>(cols);
-                        float cyn = (cast<float>(gyi) + 0.5) / cast<float>(rows) + (rng.unit() - 0.5) * 0.6 / cast<float>(rows);
+                        mutable float cxn = (cast<float>(gxi) + 0.5) / cast<float>(cols) + (rng.unit() - 0.5) * 0.6 / cast<float>(cols);
+                        mutable float cyn = (cast<float>(gyi) + 0.5) / cast<float>(rows) + (rng.unit() - 0.5) * 0.6 / cast<float>(rows);
+                        // Inset the centres so continents sit INSIDE the map, ringed by ocean, instead
+                        // of being cut off at the borders (which read as "the map is full of land").
+                        cxn = 0.10 + cxn * 0.80;
+                        cyn = 0.12 + cyn * 0.76;
                         ccx[c] = cast<int>(cxn * cast<float>(this.w));
                         ccy[c] = cast<int>(cyn * cast<float>(this.h));
                         ccr[c] = 0.11 + 0.06 * rng.unit();
@@ -461,6 +465,29 @@ public bundle Agents {
                     delete scx;
                     delete scy;
                     delete scr;
+                }
+                // Ocean border falloff (Continents / Archipelago): push elevation down toward every map
+                // edge so land never runs off the border -- the world reads as continents in an ocean,
+                // not terrain cropped by the map. The percentile sea level keeps the land ratio exact.
+                if (this.worldType == 0 || this.worldType == 2) {
+                    float margin = 0.07;
+                    mutable int i = 0;
+                    while (i < n) {
+                        int x = i % this.w;
+                        int y = i / this.w;
+                        float nx = cast<float>(x) / cast<float>(this.w - 1);
+                        float ny = cast<float>(y) / cast<float>(this.h - 1);
+                        mutable float edge = nx;
+                        if (1.0 - nx < edge) { edge = 1.0 - nx; }
+                        if (ny < edge) { edge = ny; }
+                        if (1.0 - ny < edge) { edge = 1.0 - ny; }
+                        if (edge < margin) {
+                            mutable float t = edge / margin;
+                            t = t * t * (3.0 - 2.0 * t);
+                            this.eb[i] = this.eb[i] * (0.15 + 0.85 * t);
+                        }
+                        i = i + 1;
+                    }
                 }
             }
 
