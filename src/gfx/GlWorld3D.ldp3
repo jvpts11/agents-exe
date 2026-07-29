@@ -29,6 +29,18 @@ public bundle Agents {
             private mutable float cy;
             private mutable float cz;
             private mutable float radius;
+            // pixel post-process (low-res FBO -> nearest upscale + outline)
+            private mutable int fbo;
+            private mutable int colorTex;
+            private mutable int depthTex;
+            private mutable int fboW;
+            private mutable int fboH;
+            private mutable int postProg;
+            private mutable int postVao;
+            private mutable int postVbo;
+            private mutable int uColor;
+            private mutable int uDepth;
+            private mutable int uTexel;
 
             public constructor GlWorld3D(Gl gl) {
                 this.gl = gl;
@@ -51,6 +63,82 @@ public bundle Agents {
                 this.cy = 0.0;
                 this.cz = 0.0;
                 this.radius = 10.0;
+                this.fbo = 0;
+                this.colorTex = 0;
+                this.depthTex = 0;
+                this.fboW = 0;
+                this.fboH = 0;
+                this.postProg = 0;
+                this.postVao = 0;
+                this.postVbo = 0;
+                this.uColor = 0;
+                this.uDepth = 0;
+                this.uTexel = 0;
+            }
+
+            // Create a texture (empty) for an FBO attachment, NEAREST-filtered so the low-res buffer
+            // upscales as crunchy pixels.
+            private method makeTex(int fw, int fh, int internalFmt, int fmt, int typ) returns int {
+                address idb = Memory.alloc(4);
+                Wgl.glGenTextures(1, cast<long>(idb));
+                int tex = Memory.read<int>(idb);
+                Memory.free(idb);
+                Wgl.glBindTexture(0x0DE1, tex);
+                Wgl.glTexImage2D(0x0DE1, 0, internalFmt, fw, fh, 0, fmt, typ, cast<long>(0));
+                Wgl.glTexParameteri(0x0DE1, 0x2801, 0x2600);
+                Wgl.glTexParameteri(0x0DE1, 0x2800, 0x2600);
+                Wgl.glTexParameteri(0x0DE1, 0x2802, 0x812F);
+                Wgl.glTexParameteri(0x0DE1, 0x2803, 0x812F);
+                return tex;
+            }
+
+            // One-time: the low-res color+depth FBO and the fullscreen-quad post-process program.
+            private method initPost(int fw, int fh) returns void {
+                this.fboW = fw;
+                this.fboH = fh;
+                this.colorTex = this.makeTex(fw, fh, 0x1907, 0x1907, 0x1401);   // RGB / UNSIGNED_BYTE
+                this.depthTex = this.makeTex(fw, fh, 0x81A6, 0x1902, 0x1406);   // DEPTH24 / DEPTH_COMPONENT / FLOAT
+                address fb = Memory.alloc(4);
+                this.gl.genFramebuffers(1, cast<long>(fb));
+                this.fbo = Memory.read<int>(fb);
+                Memory.free(fb);
+                this.gl.bindFramebuffer(0x8D40, this.fbo);
+                this.gl.framebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, this.colorTex, 0);
+                this.gl.framebufferTexture2D(0x8D40, 0x8D00, 0x0DE1, this.depthTex, 0);
+                this.gl.bindFramebuffer(0x8D40, 0);
+                this.postProg = Shader.fromSource(this.gl, GlWorld3D.postVert(), GlWorld3D.postFrag());
+                this.postVao = this.gl.genVertexArray();
+                this.postVbo = this.gl.genBuffer();
+                float[] q = new float[24]();
+                GlWorld3D.fillQuad(q);
+                this.gl.bindVertexArray(this.postVao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.postVbo);
+                this.gl.bufferDataFloats(GL.ARRAY_BUFFER, q, GL.STATIC_DRAW);
+                this.gl.vertexAttribPointer(0, 2, GL.FLOAT, cast<byte>(0), 16, 0);
+                this.gl.enableVertexAttribArray(0);
+                this.gl.vertexAttribPointer(1, 2, GL.FLOAT, cast<byte>(0), 16, 8);
+                this.gl.enableVertexAttribArray(1);
+                this.gl.bindVertexArray(0);
+                delete q;
+                this.uColor = this.gl.getUniformLocation(this.postProg, "uColor");
+                this.uDepth = this.gl.getUniformLocation(this.postProg, "uDepth");
+                this.uTexel = this.gl.getUniformLocation(this.postProg, "uTexel");
+            }
+
+            private static method fillQuad(float[] q) returns void {
+                float[] src = new float[24]();
+                src[0] = 0.0 - 1.0; src[1] = 0.0 - 1.0; src[2] = 0.0; src[3] = 0.0;
+                src[4] = 1.0; src[5] = 0.0 - 1.0; src[6] = 1.0; src[7] = 0.0;
+                src[8] = 1.0; src[9] = 1.0; src[10] = 1.0; src[11] = 1.0;
+                src[12] = 0.0 - 1.0; src[13] = 0.0 - 1.0; src[14] = 0.0; src[15] = 0.0;
+                src[16] = 1.0; src[17] = 1.0; src[18] = 1.0; src[19] = 1.0;
+                src[20] = 0.0 - 1.0; src[21] = 1.0; src[22] = 0.0; src[23] = 1.0;
+                mutable int i = 0;
+                while (i < 24) {
+                    q[i] = src[i];
+                    i = i + 1;
+                }
+                delete src;
             }
 
             // Count the vertices a cell contributes: its tile mesh, plus a 4-quad skirt when raised.
@@ -186,9 +274,14 @@ public bundle Agents {
                 return p;
             }
 
-            // Draw the baked world into the bound framebuffer at (fbW x fbH), orbit camera at az/el degrees.
+            // Draw the world with the pixel post-process: 3D pass into a low-res FBO, then a fullscreen
+            // pass upscales it NEAREST and adds the dark outline. Orbit camera at az/el degrees.
             public method render(int fbW, int fbH, float az, float el) returns void {
-                Wgl.glViewport(0, 0, fbW, fbH);
+                if (this.fbo == 0) {
+                    this.initPost(640, 400);
+                }
+                this.gl.bindFramebuffer(0x8D40, this.fbo);
+                Wgl.glViewport(0, 0, this.fboW, this.fboH);
                 Wgl.glEnable(GL.DEPTH_TEST);
                 Wgl.glDepthFunc(GL.LESS);
                 Wgl.glClearColor(0.08, 0.10, 0.14, 1.0);
@@ -219,6 +312,25 @@ public bundle Agents {
                 delete proj;
                 view.dispose();
                 delete view;
+
+                // ---- post-process pass: FBO -> screen, nearest upscale + outline ----
+                this.gl.bindFramebuffer(0x8D40, 0);
+                Wgl.glViewport(0, 0, fbW, fbH);
+                Wgl.glDisable(GL.DEPTH_TEST);
+                Wgl.glClearColor(0.08, 0.10, 0.14, 1.0);
+                Wgl.glClear(GL.COLOR_BUFFER_BIT);
+                this.gl.useProgram(this.postProg);
+                this.gl.activeTexture(0x84C0);
+                Wgl.glBindTexture(0x0DE1, this.colorTex);
+                this.gl.uniform1i(this.uColor, 0);
+                this.gl.activeTexture(0x84C1);
+                Wgl.glBindTexture(0x0DE1, this.depthTex);
+                this.gl.uniform1i(this.uDepth, 1);
+                this.gl.uniform2f(this.uTexel, 1.0 / cast<float>(this.fboW), 1.0 / cast<float>(this.fboH));
+                this.gl.bindVertexArray(this.postVao);
+                Wgl.glDrawArrays(GL.TRIANGLES, 0, 6);
+                this.gl.bindVertexArray(0);
+                this.gl.activeTexture(0x84C0);
             }
 
             private method fsin(float x) returns float {
@@ -241,6 +353,16 @@ public bundle Agents {
 
             private static method fragSrc() returns String {
                 return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nout vec4 FragColor;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.60 + 0.42*ndl);\n  FragColor = vec4(vCol*sh, 1.0);\n}\n";
+            }
+
+            private static method postVert() returns String {
+                return "#version 330 core\nlayout(location=0) in vec2 aPos;\nlayout(location=1) in vec2 aUV;\nout vec2 vUV;\nvoid main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
+            }
+
+            // Nearest-sampled upscale (the pixelation) + a dark outline where depth or colour jumps
+            // (silhouettes, cliffs, biome edges) + a gentle palette quantise. bg where nothing was drawn.
+            private static method postFrag() returns String {
+                return "#version 330 core\nin vec2 vUV;\nout vec4 FragColor;\nuniform sampler2D uColor;\nuniform sampler2D uDepth;\nuniform vec2 uTexel;\nvoid main(){\n  vec3 bg = vec3(0.08,0.10,0.14);\n  float d = texture(uDepth, vUV).r;\n  if (d >= 0.9999) { FragColor = vec4(bg,1.0); return; }\n  vec3 c = texture(uColor, vUV).rgb;\n  float dl = texture(uDepth, vUV+vec2(-uTexel.x,0.0)).r;\n  float dr = texture(uDepth, vUV+vec2(uTexel.x,0.0)).r;\n  float du = texture(uDepth, vUV+vec2(0.0,-uTexel.y)).r;\n  float dd = texture(uDepth, vUV+vec2(0.0,uTexel.y)).r;\n  bool sil = (dl>=0.9999)||(dr>=0.9999)||(du>=0.9999)||(dd>=0.9999);\n  float dmax = max(max(abs(d-dl),abs(d-dr)),max(abs(d-du),abs(d-dd)));\n  vec3 cl = texture(uColor, vUV+vec2(-uTexel.x,0.0)).rgb;\n  vec3 cu = texture(uColor, vUV+vec2(0.0,-uTexel.y)).rgb;\n  float cd = max(length(c-cl), length(c-cu));\n  if (sil || dmax > 0.0016 || cd > 0.22) { FragColor = vec4(0.20,0.20,0.24,1.0); return; }\n  vec3 q = floor(c*6.0 + 0.5)/6.0;\n  FragColor = vec4(q,1.0);\n}\n";
             }
         }
     }
