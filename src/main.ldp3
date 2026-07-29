@@ -33,7 +33,7 @@ public bundle Agents {
                         return;
                     }
                     if (args[0].equals("glworld")) {
-                        Main.renderGlWorld();
+                        Main.captureGlWorld();
                         return;
                     }
                     if (args[0].equals("worldmaps")) {
@@ -143,62 +143,101 @@ public bundle Agents {
             // GL true-3D path: generate a world, bake it into a VBO, render one frame with the orbit
             // camera + cel shading, and read it back to gl_world.ppm (headless-verifiable). The free
             // camera loop runs when a real window is present.
+            // The interactive true-3D world: generate, bake into a VBO (LOD stride so the whole
+            // 2560x1080 fits), then an inspection camera loop -- left-drag or arrows rotate/tilt (tilt
+            // gimbal-locked between horizontal and top-down), wheel or +/- zoom, WASD pan, ESC quits.
             private static method renderGlWorld() returns void {
                 int w = 2560;
                 int h = 1080;
-                int stride = 5;
+                int stride = 8;
                 int wc = w / stride;
                 int hc = h / stride;
-                System.IO.Console.println("glworld: generating the full 2560x1080 world...");
+                System.IO.Console.println("agents.exe: generating the world...");
                 WorldGen gen = new WorldGen(42) on stack;
                 gen.setWorld(0, 0.0 - 1.0);
                 Grid* g = gen.generate(w, h);
-                Main.writeBiomeMap(g, w, h, 720, 304, "glworld_map.ppm");
-                int sw = 960;
-                int sh = 600;
                 GlWindow* win = new GlWindow() on heap;
-                if (win.open("agents.exe -- world 3D", sw, sh, 3, 3) == 0) {
-                    System.IO.Console.println("glworld: no GL window available.");
+                if (win.open("agents.exe -- world  [drag/arrows rotate | wheel/+- zoom | WASD pan | ESC]", 1280, 720, 3, 3) == 0) {
+                    System.IO.Console.println("no GL window available.");
                     delete win;
                     delete g;
                     return;
                 }
                 win.setVSync(1);
-                System.IO.Console.println("glworld: loading models + baking VBO...");
                 MeshAtlas* atlas = MeshAtlas.loadTerrain("assets/models");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.bake(g, atlas, wc, hc, 9.0, stride);
-                System.IO.Console.println("glworld: rendering...");
-                int cw = win.width();
-                int ch = win.height();
-                r.render(cw, ch, 42.0, 32.0);
-                byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
-                Main.writePpmFlipped(px, cw, ch, "gl_world.ppm");
-                delete px;
-                win.swap();
-                System.IO.Console.println("glworld: wrote gl_world.ppm");
-
-                // Free orbit camera: A/D or Left/Right spin, W/S or Up/Down tilt, ESC quits. (No-op headless.)
-                mutable float az = 42.0;
-                mutable float el = 32.0;
+                mutable int lastX = win.cursorX();
+                mutable int lastY = win.cursorY();
                 while (win.isOpen()) {
                     win.pump();
                     if (win.keyDown(0x1B)) {
                         break;
                     }
-                    if (win.keyDown(0x41) || win.keyDown(0x25)) { az = az - 2.0; }
-                    if (win.keyDown(0x44) || win.keyDown(0x27)) { az = az + 2.0; }
-                    if (win.keyDown(0x57) || win.keyDown(0x26)) { el = el + 1.5; }
-                    if (win.keyDown(0x53) || win.keyDown(0x28)) { el = el - 1.5; }
-                    if (el > 85.0) { el = 85.0; }
-                    if (el < 6.0) { el = 6.0; }
-                    r.render(win.width(), win.height(), az, el);
+                    int mx = win.cursorX();
+                    int my = win.cursorY();
+                    if (win.keyDown(0x01) && win.isForeground()) {
+                        r.orbit(cast<float>(mx - lastX) * 0.35, 0.0 - cast<float>(my - lastY) * 0.30);
+                    }
+                    lastX = mx;
+                    lastY = my;
+                    if (win.keyDown(0x25)) { r.orbit(0.0 - 1.6, 0.0); }
+                    if (win.keyDown(0x27)) { r.orbit(1.6, 0.0); }
+                    if (win.keyDown(0x26)) { r.orbit(0.0, 1.2); }
+                    if (win.keyDown(0x28)) { r.orbit(0.0, 0.0 - 1.2); }
+                    int sc = win.takeScroll();
+                    if (sc > 0) { r.zoomBy(0.88); }
+                    if (sc < 0) { r.zoomBy(1.0 / 0.88); }
+                    if (win.keyDown(0xBB) || win.keyDown(0x6B)) { r.zoomBy(0.97); }
+                    if (win.keyDown(0xBD) || win.keyDown(0x6D)) { r.zoomBy(1.0 / 0.97); }
+                    float pan = r.curDist() * 0.018;
+                    if (win.keyDown(0x57)) { r.pan(pan, 0.0); }
+                    if (win.keyDown(0x53)) { r.pan(0.0 - pan, 0.0); }
+                    if (win.keyDown(0x41)) { r.pan(0.0, 0.0 - pan); }
+                    if (win.keyDown(0x44)) { r.pan(0.0, pan); }
+                    r.render(win.width(), win.height());
                     win.swap();
                 }
                 delete r;
                 delete atlas;
                 delete g;
                 delete win;
+                return;
+            }
+
+            // Headless verification of the GL path: render one frame of the full world and read it back
+            // to gl_world.ppm (+ a top-down biome map), no interactive loop.
+            private static method captureGlWorld() returns void {
+                int w = 2560;
+                int h = 1080;
+                int stride = 8;
+                int wc = w / stride;
+                int hc = h / stride;
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(w, h);
+                Main.writeBiomeMap(g, w, h, 720, 304, "glworld_map.ppm");
+                GlWindow* win = new GlWindow() on heap;
+                if (win.open("capture", 960, 600, 3, 3) == 0) {
+                    System.IO.Console.println("captureGlWorld: no GL window.");
+                    delete win;
+                    delete g;
+                    return;
+                }
+                MeshAtlas* atlas = MeshAtlas.loadTerrain("assets/models");
+                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
+                r.bake(g, atlas, wc, hc, 9.0, stride);
+                int cw = win.width();
+                int ch = win.height();
+                r.render(cw, ch);
+                byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
+                Main.writePpmFlipped(px, cw, ch, "gl_world.ppm");
+                delete px;
+                delete r;
+                delete atlas;
+                delete g;
+                delete win;
+                System.IO.Console.println("captureGlWorld: wrote gl_world.ppm");
                 return;
             }
 

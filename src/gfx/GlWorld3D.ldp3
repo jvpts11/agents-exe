@@ -29,6 +29,14 @@ public bundle Agents {
             private mutable float cy;
             private mutable float cz;
             private mutable float radius;
+            // orbit-inspection camera state (azimuth/elevation degrees, distance, look-at target on the
+            // ground). Elevation is gimbal-locked to [3, 89] so the view never flips past top-down or
+            // below the horizon. Owned here so the input loop just nudges it.
+            private mutable float camAz;
+            private mutable float camEl;
+            private mutable float camDist;
+            private mutable float camTx;
+            private mutable float camTy;
             // pixel post-process (low-res FBO -> nearest upscale + outline)
             private mutable int fbo;
             private mutable int colorTex;
@@ -63,6 +71,11 @@ public bundle Agents {
                 this.cy = 0.0;
                 this.cz = 0.0;
                 this.radius = 10.0;
+                this.camAz = 45.0;
+                this.camEl = 40.0;
+                this.camDist = 20.0;
+                this.camTx = 0.0;
+                this.camTy = 0.0;
                 this.fbo = 0;
                 this.colorTex = 0;
                 this.depthTex = 0;
@@ -200,6 +213,46 @@ public bundle Agents {
                 this.cy = cast<float>(hc - 1);
                 this.cz = vscale * 0.4;
                 this.radius = this.fsqrt(this.cx * this.cx + this.cy * this.cy) + vscale + 2.0;
+                this.camTx = this.cx;
+                this.camTy = this.cy;
+                this.camDist = this.radius * 1.7;
+            }
+
+            // ---- inspection camera controls (called by the input loop) ----
+            public method orbit(float dAz, float dEl) returns void {
+                this.camAz = this.camAz + dAz;
+                this.camEl = this.camEl + dEl;
+                if (this.camEl > 89.0) { this.camEl = 89.0; }
+                if (this.camEl < 3.0) { this.camEl = 3.0; }
+            }
+
+            public method zoomBy(float factor) returns void {
+                this.camDist = this.camDist * factor;
+                float minD = this.radius * 0.10;
+                float maxD = this.radius * 3.5;
+                if (this.camDist < minD) { this.camDist = minD; }
+                if (this.camDist > maxD) { this.camDist = maxD; }
+            }
+
+            // Pan the look-at target on the ground plane, relative to the current view direction.
+            public method pan(float dForward, float dRight) returns void {
+                float a = this.camAz * 3.14159265 / 180.0;
+                float fx = this.fsin(a);
+                float fy = this.fcos(a);
+                // forward = toward the target from the camera on the ground (-f); right is perpendicular.
+                this.camTx = this.camTx - fx * dForward + fy * dRight;
+                this.camTy = this.camTy - fy * dForward - fx * dRight;
+                float lo = 0.0 - this.radius;
+                float hix = this.cx * 2.0 + this.radius;
+                float hiy = this.cy * 2.0 + this.radius;
+                if (this.camTx < lo) { this.camTx = lo; }
+                if (this.camTx > hix) { this.camTx = hix; }
+                if (this.camTy < lo) { this.camTy = lo; }
+                if (this.camTy > hiy) { this.camTy = hiy; }
+            }
+
+            public method curDist() returns float {
+                return this.camDist;
             }
 
             private method fsqrt(float v) returns float {
@@ -278,7 +331,7 @@ public bundle Agents {
 
             // Draw the world with the pixel post-process: 3D pass into a low-res FBO, then a fullscreen
             // pass upscales it NEAREST and adds the dark outline. Orbit camera at az/el degrees.
-            public method render(int fbW, int fbH, float az, float el) returns void {
+            public method render(int fbW, int fbH) returns void {
                 if (this.fbo == 0) {
                     this.initPost(640, 400);
                 }
@@ -290,19 +343,19 @@ public bundle Agents {
                 Wgl.glClear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
                 float pi = 3.14159265;
-                float a = az * pi / 180.0;
-                float e = el * pi / 180.0;
+                float a = this.camAz * pi / 180.0;
+                float e = this.camEl * pi / 180.0;
                 float ce = this.fcos(e);
-                float d = this.radius * 1.7;
-                float ex = this.cx + d * ce * this.fsin(a);
-                float ey = this.cy + d * ce * this.fcos(a);
+                float d = this.camDist;
+                float ex = this.camTx + d * ce * this.fsin(a);
+                float ey = this.camTy + d * ce * this.fcos(a);
                 float ez = this.cz + d * this.fsin(e);
 
                 GlMat4* proj = new GlMat4() on heap;
                 float aspect = cast<float>(fbW) / cast<float>(fbH);
-                proj.perspective(42.0, aspect, 0.5, d * 3.0);
+                proj.perspective(42.0, aspect, 0.5, (d + this.radius) * 3.0);
                 GlMat4* view = new GlMat4() on heap;
-                view.lookAt(ex, ey, ez, this.cx, this.cy, this.cz, 0.0, 0.0, 1.0);
+                view.lookAt(ex, ey, ez, this.camTx, this.camTy, this.cz, 0.0, 0.0, 1.0);
 
                 this.gl.useProgram(this.prog);
                 this.gl.uniformMatrix4fv(this.uProj, 1, cast<byte>(0), proj.ptr());
