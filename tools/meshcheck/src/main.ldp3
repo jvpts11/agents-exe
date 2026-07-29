@@ -1,0 +1,157 @@
+import System.IO.File;
+import System.IO.Console;
+import System.Text.Scanner;
+import System.Text.StringBuilder;
+
+// Standalone validator for the .mesh loader (no opengl dep -> fast build). Loads the baked terrain
+// atlas from assets/models and prints a summary + a few per-biome checks (triangle count + first
+// triangle colour) so the export->load pipeline can be verified before wiring the 3D renderer.
+program MeshCheck;
+
+public bundle Tool {
+    public namespace App {
+
+        public class MeshAtlas {
+            public mutable int count;
+            public mutable int totalTris;
+            public mutable float[] px;
+            public mutable float[] py;
+            public mutable float[] pz;
+            public mutable int[] cr;
+            public mutable int[] cg;
+            public mutable int[] cb;
+            public mutable int[] grp;
+            public mutable int[] triStart;
+            public mutable int[] triCount;
+
+            public constructor MeshAtlas(int count, int totalTris) {
+                this.count = count;
+                this.totalTris = totalTris;
+                int nv = totalTris * 3;
+                this.px = new float[nv]();
+                this.py = new float[nv]();
+                this.pz = new float[nv]();
+                this.cr = new int[totalTris]();
+                this.cg = new int[totalTris]();
+                this.cb = new int[totalTris]();
+                this.grp = new int[totalTris]();
+                this.triStart = new int[count]();
+                this.triCount = new int[count]();
+            }
+
+            public destructor ~MeshAtlas() returns void {
+                delete this.px;
+                delete this.py;
+                delete this.pz;
+                delete this.cr;
+                delete this.cg;
+                delete this.cb;
+                delete this.grp;
+                delete this.triStart;
+                delete this.triCount;
+            }
+
+            private method appendMesh(String path, int triOffset) returns void {
+                String txt = File.readAll(path);
+                Scanner sc = new Scanner(txt) on stack;
+                sc.nextWord();
+                sc.nextInt();
+                sc.nextWord();
+                sc.nextWord();
+                sc.nextWord();
+                int scale = sc.nextInt();
+                sc.nextWord();
+                int n = sc.nextInt();
+                float inv = 1.0 / cast<float>(scale);
+                mutable int t = 0;
+                while (t < n) {
+                    int tri = triOffset + t;
+                    int vb = tri * 3;
+                    mutable int k = 0;
+                    while (k < 3) {
+                        int vi = vb + k;
+                        this.px[vi] = cast<float>(sc.nextInt()) * inv;
+                        this.py[vi] = cast<float>(sc.nextInt()) * inv;
+                        this.pz[vi] = cast<float>(sc.nextInt()) * inv;
+                        sc.nextInt();
+                        sc.nextInt();
+                        sc.nextInt();
+                        k = k + 1;
+                    }
+                    this.cr[tri] = sc.nextInt();
+                    this.cg[tri] = sc.nextInt();
+                    this.cb[tri] = sc.nextInt();
+                    this.grp[tri] = sc.nextInt();
+                    t = t + 1;
+                }
+            }
+
+            public static method loadTerrain(String root) returns MeshAtlas* {
+                String idxTxt = File.readAll(root + "/terrain.index");
+                Scanner sc = new Scanner(idxTxt) on stack;
+                int count = sc.nextInt();
+                String[] rel = new String[count]();
+                int[] tc = new int[count]();
+                mutable int total = 0;
+                mutable int i = 0;
+                while (i < count) {
+                    rel[i] = sc.nextWord();
+                    tc[i] = sc.nextInt();
+                    total = total + tc[i];
+                    i = i + 1;
+                }
+                MeshAtlas* a = new MeshAtlas(count, total) on heap;
+                mutable int off = 0;
+                mutable int j = 0;
+                while (j < count) {
+                    a.triStart[j] = off;
+                    a.triCount[j] = tc[j];
+                    a.appendMesh(root + "/" + rel[j], off);
+                    off = off + tc[j];
+                    j = j + 1;
+                }
+                delete tc;
+                return a;
+            }
+
+            public method reportModel(int o) returns void {
+                int ts = this.triStart[o];
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("  [");
+                sb.appendInt(o);
+                sb.append("] tris=");
+                sb.appendInt(this.triCount[o]);
+                sb.append("  firstColor=");
+                sb.appendInt(this.cr[ts]);
+                sb.append(",");
+                sb.appendInt(this.cg[ts]);
+                sb.append(",");
+                sb.appendInt(this.cb[ts]);
+                System.IO.Console.println(sb.toString());
+                delete sb;
+            }
+        }
+
+        public class Main {
+            public static method main(string[] args) returns void {
+                String root = "C:/Users/jvpts/Documents/GitHub/agents-exe/assets/models";
+                System.IO.Console.println("loading terrain atlas...");
+                MeshAtlas* a = MeshAtlas.loadTerrain(root);
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("MeshAtlas: ");
+                sb.appendInt(a.count);
+                sb.append(" models, ");
+                sb.appendInt(a.totalTris);
+                sb.append(" tris total");
+                System.IO.Console.println(sb.toString());
+                delete sb;
+                a.reportModel(0);
+                a.reportModel(8);
+                a.reportModel(33);
+                a.reportModel(39);
+                delete a;
+                return;
+            }
+        }
+    }
+}

@@ -1,0 +1,149 @@
+import System.IO.File;
+import System.IO.Console;
+import System.Text.Scanner;
+import System.Text.StringBuilder;
+
+// Loads the baked .mesh models (artgen -> assets/models) into one flat vertex atlas the 3D renderer
+// instances per cell. All terrain biome meshes are concatenated into parallel arrays; `triStart` /
+// `triCount` index the block for a given biome ordinal. The .mesh files are fixed-point integers
+// (see docs/RENDER3D_PIPELINE.md), so only integer parsing is needed (Scanner.nextInt).
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class MeshAtlas {
+            public mutable int count;         // number of models (40 terrain biomes)
+            public mutable int totalTris;
+
+            // per-vertex, length 3*totalTris (triangle soup: verts 3t, 3t+1, 3t+2 form tri t)
+            public mutable float[] px;
+            public mutable float[] py;
+            public mutable float[] pz;
+            public mutable float[] nx;
+            public mutable float[] ny;
+            public mutable float[] nz;
+
+            // per-triangle, length totalTris
+            public mutable int[] cr;
+            public mutable int[] cg;
+            public mutable int[] cb;
+            public mutable int[] grp;
+
+            // per-model, length count
+            public mutable int[] triStart;
+            public mutable int[] triCount;
+
+            public constructor MeshAtlas(int count, int totalTris) {
+                this.count = count;
+                this.totalTris = totalTris;
+                int nv = totalTris * 3;
+                this.px = new float[nv]();
+                this.py = new float[nv]();
+                this.pz = new float[nv]();
+                this.nx = new float[nv]();
+                this.ny = new float[nv]();
+                this.nz = new float[nv]();
+                this.cr = new int[totalTris]();
+                this.cg = new int[totalTris]();
+                this.cb = new int[totalTris]();
+                this.grp = new int[totalTris]();
+                this.triStart = new int[count]();
+                this.triCount = new int[count]();
+            }
+
+            public destructor ~MeshAtlas() returns void {
+                delete this.px;
+                delete this.py;
+                delete this.pz;
+                delete this.nx;
+                delete this.ny;
+                delete this.nz;
+                delete this.cr;
+                delete this.cg;
+                delete this.cb;
+                delete this.grp;
+                delete this.triStart;
+                delete this.triCount;
+            }
+
+            // Parse one .mesh file, appending its triangles starting at triangle index `triOffset`.
+            private method appendMesh(String path, int triOffset) returns void {
+                String txt = File.readAll(path);
+                Scanner sc = new Scanner(txt) on stack;
+                sc.nextWord();               // "LDP3MESH"
+                sc.nextInt();                // version
+                sc.nextWord();               // "name"
+                sc.nextWord();               // <name>
+                sc.nextWord();               // "scale"
+                int scale = sc.nextInt();
+                sc.nextWord();               // "tris"
+                int n = sc.nextInt();
+                float inv = 1.0 / cast<float>(scale);
+                mutable int t = 0;
+                while (t < n) {
+                    int tri = triOffset + t;
+                    int vb = tri * 3;
+                    mutable int k = 0;
+                    while (k < 3) {
+                        int vi = vb + k;
+                        this.px[vi] = cast<float>(sc.nextInt()) * inv;
+                        this.py[vi] = cast<float>(sc.nextInt()) * inv;
+                        this.pz[vi] = cast<float>(sc.nextInt()) * inv;
+                        this.nx[vi] = cast<float>(sc.nextInt()) * inv;
+                        this.ny[vi] = cast<float>(sc.nextInt()) * inv;
+                        this.nz[vi] = cast<float>(sc.nextInt()) * inv;
+                        k = k + 1;
+                    }
+                    this.cr[tri] = sc.nextInt();
+                    this.cg[tri] = sc.nextInt();
+                    this.cb[tri] = sc.nextInt();
+                    this.grp[tri] = sc.nextInt();
+                    t = t + 1;
+                }
+            }
+
+            // Load every terrain biome mesh from <root>/terrain.index into one atlas indexed by
+            // biome ordinal (0..count-1).
+            public static method loadTerrain(String root) returns MeshAtlas* {
+                String idxTxt = File.readAll(root + "/terrain.index");
+                Scanner sc = new Scanner(idxTxt) on stack;
+                int count = sc.nextInt();
+                String[] rel = new String[count]();
+                int[] tc = new int[count]();
+                mutable int total = 0;
+                mutable int i = 0;
+                while (i < count) {
+                    rel[i] = sc.nextWord();
+                    tc[i] = sc.nextInt();
+                    total = total + tc[i];
+                    i = i + 1;
+                }
+                MeshAtlas* a = new MeshAtlas(count, total) on heap;
+                mutable int off = 0;
+                mutable int j = 0;
+                while (j < count) {
+                    a.triStart[j] = off;
+                    a.triCount[j] = tc[j];
+                    a.appendMesh(root + "/" + rel[j], off);
+                    off = off + tc[j];
+                    j = j + 1;
+                }
+                delete tc;
+                return a;
+            }
+
+            // Debug: print a summary so the load can be verified headless.
+            public method summary() returns void {
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("MeshAtlas: ");
+                sb.appendInt(this.count);
+                sb.append(" models, ");
+                sb.appendInt(this.totalTris);
+                sb.append(" tris total");
+                System.IO.Console.println(sb.toString());
+                delete sb;
+            }
+        }
+    }
+}
