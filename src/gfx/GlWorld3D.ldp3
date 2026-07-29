@@ -64,6 +64,8 @@ public bundle Agents {
             private mutable float camDist;
             private mutable float camTx;
             private mutable float camTy;
+            // pixel post-process toggle: off = raw full-resolution render (no low-res, no outline)
+            public mutable boolean pixelate;
             // pixel post-process
             private mutable int fbo;
             private mutable int colorTex;
@@ -101,6 +103,7 @@ public bundle Agents {
                 this.camDist = 20.0;
                 this.camTx = 0.0;
                 this.camTy = 0.0;
+                this.pixelate = false;
                 this.fbo = 0;
                 this.colorTex = 0;
                 this.depthTex = 0;
@@ -566,12 +569,17 @@ public bundle Agents {
 
             // ---- frame ----
             public method render(int fbW, int fbH) returns void {
-                if (this.fbo == 0) {
-                    this.initPost(640, 400);
-                }
                 this.ensureDetail();
-                this.gl.bindFramebuffer(0x8D40, this.fbo);
-                Wgl.glViewport(0, 0, this.fboW, this.fboH);
+                if (this.pixelate) {
+                    if (this.fbo == 0) {
+                        this.initPost(640, 400);
+                    }
+                    this.gl.bindFramebuffer(0x8D40, this.fbo);
+                    Wgl.glViewport(0, 0, this.fboW, this.fboH);
+                } else {
+                    this.gl.bindFramebuffer(0x8D40, 0);
+                    Wgl.glViewport(0, 0, fbW, fbH);
+                }
                 Wgl.glEnable(GL.DEPTH_TEST);
                 Wgl.glDepthFunc(GL.LESS);
                 Wgl.glClearColor(0.08, 0.10, 0.14, 1.0);
@@ -610,6 +618,12 @@ public bundle Agents {
                 delete proj;
                 view.dispose();
                 delete view;
+
+                if (!this.pixelate) {
+                    // raw render went straight to the screen; just drop depth so the HUD draws on top
+                    Wgl.glDisable(GL.DEPTH_TEST);
+                    return;
+                }
 
                 // ---- post-process pass: FBO -> screen, nearest upscale + outline ----
                 this.gl.bindFramebuffer(0x8D40, 0);
