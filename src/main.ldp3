@@ -170,9 +170,6 @@ public bundle Agents {
             private static method renderGlWorld() returns void {
                 int w = 2560;
                 int h = 1080;
-                int stride = 8;
-                int wc = w / stride;
-                int hc = h / stride;
                 System.IO.Console.println("agents.exe: generating the world...");
                 WorldGen gen = new WorldGen(42) on stack;
                 gen.setWorld(0, 0.0 - 1.0);
@@ -191,9 +188,11 @@ public bundle Agents {
                     return;
                 }
                 win.setVSync(1);
-                MeshAtlas* atlas = MeshAtlas.loadTerrain(root);
+                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
+                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.bake(g, atlas, wc, hc, 9.0, stride);
+                r.setup(g, terr, props, 8, 26.0);
+                Batch2D* hud = new Batch2D(win.gl) on heap;
                 mutable int lastX = win.cursorX();
                 mutable int lastY = win.cursorY();
                 while (win.isOpen()) {
@@ -222,14 +221,50 @@ public bundle Agents {
                     if (win.keyDown(0x53)) { r.pan(0.0 - pan, 0.0); }
                     if (win.keyDown(0x41)) { r.pan(0.0, 0.0 - pan); }
                     if (win.keyDown(0x44)) { r.pan(0.0, pan); }
-                    r.render(win.width(), win.height());
+                    int cw = win.width();
+                    int ch = win.height();
+                    r.render(cw, ch);
+                    hud.begin(cw, ch, 0);
+                    r.drawCompass(hud, cw, ch);
+                    hud.flush();
                     win.swap();
                 }
+                delete hud;
                 delete r;
-                delete atlas;
+                delete props;
+                delete terr;
                 delete g;
                 delete win;
                 return;
+            }
+
+            // Nearest forest-ish cell to the map centre (for the close-up verification frame).
+            private static method findForest(Grid* g, int w, int h) returns int {
+                mutable int bestX = w / 2;
+                mutable int bestY = h / 2;
+                mutable int bestD = 2000000000;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        int ord = g.biomeAt(x, y);
+                        if (ord == 14 || ord == 22 || ord == 23 || ord == 27) {
+                            mutable int dx = x - w / 2;
+                            if (dx < 0) { dx = 0 - dx; }
+                            mutable int dy = y - h / 2;
+                            if (dy < 0) { dy = 0 - dy; }
+                            int d = dx + dy;
+                            if (d < bestD) {
+                                bestD = d;
+                                bestX = x;
+                                bestY = y;
+                            }
+                        }
+                        x = x + 4;
+                    }
+                    y = y + 4;
+                }
+                return bestY * w + bestX;
             }
 
             // Headless verification of the GL path: render one frame of the full world and read it back
@@ -237,9 +272,6 @@ public bundle Agents {
             private static method captureGlWorld() returns void {
                 int w = 2560;
                 int h = 1080;
-                int stride = 8;
-                int wc = w / stride;
-                int hc = h / stride;
                 WorldGen gen = new WorldGen(42) on stack;
                 gen.setWorld(0, 0.0 - 1.0);
                 Grid* g = gen.generate(w, h);
@@ -257,20 +289,39 @@ public bundle Agents {
                     delete g;
                     return;
                 }
-                MeshAtlas* atlas = MeshAtlas.loadTerrain(root);
+                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
+                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.bake(g, atlas, wc, hc, 9.0, stride);
+                r.setup(g, terr, props, 8, 26.0);
+                Batch2D* hud = new Batch2D(win.gl) on heap;
                 int cw = win.width();
                 int ch = win.height();
+                // far frame (whole world, coarse LOD) + compass
                 r.render(cw, ch);
+                hud.begin(cw, ch, 0);
+                r.drawCompass(hud, cw, ch);
+                hud.flush();
                 byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
                 Main.writePpmFlipped(px, cw, ch, "gl_world.ppm");
                 delete px;
+                // near frame: aim at the closest forest and zoom under the detail threshold
+                int packed = Main.findForest(g, w, h);
+                r.aimAt(packed % w, packed / w);
+                r.setView(42.0, 35.0, 130.0);
+                r.render(cw, ch);
+                hud.begin(cw, ch, 0);
+                r.drawCompass(hud, cw, ch);
+                hud.flush();
+                byte[] px2 = win.gl.readPixelsRgb(0, 0, cw, ch);
+                Main.writePpmFlipped(px2, cw, ch, "gl_world_near.ppm");
+                delete px2;
+                delete hud;
                 delete r;
-                delete atlas;
+                delete props;
+                delete terr;
                 delete g;
                 delete win;
-                System.IO.Console.println("captureGlWorld: wrote gl_world.ppm");
+                System.IO.Console.println("captureGlWorld: wrote gl_world.ppm + gl_world_near.ppm");
                 return;
             }
 
