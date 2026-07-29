@@ -20,6 +20,7 @@ public bundle Agents {
             private mutable int nPlates;
             private mutable int worldType;      // 0 Continents, 1 Pangaea, 2 Archipelago, 3 InlandSeas
             private mutable float landRatio;    // fraction of the map that is land; < 0 = use world default
+            private mutable int nContinents;    // Continental mode: number of continents; <= 0 = auto by aspect
 
             private mutable int w;
             private mutable int h;
@@ -50,6 +51,13 @@ public bundle Agents {
                 this.nPlates = 12;
                 this.worldType = 0;
                 this.landRatio = 0.0 - 1.0;
+                this.nContinents = 0;
+            }
+
+            // Continental mode only: how many distinct continents to grow (<= 0 keeps the aspect-based
+            // default). A New-Game knob.
+            public method setContinents(int n) returns void {
+                this.nContinents = n;
             }
 
             // Pick a world shape (0 Continents, 1 Pangaea, 2 Archipelago, 3 InlandSeas) and the fraction of
@@ -69,7 +77,7 @@ public bundle Agents {
                 if (t == 3) {
                     return 0.72;
                 }
-                return 0.45;
+                return 0.38;
             }
 
             // ---- integer hash / value noise / fbm (seamless in X) ----
@@ -304,16 +312,31 @@ public bundle Agents {
                     // field's averaging, which fuses everything into one globe-spanning mass). Each blob
                     // has a domain-warped, noise-modulated radius so coasts are organic, and ocean fills
                     // the gaps between blobs -- distinct continents, like the real world.
-                    int nc = 5 + cast<int>(cast<float>(this.w) / cast<float>(this.h) * 2.0);
+                    mutable int nc = this.nContinents;
+                    if (nc <= 0) {
+                        nc = 6;
+                    }
                     Rng2 rng = new Rng2(this.seed ^ 0x2C0F) on stack;
+                    // Spread the continents over a jittered grid so they land apart (fully random
+                    // positions clump them into one mass), each a compact blob -> distinct continents.
+                    float aspect = cast<float>(this.w) / cast<float>(this.h);
+                    mutable int cols = cast<int>(this.fsqrt(cast<float>(nc) * aspect + 0.5));
+                    if (cols < 1) {
+                        cols = 1;
+                    }
+                    int rows = (nc + cols - 1) / cols;
                     int[] ccx = new int[nc]();
                     int[] ccy = new int[nc]();
                     float[] ccr = new float[nc]();
                     mutable int c = 0;
                     while (c < nc) {
-                        ccx[c] = rng.nextInt(this.w);
-                        ccy[c] = this.h / 6 + rng.nextInt(this.h * 2 / 3);
-                        ccr[c] = 0.16 + 0.10 * rng.unit();
+                        int gxi = c % cols;
+                        int gyi = c / cols;
+                        float cxn = (cast<float>(gxi) + 0.5) / cast<float>(cols) + (rng.unit() - 0.5) * 0.6 / cast<float>(cols);
+                        float cyn = (cast<float>(gyi) + 0.5) / cast<float>(rows) + (rng.unit() - 0.5) * 0.6 / cast<float>(rows);
+                        ccx[c] = cast<int>(cxn * cast<float>(this.w));
+                        ccy[c] = cast<int>(cyn * cast<float>(this.h));
+                        ccr[c] = 0.11 + 0.06 * rng.unit();
                         c = c + 1;
                     }
                     mutable int i = 0;
@@ -348,7 +371,7 @@ public bundle Agents {
                         if (mask > 1.0) {
                             mask = 1.0;
                         }
-                        this.eb[i] = this.eb[i] * 0.30 + mask * 0.70;
+                        this.eb[i] = this.eb[i] * 0.18 + mask * 0.82;
                         i = i + 1;
                     }
                     delete ccx;
@@ -388,6 +411,56 @@ public bundle Agents {
                         this.eb[i] = this.eb[i] * 0.35 + hi * 0.65;
                         i = i + 1;
                     }
+                } else if (this.worldType == 3) {
+                    // InlandSeas: land-dominant, with several distinct sea basins carved out (domain-
+                    // warped so the shores are organic). The exact land ratio is set later by sea level.
+                    int ns = 4 + cast<int>(cast<float>(this.w) / cast<float>(this.h));
+                    Rng2 rng = new Rng2(this.seed ^ 0x9E11) on stack;
+                    int[] scx = new int[ns]();
+                    int[] scy = new int[ns]();
+                    float[] scr = new float[ns]();
+                    mutable int c = 0;
+                    while (c < ns) {
+                        scx[c] = rng.nextInt(this.w);
+                        scy[c] = this.h / 6 + rng.nextInt(this.h * 2 / 3);
+                        scr[c] = 0.10 + 0.10 * rng.unit();
+                        c = c + 1;
+                    }
+                    mutable int i = 0;
+                    while (i < n) {
+                        int x = i % this.w;
+                        int y = i / this.w;
+                        float nx = cast<float>(x) / cast<float>(this.w);
+                        float ny = cast<float>(y) / cast<float>(this.h);
+                        float wxf = nx + (this.vnoise(nx * 3.0, ny * 3.0, 3) - 0.5) * 0.24;
+                        float wyf = ny + (this.vnoise(nx * 3.0 + 5.0, ny * 3.0 + 9.0, 3) - 0.5) * 0.24;
+                        mutable float sea = 0.0;
+                        mutable int k = 0;
+                        while (k < ns) {
+                            float cxn = cast<float>(scx[k]) / cast<float>(this.w);
+                            float cyn = cast<float>(scy[k]) / cast<float>(this.h);
+                            float dxn = (wxf - cxn) * cast<float>(this.w) / cast<float>(this.h);
+                            float dyn = wyf - cyn;
+                            float dist = this.fsqrt(dxn * dxn + dyn * dyn);
+                            float m = 1.0 - dist / scr[k];
+                            if (m > sea) {
+                                sea = m;
+                            }
+                            k = k + 1;
+                        }
+                        if (sea < 0.0) {
+                            sea = 0.0;
+                        }
+                        if (sea > 1.0) {
+                            sea = 1.0;
+                        }
+                        float land = 0.72 - 0.55 * sea;
+                        this.eb[i] = this.eb[i] * 0.30 + land * 0.70;
+                        i = i + 1;
+                    }
+                    delete scx;
+                    delete scy;
+                    delete scr;
                 }
             }
 

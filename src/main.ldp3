@@ -5,6 +5,7 @@ import opengl.glfw.GlWindow;
 import opengl.gl.Wgl;
 import Agents.World.Grid;
 import Agents.World.WorldGen;
+import Agents.World.Biomes;
 import Agents.Gfx.SoftPainter;
 import Agents.Gfx.GlPainter;
 import Agents.Gfx.Batch2D;
@@ -33,6 +34,10 @@ public bundle Agents {
                     }
                     if (args[0].equals("glworld")) {
                         Main.renderGlWorld();
+                        return;
+                    }
+                    if (args[0].equals("worldmaps")) {
+                        Main.worldMaps();
                         return;
                     }
                 }
@@ -133,9 +138,12 @@ public bundle Agents {
             // camera + cel shading, and read it back to gl_world.ppm (headless-verifiable). The free
             // camera loop runs when a real window is present.
             private static method renderGlWorld() returns void {
-                int w = 96;
-                int h = 60;
-                System.IO.Console.println("glworld: generating a world...");
+                int w = 2560;
+                int h = 1080;
+                int stride = 5;
+                int wc = w / stride;
+                int hc = h / stride;
+                System.IO.Console.println("glworld: generating the full 2560x1080 world...");
                 WorldGen gen = new WorldGen(42) on stack;
                 gen.setWorld(0, 0.0 - 1.0);
                 Grid* g = gen.generate(w, h);
@@ -152,7 +160,7 @@ public bundle Agents {
                 System.IO.Console.println("glworld: loading models + baking VBO...");
                 MeshAtlas* atlas = MeshAtlas.loadTerrain("assets/models");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.bake(g, atlas, w, h, 9.0);
+                r.bake(g, atlas, wc, hc, 9.0, stride);
                 System.IO.Console.println("glworld: rendering...");
                 int cw = win.width();
                 int ch = win.height();
@@ -210,6 +218,62 @@ public bundle Agents {
                     }
                     sb.append("\n");
                     y = y + 1;
+                }
+                File.writeAll(path, sb.toString());
+                delete sb;
+            }
+
+            // Generate all four world modes and write a top-down biome-colour overview PNG of each --
+            // the fast way to verify continent shapes per mode.
+            private static method worldMaps() returns void {
+                int w = 1280;
+                int h = 540;
+                mutable int mode = 0;
+                while (mode < 4) {
+                    System.IO.Console.println("worldmaps: generating mode...");
+                    WorldGen gen = new WorldGen(42) on stack;
+                    gen.setWorld(mode, 0.0 - 1.0);
+                    Grid* g = gen.generate(w, h);
+                    Main.worldStats(g, w, h);
+                    Main.writeBiomeMap(g, w, h, 640, 270, Main.mapName(mode));
+                    delete g;
+                    mode = mode + 1;
+                }
+                System.IO.Console.println("worldmaps: done");
+            }
+
+            private static method mapName(int mode) returns String {
+                if (mode == 0) { return "worldmap_continental.ppm"; }
+                if (mode == 1) { return "worldmap_pangaea.ppm"; }
+                if (mode == 2) { return "worldmap_archipelago.ppm"; }
+                return "worldmap_inlandseas.ppm";
+            }
+
+            // Downsample the biome grid to outW x outH and write it top-down as a PPM (biome palette).
+            private static method writeBiomeMap(Grid* g, int w, int h, int outW, int outH, String path) returns void {
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("P3\n");
+                sb.appendInt(outW);
+                sb.append(" ");
+                sb.appendInt(outH);
+                sb.append("\n255\n");
+                mutable int oy = 0;
+                while (oy < outH) {
+                    int sy = oy * h / outH;
+                    mutable int ox = 0;
+                    while (ox < outW) {
+                        int sx = ox * w / outW;
+                        int ord = g.biomeAt(sx, sy);
+                        sb.appendInt(Biomes.red(ord));
+                        sb.append(" ");
+                        sb.appendInt(Biomes.green(ord));
+                        sb.append(" ");
+                        sb.appendInt(Biomes.blue(ord));
+                        sb.append(" ");
+                        ox = ox + 1;
+                    }
+                    sb.append("\n");
+                    oy = oy + 1;
                 }
                 File.writeAll(path, sb.toString());
                 delete sb;
