@@ -17,6 +17,9 @@ public bundle Tool {
             public mutable float[] px;
             public mutable float[] py;
             public mutable float[] pz;
+            public mutable float[] nx;
+            public mutable float[] ny;
+            public mutable float[] nz;
             public mutable int[] cr;
             public mutable int[] cg;
             public mutable int[] cb;
@@ -31,6 +34,9 @@ public bundle Tool {
                 this.px = new float[nv]();
                 this.py = new float[nv]();
                 this.pz = new float[nv]();
+                this.nx = new float[nv]();
+                this.ny = new float[nv]();
+                this.nz = new float[nv]();
                 this.cr = new int[totalTris]();
                 this.cg = new int[totalTris]();
                 this.cb = new int[totalTris]();
@@ -43,6 +49,9 @@ public bundle Tool {
                 delete this.px;
                 delete this.py;
                 delete this.pz;
+                delete this.nx;
+                delete this.ny;
+                delete this.nz;
                 delete this.cr;
                 delete this.cg;
                 delete this.cb;
@@ -73,9 +82,9 @@ public bundle Tool {
                         this.px[vi] = cast<float>(sc.nextInt()) * inv;
                         this.py[vi] = cast<float>(sc.nextInt()) * inv;
                         this.pz[vi] = cast<float>(sc.nextInt()) * inv;
-                        sc.nextInt();
-                        sc.nextInt();
-                        sc.nextInt();
+                        this.nx[vi] = cast<float>(sc.nextInt()) * inv;
+                        this.ny[vi] = cast<float>(sc.nextInt()) * inv;
+                        this.nz[vi] = cast<float>(sc.nextInt()) * inv;
                         k = k + 1;
                     }
                     this.cr[tri] = sc.nextInt();
@@ -149,8 +158,53 @@ public bundle Tool {
                 a.reportModel(8);
                 a.reportModel(33);
                 a.reportModel(39);
+
+                Main.renderMini(a);
                 delete a;
                 return;
+            }
+
+            // Render a small dome heightmap with the real biome tile meshes in true 3D -> PPM. Proves
+            // the whole export -> load -> 3D-render path (projection, z-buffer, cel shading, outline,
+            // supersample downscale) and that high cells stand tall.
+            private static method renderMini(MeshAtlas* a) returns void {
+                int nc = 16;
+                int mc = 12;
+                float vscale = 4.5;
+                System.IO.Console.println("rendering mini world in 3D...");
+                Raster3D r = new Raster3D(520, 380, 3) on heap;
+                r.fitAndAim(42.0, 32.0, nc, mc, vscale);
+                mutable int gy = 0;
+                while (gy < mc) {
+                    mutable int gx = 0;
+                    while (gx < nc) {
+                        float dx = cast<float>(gx) / cast<float>(nc - 1) * 2.0 - 1.0;
+                        float dy = cast<float>(gy) / cast<float>(mc - 1) * 2.0 - 1.0;
+                        mutable float e = 1.0 - (dx * dx + dy * dy);
+                        if (e < 0.0) { e = 0.0; }
+                        if (e > 1.0) { e = 1.0; }
+                        int ord = Main.biomeFor(e);
+                        float wx = cast<float>(gx) * 2.0;
+                        float wy = cast<float>(gy) * 2.0;
+                        float wz = e * vscale;
+                        int gbase = (gy * nc + gx + 1) * 64;
+                        r.drawAtlas(a, ord, wx, wy, wz, gbase);
+                        gx = gx + 1;
+                    }
+                    gy = gy + 1;
+                }
+                r.savePPM("render3d_test.ppm", 20, 26, 36);
+                System.IO.Console.println("wrote render3d_test.ppm");
+                delete r;
+            }
+
+            private static method biomeFor(float e) returns int {
+                if (e < 0.24) { return 2; }     // Ocean
+                if (e < 0.30) { return 8; }     // Beach
+                if (e < 0.56) { return 20; }    // WarmGrassland
+                if (e < 0.72) { return 32; }    // Hills
+                if (e < 0.88) { return 33; }    // Mountain
+                return 35;                       // SnowPeak
             }
         }
     }

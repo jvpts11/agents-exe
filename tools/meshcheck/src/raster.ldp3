@@ -1,0 +1,363 @@
+import System.IO.File;
+import System.Text.StringBuilder;
+
+// Software 3D rasterizer that bakes the agents-exe pixel look, ported from artgen/render3d.py:
+// orbit camera (azimuth/elevation, orthographic), z-buffer, per-vertex normal interpolation, cel
+// shading (0.60 + 0.42*ndl), an ID-buffer group-boundary outline in (55,55,65), and supersample +
+// box-downscale for the chunky pixel grid. Draws meshes straight from a MeshAtlas block. This is the
+// headless verification path; the GL path will mirror it. (Standalone copy for the render test.)
+program MeshCheck;
+
+public bundle Tool {
+    public namespace App {
+
+        public class Raster3D {
+            private mutable int nat;      // native width
+            private mutable int nath;     // native height
+            private mutable int ss;
+            private mutable int wpx;      // supersample width
+            private mutable int hpx;
+
+            private mutable float[] col;  // wpx*hpx*3, final rgb per subpixel (z-tested)
+            private mutable int[] cov;    // wpx*hpx, 1 if written
+            private mutable float[] zb;   // wpx*hpx depth
+            private mutable int[] idb;    // wpx*hpx group id (-1 empty)
+
+            private mutable float rx;
+            private mutable float ry;
+            private mutable float rz;
+            private mutable float ux;
+            private mutable float uy;
+            private mutable float uz;
+            private mutable float cx;
+            private mutable float cy;
+            private mutable float cz;
+            private mutable float tx;
+            private mutable float ty;
+            private mutable float tz;
+            private mutable float scale;
+            private mutable float ox;     // screen centre x (supersample px)
+            private mutable float oy;
+            private mutable float lx;
+            private mutable float ly;
+            private mutable float lz;
+
+            public constructor Raster3D(int natW, int natH, int ss) {
+                this.nat = natW;
+                this.nath = natH;
+                this.ss = ss;
+                this.wpx = natW * ss;
+                this.hpx = natH * ss;
+                int n = this.wpx * this.hpx;
+                this.col = new float[n * 3]();
+                this.cov = new int[n]();
+                this.zb = new float[n]();
+                this.idb = new int[n]();
+                mutable int i = 0;
+                while (i < n) {
+                    this.zb[i] = 0.0 - 1000000000.0;
+                    this.idb[i] = 0 - 1;
+                    i = i + 1;
+                }
+                float ln = this.fsqrt(0.35 * 0.35 + 0.55 * 0.55 + 0.95 * 0.95);
+                this.lx = 0.35 / ln;
+                this.ly = 0.55 / ln;
+                this.lz = 0.95 / ln;
+            }
+
+            public destructor ~Raster3D() returns void {
+                delete this.col;
+                delete this.cov;
+                delete this.zb;
+                delete this.idb;
+            }
+
+            private method fsqrt(float v) returns float {
+                if (v <= 0.0) {
+                    return 0.0;
+                }
+                mutable float g = v;
+                mutable int i = 0;
+                while (i < 14) {
+                    g = 0.5 * (g + v / g);
+                    i = i + 1;
+                }
+                return g;
+            }
+
+            // Orbit camera looking at (tx,ty,tz); `radius` is the scene fit radius. az/el in degrees.
+            public method setCamera(float az, float el, float tx, float ty, float tz, float radius) returns void {
+                float pi = 3.14159265;
+                float a = az * pi / 180.0;
+                float e = el * pi / 180.0;
+                float ce = this.fcos(e);
+                float se = this.fsin(e);
+                this.cx = ce * this.fsin(a);
+                this.cy = ce * this.fcos(a);
+                this.cz = se;
+                // right = normalize(up0 x cam), up0 = (0,0,1)
+                float r0x = 0.0 * this.cz - 1.0 * this.cy;
+                float r0y = 1.0 * this.cx - 0.0 * this.cz;
+                float r0z = 0.0 * this.cy - 0.0 * this.cx;
+                float rl = this.fsqrt(r0x * r0x + r0y * r0y + r0z * r0z);
+                this.rx = r0x / rl;
+                this.ry = r0y / rl;
+                this.rz = r0z / rl;
+                // up = cam x right
+                float u0x = this.cy * this.rz - this.cz * this.ry;
+                float u0y = this.cz * this.rx - this.cx * this.rz;
+                float u0z = this.cx * this.ry - this.cy * this.rx;
+                float ul = this.fsqrt(u0x * u0x + u0y * u0y + u0z * u0z);
+                this.ux = u0x / ul;
+                this.uy = u0y / ul;
+                this.uz = u0z / ul;
+                this.tx = tx;
+                this.ty = ty;
+                this.tz = tz;
+                mutable float minN = cast<float>(this.nat);
+                if (this.nath < this.nat) {
+                    minN = cast<float>(this.nath);
+                }
+                this.scale = (minN * 0.46 / radius) * cast<float>(this.ss);
+                this.ox = cast<float>(this.wpx) * 0.5;
+                this.oy = cast<float>(this.hpx) * 0.5;
+            }
+
+            // Aim the orbit camera at an N*M cell grid (cells spaced 2 units) with height*vscale.
+            public method fitAndAim(float az, float el, int nCells, int mCells, float vscale) returns void {
+                float hx = cast<float>(nCells - 1);
+                float hy = cast<float>(mCells - 1);
+                float radius = this.fsqrt(hx * hx + hy * hy) + vscale + 2.0;
+                this.setCamera(az, el, hx, hy, vscale * 0.4, radius);
+            }
+
+            private method fsin(float x) returns float {
+                mutable float t = x;
+                float pi = 3.14159265;
+                float two = 2.0 * pi;
+                while (t > pi) {
+                    t = t - two;
+                }
+                while (t < 0.0 - pi) {
+                    t = t + two;
+                }
+                float t2 = t * t;
+                return t - t * t2 / 6.0 + t * t2 * t2 / 120.0 - t * t2 * t2 * t2 / 5040.0;
+            }
+
+            private method fcos(float x) returns float {
+                return this.fsin(x + 1.5707963);
+            }
+
+            // Rasterize one triangle (world positions + per-vertex world normals + baked colour + group).
+            public method drawTri(float ax, float ay, float az, float bx, float by, float bz,
+                                  float ccx, float ccy, float ccz,
+                                  float nax, float nay, float naz, float nbx, float nby, float nbz,
+                                  float ncx, float ncy, float ncz, int r, int g, int b, int grp) returns void {
+                float qax = ax - this.tx;
+                float qay = ay - this.ty;
+                float qaz = az - this.tz;
+                float qbx = bx - this.tx;
+                float qby = by - this.ty;
+                float qbz = bz - this.tz;
+                float qcx = ccx - this.tx;
+                float qcy = ccy - this.ty;
+                float qcz = ccz - this.tz;
+                float sax = this.ox + this.scale * (qax * this.rx + qay * this.ry + qaz * this.rz);
+                float say = this.oy - this.scale * (qax * this.ux + qay * this.uy + qaz * this.uz);
+                float da = qax * this.cx + qay * this.cy + qaz * this.cz;
+                float sbx = this.ox + this.scale * (qbx * this.rx + qby * this.ry + qbz * this.rz);
+                float sby = this.oy - this.scale * (qbx * this.ux + qby * this.uy + qbz * this.uz);
+                float db = qbx * this.cx + qby * this.cy + qbz * this.cz;
+                float scx = this.ox + this.scale * (qcx * this.rx + qcy * this.ry + qcz * this.rz);
+                float scy = this.oy - this.scale * (qcx * this.ux + qcy * this.uy + qcz * this.uz);
+                float dc = qcx * this.cx + qcy * this.cy + qcz * this.cz;
+
+                mutable int minx = this.ftoi(this.fmin3(sax, sbx, scx));
+                mutable int maxx = this.ftoi(this.fmax3(sax, sbx, scx)) + 1;
+                mutable int miny = this.ftoi(this.fmin3(say, sby, scy));
+                mutable int maxy = this.ftoi(this.fmax3(say, sby, scy)) + 1;
+                if (minx < 0) { minx = 0; }
+                if (miny < 0) { miny = 0; }
+                if (maxx > this.wpx) { maxx = this.wpx; }
+                if (maxy > this.hpx) { maxy = this.hpx; }
+                float denom = (sby - scy) * (sax - scx) + (scx - sbx) * (say - scy);
+                if (denom < 0.0000001 && denom > 0.0 - 0.0000001) {
+                    return;
+                }
+                float inv = 1.0 / denom;
+                float br = cast<float>(r) / 255.0;
+                float bg = cast<float>(g) / 255.0;
+                float bb = cast<float>(b) / 255.0;
+                mutable int py = miny;
+                while (py < maxy) {
+                    float fy = cast<float>(py) + 0.5;
+                    mutable int px = minx;
+                    while (px < maxx) {
+                        float fx = cast<float>(px) + 0.5;
+                        float wa = ((sby - scy) * (fx - scx) + (scx - sbx) * (fy - scy)) * inv;
+                        float wb = ((scy - say) * (fx - scx) + (sax - scx) * (fy - scy)) * inv;
+                        float wc = 1.0 - wa - wb;
+                        if (wa >= 0.0 - 0.0001 && wb >= 0.0 - 0.0001 && wc >= 0.0 - 0.0001) {
+                            float depth = wa * da + wb * db + wc * dc;
+                            int idx = py * this.wpx + px;
+                            if (depth > this.zb[idx]) {
+                                float nx = wa * nax + wb * nbx + wc * ncx;
+                                float ny = wa * nay + wb * nby + wc * ncy;
+                                float nz = wa * naz + wb * nbz + wc * ncz;
+                                float nl = this.fsqrt(nx * nx + ny * ny + nz * nz) + 0.000000001;
+                                mutable float ndl = (nx * this.lx + ny * this.ly + nz * this.lz) / nl;
+                                if (ndl < 0.0) { ndl = 0.0; }
+                                if (ndl > 1.0) { ndl = 1.0; }
+                                mutable float sh = 0.60 + 0.42 * ndl;
+                                if (sh > 1.0) { sh = 1.0; }
+                                this.col[idx * 3] = br * sh;
+                                this.col[idx * 3 + 1] = bg * sh;
+                                this.col[idx * 3 + 2] = bb * sh;
+                                this.cov[idx] = 1;
+                                this.zb[idx] = depth;
+                                this.idb[idx] = grp;
+                            }
+                        }
+                        px = px + 1;
+                    }
+                    py = py + 1;
+                }
+            }
+
+            private method ftoi(float v) returns int {
+                return cast<int>(v);
+            }
+
+            private method fmin3(float a, float b, float c) returns float {
+                mutable float m = a;
+                if (b < m) { m = b; }
+                if (c < m) { m = c; }
+                return m;
+            }
+
+            private method fmax3(float a, float b, float c) returns float {
+                mutable float m = a;
+                if (b > m) { m = b; }
+                if (c > m) { m = c; }
+                return m;
+            }
+
+            // Draw biome `ord`'s mesh from the atlas, translated to (wx,wy,wz). Group ids are offset per
+            // instance so the outline separates neighbouring tiles, not just facets within one tile.
+            public method drawAtlas(MeshAtlas* a, int ord, float wx, float wy, float wz, int gbase) returns void {
+                int t0 = a.triStart[ord];
+                int tn = a.triCount[ord];
+                mutable int t = 0;
+                while (t < tn) {
+                    int tri = t0 + t;
+                    int vb = tri * 3;
+                    int v0 = vb;
+                    int v1 = vb + 1;
+                    int v2 = vb + 2;
+                    this.drawTri(a.px[v0] + wx, a.py[v0] + wy, a.pz[v0] + wz,
+                                 a.px[v1] + wx, a.py[v1] + wy, a.pz[v1] + wz,
+                                 a.px[v2] + wx, a.py[v2] + wy, a.pz[v2] + wz,
+                                 a.nx[v0], a.ny[v0], a.nz[v0], a.nx[v1], a.ny[v1], a.nz[v1],
+                                 a.nx[v2], a.ny[v2], a.nz[v2],
+                                 a.cr[tri], a.cg[tri], a.cb[tri], gbase + a.grp[tri]);
+                    t = t + 1;
+                }
+            }
+
+            // Downscale (box average over covered subpixels) + ID-boundary outline, write an opaque PPM.
+            public method savePPM(String path, int bgr, int bgg, int bgb) returns void {
+                int s = this.ss;
+                int half = s / 2;
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("P3\n");
+                sb.appendInt(this.nat);
+                sb.append(" ");
+                sb.appendInt(this.nath);
+                sb.append("\n255\n");
+                mutable int oyp = 0;
+                while (oyp < this.nath) {
+                    mutable int oxp = 0;
+                    while (oxp < this.nat) {
+                        // box average of colour over the ss*ss block
+                        mutable float sr = 0.0;
+                        mutable float sg = 0.0;
+                        mutable float sbb = 0.0;
+                        mutable int cnt = 0;
+                        mutable int dy = 0;
+                        while (dy < s) {
+                            mutable int dx = 0;
+                            while (dx < s) {
+                                int spx = oxp * s + dx;
+                                int spy = oyp * s + dy;
+                                int si = spy * this.wpx + spx;
+                                if (this.cov[si] == 1) {
+                                    sr = sr + this.col[si * 3];
+                                    sg = sg + this.col[si * 3 + 1];
+                                    sbb = sbb + this.col[si * 3 + 2];
+                                    cnt = cnt + 1;
+                                }
+                                dx = dx + 1;
+                            }
+                            dy = dy + 1;
+                        }
+                        // id at block centre -> outline if a 4-neighbour block centre differs
+                        int cxp = oxp * s + half;
+                        int cyp = oyp * s + half;
+                        int cid = this.idb[cyp * this.wpx + cxp];
+                        mutable int rr = bgr;
+                        mutable int gg = bgg;
+                        mutable int bbo = bgb;
+                        if (cid != 0 - 1) {
+                            boolean edge = this.idDiff(cxp, cyp, cid, s);
+                            if (edge) {
+                                rr = 55;
+                                gg = 55;
+                                bbo = 65;
+                            } else {
+                                if (cnt > 0) {
+                                    rr = this.clamp255(sr / cast<float>(cnt));
+                                    gg = this.clamp255(sg / cast<float>(cnt));
+                                    bbo = this.clamp255(sbb / cast<float>(cnt));
+                                }
+                            }
+                        }
+                        sb.appendInt(rr);
+                        sb.append(" ");
+                        sb.appendInt(gg);
+                        sb.append(" ");
+                        sb.appendInt(bbo);
+                        sb.append(" ");
+                        oxp = oxp + 1;
+                    }
+                    sb.append("\n");
+                    oyp = oyp + 1;
+                }
+                File.writeAll(path, sb.toString());
+                delete sb;
+            }
+
+            private method idDiff(int cxp, int cyp, int cid, int s) returns boolean {
+                if (this.idAt(cxp - s, cyp) != cid) { return true; }
+                if (this.idAt(cxp + s, cyp) != cid) { return true; }
+                if (this.idAt(cxp, cyp - s) != cid) { return true; }
+                if (this.idAt(cxp, cyp + s) != cid) { return true; }
+                return false;
+            }
+
+            private method idAt(int x, int y) returns int {
+                if (x < 0 || y < 0 || x >= this.wpx || y >= this.hpx) {
+                    return 0 - 1;
+                }
+                return this.idb[y * this.wpx + x];
+            }
+
+            private method clamp255(float v) returns int {
+                mutable int i = cast<int>(v * 255.0 + 0.5);
+                if (i < 0) { i = 0; }
+                if (i > 255) { i = 255; }
+                return i;
+            }
+        }
+    }
+}
