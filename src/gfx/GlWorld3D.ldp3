@@ -54,6 +54,12 @@ public bundle Agents {
             private mutable int rvFork;
             private mutable int rvSource;
             private mutable int rvDelta;
+            private mutable int rvB45a;
+            private mutable int rvB45b;
+            private mutable int rvB135a;
+            private mutable int rvB135b;
+            private mutable int rvCDiag;
+            private mutable int rvStar;
             private mutable int srcW;
             private mutable int srcH;
             private mutable int stride;
@@ -218,6 +224,12 @@ public bundle Agents {
                 this.rvFork = rivers.ordOf("Fork");
                 this.rvSource = rivers.ordOf("Source");
                 this.rvDelta = rivers.ordOf("Delta");
+                this.rvB45a = rivers.ordOf("Bend45A");
+                this.rvB45b = rivers.ordOf("Bend45B");
+                this.rvB135a = rivers.ordOf("Bend135A");
+                this.rvB135b = rivers.ordOf("Bend135B");
+                this.rvCDiag = rivers.ordOf("CornerDiag");
+                this.rvStar = rivers.ordOf("Star");
                 this.initScatter();
                 this.bakeCoarse();
                 this.cx = cast<float>(this.srcW);
@@ -240,7 +252,7 @@ public bundle Agents {
                 mutable int base = 0;
                 if (ord == 32) { base = 1; }                    // Hills
                 if (ord == 33 || ord == 34) { base = 2; }       // Mountain / AlpineMeadow
-                if (ord == 36) { base = 3; }                    // Volcanic
+                if (ord == 36) { base = 1; }                    // Volcanic: low lava fields, cones are props
                 if (ord == 35) { base = 4; }                    // SnowPeak
                 float e = cast<float>(this.grid.elevAt(x, y)) / 10000.0;
                 if (base == 0) {
@@ -299,6 +311,7 @@ public bundle Agents {
                 this.setScatter(31, "Snowdrift", 40, 1.0);      // Snowfield
                 this.setScatter(32, "Boulder", 25, 1.0);        // Hills
                 this.setScatter(34, "Flower", 60, 1.0);         // AlpineMeadow
+                this.setScatter(36, "Volcano", 85, 1.4);        // Volcanic lands: scattered cones
                 this.setScatter(37, "Boulder", 30, 1.0);        // Badlands
                 this.setScatter(38, "SaltCrystal", 25, 1.0);    // SaltFlat
                 this.setScatter(39, "Palm", 150, 1.1);          // Oasis
@@ -433,10 +446,9 @@ public bundle Agents {
                 return 0;
             }
 
-            // Choose (variant, rot) packed as variant*4+rot for a river cell -- ONLY when an authored
-            // variant matches the connections EXACTLY. Returns -1 otherwise (45-degree bends, staircase
-            // steps, odd junctions): those cells draw their terrain tile plus a geometric channel
-            // overlay that follows the exact flow directions, so the river NEVER disconnects.
+            // Choose (variant, rot) packed as variant*4+rot for a river cell. With the 45/135-degree
+            // bends, the diagonal corner and the Star junction, every possible connection set maps to
+            // an AUTHORED tile -- 2-connection coverage is exact and complete.
             private method pickRiver(int gx, int gy) returns int {
                 mutable int conn = this.riverConn(gx, gy);
                 int n = this.bitCount(conn);
@@ -453,8 +465,9 @@ public bundle Agents {
                 }
                 if (n == 1) {
                     int d = this.firstDir(conn);
+                    mutable int k = d / 2;
                     if (d % 2 == 1) {
-                        return 0 - 1;                            // diagonal endpoint: overlay
+                        k = ((d + 1) / 2) % 4;                   // diagonal end: nearest quarter turn
                     }
                     if (mouth) {
                         // Delta: the fan (mesh S) faces the water; rotate S(4) onto d.
@@ -462,7 +475,7 @@ public bundle Agents {
                         if (kd >= 4) { kd = kd - 4; }
                         return this.rvDelta * 4 + kd;
                     }
-                    return this.rvSource * 4 + d / 2;
+                    return this.rvSource * 4 + k;
                 }
                 if (n == 2) {
                     mutable int k = this.matchRot(1 | 16, conn);              // Straight {N,S}
@@ -471,22 +484,30 @@ public bundle Agents {
                     if (k >= 0) { return this.rvDiagonal * 4 + k; }
                     k = this.matchRot(16 | 4, conn);                          // Corner {S,E}
                     if (k >= 0) { return this.rvCorner * 4 + k; }
-                    k = this.matchRot(64 | 1, conn);                          // Bend {W,N}
-                    if (k >= 0) { return this.rvBend * 4 + k; }
-                    return 0 - 1;
+                    k = this.matchRot(1 | 2, conn);                           // Bend45A {N,NE}
+                    if (k >= 0) { return this.rvB45a * 4 + k; }
+                    k = this.matchRot(2 | 4, conn);                           // Bend45B {NE,E}
+                    if (k >= 0) { return this.rvB45b * 4 + k; }
+                    k = this.matchRot(1 | 8, conn);                           // Bend135A {N,SE}
+                    if (k >= 0) { return this.rvB135a * 4 + k; }
+                    k = this.matchRot(2 | 16, conn);                          // Bend135B {NE,S}
+                    if (k >= 0) { return this.rvB135b * 4 + k; }
+                    k = this.matchRot(2 | 8, conn);                           // CornerDiag {NE,SE}
+                    if (k >= 0) { return this.rvCDiag * 4 + k; }
+                    return this.rvStar * 4;
                 }
                 if (n == 3) {
                     mutable int k = this.matchRot(64 | 4 | 1, conn);          // T {W,E,N}
                     if (k >= 0) { return this.rvT * 4 + k; }
                     k = this.matchRot(16 | 2 | 128, conn);                    // Fork {S,NE,NW}
                     if (k >= 0) { return this.rvFork * 4 + k; }
-                    return 0 - 1;
+                    return this.rvStar * 4;                                   // odd junction: star pool
                 }
                 mutable int kx = this.matchRot(1 | 4 | 16 | 64, conn);        // Crossing {N,E,S,W}
                 if (kx >= 0) {
                     return this.rvCross * 4 + kx;
                 }
-                return 0 - 1;
+                return this.rvStar * 4;
             }
 
             // Channel segment count for an overlay river cell (downstream + one per inflow).
@@ -573,10 +594,13 @@ public bundle Agents {
             // underlying biome's own top/side colours (a jungle river has jungle banks, a snowy river
             // snowy ones). Water/foam/rock parts keep their colours; foam stays unshaded (animation key).
             private method emitRTile(address buf, int w, int variant, int rot, int underOrd,
-                                     float wx, float wy, float zOff, float shade) returns int {
+                                     float wx, float wy, float zOffIn, float shade) returns int {
                 int t0 = this.rivers.triStart[variant];
                 int tn = this.rivers.triCount[variant];
                 float top = this.riverTop[variant];
+                // raise/lower the river tile so its plate sits EXACTLY at the neighbouring terrain's
+                // plate height -- otherwise the river runs with a visible lip around it
+                float zOff = zOffIn + this.tileTop[underOrd] - top;
                 int ut = this.terr.triStart[underOrd] + 8;      // biome top-face colour
                 int us = this.terr.triStart[underOrd];          // biome side colour
                 float topR = cast<float>(this.terr.cr[ut]) / 255.0;
@@ -904,8 +928,13 @@ public bundle Agents {
                                 lz = top + lift;
                             } else {
                                 if (decor && dropExtras) {
-                                    // coarse mountain peak: stretch the cone so it keeps its profile
-                                    lz = top + (lz - top) * scale;
+                                    // coarse mountain peak: stretch the cone a LITTLE so it reads far
+                                    // away, but capped -- full x8 made giant spikes
+                                    mutable float ds = scale;
+                                    if (ds > 2.5) {
+                                        ds = 2.5;
+                                    }
+                                    lz = top + (lz - top) * ds;
                                 }
                             }
                             p = this.wr(buf, p, this.terr.px[vi] * scale + wx, this.terr.py[vi] * scale + wy,
@@ -1069,12 +1098,7 @@ public bundle Agents {
                         int ord = this.grid.biomeAt(gx, gy);
                         int lvl = this.stackLvl(ord, gx, gy);
                         if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
-                            int pk = this.pickRiver(gx, gy);
-                            if (pk >= 0) {
-                                tris = tris + this.countRTile(pk / 4, lvl);
-                            } else {
-                                tris = tris + this.countTile(ord, false) + 8 + this.riverSegs(gx, gy) * 2;
-                            }
+                            tris = tris + this.countRTile(this.pickRiver(gx, gy) / 4, lvl);
                         } else {
                             tris = tris + this.countTile(ord, false) + 8;    // + the always-on skirt
                         }
@@ -1103,12 +1127,7 @@ public bundle Agents {
                         float shade = this.shadeAt(gx, gy, 1, lvl);
                         if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
                             int pk = this.pickRiver(gx, gy);
-                            if (pk >= 0) {
-                                w = this.emitRTile(buf, w, pk / 4, pk % 4, ord, wx, wy, zOff, shade);
-                            } else {
-                                w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false, shade);
-                                w = this.emitRiverOverlay(buf, w, gx, gy, wx, wy, this.tileTop[ord] + zOff, shade);
-                            }
+                            w = this.emitRTile(buf, w, pk / 4, pk % 4, ord, wx, wy, zOff, shade);
                         } else {
                             w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false, shade);
                         }
