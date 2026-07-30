@@ -573,6 +573,13 @@ public bundle Agents {
             // A flat water quad from (x0,y0) to (x1,y1) at height z (2 triangles).
             private method emitFlatSeg(address buf, int w, float x0, float y0, float x1, float y1,
                                        float z, float width, float shade) returns int {
+                return this.emitSlopeSeg(buf, w, x0, y0, z, x1, y1, z, width, shade);
+            }
+
+            // A water quad from (x0,y0,z0) to (x1,y1,z1) -- each end at its own height, so the
+            // coarse river line climbs terrain steps instead of slicing through them.
+            private method emitSlopeSeg(address buf, int w, float x0, float y0, float z0,
+                                        float x1, float y1, float z1, float width, float shade) returns int {
                 float dx = x1 - x0;
                 float dy = y1 - y0;
                 float len = this.fsqrt(dx * dx + dy * dy) + 0.0001;
@@ -581,8 +588,8 @@ public bundle Agents {
                 float r = 52.0 / 255.0 * shade;
                 float g = 120.0 / 255.0 * shade;
                 float b = 176.0 / 255.0 * shade;
-                return this.emitQuad(buf, w, x0 + px, y0 + py, z, x0 - px, y0 - py, z,
-                                     x1 - px, y1 - py, z, x1 + px, y1 + py, z, 0.0, 0.0, 1.0, r, g, b);
+                return this.emitQuad(buf, w, x0 + px, y0 + py, z0, x0 - px, y0 - py, z0,
+                                     x1 - px, y1 - py, z1, x1 + px, y1 + py, z1, 0.0, 0.0, 1.0, r, g, b);
             }
 
             private method countRTile(int variant, int lvl) returns int {
@@ -707,11 +714,14 @@ public bundle Agents {
                 return p;
             }
 
-            // Lowest stack level inside a coarse block. Sampling one corner cell let a tall peak raise
-            // the whole 8x8 block ABOVE the local detail layer and poke through it; the minimum keeps
-            // the coarse layer strictly underneath.
-            private method blockMinLvl(int bx, int by) returns int {
+            // Representative cell of a coarse block: the FIRST cell sitting at the block's minimum
+            // stack level (packed y*srcW+x). The block is drawn with this cell's biome at this cell's
+            // level. Using the min level (so the coarse layer stays strictly under the detail layer)
+            // but an arbitrary CORNER cell's biome painted mountain-grey slabs flat on the ground
+            // wherever a block mixed mountains with plains -- the z-fighting quads.
+            private method blockRep(int bx, int by) returns int {
                 mutable int best = 99;
+                mutable int rep = (by * this.stride) * this.srcW + bx * this.stride;
                 mutable int y = 0;
                 while (y < this.stride) {
                     mutable int x = 0;
@@ -721,15 +731,16 @@ public bundle Agents {
                         int lvl = this.stackLvl(this.grid.biomeAt(gx, gy), gx, gy);
                         if (lvl < best) {
                             best = lvl;
+                            rep = gy * this.srcW + gx;
                             if (best == 0) {
-                                return 0;
+                                return rep;
                             }
                         }
                         x = x + 1;
                     }
                     y = y + 1;
                 }
-                return best;
+                return rep;
             }
 
             // First river cell inside a coarse block, or -1. Packed as y*srcW+x.
@@ -919,13 +930,11 @@ public bundle Agents {
                             int vi = vb + k;
                             mutable float lz = this.terr.pz[vi];
                             if (lz > top && lz < top + 0.05) {
-                                // flat surface decal: push it off the plate (z-fights at range) but CAP
-                                // the lift so the coarse layer never rises above the detail layer
-                                mutable float lift = (lz - top) * 6.0 * scale;
-                                if (lift > 0.12) {
-                                    lift = 0.12;
-                                }
-                                lz = top + lift;
+                                // flat surface decal: push it off the plate (z-fights at range),
+                                // PROPORTIONALLY -- the old hard cap collapsed every decal layer onto
+                                // one plane, and coplanar decals moired (the shimmering patches).
+                                // x2.4 keeps the max lift at 0.12, under the detail layer's 0.8.
+                                lz = top + (lz - top) * 2.4;
                             } else {
                                 if (decor && dropExtras) {
                                     // coarse mountain peak: stretch the cone a LITTLE so it reads far
@@ -987,6 +996,36 @@ public bundle Agents {
                 return false;
             }
 
+            // Walk downstream from a river cell until it leaves block (bx,by) or reaches water.
+            // Returns the packed end cell (the water cell, or the first cell in the next block, or
+            // the last cell walked).
+            private method riverWalk(int rcell, int bx, int by) returns int {
+                mutable int cx2 = rcell % this.srcW;
+                mutable int cy2 = rcell / this.srcW;
+                mutable int steps = 0;
+                int maxSteps = this.stride * 3;
+                while (steps < maxSteps) {
+                    if (!this.grid.hasFlow(cx2, cy2)) {
+                        break;
+                    }
+                    int nx2 = cx2 + this.grid.flowDx(cx2, cy2);
+                    int ny2 = cy2 + this.grid.flowDy(cx2, cy2);
+                    if (nx2 < 0 || ny2 < 0 || nx2 >= this.srcW || ny2 >= this.srcH) {
+                        break;
+                    }
+                    cx2 = nx2;
+                    cy2 = ny2;
+                    if (this.grid.biomeAt(cx2, cy2) <= 7) {
+                        break;
+                    }
+                    if (cx2 / this.stride != bx || cy2 / this.stride != by) {
+                        break;
+                    }
+                    steps = steps + 1;
+                }
+                return cy2 * this.srcW + cx2;
+            }
+
             private method bakeCoarse() returns void {
                 int bw = this.srcW / this.stride;
                 int bh = this.srcH / this.stride;
@@ -996,14 +1035,14 @@ public bundle Agents {
                 while (by < bh) {
                     mutable int bx = 0;
                     while (bx < bw) {
-                        int sx = bx * this.stride;
-                        int sy = by * this.stride;
-                        int ord = this.grid.biomeAt(sx, sy);
+                        int rep = this.blockRep(bx, by);
+                        int ord = this.grid.biomeAt(rep % this.srcW, rep / this.srcW);
                         tris = tris + this.countTile(ord, true);
-                        if (this.blockMinLvl(bx, by) > 0) {
+                        if (this.stackLvl(ord, rep % this.srcW, rep / this.srcW) > 0) {
                             tris = tris + 8;
                         }
-                        if (this.blockRiver(bx, by) >= 0) {
+                        int rcell = this.blockRiver(bx, by);
+                        if (rcell >= 0 && this.grid.hasFlow(rcell % this.srcW, rcell / this.srcW)) {
                             tris = tris + 2;
                         }
                         if (this.coarseHint(bx, by, ord)) {
@@ -1023,8 +1062,9 @@ public bundle Agents {
                     while (bx < bw) {
                         int sx = bx * this.stride;
                         int sy = by * this.stride;
-                        int ord = this.grid.biomeAt(sx, sy);
-                        int lvl = this.blockMinLvl(bx, by);
+                        int rep = this.blockRep(bx, by);
+                        int ord = this.grid.biomeAt(rep % this.srcW, rep / this.srcW);
+                        int lvl = this.stackLvl(ord, rep % this.srcW, rep / this.srcW);
                         float zOff = cast<float>(lvl) * this.stepH;
                         float wx = cast<float>(sx * 2 + this.stride);
                         float wy = cast<float>(sy * 2 + this.stride);
@@ -1032,17 +1072,33 @@ public bundle Agents {
                         float shade = this.shadeAt(sx, sy, this.stride, lvl);
                         w = this.emitTile(buf, w, ord, wx, wy, zOff, sc, true, shade);
                         int rcell = this.blockRiver(bx, by);
-                        if (rcell >= 0) {
-                            int rx = rcell % this.srcW;
-                            int ry = rcell / this.srcW;
-                            mutable float fx = cast<float>(this.grid.flowDx(rx, ry));
-                            mutable float fy = cast<float>(this.grid.flowDy(rx, ry));
-                            if (fx == 0.0 && fy == 0.0) {
-                                fy = 1.0;
+                        if (rcell >= 0 && this.grid.hasFlow(rcell % this.srcW, rcell / this.srcW)) {
+                            // one polyline piece per river block: this block's centre to the next
+                            // river block's centre downstream (or into the water cell at the mouth),
+                            // each end at its own block's plate height -- a CONNECTED line that
+                            // climbs steps and actually reaches the sea
+                            int endc = this.riverWalk(rcell, bx, by);
+                            int ecx = endc % this.srcW;
+                            int ecy = endc / this.srcW;
+                            float z0 = this.tileTop[ord] + zOff + 0.20;
+                            mutable float x1 = cast<float>(ecx * 2 + 1);
+                            mutable float y1 = cast<float>(ecy * 2 + 1);
+                            mutable float z1 = z0;
+                            if (this.grid.biomeAt(ecx, ecy) <= 7) {
+                                z1 = this.tileTop[this.grid.biomeAt(ecx, ecy)] + 0.20;
+                            } else {
+                                int ebx = ecx / this.stride;
+                                int eby = ecy / this.stride;
+                                if (ebx != bx || eby != by) {
+                                    int erep = this.blockRep(ebx, eby);
+                                    int eord = this.grid.biomeAt(erep % this.srcW, erep / this.srcW);
+                                    int elvl = this.stackLvl(eord, erep % this.srcW, erep / this.srcW);
+                                    x1 = cast<float>(ebx * this.stride * 2 + this.stride);
+                                    y1 = cast<float>(eby * this.stride * 2 + this.stride);
+                                    z1 = this.tileTop[eord] + cast<float>(elvl) * this.stepH + 0.20;
+                                }
                             }
-                            float topZ = this.tileTop[ord] + zOff + 0.20;
-                            w = this.emitFlatSeg(buf, w, wx - fx * sc, wy - fy * sc,
-                                                 wx + fx * sc, wy + fy * sc, topZ, sc * 0.30, shade);
+                            w = this.emitSlopeSeg(buf, w, wx, wy, z0, x1, y1, z1, sc * 0.30, shade);
                         }
                         if (this.coarseHint(bx, by, ord)) {
                             float topZ = this.tileTop[ord] + zOff;
@@ -1097,7 +1153,10 @@ public bundle Agents {
                         int gy = oy + y;
                         int ord = this.grid.biomeAt(gx, gy);
                         int lvl = this.stackLvl(ord, gx, gy);
-                        if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
+                        // ord > 7: river tiles on any LAND cell including Beach/RockyShore -- most of
+                        // a river's lower course crosses the coast band, and skipping it there cut
+                        // every river short of the sea
+                        if (ord > 7 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
                             tris = tris + this.countRTile(this.pickRiver(gx, gy) / 4, lvl);
                         } else {
                             tris = tris + this.countTile(ord, false) + 8;    // + the always-on skirt
@@ -1125,7 +1184,7 @@ public bundle Agents {
                         float wx = cast<float>(gx * 2 + 1);
                         float wy = cast<float>(gy * 2 + 1);
                         float shade = this.shadeAt(gx, gy, 1, lvl);
-                        if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
+                        if (ord > 7 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
                             int pk = this.pickRiver(gx, gy);
                             w = this.emitRTile(buf, w, pk / 4, pk % 4, ord, wx, wy, zOff, shade);
                         } else {
