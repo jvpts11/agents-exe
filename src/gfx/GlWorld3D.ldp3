@@ -507,11 +507,8 @@ public bundle Agents {
             }
 
             private method countRTile(int variant, int lvl) returns int {
-                mutable int c = this.rivers.triCount[variant];
-                if (lvl > 0) {
-                    c = c + 8;
-                }
-                return c;
+                // detail tiles always float 0.8 above the coarse layer, so they always get a skirt
+                return this.rivers.triCount[variant] + 8;
             }
 
             // Emit a river tile variant rotated by `rot` quarter turns, its grass bank recoloured to the
@@ -602,21 +599,28 @@ public bundle Agents {
                 return p;
             }
 
-            // A soft blob shadow under a prop: a dark octagon of the ground colour, offset away from
-            // the light -- the objects' ground shadows.
-            private method emitShadow(float[] buf, int w, float cx2, float cy2, float z, float rad,
-                                      float gr, float gg, float gb) returns int {
-                float sx = cx2 - rad * 0.30;
-                float sy = cy2 - rad * 0.42;
+            // The prop's OWN shadow: its geometry flattened onto the ground, each vertex displaced
+            // along the sun direction by its height -- a real projected silhouette, not a blob.
+            // (Light comes from +x/+y, so shadows stretch toward -x/-y.)
+            private method emitPropShadow(float[] buf, int w, int pord, float wx, float wy, float z,
+                                          float scale, float gr, float gg, float gb) returns int {
+                int t0 = this.props.triStart[pord];
+                int tn = this.props.triCount[pord];
                 mutable int p = w;
-                mutable int i = 0;
-                while (i < 8) {
-                    float a0 = cast<float>(i) * 0.7853982;
-                    float a1 = cast<float>(i + 1) * 0.7853982;
-                    p = this.wr(buf, p, sx, sy, z, 0.0, 0.0, 1.0, gr, gg, gb);
-                    p = this.wr(buf, p, sx + rad * this.fcos(a0), sy + rad * this.fsin(a0), z, 0.0, 0.0, 1.0, gr, gg, gb);
-                    p = this.wr(buf, p, sx + rad * this.fcos(a1), sy + rad * this.fsin(a1), z, 0.0, 0.0, 1.0, gr, gg, gb);
-                    i = i + 1;
+                mutable int t = 0;
+                while (t < tn) {
+                    int vb = (t0 + t) * 3;
+                    mutable int k = 0;
+                    while (k < 3) {
+                        int vi = vb + k;
+                        float hz = this.props.pz[vi] * scale;
+                        p = this.wr(buf, p,
+                                    this.props.px[vi] * scale + wx - hz * 0.368,
+                                    this.props.py[vi] * scale + wy - hz * 0.579,
+                                    z, 0.0, 0.0, 1.0, gr, gg, gb);
+                        k = k + 1;
+                    }
+                    t = t + 1;
                 }
                 return p;
             }
@@ -671,7 +675,7 @@ public bundle Agents {
             // slope shadow -- cells whose sun-side neighbour (light comes from +x/+y) stands higher get
             // darkened, which makes the mountain stacks read as lit terrain.
             private method shadeAt(int sx, int sy, int stp, int lvl) returns float {
-                mutable float s = 0.93 + 0.14 * this.hash01(sx * 31 + 11, sy * 37 + 5);
+                mutable float s = 0.95 + 0.10 * this.hash01(sx * 31 + 11, sy * 37 + 5);
                 mutable int shadowed = 0;
                 mutable int k = 0;
                 while (k < 3) {
@@ -807,8 +811,13 @@ public bundle Agents {
                             int vi = vb + k;
                             mutable float lz = this.terr.pz[vi];
                             if (lz > top && lz < top + 0.05) {
-                                // flat surface decal: push it further off the plate or it z-fights at range
-                                lz = top + (lz - top) * 6.0 * scale;
+                                // flat surface decal: push it off the plate (z-fights at range) but CAP
+                                // the lift so the coarse layer never rises above the detail layer
+                                mutable float lift = (lz - top) * 6.0 * scale;
+                                if (lift > 0.12) {
+                                    lift = 0.12;
+                                }
+                                lz = top + lift;
                             } else {
                                 if (decor && dropExtras) {
                                     // coarse mountain peak: stretch the cone so it keeps its profile
@@ -885,7 +894,7 @@ public bundle Agents {
                             tris = tris + 2;
                         }
                         if (this.coarseHint(bx, by, ord)) {
-                            htris = htris + this.props.triCount[this.hintProp] + 8;
+                            htris = htris + this.props.triCount[this.hintProp] * 2;
                         }
                         bx = bx + 1;
                     }
@@ -918,7 +927,7 @@ public bundle Agents {
                             if (fx == 0.0 && fy == 0.0) {
                                 fy = 1.0;
                             }
-                            float topZ = this.tileTop[ord] + zOff + 0.35;
+                            float topZ = this.tileTop[ord] + zOff + 0.20;
                             w = this.emitFlatSeg(buf, w, wx - fx * sc, wy - fy * sc,
                                                  wx + fx * sc, wy + fy * sc, topZ, sc * 0.30, shade);
                         }
@@ -928,7 +937,8 @@ public bundle Agents {
                             float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
                             float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
-                            hw = this.emitShadow(hbuf, hw, wx, wy, topZ + 0.3, sc * 0.34, gr, gg, gb);
+                            hw = this.emitPropShadow(hbuf, hw, this.hintProp, wx, wy, topZ + 0.18,
+                                                     sc * 0.55, gr, gg, gb);
                             hw = this.emitProp(hbuf, hw, this.hintProp, wx, wy, topZ, sc * 0.55, shade);
                         }
                         bx = bx + 1;
@@ -977,14 +987,11 @@ public bundle Agents {
                         if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
                             tris = tris + this.countRTile(this.pickRiver(gx, gy) / 4, lvl);
                         } else {
-                            tris = tris + this.countTile(ord, false);
-                            if (lvl > 0) {
-                                tris = tris + 8;
-                            }
+                            tris = tris + this.countTile(ord, false) + 8;    // + the always-on skirt
                         }
                         int p = this.detailPropAt(gx, gy, ord);
                         if (p >= 0) {
-                            tris = tris + this.props.triCount[p] + 8;    // prop + its blob shadow
+                            tris = tris + this.props.triCount[p] * 2;    // prop + its projected shadow
                         }
                         x = x + 1;
                     }
@@ -1000,7 +1007,8 @@ public bundle Agents {
                         int gy = oy + y;
                         int ord = this.grid.biomeAt(gx, gy);
                         int lvl = this.stackLvl(ord, gx, gy);
-                        float zOff = cast<float>(lvl) * this.stepH + 0.15;   // above the coarse layer
+                        float zOff = cast<float>(lvl) * this.stepH + 0.8;    // clear of EVERYTHING coarse
+                                                                             // (its plates + capped decals)
                         float wx = cast<float>(gx * 2 + 1);
                         float wy = cast<float>(gy * 2 + 1);
                         float shade = this.shadeAt(gx, gy, 1, lvl);
@@ -1019,8 +1027,8 @@ public bundle Agents {
                             float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
                             float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
-                            float rad = 0.55 * this.sScale[ord];
-                            w = this.emitShadow(buf, w, wx + jx, wy + jy, topZ + 0.055, rad, gr, gg, gb);
+                            w = this.emitPropShadow(buf, w, p, wx + jx, wy + jy, topZ + 0.055,
+                                                    this.sScale[ord], gr, gg, gb);
                             w = this.emitProp(buf, w, p, wx + jx, wy + jy, topZ, this.sScale[ord], shade);
                         }
                         x = x + 1;
@@ -1148,7 +1156,6 @@ public bundle Agents {
                 this.gl.uniformMatrix4fv(this.uProj, 1, cast<byte>(0), this.projM.ptr());
                 this.gl.uniformMatrix4fv(this.uView, 1, cast<byte>(0), this.viewM.ptr());
                 this.gl.uniform1f(this.uTime, this.timeSec);
-                this.gl.uniform2f(this.uFog, d * 1.5, d * 3.0);
                 this.gl.bindVertexArray(this.vao);
                 Wgl.glDrawArrays(GL.TRIANGLES, 0, this.nverts);
                 if (this.camDist <= this.detailDist && this.haveDetail) {
@@ -1362,12 +1369,12 @@ public bundle Agents {
 
             // The sea foam crests (their exact baked colour) bob with time -- the water animation.
             private static method vertSrc() returns String {
-                return "#version 330 core\nlayout(location=0) in vec3 aPos;\nlayout(location=1) in vec3 aNrm;\nlayout(location=2) in vec3 aCol;\nuniform mat4 uProj;\nuniform mat4 uView;\nuniform float uTime;\nout vec3 vNrm;\nout vec3 vCol;\nout float vDist;\nvoid main(){\n  vec3 p = aPos;\n  if (abs(aCol.r-0.8157)<0.03 && abs(aCol.g-0.9020)<0.03 && abs(aCol.b-0.9725)<0.03) {\n    p.y += sin(uTime*1.8 + p.x*1.3 + p.y*0.7)*0.18;\n    p.x += cos(uTime*1.4 + p.y*1.1)*0.12;\n  }\n  vec4 cp = uProj * uView * vec4(p,1.0);\n  gl_Position = cp;\n  vDist = cp.w;\n  vNrm=aNrm; vCol=aCol;\n}\n";
+                return "#version 330 core\nlayout(location=0) in vec3 aPos;\nlayout(location=1) in vec3 aNrm;\nlayout(location=2) in vec3 aCol;\nuniform mat4 uProj;\nuniform mat4 uView;\nuniform float uTime;\nout vec3 vNrm;\nout vec3 vCol;\nvoid main(){\n  vec3 p = aPos;\n  if (abs(aCol.r-0.8157)<0.03 && abs(aCol.g-0.9020)<0.03 && abs(aCol.b-0.9725)<0.03) {\n    p.y += sin(uTime*1.8 + p.x*1.3 + p.y*0.7)*0.18;\n    p.x += cos(uTime*1.4 + p.y*1.1)*0.12;\n  }\n  gl_Position = uProj * uView * vec4(p,1.0);\n  vNrm=aNrm; vCol=aCol;\n}\n";
             }
 
-            // The approved cel contrast + distance fog toward the sky colour.
+            // The approved cel contrast (no fog: it darkened the horizon).
             private static method fragSrc() returns String {
-                return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nin float vDist;\nout vec4 FragColor;\nuniform vec2 uFog;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.60 + 0.42*ndl);\n  vec3 c = vCol*sh;\n  float f = clamp((vDist - uFog.x) / uFog.y, 0.0, 0.55);\n  c = mix(c, vec3(0.10,0.13,0.18), f);\n  FragColor = vec4(c, 1.0);\n}\n";
+                return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nout vec4 FragColor;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.60 + 0.42*ndl);\n  FragColor = vec4(vCol*sh, 1.0);\n}\n";
             }
 
             private static method postVert() returns String {
