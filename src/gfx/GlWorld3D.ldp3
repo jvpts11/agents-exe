@@ -433,11 +433,13 @@ public bundle Agents {
                 return 0;
             }
 
-            // Choose (variant, rot) packed as variant*4+rot for a river cell.
+            // Choose (variant, rot) packed as variant*4+rot for a river cell -- ONLY when an authored
+            // variant matches the connections EXACTLY. Returns -1 otherwise (45-degree bends, staircase
+            // steps, odd junctions): those cells draw their terrain tile plus a geometric channel
+            // overlay that follows the exact flow directions, so the river NEVER disconnects.
             private method pickRiver(int gx, int gy) returns int {
                 mutable int conn = this.riverConn(gx, gy);
                 int n = this.bitCount(conn);
-                // does this cell empty into water? (its downstream neighbour is a water biome)
                 mutable boolean mouth = false;
                 if (this.grid.hasFlow(gx, gy)) {
                     int wx = gx + this.grid.flowDx(gx, gy);
@@ -451,9 +453,8 @@ public bundle Agents {
                 }
                 if (n == 1) {
                     int d = this.firstDir(conn);
-                    mutable int k = d / 2;
                     if (d % 2 == 1) {
-                        k = (d + 1) / 2;
+                        return 0 - 1;                            // diagonal endpoint: overlay
                     }
                     if (mouth) {
                         // Delta: the fan (mesh S) faces the water; rotate S(4) onto d.
@@ -461,7 +462,7 @@ public bundle Agents {
                         if (kd >= 4) { kd = kd - 4; }
                         return this.rvDelta * 4 + kd;
                     }
-                    return this.rvSource * 4 + (k % 4);
+                    return this.rvSource * 4 + d / 2;
                 }
                 if (n == 2) {
                     mutable int k = this.matchRot(1 | 16, conn);              // Straight {N,S}
@@ -472,29 +473,84 @@ public bundle Agents {
                     if (k >= 0) { return this.rvCorner * 4 + k; }
                     k = this.matchRot(64 | 1, conn);                          // Bend {W,N}
                     if (k >= 0) { return this.rvBend * 4 + k; }
-                    // mixed diagonal/cardinal pair: round diagonals and retry the cardinal shapes
-                    int rc = this.roundMask(conn);
-                    k = this.matchRot(1 | 16, rc);
-                    if (k >= 0) { return this.rvStraight * 4 + k; }
-                    k = this.matchRot(16 | 4, rc);
-                    if (k >= 0) { return this.rvCorner * 4 + k; }
-                    return this.rvStraight * 4;
+                    return 0 - 1;
                 }
                 if (n == 3) {
                     mutable int k = this.matchRot(64 | 4 | 1, conn);          // T {W,E,N}
                     if (k >= 0) { return this.rvT * 4 + k; }
                     k = this.matchRot(16 | 2 | 128, conn);                    // Fork {S,NE,NW}
                     if (k >= 0) { return this.rvFork * 4 + k; }
-                    int rc = this.roundMask(conn);
-                    k = this.matchRot(64 | 4 | 1, rc);
-                    if (k >= 0) { return this.rvT * 4 + k; }
-                    return this.rvCross * 4;
+                    return 0 - 1;
                 }
-                return this.rvCross * 4;
+                mutable int kx = this.matchRot(1 | 4 | 16 | 64, conn);        // Crossing {N,E,S,W}
+                if (kx >= 0) {
+                    return this.rvCross * 4 + kx;
+                }
+                return 0 - 1;
+            }
+
+            // Channel segment count for an overlay river cell (downstream + one per inflow).
+            private method riverSegs(int gx, int gy) returns int {
+                mutable int s = 0;
+                if (this.grid.hasFlow(gx, gy)) {
+                    s = 1;
+                }
+                mutable int dy = 0 - 1;
+                while (dy <= 1) {
+                    mutable int dx = 0 - 1;
+                    while (dx <= 1) {
+                        if (!(dx == 0 && dy == 0)) {
+                            int nx = gx + dx;
+                            int ny = gy + dy;
+                            if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
+                                if (this.grid.hasFlag(nx, ny, Grid.FLAG_RIVER)) {
+                                    if (nx + this.grid.flowDx(nx, ny) == gx && ny + this.grid.flowDy(nx, ny) == gy) {
+                                        s = s + 1;
+                                    }
+                                }
+                            }
+                        }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                return s;
+            }
+
+            private method emitRiverOverlay(address buf, int w, int gx, int gy, float wx, float wy,
+                                            float top, float shade) returns int {
+                float z = top + 0.09;
+                mutable int p = w;
+                if (this.grid.hasFlow(gx, gy)) {
+                    float fx = cast<float>(this.grid.flowDx(gx, gy));
+                    float fy = cast<float>(this.grid.flowDy(gx, gy));
+                    p = this.emitFlatSeg(buf, p, wx, wy, wx + fx, wy + fy, z, 0.60, shade);
+                }
+                mutable int dy = 0 - 1;
+                while (dy <= 1) {
+                    mutable int dx = 0 - 1;
+                    while (dx <= 1) {
+                        if (!(dx == 0 && dy == 0)) {
+                            int nx = gx + dx;
+                            int ny = gy + dy;
+                            if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
+                                if (this.grid.hasFlag(nx, ny, Grid.FLAG_RIVER)) {
+                                    if (nx + this.grid.flowDx(nx, ny) == gx && ny + this.grid.flowDy(nx, ny) == gy) {
+                                        p = this.emitFlatSeg(buf, p, wx + cast<float>(dx), wy + cast<float>(dy),
+                                                             wx, wy, z, 0.60, shade);
+                                    }
+                                }
+                            }
+                        }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                return p;
             }
 
             // A flat water quad from (x0,y0) to (x1,y1) at height z (2 triangles).
-            private method emitFlatSeg(float[] buf, int w, float x0, float y0, float x1, float y1,
+            private method emitFlatSeg(address buf, int w, float x0, float y0, float x1, float y1,
                                        float z, float width, float shade) returns int {
                 float dx = x1 - x0;
                 float dy = y1 - y0;
@@ -516,7 +572,7 @@ public bundle Agents {
             // Emit a river tile variant rotated by `rot` quarter turns, its grass bank recoloured to the
             // underlying biome's own top/side colours (a jungle river has jungle banks, a snowy river
             // snowy ones). Water/foam/rock parts keep their colours; foam stays unshaded (animation key).
-            private method emitRTile(float[] buf, int w, int variant, int rot, int underOrd,
+            private method emitRTile(address buf, int w, int variant, int rot, int underOrd,
                                      float wx, float wy, float zOff, float shade) returns int {
                 int t0 = this.rivers.triStart[variant];
                 int tn = this.rivers.triCount[variant];
@@ -604,7 +660,7 @@ public bundle Agents {
             // The prop's OWN shadow: its geometry flattened onto the ground, each vertex displaced
             // along the sun direction by its height -- a real projected silhouette, not a blob.
             // (Light comes from +x/+y, so shadows stretch toward -x/-y.)
-            private method emitPropShadow(float[] buf, int w, int pord, float wx, float wy, float z,
+            private method emitPropShadow(address buf, int w, int pord, float wx, float wy, float z,
                                           float scale, float gr, float gg, float gb) returns int {
                 int t0 = this.props.triStart[pord];
                 int tn = this.props.triCount[pord];
@@ -759,21 +815,22 @@ public bundle Agents {
                 return c;
             }
 
-            private method wr(float[] buf, int w, float x, float y, float z,
+            private method wr(address buf, int w, float x, float y, float z,
                               float nx, float ny, float nz, float r, float g, float b) returns int {
-                buf[w] = x;
-                buf[w + 1] = y;
-                buf[w + 2] = z;
-                buf[w + 3] = nx;
-                buf[w + 4] = ny;
-                buf[w + 5] = nz;
-                buf[w + 6] = r;
-                buf[w + 7] = g;
-                buf[w + 8] = b;
+                address p = buf + cast<address>(w * 4);
+                Memory.write<float>(p, x);
+                Memory.write<float>(p + cast<address>(4), y);
+                Memory.write<float>(p + cast<address>(8), z);
+                Memory.write<float>(p + cast<address>(12), nx);
+                Memory.write<float>(p + cast<address>(16), ny);
+                Memory.write<float>(p + cast<address>(20), nz);
+                Memory.write<float>(p + cast<address>(24), r);
+                Memory.write<float>(p + cast<address>(28), g);
+                Memory.write<float>(p + cast<address>(32), b);
                 return w + 9;
             }
 
-            private method emitQuad(float[] buf, int w, float ax, float ay, float az, float bx, float by, float bz,
+            private method emitQuad(address buf, int w, float ax, float ay, float az, float bx, float by, float bz,
                                     float qcx, float qcy, float qcz, float dx, float dy, float dz,
                                     float nx, float ny, float nz, float r, float g, float b) returns int {
                 mutable int p = w;
@@ -790,7 +847,7 @@ public bundle Agents {
             // 0 = flat ground). The mesh is scaled by `scale` in x/y only, so the plate heights match
             // across LODs. `rot` = 1 rotates the tile 90 degrees (river channels follow the flow).
             // When zOff > 0 a skirt column fills 0..zOff (count it as +8 tris).
-            private method emitTile(float[] buf, int w, int ord, float wx, float wy, float zOff,
+            private method emitTile(address buf, int w, int ord, float wx, float wy, float zOff,
                                     float scale, boolean dropExtras, float shade) returns int {
                 int t0 = this.terr.triStart[ord];
                 int tn = this.terr.triCount[ord];
@@ -862,7 +919,7 @@ public bundle Agents {
                 return p;
             }
 
-            private method emitProp(float[] buf, int w, int pord, float wx, float wy, float wz, float scale,
+            private method emitProp(address buf, int w, int pord, float wx, float wy, float wz, float scale,
                                     float shade) returns int {
                 int t0 = this.props.triStart[pord];
                 int tn = this.props.triCount[pord];
@@ -927,8 +984,8 @@ public bundle Agents {
                     }
                     by = by + 1;
                 }
-                float[] buf = new float[tris * 27]();
-                float[] hbuf = new float[htris * 27]();
+                address buf = Memory.alloc(cast<long>(tris * 27 * 4 + 4));
+                address hbuf = Memory.alloc(cast<long>(htris * 27 * 4 + 4));
                 mutable int w = 0;
                 mutable int hw = 0;
                 by = 0;
@@ -974,15 +1031,15 @@ public bundle Agents {
                 }
                 this.gl.bindVertexArray(this.vao);
                 this.gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
-                this.gl.bufferDataFloats(GL.ARRAY_BUFFER, buf, GL.STATIC_DRAW);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4), cast<long>(buf), GL.STATIC_DRAW);
                 this.gl.bindVertexArray(this.hvao);
                 this.gl.bindBuffer(GL.ARRAY_BUFFER, this.hvbo);
-                this.gl.bufferDataFloats(GL.ARRAY_BUFFER, hbuf, GL.STATIC_DRAW);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(htris * 27 * 4), cast<long>(hbuf), GL.STATIC_DRAW);
                 this.gl.bindVertexArray(0);
                 this.nverts = tris * 3;
                 this.hnverts = htris * 3;
-                delete buf;
-                delete hbuf;
+                Memory.free(buf);
+                Memory.free(hbuf);
             }
 
             // ---- detail LOD: full-res window around the camera target, foam + scattered props ----
@@ -1012,7 +1069,12 @@ public bundle Agents {
                         int ord = this.grid.biomeAt(gx, gy);
                         int lvl = this.stackLvl(ord, gx, gy);
                         if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
-                            tris = tris + this.countRTile(this.pickRiver(gx, gy) / 4, lvl);
+                            int pk = this.pickRiver(gx, gy);
+                            if (pk >= 0) {
+                                tris = tris + this.countRTile(pk / 4, lvl);
+                            } else {
+                                tris = tris + this.countTile(ord, false) + 8 + this.riverSegs(gx, gy) * 2;
+                            }
                         } else {
                             tris = tris + this.countTile(ord, false) + 8;    // + the always-on skirt
                         }
@@ -1024,7 +1086,7 @@ public bundle Agents {
                     }
                     y = y + 1;
                 }
-                float[] buf = new float[tris * 27]();
+                address buf = Memory.alloc(cast<long>(tris * 27 * 4 + 4));
                 mutable int w = 0;
                 y = 0;
                 while (y < this.detH) {
@@ -1041,7 +1103,12 @@ public bundle Agents {
                         float shade = this.shadeAt(gx, gy, 1, lvl);
                         if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
                             int pk = this.pickRiver(gx, gy);
-                            w = this.emitRTile(buf, w, pk / 4, pk % 4, ord, wx, wy, zOff, shade);
+                            if (pk >= 0) {
+                                w = this.emitRTile(buf, w, pk / 4, pk % 4, ord, wx, wy, zOff, shade);
+                            } else {
+                                w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false, shade);
+                                w = this.emitRiverOverlay(buf, w, gx, gy, wx, wy, this.tileTop[ord] + zOff, shade);
+                            }
                         } else {
                             w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false, shade);
                         }
@@ -1064,10 +1131,10 @@ public bundle Agents {
                 }
                 this.gl.bindVertexArray(this.dvao);
                 this.gl.bindBuffer(GL.ARRAY_BUFFER, this.dvbo);
-                this.gl.bufferDataFloats(GL.ARRAY_BUFFER, buf, GL.STATIC_DRAW);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4), cast<long>(buf), GL.STATIC_DRAW);
                 this.gl.bindVertexArray(0);
                 this.dnverts = tris * 3;
-                delete buf;
+                Memory.free(buf);
                 this.detX0 = ox;
                 this.detY0 = oy;
                 this.haveDetail = true;
