@@ -73,6 +73,7 @@ public bundle Agents {
             private mutable int detX0;
             private mutable int detY0;
             private mutable boolean haveDetail;
+            private mutable boolean detailOn;
             private mutable float detailDist;
             // framing + inspection camera (elevation gimbal-locked between horizon and top-down)
             private mutable float cx;
@@ -131,6 +132,7 @@ public bundle Agents {
                 this.detX0 = 0;
                 this.detY0 = 0;
                 this.haveDetail = false;
+                this.detailOn = false;
                 this.detailDist = 340.0;
                 this.camAz = 45.0;
                 this.camEl = 40.0;
@@ -625,6 +627,31 @@ public bundle Agents {
                 return p;
             }
 
+            // Lowest stack level inside a coarse block. Sampling one corner cell let a tall peak raise
+            // the whole 8x8 block ABOVE the local detail layer and poke through it; the minimum keeps
+            // the coarse layer strictly underneath.
+            private method blockMinLvl(int bx, int by) returns int {
+                mutable int best = 99;
+                mutable int y = 0;
+                while (y < this.stride) {
+                    mutable int x = 0;
+                    while (x < this.stride) {
+                        int gx = bx * this.stride + x;
+                        int gy = by * this.stride + y;
+                        int lvl = this.stackLvl(this.grid.biomeAt(gx, gy), gx, gy);
+                        if (lvl < best) {
+                            best = lvl;
+                            if (best == 0) {
+                                return 0;
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                return best;
+            }
+
             // First river cell inside a coarse block, or -1. Packed as y*srcW+x.
             private method blockRiver(int bx, int by) returns int {
                 mutable int y = 0;
@@ -887,7 +914,7 @@ public bundle Agents {
                         int sy = by * this.stride;
                         int ord = this.grid.biomeAt(sx, sy);
                         tris = tris + this.countTile(ord, true);
-                        if (this.stackLvl(ord, sx, sy) > 0) {
+                        if (this.blockMinLvl(bx, by) > 0) {
                             tris = tris + 8;
                         }
                         if (this.blockRiver(bx, by) >= 0) {
@@ -911,7 +938,7 @@ public bundle Agents {
                         int sx = bx * this.stride;
                         int sy = by * this.stride;
                         int ord = this.grid.biomeAt(sx, sy);
-                        int lvl = this.stackLvl(ord, sx, sy);
+                        int lvl = this.blockMinLvl(bx, by);
                         float zOff = cast<float>(lvl) * this.stepH;
                         float wx = cast<float>(sx * 2 + this.stride);
                         float wy = cast<float>(sy * 2 + this.stride);
@@ -1046,12 +1073,35 @@ public bundle Agents {
                 this.haveDetail = true;
             }
 
+            // The detail LOD keys off the camera's HEIGHT ABOVE THE GROUND (with hysteresis), not the
+            // orbit distance -- at a grazing angle you are near the ground even when the look-at target
+            // is far. And the window is centred just AHEAD OF THE CAMERA on the ground, so the
+            // foreground -- the terrain closest to the player -- is always the part in full detail.
             private method ensureDetail() returns void {
-                if (this.camDist > this.detailDist) {
-                    return;
+                float pi = 3.14159265;
+                float e = this.camEl * pi / 180.0;
+                float a = this.camAz * pi / 180.0;
+                float alt = this.camDist * this.fsin(e);
+                if (this.detailOn) {
+                    if (alt > this.detailDist * 1.2) {
+                        this.detailOn = false;
+                        return;
+                    }
+                } else {
+                    if (alt > this.detailDist) {
+                        return;
+                    }
+                    this.detailOn = true;
                 }
-                mutable int tx = cast<int>(this.camTx / 2.0) - this.detW / 2;
-                mutable int ty = cast<int>(this.camTy / 2.0) - this.detH / 2;
+                // camera's ground footprint, then a nudge forward toward what it is looking at
+                float ce = this.fcos(e);
+                float egx = this.camTx + this.camDist * ce * this.fsin(a);
+                float egy = this.camTy + this.camDist * ce * this.fcos(a);
+                float ahead = 90.0;
+                float cxw = egx - this.fsin(a) * ahead;
+                float cyw = egy - this.fcos(a) * ahead;
+                mutable int tx = cast<int>(cxw / 2.0) - this.detW / 2;
+                mutable int ty = cast<int>(cyw / 2.0) - this.detH / 2;
                 if (tx < 0) { tx = 0; }
                 if (ty < 0) { ty = 0; }
                 if (tx > this.srcW - this.detW) { tx = this.srcW - this.detW; }
@@ -1158,7 +1208,7 @@ public bundle Agents {
                 this.gl.uniform1f(this.uTime, this.timeSec);
                 this.gl.bindVertexArray(this.vao);
                 Wgl.glDrawArrays(GL.TRIANGLES, 0, this.nverts);
-                if (this.camDist <= this.detailDist && this.haveDetail) {
+                if (this.detailOn && this.haveDetail) {
                     this.gl.bindVertexArray(this.dvao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.dnverts);
                 } else {
