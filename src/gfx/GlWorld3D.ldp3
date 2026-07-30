@@ -25,6 +25,9 @@ public bundle Agents {
             private mutable int prog;
             private mutable int uProj;
             private mutable int uView;
+            private mutable int uTime;
+            private mutable int uFog;
+            private mutable float timeSec;
             // coarse (whole world) and detail (near window) batches
             private mutable int vao;
             private mutable int vbo;
@@ -105,14 +108,17 @@ public bundle Agents {
                 this.sScale = new float[1]();
                 this.uProj = gl.getUniformLocation(this.prog, "uProj");
                 this.uView = gl.getUniformLocation(this.prog, "uView");
+                this.uTime = gl.getUniformLocation(this.prog, "uTime");
+                this.uFog = gl.getUniformLocation(this.prog, "uFog");
+                this.timeSec = 0.0;
                 this.nverts = 0;
                 this.dnverts = 0;
-                this.detW = 112;
-                this.detH = 112;
+                this.detW = 144;
+                this.detH = 144;
                 this.detX0 = 0;
                 this.detY0 = 0;
                 this.haveDetail = false;
-                this.detailDist = 280.0;
+                this.detailDist = 340.0;
                 this.camAz = 45.0;
                 this.camEl = 40.0;
                 this.camDist = 20.0;
@@ -193,15 +199,21 @@ public bundle Agents {
             // Mountain-family stack level for a cell (0 = flat ground). Quantized from elevation so
             // neighbouring mountain cells step like stacked blocks.
             private method stackLvl(int ord, int x, int y) returns int {
+                if (ord <= 9) {
+                    return 0;                                   // water and coast never stack
+                }
                 mutable int base = 0;
                 if (ord == 32) { base = 1; }                    // Hills
                 if (ord == 33 || ord == 34) { base = 2; }       // Mountain / AlpineMeadow
                 if (ord == 36) { base = 3; }                    // Volcanic
                 if (ord == 35) { base = 4; }                    // SnowPeak
-                if (base == 0) {
-                    return 0;
-                }
                 float e = cast<float>(this.grid.elevAt(x, y)) / 10000.0;
+                if (base == 0) {
+                    if (e < 0.63) {
+                        return 0;                               // ordinary land is FLAT
+                    }
+                    base = 1;                                   // high ground of any biome steps up
+                }
                 mutable int q = cast<int>((e - 0.62) * 8.0);
                 if (q < 0) { q = 0; }
                 if (q > 4) { q = 4; }
@@ -270,17 +282,100 @@ public bundle Agents {
                 return cast<float>(v) / 2147483647.0;
             }
 
-            // Detail-LOD biome for a cell: river cells recolour to the River tile (oriented later by the
-            // flow direction). The coarse LOD keeps the plain biome -- a stride-sampled river turns into
-            // broken dashes, so rivers only appear close up.
-            private method detailOrd(int x, int y) returns int {
-                int ord = this.grid.biomeAt(x, y);
-                if (ord > 9) {
-                    if (this.grid.hasFlag(x, y, Grid.FLAG_RIVER)) {
-                        return 7;
-                    }
+            // Rivers keep their terrain tile; the channel is drawn as a flat water overlay that follows
+            // the real flow graph (centre -> downstream edge, plus one segment per inflowing neighbour),
+            // so channels CONNECT -- including diagonals -- instead of reading as dashes.
+            private method riverSegs(int gx, int gy) returns int {
+                mutable int s = 0;
+                if (this.grid.hasFlow(gx, gy)) {
+                    s = 1;
                 }
-                return ord;
+                mutable int dy = 0 - 1;
+                while (dy <= 1) {
+                    mutable int dx = 0 - 1;
+                    while (dx <= 1) {
+                        if (!(dx == 0 && dy == 0)) {
+                            int nx = gx + dx;
+                            int ny = gy + dy;
+                            if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
+                                if (this.grid.hasFlag(nx, ny, Grid.FLAG_RIVER)) {
+                                    if (nx + this.grid.flowDx(nx, ny) == gx && ny + this.grid.flowDy(nx, ny) == gy) {
+                                        s = s + 1;
+                                    }
+                                }
+                            }
+                        }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                return s;
+            }
+
+            // A flat water quad from (x0,y0) to (x1,y1) at height z (2 triangles).
+            private method emitFlatSeg(float[] buf, int w, float x0, float y0, float x1, float y1,
+                                       float z, float width, float shade) returns int {
+                float dx = x1 - x0;
+                float dy = y1 - y0;
+                float len = this.fsqrt(dx * dx + dy * dy) + 0.0001;
+                float px = 0.0 - dy / len * width * 0.5;
+                float py = dx / len * width * 0.5;
+                float r = 52.0 / 255.0 * shade;
+                float g = 120.0 / 255.0 * shade;
+                float b = 176.0 / 255.0 * shade;
+                return this.emitQuad(buf, w, x0 + px, y0 + py, z, x0 - px, y0 - py, z,
+                                     x1 - px, y1 - py, z, x1 + px, y1 + py, z, 0.0, 0.0, 1.0, r, g, b);
+            }
+
+            // Emit every channel segment for river cell (gx,gy); top = the cell's plate height.
+            private method emitRiver(float[] buf, int w, int gx, int gy, float wx, float wy, float top,
+                                     float shade) returns int {
+                float z = top + 0.10;
+                mutable int p = w;
+                if (this.grid.hasFlow(gx, gy)) {
+                    float fx = cast<float>(this.grid.flowDx(gx, gy));
+                    float fy = cast<float>(this.grid.flowDy(gx, gy));
+                    p = this.emitFlatSeg(buf, p, wx, wy, wx + fx, wy + fy, z, 0.62, shade);
+                }
+                mutable int dy = 0 - 1;
+                while (dy <= 1) {
+                    mutable int dx = 0 - 1;
+                    while (dx <= 1) {
+                        if (!(dx == 0 && dy == 0)) {
+                            int nx = gx + dx;
+                            int ny = gy + dy;
+                            if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
+                                if (this.grid.hasFlag(nx, ny, Grid.FLAG_RIVER)) {
+                                    if (nx + this.grid.flowDx(nx, ny) == gx && ny + this.grid.flowDy(nx, ny) == gy) {
+                                        p = this.emitFlatSeg(buf, p, wx + cast<float>(dx), wy + cast<float>(dy),
+                                                             wx, wy, z, 0.62, shade);
+                                    }
+                                }
+                            }
+                        }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                return p;
+            }
+
+            // First river cell inside a coarse block, or -1. Packed as y*srcW+x.
+            private method blockRiver(int bx, int by) returns int {
+                mutable int y = 0;
+                while (y < this.stride) {
+                    mutable int x = 0;
+                    while (x < this.stride) {
+                        int gx = bx * this.stride + x;
+                        int gy = by * this.stride + y;
+                        if (this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
+                            return gy * this.srcW + gx;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                return 0 - 1;
             }
 
             private method isForest(int ord) returns boolean {
@@ -301,12 +396,41 @@ public bundle Agents {
             // Is triangle `tri` of terrain model `ord` a 3D decoration ABOVE the top plate (coral, oasis
             // palm, rocks, cones...)? Flat surface features sit within 0.02 of the plate and stay.
             private method isDecor(int ord, int tri) returns boolean {
+                // ANY vertex above the plate marks the whole triangle as decoration -- dome/cone BASE
+                // rings have plate-level verts too, and keeping them left giant hoops in the far LOD.
                 float top = this.tileTop[ord] + 0.02;
                 int vb = tri * 3;
-                if (this.terr.pz[vb] > top && this.terr.pz[vb + 1] > top && this.terr.pz[vb + 2] > top) {
+                if (this.terr.pz[vb] > top || this.terr.pz[vb + 1] > top || this.terr.pz[vb + 2] > top) {
                     return true;
                 }
                 return false;
+            }
+
+            // Baked per-cell shade: a small deterministic brightness variation (ground texture) times a
+            // slope shadow -- cells whose sun-side neighbour (light comes from +x/+y) stands higher get
+            // darkened, which makes the mountain stacks read as lit terrain.
+            private method shadeAt(int sx, int sy, int stp, int lvl) returns float {
+                mutable float s = 0.93 + 0.14 * this.hash01(sx * 31 + 11, sy * 37 + 5);
+                mutable int shadowed = 0;
+                mutable int k = 0;
+                while (k < 3) {
+                    mutable int nx = sx;
+                    mutable int ny = sy;
+                    if (k == 0) { nx = sx + stp; }
+                    if (k == 1) { ny = sy + stp; }
+                    if (k == 2) { nx = sx + stp; ny = sy + stp; }
+                    if (nx < this.srcW && ny < this.srcH) {
+                        int nord = this.grid.biomeAt(nx, ny);
+                        if (this.stackLvl(nord, nx, ny) > lvl) {
+                            shadowed = 1;
+                        }
+                    }
+                    k = k + 1;
+                }
+                if (shadowed == 1) {
+                    s = s * 0.78;
+                }
+                return s;
             }
 
             private method isMountainOrd(int ord) returns boolean {
@@ -375,16 +499,16 @@ public bundle Agents {
             // across LODs. `rot` = 1 rotates the tile 90 degrees (river channels follow the flow).
             // When zOff > 0 a skirt column fills 0..zOff (count it as +8 tris).
             private method emitTile(float[] buf, int w, int ord, float wx, float wy, float zOff,
-                                    float scale, boolean dropExtras, int rot) returns int {
+                                    float scale, boolean dropExtras, float shade) returns int {
                 int t0 = this.terr.triStart[ord];
                 int tn = this.terr.triCount[ord];
                 boolean keepDecor = this.isMountainOrd(ord);
                 float top = this.tileTop[ord];
                 mutable int p = w;
                 if (zOff > 0.5) {                    // a real stack step, not the tiny detail lift
-                    float sr = cast<float>(this.terr.cr[t0]) / 255.0;
-                    float sg = cast<float>(this.terr.cg[t0]) / 255.0;
-                    float sb = cast<float>(this.terr.cb[t0]) / 255.0;
+                    float sr = cast<float>(this.terr.cr[t0]) / 255.0 * shade;
+                    float sg = cast<float>(this.terr.cg[t0]) / 255.0 * shade;
+                    float sb = cast<float>(this.terr.cb[t0]) / 255.0 * shade;
                     float x0 = wx - scale;
                     float x1 = wx + scale;
                     float y0 = wy - scale;
@@ -410,31 +534,29 @@ public bundle Agents {
                     }
                     if (!skip) {
                         int vb = tri * 3;
-                        float r = cast<float>(this.terr.cr[tri]) / 255.0;
-                        float g = cast<float>(this.terr.cg[tri]) / 255.0;
-                        float b = cast<float>(this.terr.cb[tri]) / 255.0;
+                        mutable float sh = shade;
+                        if (this.isFoam(tri)) {
+                            sh = 1.0;                // foam keeps its exact colour: the shader keys the
+                        }                            // water animation off it
+                        float r = cast<float>(this.terr.cr[tri]) / 255.0 * sh;
+                        float g = cast<float>(this.terr.cg[tri]) / 255.0 * sh;
+                        float b = cast<float>(this.terr.cb[tri]) / 255.0 * sh;
                         mutable int k = 0;
                         while (k < 3) {
                             int vi = vb + k;
-                            mutable float lx = this.terr.px[vi];
-                            mutable float ly = this.terr.py[vi];
-                            mutable float lnx = this.terr.nx[vi];
-                            mutable float lny = this.terr.ny[vi];
-                            if (rot == 1) {
-                                float tx = lx;
-                                lx = ly;
-                                ly = 0.0 - tx;
-                                float tnx = lnx;
-                                lnx = lny;
-                                lny = 0.0 - tnx;
-                            }
                             mutable float lz = this.terr.pz[vi];
-                            if (decor && dropExtras) {
-                                // coarse mountain peak: stretch the cone back up so it keeps its profile
-                                lz = top + (lz - top) * scale;
+                            if (lz > top && lz < top + 0.05) {
+                                // flat surface decal: push it further off the plate or it z-fights at range
+                                lz = top + (lz - top) * 6.0 * scale;
+                            } else {
+                                if (decor && dropExtras) {
+                                    // coarse mountain peak: stretch the cone so it keeps its profile
+                                    lz = top + (lz - top) * scale;
+                                }
                             }
-                            p = this.wr(buf, p, lx * scale + wx, ly * scale + wy, lz + zOff,
-                                        lnx, lny, this.terr.nz[vi], r, g, b);
+                            p = this.wr(buf, p, this.terr.px[vi] * scale + wx, this.terr.py[vi] * scale + wy,
+                                        lz + zOff,
+                                        this.terr.nx[vi], this.terr.ny[vi], this.terr.nz[vi], r, g, b);
                             k = k + 1;
                         }
                     }
@@ -443,7 +565,8 @@ public bundle Agents {
                 return p;
             }
 
-            private method emitProp(float[] buf, int w, int pord, float wx, float wy, float wz, float scale) returns int {
+            private method emitProp(float[] buf, int w, int pord, float wx, float wy, float wz, float scale,
+                                    float shade) returns int {
                 int t0 = this.props.triStart[pord];
                 int tn = this.props.triCount[pord];
                 mutable int p = w;
@@ -451,9 +574,9 @@ public bundle Agents {
                 while (t < tn) {
                     int tri = t0 + t;
                     int vb = tri * 3;
-                    float r = cast<float>(this.props.cr[tri]) / 255.0;
-                    float g = cast<float>(this.props.cg[tri]) / 255.0;
-                    float b = cast<float>(this.props.cb[tri]) / 255.0;
+                    float r = cast<float>(this.props.cr[tri]) / 255.0 * shade;
+                    float g = cast<float>(this.props.cg[tri]) / 255.0 * shade;
+                    float b = cast<float>(this.props.cb[tri]) / 255.0 * shade;
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
@@ -497,6 +620,9 @@ public bundle Agents {
                         if (this.stackLvl(ord, sx, sy) > 0) {
                             tris = tris + 8;
                         }
+                        if (this.blockRiver(bx, by) >= 0) {
+                            tris = tris + 2;
+                        }
                         if (this.coarseHint(bx, by, ord)) {
                             htris = htris + this.props.triCount[this.hintProp];
                         }
@@ -515,14 +641,29 @@ public bundle Agents {
                         int sx = bx * this.stride;
                         int sy = by * this.stride;
                         int ord = this.grid.biomeAt(sx, sy);
-                        float zOff = cast<float>(this.stackLvl(ord, sx, sy)) * this.stepH;
+                        int lvl = this.stackLvl(ord, sx, sy);
+                        float zOff = cast<float>(lvl) * this.stepH;
                         float wx = cast<float>(sx * 2 + this.stride);
                         float wy = cast<float>(sy * 2 + this.stride);
                         float sc = cast<float>(this.stride);
-                        w = this.emitTile(buf, w, ord, wx, wy, zOff, sc, true, 0);
+                        float shade = this.shadeAt(sx, sy, this.stride, lvl);
+                        w = this.emitTile(buf, w, ord, wx, wy, zOff, sc, true, shade);
+                        int rcell = this.blockRiver(bx, by);
+                        if (rcell >= 0) {
+                            int rx = rcell % this.srcW;
+                            int ry = rcell / this.srcW;
+                            mutable float fx = cast<float>(this.grid.flowDx(rx, ry));
+                            mutable float fy = cast<float>(this.grid.flowDy(rx, ry));
+                            if (fx == 0.0 && fy == 0.0) {
+                                fy = 1.0;
+                            }
+                            float topZ = this.tileTop[ord] + zOff + 0.35;
+                            w = this.emitFlatSeg(buf, w, wx - fx * sc, wy - fy * sc,
+                                                 wx + fx * sc, wy + fy * sc, topZ, sc * 0.30, shade);
+                        }
                         if (this.coarseHint(bx, by, ord)) {
                             float topZ = this.tileTop[ord] + zOff;
-                            hw = this.emitProp(hbuf, hw, this.hintProp, wx, wy, topZ, sc * 0.55);
+                            hw = this.emitProp(hbuf, hw, this.hintProp, wx, wy, topZ, sc * 0.55, shade);
                         }
                         bx = bx + 1;
                     }
@@ -565,10 +706,13 @@ public bundle Agents {
                     while (x < this.detW) {
                         int gx = ox + x;
                         int gy = oy + y;
-                        int ord = this.detailOrd(gx, gy);
+                        int ord = this.grid.biomeAt(gx, gy);
                         tris = tris + this.countTile(ord, false);
                         if (this.stackLvl(ord, gx, gy) > 0) {
                             tris = tris + 8;
+                        }
+                        if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
+                            tris = tris + this.riverSegs(gx, gy) * 2;
                         }
                         int p = this.detailPropAt(gx, gy, ord);
                         if (p >= 0) {
@@ -586,27 +730,22 @@ public bundle Agents {
                     while (x < this.detW) {
                         int gx = ox + x;
                         int gy = oy + y;
-                        int ord = this.detailOrd(gx, gy);
-                        float zOff = cast<float>(this.stackLvl(ord, gx, gy)) * this.stepH + 0.02;   // hair above coarse
+                        int ord = this.grid.biomeAt(gx, gy);
+                        int lvl = this.stackLvl(ord, gx, gy);
+                        float zOff = cast<float>(lvl) * this.stepH + 0.15;   // above the coarse layer
                         float wx = cast<float>(gx * 2 + 1);
                         float wy = cast<float>(gy * 2 + 1);
-                        mutable int rot = 0;
-                        if (ord == 7) {
-                            mutable int fdx = this.grid.flowDx(gx, gy);
-                            if (fdx < 0) { fdx = 0 - fdx; }
-                            mutable int fdy = this.grid.flowDy(gx, gy);
-                            if (fdy < 0) { fdy = 0 - fdy; }
-                            if (fdx > fdy) {
-                                rot = 1;                          // channel follows an east-west flow
-                            }
+                        float shade = this.shadeAt(gx, gy, 1, lvl);
+                        w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false, shade);
+                        float topZ = this.tileTop[ord] + zOff;
+                        if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
+                            w = this.emitRiver(buf, w, gx, gy, wx, wy, topZ, shade);
                         }
-                        w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false, rot);
                         int p = this.detailPropAt(gx, gy, ord);
                         if (p >= 0) {
                             float jx = (this.hash01(gx * 3 + 1, gy * 5 + 2) - 0.5) * 1.2;
                             float jy = (this.hash01(gx * 5 + 4, gy * 3 + 7) - 0.5) * 1.2;
-                            float topZ = this.tileTop[ord] + zOff;
-                            w = this.emitProp(buf, w, p, wx + jx, wy + jy, topZ, this.sScale[ord]);
+                            w = this.emitProp(buf, w, p, wx + jx, wy + jy, topZ, this.sScale[ord], shade);
                         }
                         x = x + 1;
                     }
@@ -655,7 +794,7 @@ public bundle Agents {
 
             public method zoomBy(float factor) returns void {
                 this.camDist = this.camDist * factor;
-                float minD = 26.0;
+                float minD = 9.0;
                 float maxD = this.radius * 2.6;
                 if (this.camDist < minD) { this.camDist = minD; }
                 if (this.camDist > maxD) { this.camDist = maxD; }
@@ -721,16 +860,19 @@ public bundle Agents {
                 float ez = this.cz + d * this.fsin(e);
 
                 float aspect = cast<float>(fbW) / cast<float>(fbH);
-                mutable float nearP = d * 0.004;
-                if (nearP < 0.5) {
-                    nearP = 0.5;
+                mutable float nearP = d * 0.012;
+                if (nearP < 0.8) {
+                    nearP = 0.8;
                 }
                 this.projM.perspective(42.0, aspect, nearP, (d + this.radius) * 3.0);
                 this.viewM.lookAt(ex, ey, ez, this.camTx, this.camTy, this.cz, 0.0, 0.0, 1.0);
 
+                this.timeSec = this.timeSec + 0.016;
                 this.gl.useProgram(this.prog);
                 this.gl.uniformMatrix4fv(this.uProj, 1, cast<byte>(0), this.projM.ptr());
                 this.gl.uniformMatrix4fv(this.uView, 1, cast<byte>(0), this.viewM.ptr());
+                this.gl.uniform1f(this.uTime, this.timeSec);
+                this.gl.uniform2f(this.uFog, d * 1.5, d * 3.0);
                 this.gl.bindVertexArray(this.vao);
                 Wgl.glDrawArrays(GL.TRIANGLES, 0, this.nverts);
                 if (this.camDist <= this.detailDist && this.haveDetail) {
@@ -942,12 +1084,14 @@ public bundle Agents {
                 q[23] = 1.0;
             }
 
+            // The sea foam crests (their exact baked colour) bob with time -- the water animation.
             private static method vertSrc() returns String {
-                return "#version 330 core\nlayout(location=0) in vec3 aPos;\nlayout(location=1) in vec3 aNrm;\nlayout(location=2) in vec3 aCol;\nuniform mat4 uProj;\nuniform mat4 uView;\nout vec3 vNrm;\nout vec3 vCol;\nvoid main(){\n  gl_Position = uProj * uView * vec4(aPos,1.0);\n  vNrm=aNrm; vCol=aCol;\n}\n";
+                return "#version 330 core\nlayout(location=0) in vec3 aPos;\nlayout(location=1) in vec3 aNrm;\nlayout(location=2) in vec3 aCol;\nuniform mat4 uProj;\nuniform mat4 uView;\nuniform float uTime;\nout vec3 vNrm;\nout vec3 vCol;\nout float vDist;\nvoid main(){\n  vec3 p = aPos;\n  if (abs(aCol.r-0.8157)<0.03 && abs(aCol.g-0.9020)<0.03 && abs(aCol.b-0.9725)<0.03) {\n    p.y += sin(uTime*1.8 + p.x*1.3 + p.y*0.7)*0.18;\n    p.x += cos(uTime*1.4 + p.y*1.1)*0.12;\n  }\n  vec4 cp = uProj * uView * vec4(p,1.0);\n  gl_Position = cp;\n  vDist = cp.w;\n  vNrm=aNrm; vCol=aCol;\n}\n";
             }
 
+            // Stronger cel contrast + distance fog toward the sky colour.
             private static method fragSrc() returns String {
-                return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nout vec4 FragColor;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.60 + 0.42*ndl);\n  FragColor = vec4(vCol*sh, 1.0);\n}\n";
+                return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nin float vDist;\nout vec4 FragColor;\nuniform vec2 uFog;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.52 + 0.55*ndl);\n  vec3 c = vCol*sh;\n  float f = clamp((vDist - uFog.x) / uFog.y, 0.0, 0.55);\n  c = mix(c, vec3(0.10,0.13,0.18), f);\n  FragColor = vec4(c, 1.0);\n}\n";
             }
 
             private static method postVert() returns String {

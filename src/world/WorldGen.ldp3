@@ -246,7 +246,7 @@ public bundle Agents {
                             float edge = (border - 0.55) / 0.45;
                             if (conv > 0.0) {
                                 base = base + 0.30 * conv * edge;
-                                if (conv > 0.5 && this.hash01(x * 7 + 1, y * 13 + 3) > 0.985) {
+                                if (conv > 0.7 && this.hash01(x * 7 + 1, y * 13 + 3) > 0.9985) {
                                     g.setFlag(x, y, Grid.FLAG_VENT);
                                 }
                             }
@@ -823,18 +823,18 @@ public bundle Agents {
                         float m = cast<float>(g.moistAt(x, y)) / 100.0;
                         int fg = g.flagsAt(x, y);
                         g.setElev(x, y, cast<int>(e * 10000.0));
-                        g.setBiome(x, y, this.classify(e, t, m, fg, this.wtr[i]));
+                        g.setBiome(x, y, this.classify(e, t, m, fg, this.wtr[i], x, y));
                         x = x + 1;
                     }
                     y = y + 1;
                 }
             }
 
-            private method classify(float e, float t, float m, int fg, int distw) returns int {
+            private method classify(float e, float t, float m, int fg, int distw, int x, int y) returns int {
                 // hard overrides. NOTE: a river cell keeps its terrain biome -- the renderer draws a blue
                 // channel over the land following the stored flow direction (spec: rivers wind through
                 // terrain, they don't paint the whole tile). Lakes and vents still recolour the cell.
-                if ((fg & Grid.FLAG_VENT) != 0) { return cast<int>(Biome.Volcanic); }
+                if ((fg & Grid.FLAG_VENT) != 0 && e >= this.sea) { return cast<int>(Biome.Volcanic); }
                 if ((fg & Grid.FLAG_LAKE) != 0 && e >= this.sea) { return cast<int>(Biome.Lake); }
                 // water
                 if (e < this.sea) {
@@ -869,7 +869,10 @@ public bundle Agents {
                 }
                 // lowland specials
                 if (m < 0.20 && (fg & Grid.FLAG_ENDORHEIC) != 0) { return cast<int>(Biome.SaltFlat); }
-                if (m < 0.25 && distw <= 2) { return cast<int>(Biome.Oasis); }
+                // An oasis is a RARE, isolated pool cell inside hot desert -- not a coastal band.
+                if (t >= 0.55 && m < 0.20 && this.hash01(x * 13 + 7, y * 17 + 3) > 0.995) {
+                    return cast<int>(Biome.Oasis);
+                }
                 // wetlands
                 if (m >= 0.90) {
                     if (t >= 0.78) { return cast<int>(Biome.Swamp); }
