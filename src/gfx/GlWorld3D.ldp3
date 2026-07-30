@@ -65,6 +65,7 @@ public bundle Agents {
             private mutable int stride;
             private mutable float stepH;        // height of one mountain stack step
             private mutable float[] tileTop;    // per-terrain-model top-plate height (z of the box top)
+            private mutable float[] zAdj;       // per-terrain lift so all LAND plates share one ground level
             // per-frame matrices, allocated once (a heap alloc per frame is how leaks are born)
             private mutable GlMat4* projM;
             private mutable GlMat4* viewM;
@@ -122,6 +123,7 @@ public bundle Agents {
                 this.projM = new GlMat4() on heap;
                 this.viewM = new GlMat4() on heap;
                 this.tileTop = new float[1]();
+                this.zAdj = new float[1]();
                 this.riverTop = new float[1]();
                 this.sProp = new int[1]();
                 this.sMilli = new int[1]();
@@ -165,6 +167,7 @@ public bundle Agents {
                 this.viewM.dispose();
                 delete this.viewM;
                 delete this.tileTop;
+                delete this.zAdj;
                 delete this.riverTop;
                 delete this.sProp;
                 delete this.sMilli;
@@ -207,6 +210,24 @@ public bundle Agents {
                     this.tileTop[m] = terr.pz[vi];
                     m = m + 1;
                 }
+                // One shared ground level for every LAND tile: the art's plate heights differ a
+                // little per biome, which stepped random ledges across flat plains. Water and the
+                // coast (ords 0..9) keep their authored heights -- the shoreline drop is intended.
+                delete this.zAdj;
+                this.zAdj = new float[terr.count]();
+                mutable float groundTop = 0.0;
+                mutable int gi = 10;
+                while (gi < terr.count) {
+                    if (this.tileTop[gi] > groundTop) {
+                        groundTop = this.tileTop[gi];
+                    }
+                    gi = gi + 1;
+                }
+                gi = 10;
+                while (gi < terr.count) {
+                    this.zAdj[gi] = groundTop - this.tileTop[gi];
+                    gi = gi + 1;
+                }
                 delete this.riverTop;
                 this.riverTop = new float[rivers.count]();
                 mutable int rm = 0;
@@ -245,7 +266,7 @@ public bundle Agents {
 
             // Mountain-family stack level for a cell (0 = flat ground). Quantized from elevation so
             // neighbouring mountain cells step like stacked blocks.
-            private method stackLvl(int ord, int x, int y) returns int {
+            private method baseLvl(int ord, int x, int y) returns int {
                 if (ord <= 9) {
                     return 0;                                   // water and coast never stack
                 }
@@ -265,6 +286,24 @@ public bundle Agents {
                 if (q < 0) { q = 0; }
                 if (q > 4) { q = 4; }
                 return base + q;
+            }
+
+            // Stack level with the RIVER CARVE: a river crossing stacked terrain cuts down to its
+            // downstream step, so the channel runs through a gorge instead of over the plateau top
+            // ("how does a river climb a mountain?").
+            private method stackLvl(int ord, int x, int y) returns int {
+                int own = this.baseLvl(ord, x, y);
+                if (own > 0 && this.grid.hasFlag(x, y, Grid.FLAG_RIVER) && this.grid.hasFlow(x, y)) {
+                    int nx = x + this.grid.flowDx(x, y);
+                    int ny = y + this.grid.flowDy(x, y);
+                    if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
+                        int dLvl = this.baseLvl(this.grid.biomeAt(nx, ny), nx, ny);
+                        if (dLvl < own) {
+                            return dLvl;
+                        }
+                    }
+                }
+                return own;
             }
 
             private method setScatter(int ord, String prop, int milli, float scale) returns void {
@@ -510,72 +549,6 @@ public bundle Agents {
                 return this.rvStar * 4;
             }
 
-            // Channel segment count for an overlay river cell (downstream + one per inflow).
-            private method riverSegs(int gx, int gy) returns int {
-                mutable int s = 0;
-                if (this.grid.hasFlow(gx, gy)) {
-                    s = 1;
-                }
-                mutable int dy = 0 - 1;
-                while (dy <= 1) {
-                    mutable int dx = 0 - 1;
-                    while (dx <= 1) {
-                        if (!(dx == 0 && dy == 0)) {
-                            int nx = gx + dx;
-                            int ny = gy + dy;
-                            if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
-                                if (this.grid.hasFlag(nx, ny, Grid.FLAG_RIVER)) {
-                                    if (nx + this.grid.flowDx(nx, ny) == gx && ny + this.grid.flowDy(nx, ny) == gy) {
-                                        s = s + 1;
-                                    }
-                                }
-                            }
-                        }
-                        dx = dx + 1;
-                    }
-                    dy = dy + 1;
-                }
-                return s;
-            }
-
-            private method emitRiverOverlay(address buf, int w, int gx, int gy, float wx, float wy,
-                                            float top, float shade) returns int {
-                float z = top + 0.09;
-                mutable int p = w;
-                if (this.grid.hasFlow(gx, gy)) {
-                    float fx = cast<float>(this.grid.flowDx(gx, gy));
-                    float fy = cast<float>(this.grid.flowDy(gx, gy));
-                    p = this.emitFlatSeg(buf, p, wx, wy, wx + fx, wy + fy, z, 0.60, shade);
-                }
-                mutable int dy = 0 - 1;
-                while (dy <= 1) {
-                    mutable int dx = 0 - 1;
-                    while (dx <= 1) {
-                        if (!(dx == 0 && dy == 0)) {
-                            int nx = gx + dx;
-                            int ny = gy + dy;
-                            if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
-                                if (this.grid.hasFlag(nx, ny, Grid.FLAG_RIVER)) {
-                                    if (nx + this.grid.flowDx(nx, ny) == gx && ny + this.grid.flowDy(nx, ny) == gy) {
-                                        p = this.emitFlatSeg(buf, p, wx + cast<float>(dx), wy + cast<float>(dy),
-                                                             wx, wy, z, 0.60, shade);
-                                    }
-                                }
-                            }
-                        }
-                        dx = dx + 1;
-                    }
-                    dy = dy + 1;
-                }
-                return p;
-            }
-
-            // A flat water quad from (x0,y0) to (x1,y1) at height z (2 triangles).
-            private method emitFlatSeg(address buf, int w, float x0, float y0, float x1, float y1,
-                                       float z, float width, float shade) returns int {
-                return this.emitSlopeSeg(buf, w, x0, y0, z, x1, y1, z, width, shade);
-            }
-
             // A water quad from (x0,y0,z0) to (x1,y1,z1) -- each end at its own height, so the
             // coarse river line climbs terrain steps instead of slicing through them.
             private method emitSlopeSeg(address buf, int w, float x0, float y0, float z0,
@@ -743,22 +716,14 @@ public bundle Agents {
                 return rep;
             }
 
-            // First river cell inside a coarse block, or -1. Packed as y*srcW+x.
-            private method blockRiver(int bx, int by) returns int {
-                mutable int y = 0;
-                while (y < this.stride) {
-                    mutable int x = 0;
-                    while (x < this.stride) {
-                        int gx = bx * this.stride + x;
-                        int gy = by * this.stride + y;
-                        if (this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
-                            return gy * this.srcW + gx;
-                        }
-                        x = x + 1;
-                    }
-                    y = y + 1;
+            // Coral thinning: the reef tile art carries coral clusters, and EVERY reef cell showing
+            // them read as a solid coral carpet -- keep the clusters on ~30% of reef cells (the foam
+            // animation stays on all of them).
+            private method thinDecor(int ord, int x, int y) returns boolean {
+                if (ord == 4) {
+                    return this.hash01(x * 7 + 3, y * 11 + 9) > 0.30;
                 }
-                return 0 - 1;
+                return false;
             }
 
             private method isForest(int ord) returns boolean {
@@ -825,7 +790,8 @@ public bundle Agents {
 
             // dropExtras = coarse LOD: drop water foam AND above-plate decorations (they scale up into
             // giants); mountain-family tiles keep their peak cones (stretched back up in emitTile).
-            private method countTile(int ord, boolean dropExtras) returns int {
+            // dropDecor = drop just the 3D decorations, keeping foam (per-cell coral thinning).
+            private method countTile(int ord, boolean dropExtras, boolean dropDecor) returns int {
                 int t0 = this.terr.triStart[ord];
                 int tn = this.terr.triCount[ord];
                 boolean keepDecor = this.isMountainOrd(ord);
@@ -834,11 +800,11 @@ public bundle Agents {
                 while (t < tn) {
                     int tri = t0 + t;
                     mutable boolean skip = false;
-                    if (dropExtras) {
-                        if (this.isFoam(tri)) {
-                            skip = true;
-                        }
-                        if (!keepDecor && this.isDecor(ord, tri)) {
+                    if (dropExtras && this.isFoam(tri)) {
+                        skip = true;
+                    }
+                    if ((dropExtras && !keepDecor) || dropDecor) {
+                        if (this.isDecor(ord, tri)) {
                             skip = true;
                         }
                     }
@@ -883,7 +849,7 @@ public bundle Agents {
             // across LODs. `rot` = 1 rotates the tile 90 degrees (river channels follow the flow).
             // When zOff > 0 a skirt column fills 0..zOff (count it as +8 tris).
             private method emitTile(address buf, int w, int ord, float wx, float wy, float zOff,
-                                    float scale, boolean dropExtras, float shade) returns int {
+                                    float scale, boolean dropExtras, boolean dropDecor, float shade) returns int {
                 int t0 = this.terr.triStart[ord];
                 int tn = this.terr.triCount[ord];
                 boolean keepDecor = this.isMountainOrd(ord);
@@ -908,11 +874,11 @@ public bundle Agents {
                     int tri = t0 + t;
                     mutable boolean skip = false;
                     boolean decor = this.isDecor(ord, tri);
-                    if (dropExtras) {
-                        if (this.isFoam(tri)) {
-                            skip = true;
-                        }
-                        if (!keepDecor && decor) {
+                    if (dropExtras && this.isFoam(tri)) {
+                        skip = true;
+                    }
+                    if ((dropExtras && !keepDecor) || dropDecor) {
+                        if (decor) {
                             skip = true;
                         }
                     }
@@ -930,11 +896,11 @@ public bundle Agents {
                             int vi = vb + k;
                             mutable float lz = this.terr.pz[vi];
                             if (lz > top && lz < top + 0.05) {
-                                // flat surface decal: push it off the plate (z-fights at range),
-                                // PROPORTIONALLY -- the old hard cap collapsed every decal layer onto
-                                // one plane, and coplanar decals moired (the shimmering patches).
-                                // x2.4 keeps the max lift at 0.12, under the detail layer's 0.8.
-                                lz = top + (lz - top) * 2.4;
+                                // flat surface decal: a guaranteed 0.03 clearance off the plate (art
+                                // authored 0.001 above it moired against it) plus a PROPORTIONAL
+                                // rise that keeps decal layers apart (a hard cap collapsed them onto
+                                // one shimmering plane). Max 0.13, well under the detail layer's 0.8.
+                                lz = top + 0.03 + (lz - top) * 2.0;
                             } else {
                                 if (decor && dropExtras) {
                                     // coarse mountain peak: stretch the cone a LITTLE so it reads far
@@ -996,39 +962,13 @@ public bundle Agents {
                 return false;
             }
 
-            // Walk downstream from a river cell until it leaves block (bx,by) or reaches water.
-            // Returns the packed end cell (the water cell, or the first cell in the next block, or
-            // the last cell walked).
-            private method riverWalk(int rcell, int bx, int by) returns int {
-                mutable int cx2 = rcell % this.srcW;
-                mutable int cy2 = rcell / this.srcW;
-                mutable int steps = 0;
-                int maxSteps = this.stride * 3;
-                while (steps < maxSteps) {
-                    if (!this.grid.hasFlow(cx2, cy2)) {
-                        break;
-                    }
-                    int nx2 = cx2 + this.grid.flowDx(cx2, cy2);
-                    int ny2 = cy2 + this.grid.flowDy(cx2, cy2);
-                    if (nx2 < 0 || ny2 < 0 || nx2 >= this.srcW || ny2 >= this.srcH) {
-                        break;
-                    }
-                    cx2 = nx2;
-                    cy2 = ny2;
-                    if (this.grid.biomeAt(cx2, cy2) <= 7) {
-                        break;
-                    }
-                    if (cx2 / this.stride != bx || cy2 / this.stride != by) {
-                        break;
-                    }
-                    steps = steps + 1;
-                }
-                return cy2 * this.srcW + cx2;
-            }
-
             private method bakeCoarse() returns void {
                 int bw = this.srcW / this.stride;
                 int bh = this.srcH / this.stride;
+                // Per-block representative biome + level, computed once and reused by the block
+                // pass AND the river polyline pass.
+                int[] bOrd = new int[bw * bh]();
+                int[] bLvl = new int[bw * bh]();
                 mutable int tris = 0;
                 mutable int htris = 0;
                 mutable int by = 0;
@@ -1037,13 +977,12 @@ public bundle Agents {
                     while (bx < bw) {
                         int rep = this.blockRep(bx, by);
                         int ord = this.grid.biomeAt(rep % this.srcW, rep / this.srcW);
-                        tris = tris + this.countTile(ord, true);
-                        if (this.stackLvl(ord, rep % this.srcW, rep / this.srcW) > 0) {
+                        int lvl = this.stackLvl(ord, rep % this.srcW, rep / this.srcW);
+                        bOrd[by * bw + bx] = ord;
+                        bLvl[by * bw + bx] = lvl;
+                        tris = tris + this.countTile(ord, true, false);
+                        if (lvl > 0) {
                             tris = tris + 8;
-                        }
-                        int rcell = this.blockRiver(bx, by);
-                        if (rcell >= 0 && this.grid.hasFlow(rcell % this.srcW, rcell / this.srcW)) {
-                            tris = tris + 2;
                         }
                         if (this.coarseHint(bx, by, ord)) {
                             htris = htris + this.props.triCount[this.hintProp] * 2;
@@ -1052,6 +991,22 @@ public bundle Agents {
                     }
                     by = by + 1;
                 }
+                // the river polyline: one short segment per river cell (cell centre -> downstream
+                // cell centre), so the far view shows the river's REAL winding course, connected
+                // and ending in the water -- not per-block stubs at odd angles
+                mutable int rtris = 0;
+                mutable int ry = 0;
+                while (ry < this.srcH) {
+                    mutable int rx = 0;
+                    while (rx < this.srcW) {
+                        if (this.grid.hasFlag(rx, ry, Grid.FLAG_RIVER) && this.grid.hasFlow(rx, ry)) {
+                            rtris = rtris + 2;
+                        }
+                        rx = rx + 1;
+                    }
+                    ry = ry + 1;
+                }
+                tris = tris + rtris;
                 address buf = Memory.alloc(cast<long>(tris * 27 * 4 + 4));
                 address hbuf = Memory.alloc(cast<long>(htris * 27 * 4 + 4));
                 mutable int w = 0;
@@ -1062,44 +1017,14 @@ public bundle Agents {
                     while (bx < bw) {
                         int sx = bx * this.stride;
                         int sy = by * this.stride;
-                        int rep = this.blockRep(bx, by);
-                        int ord = this.grid.biomeAt(rep % this.srcW, rep / this.srcW);
-                        int lvl = this.stackLvl(ord, rep % this.srcW, rep / this.srcW);
-                        float zOff = cast<float>(lvl) * this.stepH;
+                        int ord = bOrd[by * bw + bx];
+                        int lvl = bLvl[by * bw + bx];
+                        float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord];
                         float wx = cast<float>(sx * 2 + this.stride);
                         float wy = cast<float>(sy * 2 + this.stride);
                         float sc = cast<float>(this.stride);
                         float shade = this.shadeAt(sx, sy, this.stride, lvl);
-                        w = this.emitTile(buf, w, ord, wx, wy, zOff, sc, true, shade);
-                        int rcell = this.blockRiver(bx, by);
-                        if (rcell >= 0 && this.grid.hasFlow(rcell % this.srcW, rcell / this.srcW)) {
-                            // one polyline piece per river block: this block's centre to the next
-                            // river block's centre downstream (or into the water cell at the mouth),
-                            // each end at its own block's plate height -- a CONNECTED line that
-                            // climbs steps and actually reaches the sea
-                            int endc = this.riverWalk(rcell, bx, by);
-                            int ecx = endc % this.srcW;
-                            int ecy = endc / this.srcW;
-                            float z0 = this.tileTop[ord] + zOff + 0.20;
-                            mutable float x1 = cast<float>(ecx * 2 + 1);
-                            mutable float y1 = cast<float>(ecy * 2 + 1);
-                            mutable float z1 = z0;
-                            if (this.grid.biomeAt(ecx, ecy) <= 7) {
-                                z1 = this.tileTop[this.grid.biomeAt(ecx, ecy)] + 0.20;
-                            } else {
-                                int ebx = ecx / this.stride;
-                                int eby = ecy / this.stride;
-                                if (ebx != bx || eby != by) {
-                                    int erep = this.blockRep(ebx, eby);
-                                    int eord = this.grid.biomeAt(erep % this.srcW, erep / this.srcW);
-                                    int elvl = this.stackLvl(eord, erep % this.srcW, erep / this.srcW);
-                                    x1 = cast<float>(ebx * this.stride * 2 + this.stride);
-                                    y1 = cast<float>(eby * this.stride * 2 + this.stride);
-                                    z1 = this.tileTop[eord] + cast<float>(elvl) * this.stepH + 0.20;
-                                }
-                            }
-                            w = this.emitSlopeSeg(buf, w, wx, wy, z0, x1, y1, z1, sc * 0.30, shade);
-                        }
+                        w = this.emitTile(buf, w, ord, wx, wy, zOff, sc, true, false, shade);
                         if (this.coarseHint(bx, by, ord)) {
                             float topZ = this.tileTop[ord] + zOff;
                             int ut = this.terr.triStart[ord] + 8;
@@ -1114,6 +1039,33 @@ public bundle Agents {
                     }
                     by = by + 1;
                 }
+                ry = 0;
+                while (ry < this.srcH) {
+                    mutable int rx = 0;
+                    while (rx < this.srcW) {
+                        if (this.grid.hasFlag(rx, ry, Grid.FLAG_RIVER) && this.grid.hasFlow(rx, ry)) {
+                            int nx = rx + this.grid.flowDx(rx, ry);
+                            int ny = ry + this.grid.flowDy(rx, ry);
+                            int b0 = (ry / this.stride) * bw + rx / this.stride;
+                            float z0 = this.tileTop[bOrd[b0]] + this.zAdj[bOrd[b0]]
+                                       + cast<float>(bLvl[b0]) * this.stepH + 0.20;
+                            mutable float z1 = z0;
+                            if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
+                                int b1 = (ny / this.stride) * bw + nx / this.stride;
+                                z1 = this.tileTop[bOrd[b1]] + this.zAdj[bOrd[b1]]
+                                     + cast<float>(bLvl[b1]) * this.stepH + 0.20;
+                            }
+                            w = this.emitSlopeSeg(buf, w, cast<float>(rx * 2 + 1), cast<float>(ry * 2 + 1), z0,
+                                                  cast<float>((rx + this.grid.flowDx(rx, ry)) * 2 + 1),
+                                                  cast<float>((ry + this.grid.flowDy(rx, ry)) * 2 + 1), z1,
+                                                  1.0, this.shadeAt(rx, ry, 1, bLvl[b0]));
+                        }
+                        rx = rx + 1;
+                    }
+                    ry = ry + 1;
+                }
+                delete bOrd;
+                delete bLvl;
                 this.gl.bindVertexArray(this.vao);
                 this.gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
                 this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4), cast<long>(buf), GL.STATIC_DRAW);
@@ -1159,7 +1111,7 @@ public bundle Agents {
                         if (ord > 7 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
                             tris = tris + this.countRTile(this.pickRiver(gx, gy) / 4, lvl);
                         } else {
-                            tris = tris + this.countTile(ord, false) + 8;    // + the always-on skirt
+                            tris = tris + this.countTile(ord, false, this.thinDecor(ord, gx, gy)) + 8;
                         }
                         int p = this.detailPropAt(gx, gy, ord);
                         if (p >= 0) {
@@ -1179,8 +1131,9 @@ public bundle Agents {
                         int gy = oy + y;
                         int ord = this.grid.biomeAt(gx, gy);
                         int lvl = this.stackLvl(ord, gx, gy);
-                        float zOff = cast<float>(lvl) * this.stepH + 0.8;    // clear of EVERYTHING coarse
-                                                                             // (its plates + capped decals)
+                        float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
+                                                                             // +0.8: clear of EVERYTHING
+                                                                             // coarse (plates + decals)
                         float wx = cast<float>(gx * 2 + 1);
                         float wy = cast<float>(gy * 2 + 1);
                         float shade = this.shadeAt(gx, gy, 1, lvl);
@@ -1188,7 +1141,8 @@ public bundle Agents {
                             int pk = this.pickRiver(gx, gy);
                             w = this.emitRTile(buf, w, pk / 4, pk % 4, ord, wx, wy, zOff, shade);
                         } else {
-                            w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false, shade);
+                            w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false,
+                                              this.thinDecor(ord, gx, gy), shade);
                         }
                         int p = this.detailPropAt(gx, gy, ord);
                         if (p >= 0) {
