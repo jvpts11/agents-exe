@@ -245,7 +245,7 @@ public bundle Agents {
                             float conv = this.convergence(best, second);
                             float edge = (border - 0.55) / 0.45;
                             if (conv > 0.0) {
-                                base = base + 0.30 * conv * edge;
+                                base = base + 0.35 * conv * edge;
                                 if (conv > 0.45 && this.hash01(x * 7 + 1, y * 13 + 3) > 0.9993) {
                                     // stamp a volcanic-lands ZONE, not a single cell: a small blob of
                                     // Volcanic terrain the renderer scatters volcano props over
@@ -344,6 +344,16 @@ public bundle Agents {
                     int[] ccx = new int[nc]();
                     int[] ccy = new int[nc]();
                     float[] ccr = new float[nc]();
+                    // Size the blobs from the LAND TARGET: total blob area ~ the land ratio, so the
+                    // percentile sea level cuts the coastline on the blob RAMPS. Undersized blobs
+                    // (the old fixed 0.11..0.17) forced the sea down into the detail-noise floor:
+                    // 55% of all land ended up within 0.05 of sea level -- continent-wide beaches
+                    // and rocky shores, and no elevation ever reached the mountain thresholds.
+                    mutable float landT = this.landRatio;
+                    if (landT < 0.0) {
+                        landT = this.defaultLand(this.worldType);
+                    }
+                    float r0 = this.fsqrt(landT * aspect / (cast<float>(nc) * 3.14159));
                     mutable int c = 0;
                     while (c < nc) {
                         int gxi = c % cols;
@@ -353,10 +363,10 @@ public bundle Agents {
                         // Inset the centres so continents sit INSIDE the map, ringed by ocean, instead
                         // of being cut off at the borders (which read as "the map is full of land").
                         cxn = 0.10 + cxn * 0.80;
-                        cyn = 0.12 + cyn * 0.76;
+                        cyn = 0.15 + cyn * 0.70;
                         ccx[c] = cast<int>(cxn * cast<float>(this.w));
                         ccy[c] = cast<int>(cyn * cast<float>(this.h));
-                        ccr[c] = 0.11 + 0.06 * rng.unit();
+                        ccr[c] = r0 * (1.05 + 0.30 * rng.unit());
                         c = c + 1;
                     }
                     mutable int i = 0;
@@ -391,7 +401,16 @@ public bundle Agents {
                         if (mask > 1.0) {
                             mask = 1.0;
                         }
-                        this.eb[i] = this.eb[i] * 0.18 + mask * 0.82;
+                        // PLATEAU mask, not a radial cone: the mask saturates over the outer ~35% of
+                        // the radius, so a continent's INTERIOR is a uniform moderate height (plains,
+                        // with the plate field's boundary ridges as the only mountains) instead of an
+                        // ever-rising dome whose core always crossed the mountain thresholds -- that
+                        // dome is what painted giant mountain slabs over every continent centre.
+                        mutable float shaped = mask * 2.8;
+                        if (shaped > 1.0) {
+                            shaped = 1.0;
+                        }
+                        this.eb[i] = shaped * (0.30 + 0.62 * this.eb[i]);
                         i = i + 1;
                     }
                     delete ccx;
@@ -414,10 +433,12 @@ public bundle Agents {
                         if (blob < 0.0) {
                             blob = 0.0;
                         }
-                        if (blob > 1.0) {
-                            blob = 1.0;
+                        // same plateau treatment as Continents: flat interior, coastal ramp
+                        mutable float shaped = blob * 2.6;
+                        if (shaped > 1.0) {
+                            shaped = 1.0;
                         }
-                        this.eb[i] = this.eb[i] * 0.28 + blob * 0.72;
+                        this.eb[i] = shaped * (0.30 + 0.62 * this.eb[i]);
                         i = i + 1;
                     }
                 } else if (this.worldType == 2) {
@@ -630,7 +651,10 @@ public bundle Agents {
             }
 
             private method climate(Grid* g) returns void {
-                int rings = 8;
+                // 32 rings: how far ocean moisture reaches inland. 8 cells on a 2560-wide map died
+                // inside the beach band, so no m>=0.8 biome (rainforest/wetland/ice cap) ever formed;
+                // 32 gives real coastal climate bands with a continental dry interior.
+                int rings = 32;
                 this.distToWater(rings);
                 mutable int y = 0;
                 while (y < this.h) {
@@ -643,7 +667,9 @@ public bundle Agents {
                         float e = this.eb[i];
                         mutable float lapse = 0.0;
                         if (e > this.sea) {
-                            lapse = 0.9 * (e - this.sea);
+                            // 0.75: with 0.9 every cell above e~0.70 froze regardless of latitude --
+                            // high ground needs a temperature RANGE (rock vs glacier vs meadow)
+                            lapse = 0.75 * (e - this.sea);
                         }
                         float tnoise = (this.fbm(x, y, 17) - 0.5) * 0.14;   // wavy climate bands, not straight lines
                         mutable float t = latBand - lapse + tnoise;
@@ -654,7 +680,14 @@ public bundle Agents {
                         if (this.wtr[i] < rings) {
                             coast = 1.0 - cast<float>(this.wtr[i]) / cast<float>(rings);
                         }
-                        mutable float m = 0.5 * mn + 0.3 * beltM + 0.2 * coast;
+                        // coast-heavy blend: oceans are where moisture comes from -- the top decile
+                        // (rainforests, wetlands, ice caps) forms along wet coasts and fades inland
+                        mutable float m = 0.46 * mn + 0.26 * beltM + 0.28 * coast;
+                        // Stretch the contrast around the mean: the raw blend almost never leaves
+                        // [0.2, 0.8], so every m>=0.80 biome (wetlands, rainforests, IceCap) and most
+                        // m<0.20 deserts NEVER generated. Widening both tails puts the whole Whittaker
+                        // table in play.
+                        m = 0.5 + (m - 0.5) * 1.6;
                         if (m > 1.0) { m = 1.0; }
                         if (m < 0.0) { m = 0.0; }
                         g.setTemp(x, y, cast<int>(t * 100.0));
@@ -787,6 +820,44 @@ public bundle Agents {
                         oy = oy + 1;
                     }
                 }
+                // Re-route each land cell to its STEEPEST fld neighbour instead of the discovery
+                // parent: on smooth slopes the flood wavefront sweeps uniformly, so parent links run
+                // in straight parallel diagonals (the "rivers that never connect"). Steepest descent
+                // on the filled surface follows the actual valleys, so tributaries CONVERGE into a
+                // dendritic network -- and fld is pit-free (epsilon), so descent always reaches the
+                // sea. The reverse-fld accumulation order below stays valid for any descending link.
+                mutable int rc = 0;
+                while (rc < n) {
+                    if (this.dn[rc] != 0 - 1) {
+                        int rcx = rc % this.w;
+                        int rcy = rc / this.w;
+                        mutable float bestF = this.fld[rc];
+                        mutable int bestJ = 0 - 1;
+                        mutable int ry = 0 - 1;
+                        while (ry <= 1) {
+                            mutable int rx = 0 - 1;
+                            while (rx <= 1) {
+                                if (!(rx == 0 && ry == 0)) {
+                                    int nxx = rcx + rx;
+                                    int nyy = rcy + ry;
+                                    if (nxx >= 0 && nxx < this.w && nyy >= 0 && nyy < this.h) {
+                                        int j = nyy * this.w + nxx;
+                                        if (this.fld[j] < bestF) {
+                                            bestF = this.fld[j];
+                                            bestJ = j;
+                                        }
+                                    }
+                                }
+                                rx = rx + 1;
+                            }
+                            ry = ry + 1;
+                        }
+                        if (bestJ != 0 - 1) {
+                            this.dn[rc] = bestJ;
+                        }
+                    }
+                    rc = rc + 1;
+                }
                 // Flow accumulation: leaves first (reverse discovery order), pushing flow downstream.
                 mutable int r = oc - 1;
                 while (r >= 0) {
@@ -850,7 +921,9 @@ public bundle Agents {
                 // hard overrides. NOTE: a river cell keeps its terrain biome -- the renderer draws a blue
                 // channel over the land following the stored flow direction (spec: rivers wind through
                 // terrain, they don't paint the whole tile). Lakes and vents still recolour the cell.
-                if ((fg & Grid.FLAG_VENT) != 0 && e >= this.sea) { return cast<int>(Biome.Volcanic); }
+                // Volcanic lands live on HIGH ground near the convergent ridges; a vent stamped where
+                // the world shaping later left lowland is ignored (it painted lava islands mid-grass).
+                if ((fg & Grid.FLAG_VENT) != 0 && e >= this.sea && e >= 0.55) { return cast<int>(Biome.Volcanic); }
                 if ((fg & Grid.FLAG_LAKE) != 0 && e >= this.sea) {
                     // a basin in a bone-dry climate is a dried-up salt flat, not a lake
                     if (m < 0.22) { return cast<int>(Biome.SaltFlat); }
@@ -858,7 +931,10 @@ public bundle Agents {
                 }
                 // water
                 if (e < this.sea) {
-                    if (e < 0.08) { return cast<int>(Biome.MarineTrench); }
+                    // trenches only in the deep INTERIOR basins -- the border falloff also drives
+                    // elevation under the trench cut, which drew an artificial trench ring hugging
+                    // the map edges (the "giant trench in the south")
+                    if (e < 0.08 && !this.nearEdge(x, y)) { return cast<int>(Biome.MarineTrench); }
                     if (e < 0.20) { return cast<int>(Biome.DeepOcean); }
                     if (t < 0.15) { return cast<int>(Biome.SeaIce); }
                     if (e >= this.sea - 0.06) {
@@ -875,19 +951,24 @@ public bundle Agents {
                     if (t < 0.35) { return cast<int>(Biome.RockyShore); }
                     return cast<int>(Biome.Beach);
                 }
-                // peaks & mountains
-                if (e >= 0.90) {
+                // peaks & mountains (0.82: the tallest plateau-world ridges top out near 0.85 --
+                // the cut must sit inside the range that actually generates)
+                if (e >= 0.82) {
                     if (t < 0.35) { return cast<int>(Biome.SnowPeak); }
                     return cast<int>(Biome.Mountain);
                 }
                 if (e >= 0.75) {
                     if (t < 0.15) { return cast<int>(Biome.Glacier); }
-                    if (t >= 0.55 && m >= 0.60) { return cast<int>(Biome.AlpineMeadow); }
+                    if (t >= 0.30 && m >= 0.45) { return cast<int>(Biome.AlpineMeadow); }
                     return cast<int>(Biome.Mountain);
                 }
-                if (e >= 0.62) {
+                if (e >= 0.58) {
                     if (m < 0.26) { return cast<int>(Biome.Badlands); }
                     if (t < 0.28) { return cast<int>(Biome.Mountain); }   // truly cold highland (glacier rims) = rock
+                    // the green shoulder under the peaks: warm-enough, wet-enough high ground
+                    // (0.64: anchored to where warm land actually exists -- a seed can roll every
+                    // tall ridge into polar latitudes, and the meadow must survive that)
+                    if (e >= 0.64 && t >= 0.30 && m >= 0.32) { return cast<int>(Biome.AlpineMeadow); }
                     return cast<int>(Biome.Hills);
                 }
                 // lowland specials
@@ -896,16 +977,34 @@ public bundle Agents {
                 if (t >= 0.55 && m < 0.20 && this.hash01(x * 13 + 7, y * 17 + 3) > 0.995) {
                     return cast<int>(Biome.Oasis);
                 }
-                // wetlands
-                if (m >= 0.90) {
+                // wetlands (a cold bog waterlogs at lower moisture -- barely any evaporation)
+                if (t < 0.35 && m >= 0.78) { return cast<int>(Biome.Bog); }
+                if (m >= 0.84) {
                     if (t >= 0.78) { return cast<int>(Biome.Swamp); }
-                    if (t < 0.35) { return cast<int>(Biome.Bog); }
                     return cast<int>(Biome.Marsh);
                 }
                 return this.whittaker(t, m);
             }
 
+            // Inside the outer 10% frame of the map, where the border-ocean falloff (not geology)
+            // controls the depth.
+            private method nearEdge(int x, int y) returns boolean {
+                int bx = this.w / 10;
+                int by = this.h / 10;
+                if (x < bx || x >= this.w - bx) {
+                    return true;
+                }
+                if (y < by || y >= this.h - by) {
+                    return true;
+                }
+                return false;
+            }
+
             private method whittaker(float t, float m) returns int {
+                // below ~0.05 nothing melts, regardless of how little falls: permanent ice cap --
+                // this is what covers the extreme polar strips (the belt model keeps poles dry, so
+                // the m>=0.80 route alone never fired there)
+                if (t < 0.05) { return cast<int>(Biome.IceCap); }
                 if (t < 0.15) {
                     if (m < 0.20) { return cast<int>(Biome.ColdDesert); }
                     if (m < 0.60) { return cast<int>(Biome.Tundra); }

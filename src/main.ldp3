@@ -41,6 +41,10 @@ public bundle Agents {
                         Main.worldMaps();
                         return;
                     }
+                    if (args[0].equals("audit")) {
+                        Main.audit();
+                        return;
+                    }
                     if (args[0].equals("iso2d")) {
                         Main.runIso2d();
                         return;
@@ -260,7 +264,7 @@ public bundle Agents {
                 while (y < h) {
                     mutable int x = 0;
                     while (x < w) {
-                        if (g.biomeAt(x, y) > 9 && g.hasFlag(x, y, Grid.FLAG_RIVER)) {
+                        if (g.biomeAt(x, y) > 7 && g.hasFlag(x, y, Grid.FLAG_RIVER)) {
                             mutable int dx = x - w / 2;
                             if (dx < 0) { dx = 0 - dx; }
                             mutable int dy = y - h / 2;
@@ -498,6 +502,377 @@ public bundle Agents {
                 sb.append("]");
                 System.IO.Console.println(sb.toString());
                 delete sb;
+            }
+
+            // ---- worldgen audit: SEE what the generator produced, in numbers ----------------------
+            // `AgentsExe.exe audit` generates the default world (same seed/mode as the game) and
+            // prints a per-biome census, a land elevation histogram, river-network health metrics
+            // (mouths / broken ends / sources) and placement checks (border trench, lowland volcanic),
+            // plus a full-size top-down biome map (audit_map.ppm).
+            private static method pad(String s, int width) returns String {
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append(s);
+                mutable int k = s.length();
+                while (k < width) {
+                    sb.append(" ");
+                    k = k + 1;
+                }
+                String out = sb.toString();
+                delete sb;
+                return out;
+            }
+
+            private static method padLeft(String s, int width) returns String {
+                StringBuilder sb = new StringBuilder() on heap;
+                mutable int k = s.length();
+                while (k < width) {
+                    sb.append(" ");
+                    k = k + 1;
+                }
+                sb.append(s);
+                String out = sb.toString();
+                delete sb;
+                return out;
+            }
+
+            private static method padNum(int v, int width) returns String {
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.appendInt(v);
+                String num = sb.toString();
+                delete sb;
+                return Main.padLeft(num, width);
+            }
+
+            // one-decimal percentage of count/total, right-aligned in 7 chars ("  12.3%")
+            private static method pct(int count, int total) returns String {
+                mutable int p10 = 0;
+                if (total > 0) {
+                    p10 = cast<int>(cast<long>(count) * 1000 / cast<long>(total));
+                }
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.appendInt(p10 / 10);
+                sb.append(".");
+                sb.appendInt(p10 % 10);
+                sb.append("%");
+                String out = sb.toString();
+                delete sb;
+                return Main.padLeft(out, 7);
+            }
+
+            private static method audit() returns void {
+                int w = 2560;
+                int h = 1440;
+                System.IO.Console.println("audit: generating the default world (Continental, 2560x1440, seed 42)...");
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(w, h);
+                Main.auditBiomes(g, w, h);
+                Main.auditElevation(g, w, h);
+                Main.auditPlacement(g, w, h);
+                Main.auditRivers(g, w, h);
+                Main.writeBiomeMap(g, w, h, 1280, 720, "audit_map.ppm");
+                System.IO.Console.println("");
+                System.IO.Console.println("audit: wrote audit_map.ppm (top-down biome map, full world).");
+                delete g;
+                return;
+            }
+
+            private static method auditBiomes(Grid* g, int w, int h) returns void {
+                int[] cnt = new int[40]();
+                mutable int land = 0;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        int o = g.biomeAt(x, y);
+                        cnt[o] = cnt[o] + 1;
+                        if (o >= 8) {
+                            land = land + 1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                int total = w * h;
+                System.IO.Console.println("");
+                System.IO.Console.println("---- biome census -------------------------------------------");
+                // NOTE: a leading string LITERAL in println is a printf format -- '%' must be escaped
+                System.IO.Console.println(" ord biome                     cells  %%world  %%land");
+                mutable int o = 0;
+                mutable int missing = 0;
+                while (o < 40) {
+                    StringBuilder sb = new StringBuilder() on heap;
+                    sb.append(Main.padNum(o, 4));
+                    sb.append(" ");
+                    String nm = Biomes.name(o);
+                    sb.append(Main.pad(nm, 20));
+                    sb.append(Main.padNum(cnt[o], 9));
+                    sb.append(" ");
+                    sb.append(Main.pct(cnt[o], total));
+                    if (o >= 8) {
+                        sb.append(" ");
+                        sb.append(Main.pct(cnt[o], land));
+                    }
+                    if (cnt[o] == 0) {
+                        if (o == 7) {
+                            // rivers are a FLAG over terrain cells (the renderer draws the channel);
+                            // ordinal 7 never appears as a cell biome by design
+                            sb.append("   (flag-based, expected 0)");
+                        } else {
+                            sb.append("   <-- MISSING");
+                            missing = missing + 1;
+                        }
+                    }
+                    System.IO.Console.println(sb.toString());
+                    delete sb;
+                    o = o + 1;
+                }
+                mutable int mountainFam = cnt[32] + cnt[33] + cnt[34] + cnt[35] + cnt[36];
+                StringBuilder s2 = new StringBuilder() on heap;
+                s2.append("land ");
+                s2.append(Main.pct(land, total));
+                s2.append(" of world | mountain family (Hills..Volcanic) ");
+                s2.append(Main.pct(mountainFam, land));
+                s2.append(" of land | missing biomes: ");
+                s2.appendInt(missing);
+                System.IO.Console.println(s2.toString());
+                delete s2;
+                delete cnt;
+                return;
+            }
+
+            private static method auditElevation(Grid* g, int w, int h) returns void {
+                // land-only elevation histogram, 20 bins over 0..1 -- shows where the mountain cut
+                // (0.62) falls and how much land piles above it
+                int[] bins = new int[20]();
+                mutable int land = 0;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        if (g.biomeAt(x, y) >= 8) {
+                            land = land + 1;
+                            mutable int b = g.elevAt(x, y) / 500;
+                            if (b > 19) {
+                                b = 19;
+                            }
+                            bins[b] = bins[b] + 1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                System.IO.Console.println("");
+                System.IO.Console.println("---- land elevation histogram (bin = 0.05) ------------------");
+                mutable int b = 0;
+                while (b < 20) {
+                    if (bins[b] > 0) {
+                        StringBuilder sb = new StringBuilder() on heap;
+                        sb.append("  0.");
+                        sb.appendInt(b * 5 / 10);
+                        sb.appendInt(b * 5 % 10);
+                        sb.append("0 ");
+                        sb.append(Main.padNum(bins[b], 9));
+                        sb.append(" ");
+                        sb.append(Main.pct(bins[b], land));
+                        mutable int bar = bins[b] * 50 / land;
+                        sb.append("  ");
+                        mutable int k = 0;
+                        while (k < bar) {
+                            sb.append("#");
+                            k = k + 1;
+                        }
+                        System.IO.Console.println(sb.toString());
+                        delete sb;
+                    }
+                    b = b + 1;
+                }
+                delete bins;
+                return;
+            }
+
+            private static method auditPlacement(Grid* g, int w, int h) returns void {
+                // MarineTrench should live in deep interior basins, not hug the map border; Volcanic
+                // should sit on high ground (ridges), not lowland grass.
+                mutable int trench = 0;
+                mutable int trenchBorder = 0;
+                mutable int volc = 0;
+                mutable int volcLow = 0;
+                mutable int maxMcold = 0;
+                mutable int maxThigh = 0;
+                mutable int maxEwarm = 0;
+                mutable int warmHigh = 0;
+                mutable int warmHighWet = 0;
+                int bx = w / 10;
+                int by = h / 10;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        int o = g.biomeAt(x, y);
+                        if (o == 0) {
+                            trench = trench + 1;
+                            if (x < bx || x >= w - bx || y < by || y >= h - by) {
+                                trenchBorder = trenchBorder + 1;
+                            }
+                        }
+                        if (o == 36) {
+                            volc = volc + 1;
+                            if (g.elevAt(x, y) < 5500) {
+                                volcLow = volcLow + 1;
+                            }
+                        }
+                        if (o >= 8) {
+                            // reachability probes for the marginal biomes: are Bog / AlpineMeadow
+                            // thresholds even inside the generated (t, m, e) envelope?
+                            int tt = g.tempAt(x, y);
+                            int mm = g.moistAt(x, y);
+                            int ee = g.elevAt(x, y);
+                            if (tt < 35 && mm > maxMcold) {
+                                maxMcold = mm;
+                            }
+                            if (ee >= 7000 && tt > maxThigh) {
+                                maxThigh = tt;
+                            }
+                            if (tt >= 30 && ee > maxEwarm) {
+                                maxEwarm = ee;
+                            }
+                            if (tt >= 30 && ee >= 6400) {
+                                warmHigh = warmHigh + 1;
+                                if (mm > warmHighWet) {
+                                    warmHighWet = mm;    // max moisture seen on warm high ground
+                                }
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                System.IO.Console.println("");
+                System.IO.Console.println("---- placement checks ---------------------------------------");
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("MarineTrench cells ");
+                sb.appendInt(trench);
+                sb.append(", in the outer 10% border ring: ");
+                sb.appendInt(trenchBorder);
+                sb.append(" (");
+                sb.append(Main.pct(trenchBorder, trench));
+                sb.append(")  [border trench = artificial]");
+                System.IO.Console.println(sb.toString());
+                delete sb;
+                StringBuilder s2 = new StringBuilder() on heap;
+                s2.append("Volcanic cells ");
+                s2.appendInt(volc);
+                s2.append(", below elevation 0.55 (lowland): ");
+                s2.appendInt(volcLow);
+                s2.append(" (");
+                s2.append(Main.pct(volcLow, volc));
+                s2.append(")  [lowland volcanic = misplaced]");
+                System.IO.Console.println(s2.toString());
+                delete s2;
+                StringBuilder s3 = new StringBuilder() on heap;
+                s3.append("envelope: max moisture on cold land (t<0.35) = 0.");
+                s3.appendInt(maxMcold);
+                s3.append(" | max temperature on high ground (e>=0.70) = 0.");
+                s3.appendInt(maxThigh);
+                s3.append(" | max elevation on warm land (t>=0.30) = 0.");
+                s3.appendInt(maxEwarm / 100);
+                s3.append(" | warm cells e>=0.64: ");
+                s3.appendInt(warmHigh);
+                s3.append(" (max moisture there: 0.");
+                s3.appendInt(warmHighWet);
+                s3.append(")");
+                System.IO.Console.println(s3.toString());
+                delete s3;
+                return;
+            }
+
+            private static method auditRivers(Grid* g, int w, int h) returns void {
+                byte[] inflow = new byte[w * h]();
+                mutable int cells = 0;
+                mutable int mouths = 0;
+                mutable int broken = 0;
+                mutable int noflow = 0;
+                mutable int onCoast = 0;
+                mutable int shown = 0;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        if (g.hasFlag(x, y, Grid.FLAG_RIVER)) {
+                            cells = cells + 1;
+                            int o = g.biomeAt(x, y);
+                            if (o == 8 || o == 9) {
+                                onCoast = onCoast + 1;
+                            }
+                            if (!g.hasFlow(x, y)) {
+                                noflow = noflow + 1;
+                            } else {
+                                int tx = x + g.flowDx(x, y);
+                                int ty = y + g.flowDy(x, y);
+                                if (tx < 0 || ty < 0 || tx >= w || ty >= h) {
+                                    broken = broken + 1;
+                                } else {
+                                    inflow[ty * w + tx] = cast<byte>(1);
+                                    int tb = g.biomeAt(tx, ty);
+                                    if (tb <= 7) {
+                                        mouths = mouths + 1;
+                                    } else {
+                                        if (!g.hasFlag(tx, ty, Grid.FLAG_RIVER)) {
+                                            broken = broken + 1;
+                                            if (shown < 6) {
+                                                StringBuilder sb = new StringBuilder() on heap;
+                                                sb.append("  broken river end at (");
+                                                sb.appendInt(x);
+                                                sb.append(",");
+                                                sb.appendInt(y);
+                                                sb.append(") -> lands on ");
+                                                String tn = Biomes.name(tb);
+                                                sb.append(tn);
+                                                System.IO.Console.println(sb.toString());
+                                                delete sb;
+                                                shown = shown + 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                mutable int sources = 0;
+                y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        if (g.hasFlag(x, y, Grid.FLAG_RIVER) && cast<int>(inflow[y * w + x]) == 0) {
+                            sources = sources + 1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                System.IO.Console.println("");
+                System.IO.Console.println("---- river network ------------------------------------------");
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("river cells ");
+                sb.appendInt(cells);
+                sb.append(" | sources ");
+                sb.appendInt(sources);
+                sb.append(" | mouths (reach water) ");
+                sb.appendInt(mouths);
+                sb.append(" | BROKEN ends (die on land) ");
+                sb.appendInt(broken);
+                sb.append(" | no-flow ");
+                sb.appendInt(noflow);
+                sb.append(" | on beach/rocky shore ");
+                sb.appendInt(onCoast);
+                System.IO.Console.println(sb.toString());
+                delete sb;
+                delete inflow;
+                return;
             }
 
             private static method writeSnapshot(Grid* g, int w, int h) returns void {
