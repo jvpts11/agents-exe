@@ -42,6 +42,18 @@ public bundle Agents {
             private mutable Grid* grid;
             private mutable MeshAtlas* terr;
             private mutable MeshAtlas* props;
+            private mutable MeshAtlas* rivers;
+            private mutable float[] riverTop;   // per-river-variant top-plate height
+            // river variant ordinals in the rivers atlas
+            private mutable int rvStraight;
+            private mutable int rvDiagonal;
+            private mutable int rvBend;
+            private mutable int rvCorner;
+            private mutable int rvT;
+            private mutable int rvCross;
+            private mutable int rvFork;
+            private mutable int rvSource;
+            private mutable int rvDelta;
             private mutable int srcW;
             private mutable int srcH;
             private mutable int stride;
@@ -103,6 +115,7 @@ public bundle Agents {
                 this.projM = new GlMat4() on heap;
                 this.viewM = new GlMat4() on heap;
                 this.tileTop = new float[1]();
+                this.riverTop = new float[1]();
                 this.sProp = new int[1]();
                 this.sMilli = new int[1]();
                 this.sScale = new float[1]();
@@ -144,6 +157,7 @@ public bundle Agents {
                 this.viewM.dispose();
                 delete this.viewM;
                 delete this.tileTop;
+                delete this.riverTop;
                 delete this.sProp;
                 delete this.sMilli;
                 delete this.sScale;
@@ -165,10 +179,12 @@ public bundle Agents {
             // Terrain model (matches the original agents): every non-mountain tile sits at the SAME
             // ground level -- coasts read from the tiles' own art heights -- and only the mountain
             // family stacks up, in discrete steps of `stepH` derived from the cell's elevation.
-            public method setup(Grid* g, MeshAtlas* terr, MeshAtlas* props, int stride, float stepH) returns void {
+            public method setup(Grid* g, MeshAtlas* terr, MeshAtlas* props, MeshAtlas* rivers,
+                                int stride, float stepH) returns void {
                 this.grid = g;
                 this.terr = terr;
                 this.props = props;
+                this.rivers = rivers;
                 this.srcW = g.width();
                 this.srcH = g.height();
                 this.stride = stride;
@@ -183,6 +199,23 @@ public bundle Agents {
                     this.tileTop[m] = terr.pz[vi];
                     m = m + 1;
                 }
+                delete this.riverTop;
+                this.riverTop = new float[rivers.count]();
+                mutable int rm = 0;
+                while (rm < rivers.count) {
+                    int vi = (rivers.triStart[rm] + 8) * 3;
+                    this.riverTop[rm] = rivers.pz[vi];
+                    rm = rm + 1;
+                }
+                this.rvStraight = rivers.ordOf("Straight");
+                this.rvDiagonal = rivers.ordOf("Diagonal");
+                this.rvBend = rivers.ordOf("BendDiag");
+                this.rvCorner = rivers.ordOf("Corner90");
+                this.rvT = rivers.ordOf("TJunction");
+                this.rvCross = rivers.ordOf("Crossing");
+                this.rvFork = rivers.ordOf("Fork");
+                this.rvSource = rivers.ordOf("Source");
+                this.rvDelta = rivers.ordOf("Delta");
                 this.initScatter();
                 this.bakeCoarse();
                 this.cx = cast<float>(this.srcW);
@@ -282,13 +315,35 @@ public bundle Agents {
                 return cast<float>(v) / 2147483647.0;
             }
 
-            // Rivers keep their terrain tile; the channel is drawn as a flat water overlay that follows
-            // the real flow graph (centre -> downstream edge, plus one segment per inflowing neighbour),
-            // so channels CONNECT -- including diagonals -- instead of reading as dashes.
-            private method riverSegs(int gx, int gy) returns int {
-                mutable int s = 0;
+            // ---- river autotiling: pick the authored river-tile VARIANT + rotation from the flow ----
+            // Mesh direction indices: N=0 NE=1 E=2 SE=3 S=4 SW=5 W=6 NW=7 in the TILE's local space.
+            // World -> mesh is a Y mirror (grid y grows southward, mesh +y is the tile's local north).
+            private method meshDir(int dx, int dy) returns int {
+                mutable int wd = 0;
+                if (dx == 0 && dy < 0) { wd = 0; }
+                if (dx > 0 && dy < 0) { wd = 1; }
+                if (dx > 0 && dy == 0) { wd = 2; }
+                if (dx > 0 && dy > 0) { wd = 3; }
+                if (dx == 0 && dy > 0) { wd = 4; }
+                if (dx < 0 && dy > 0) { wd = 5; }
+                if (dx < 0 && dy == 0) { wd = 6; }
+                if (dx < 0 && dy < 0) { wd = 7; }
+                // mirror Y: N<->S, NE<->SE, NW<->SW; E/W unchanged
+                if (wd == 0) { return 4; }
+                if (wd == 1) { return 3; }
+                if (wd == 3) { return 1; }
+                if (wd == 4) { return 0; }
+                if (wd == 5) { return 7; }
+                if (wd == 7) { return 5; }
+                return wd;
+            }
+
+            // Bitmask of connected mesh directions for river cell (gx,gy): its downstream edge plus one
+            // bit per river neighbour that flows INTO it.
+            private method riverConn(int gx, int gy) returns int {
+                mutable int mask = 0;
                 if (this.grid.hasFlow(gx, gy)) {
-                    s = 1;
+                    mask = mask | (1 << this.meshDir(this.grid.flowDx(gx, gy), this.grid.flowDy(gx, gy)));
                 }
                 mutable int dy = 0 - 1;
                 while (dy <= 1) {
@@ -300,7 +355,7 @@ public bundle Agents {
                             if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
                                 if (this.grid.hasFlag(nx, ny, Grid.FLAG_RIVER)) {
                                     if (nx + this.grid.flowDx(nx, ny) == gx && ny + this.grid.flowDy(nx, ny) == gy) {
-                                        s = s + 1;
+                                        mask = mask | (1 << this.meshDir(dx, dy));
                                     }
                                 }
                             }
@@ -309,7 +364,131 @@ public bundle Agents {
                     }
                     dy = dy + 1;
                 }
-                return s;
+                return mask;
+            }
+
+            private method rotMask(int mask, int k) returns int {
+                mutable int out = 0;
+                mutable int d = 0;
+                while (d < 8) {
+                    if ((mask & (1 << d)) != 0) {
+                        out = out | (1 << ((d + 2 * k) % 8));
+                    }
+                    d = d + 1;
+                }
+                return out;
+            }
+
+            private method bitCount(int mask) returns int {
+                mutable int c = 0;
+                mutable int d = 0;
+                while (d < 8) {
+                    if ((mask & (1 << d)) != 0) {
+                        c = c + 1;
+                    }
+                    d = d + 1;
+                }
+                return c;
+            }
+
+            // Round diagonal connections to their clockwise cardinal (variant coverage is cardinal-heavy).
+            private method roundMask(int mask) returns int {
+                mutable int out = 0;
+                mutable int d = 0;
+                while (d < 8) {
+                    if ((mask & (1 << d)) != 0) {
+                        if (d % 2 == 1) {
+                            out = out | (1 << ((d + 1) % 8));
+                        } else {
+                            out = out | (1 << d);
+                        }
+                    }
+                    d = d + 1;
+                }
+                return out;
+            }
+
+            // Find k so that base rotated by k equals conn; -1 if none.
+            private method matchRot(int base, int conn) returns int {
+                mutable int k = 0;
+                while (k < 4) {
+                    if (this.rotMask(base, k) == conn) {
+                        return k;
+                    }
+                    k = k + 1;
+                }
+                return 0 - 1;
+            }
+
+            private method firstDir(int mask) returns int {
+                mutable int d = 0;
+                while (d < 8) {
+                    if ((mask & (1 << d)) != 0) {
+                        return d;
+                    }
+                    d = d + 1;
+                }
+                return 0;
+            }
+
+            // Choose (variant, rot) packed as variant*4+rot for a river cell.
+            private method pickRiver(int gx, int gy) returns int {
+                mutable int conn = this.riverConn(gx, gy);
+                int n = this.bitCount(conn);
+                // does this cell empty into water? (its downstream neighbour is a water biome)
+                mutable boolean mouth = false;
+                if (this.grid.hasFlow(gx, gy)) {
+                    int wx = gx + this.grid.flowDx(gx, gy);
+                    int wy2 = gy + this.grid.flowDy(gx, gy);
+                    if (this.grid.biomeAt(wx, wy2) <= 7) {
+                        mouth = true;
+                    }
+                }
+                if (n == 0) {
+                    return this.rvSource * 4;
+                }
+                if (n == 1) {
+                    int d = this.firstDir(conn);
+                    mutable int k = d / 2;
+                    if (d % 2 == 1) {
+                        k = (d + 1) / 2;
+                    }
+                    if (mouth) {
+                        // Delta: the fan (mesh S) faces the water; rotate S(4) onto d.
+                        mutable int kd = (d + 4) / 2;
+                        if (kd >= 4) { kd = kd - 4; }
+                        return this.rvDelta * 4 + kd;
+                    }
+                    return this.rvSource * 4 + (k % 4);
+                }
+                if (n == 2) {
+                    mutable int k = this.matchRot(1 | 16, conn);              // Straight {N,S}
+                    if (k >= 0) { return this.rvStraight * 4 + k; }
+                    k = this.matchRot(2 | 32, conn);                          // Diagonal {NE,SW}
+                    if (k >= 0) { return this.rvDiagonal * 4 + k; }
+                    k = this.matchRot(16 | 4, conn);                          // Corner {S,E}
+                    if (k >= 0) { return this.rvCorner * 4 + k; }
+                    k = this.matchRot(64 | 1, conn);                          // Bend {W,N}
+                    if (k >= 0) { return this.rvBend * 4 + k; }
+                    // mixed diagonal/cardinal pair: round diagonals and retry the cardinal shapes
+                    int rc = this.roundMask(conn);
+                    k = this.matchRot(1 | 16, rc);
+                    if (k >= 0) { return this.rvStraight * 4 + k; }
+                    k = this.matchRot(16 | 4, rc);
+                    if (k >= 0) { return this.rvCorner * 4 + k; }
+                    return this.rvStraight * 4;
+                }
+                if (n == 3) {
+                    mutable int k = this.matchRot(64 | 4 | 1, conn);          // T {W,E,N}
+                    if (k >= 0) { return this.rvT * 4 + k; }
+                    k = this.matchRot(16 | 2 | 128, conn);                    // Fork {S,NE,NW}
+                    if (k >= 0) { return this.rvFork * 4 + k; }
+                    int rc = this.roundMask(conn);
+                    k = this.matchRot(64 | 4 | 1, rc);
+                    if (k >= 0) { return this.rvT * 4 + k; }
+                    return this.rvCross * 4;
+                }
+                return this.rvCross * 4;
             }
 
             // A flat water quad from (x0,y0) to (x1,y1) at height z (2 triangles).
@@ -327,35 +506,117 @@ public bundle Agents {
                                      x1 - px, y1 - py, z, x1 + px, y1 + py, z, 0.0, 0.0, 1.0, r, g, b);
             }
 
-            // Emit every channel segment for river cell (gx,gy); top = the cell's plate height.
-            private method emitRiver(float[] buf, int w, int gx, int gy, float wx, float wy, float top,
-                                     float shade) returns int {
-                float z = top + 0.10;
-                mutable int p = w;
-                if (this.grid.hasFlow(gx, gy)) {
-                    float fx = cast<float>(this.grid.flowDx(gx, gy));
-                    float fy = cast<float>(this.grid.flowDy(gx, gy));
-                    p = this.emitFlatSeg(buf, p, wx, wy, wx + fx, wy + fy, z, 0.62, shade);
+            private method countRTile(int variant, int lvl) returns int {
+                mutable int c = this.rivers.triCount[variant];
+                if (lvl > 0) {
+                    c = c + 8;
                 }
-                mutable int dy = 0 - 1;
-                while (dy <= 1) {
-                    mutable int dx = 0 - 1;
-                    while (dx <= 1) {
-                        if (!(dx == 0 && dy == 0)) {
-                            int nx = gx + dx;
-                            int ny = gy + dy;
-                            if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
-                                if (this.grid.hasFlag(nx, ny, Grid.FLAG_RIVER)) {
-                                    if (nx + this.grid.flowDx(nx, ny) == gx && ny + this.grid.flowDy(nx, ny) == gy) {
-                                        p = this.emitFlatSeg(buf, p, wx + cast<float>(dx), wy + cast<float>(dy),
-                                                             wx, wy, z, 0.62, shade);
-                                    }
-                                }
-                            }
+                return c;
+            }
+
+            // Emit a river tile variant rotated by `rot` quarter turns, its grass bank recoloured to the
+            // underlying biome's own top/side colours (a jungle river has jungle banks, a snowy river
+            // snowy ones). Water/foam/rock parts keep their colours; foam stays unshaded (animation key).
+            private method emitRTile(float[] buf, int w, int variant, int rot, int underOrd,
+                                     float wx, float wy, float zOff, float shade) returns int {
+                int t0 = this.rivers.triStart[variant];
+                int tn = this.rivers.triCount[variant];
+                float top = this.riverTop[variant];
+                int ut = this.terr.triStart[underOrd] + 8;      // biome top-face colour
+                int us = this.terr.triStart[underOrd];          // biome side colour
+                float topR = cast<float>(this.terr.cr[ut]) / 255.0;
+                float topG = cast<float>(this.terr.cg[ut]) / 255.0;
+                float topB = cast<float>(this.terr.cb[ut]) / 255.0;
+                float sidR = cast<float>(this.terr.cr[us]) / 255.0;
+                float sidG = cast<float>(this.terr.cg[us]) / 255.0;
+                float sidB = cast<float>(this.terr.cb[us]) / 255.0;
+                mutable int p = w;
+                if (zOff > 0.5) {
+                    float x0 = wx - 1.0;
+                    float x1 = wx + 1.0;
+                    float y0 = wy - 1.0;
+                    float y1 = wy + 1.0;
+                    float zt = zOff + 0.05;
+                    float sr = sidR * shade;
+                    float sg = sidG * shade;
+                    float sb = sidB * shade;
+                    p = this.emitQuad(buf, p, x1, y0, 0.0, x1, y1, 0.0, x1, y1, zt, x1, y0, zt, 1.0, 0.0, 0.0, sr, sg, sb);
+                    p = this.emitQuad(buf, p, x0, y0, 0.0, x0, y0, zt, x0, y1, zt, x0, y1, 0.0, 0.0 - 1.0, 0.0, 0.0, sr, sg, sb);
+                    p = this.emitQuad(buf, p, x0, y1, 0.0, x0, y1, zt, x1, y1, zt, x1, y1, 0.0, 0.0, 1.0, 0.0, sr, sg, sb);
+                    p = this.emitQuad(buf, p, x0, y0, 0.0, x1, y0, 0.0, x1, y0, zt, x0, y0, zt, 0.0, 0.0 - 1.0, 0.0, sr, sg, sb);
+                }
+                mutable int t = 0;
+                while (t < tn) {
+                    int tri = t0 + t;
+                    int cr = this.rivers.cr[tri];
+                    int cg = this.rivers.cg[tri];
+                    int cb = this.rivers.cb[tri];
+                    mutable float r = cast<float>(cr) / 255.0;
+                    mutable float g = cast<float>(cg) / 255.0;
+                    mutable float b = cast<float>(cb) / 255.0;
+                    mutable float sh = shade;
+                    if (cr == 96 && cg == 150 && cb == 84) {         // grass bank top -> biome top
+                        r = topR;
+                        g = topG;
+                        b = topB;
+                    } else {
+                        if (cr == 96 && cg == 75 && cb == 48) {      // soil side -> biome side
+                            r = sidR;
+                            g = sidG;
+                            b = sidB;
                         }
-                        dx = dx + 1;
                     }
-                    dy = dy + 1;
+                    if (cr == 208 && cg == 230 && cb == 248) {
+                        sh = 1.0;                                    // foam: exact colour, animated
+                    }
+                    r = r * sh;
+                    g = g * sh;
+                    b = b * sh;
+                    mutable int k = 0;
+                    while (k < 3) {
+                        int vi = tri * 3 + k;
+                        mutable float lx = this.rivers.px[vi];
+                        mutable float ly = this.rivers.py[vi];
+                        mutable float lnx = this.rivers.nx[vi];
+                        mutable float lny = this.rivers.ny[vi];
+                        mutable int rr = 0;
+                        while (rr < rot) {
+                            float tx = lx;
+                            lx = ly;
+                            ly = 0.0 - tx;
+                            float tnx = lnx;
+                            lnx = lny;
+                            lny = 0.0 - tnx;
+                            rr = rr + 1;
+                        }
+                        mutable float lz = this.rivers.pz[vi];
+                        if (lz > top && lz < top + 0.05) {
+                            lz = top + (lz - top) * 6.0;             // decal lift (channel/foam)
+                        }
+                        p = this.wr(buf, p, lx + wx, ly + wy, lz + zOff,
+                                    lnx, lny, this.rivers.nz[vi], r, g, b);
+                        k = k + 1;
+                    }
+                    t = t + 1;
+                }
+                return p;
+            }
+
+            // A soft blob shadow under a prop: a dark octagon of the ground colour, offset away from
+            // the light -- the objects' ground shadows.
+            private method emitShadow(float[] buf, int w, float cx2, float cy2, float z, float rad,
+                                      float gr, float gg, float gb) returns int {
+                float sx = cx2 - rad * 0.30;
+                float sy = cy2 - rad * 0.42;
+                mutable int p = w;
+                mutable int i = 0;
+                while (i < 8) {
+                    float a0 = cast<float>(i) * 0.7853982;
+                    float a1 = cast<float>(i + 1) * 0.7853982;
+                    p = this.wr(buf, p, sx, sy, z, 0.0, 0.0, 1.0, gr, gg, gb);
+                    p = this.wr(buf, p, sx + rad * this.fcos(a0), sy + rad * this.fsin(a0), z, 0.0, 0.0, 1.0, gr, gg, gb);
+                    p = this.wr(buf, p, sx + rad * this.fcos(a1), sy + rad * this.fsin(a1), z, 0.0, 0.0, 1.0, gr, gg, gb);
+                    i = i + 1;
                 }
                 return p;
             }
@@ -624,7 +885,7 @@ public bundle Agents {
                             tris = tris + 2;
                         }
                         if (this.coarseHint(bx, by, ord)) {
-                            htris = htris + this.props.triCount[this.hintProp];
+                            htris = htris + this.props.triCount[this.hintProp] + 8;
                         }
                         bx = bx + 1;
                     }
@@ -663,6 +924,11 @@ public bundle Agents {
                         }
                         if (this.coarseHint(bx, by, ord)) {
                             float topZ = this.tileTop[ord] + zOff;
+                            int ut = this.terr.triStart[ord] + 8;
+                            float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
+                            float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
+                            float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
+                            hw = this.emitShadow(hbuf, hw, wx, wy, topZ + 0.3, sc * 0.34, gr, gg, gb);
                             hw = this.emitProp(hbuf, hw, this.hintProp, wx, wy, topZ, sc * 0.55, shade);
                         }
                         bx = bx + 1;
@@ -707,16 +973,18 @@ public bundle Agents {
                         int gx = ox + x;
                         int gy = oy + y;
                         int ord = this.grid.biomeAt(gx, gy);
-                        tris = tris + this.countTile(ord, false);
-                        if (this.stackLvl(ord, gx, gy) > 0) {
-                            tris = tris + 8;
-                        }
+                        int lvl = this.stackLvl(ord, gx, gy);
                         if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
-                            tris = tris + this.riverSegs(gx, gy) * 2;
+                            tris = tris + this.countRTile(this.pickRiver(gx, gy) / 4, lvl);
+                        } else {
+                            tris = tris + this.countTile(ord, false);
+                            if (lvl > 0) {
+                                tris = tris + 8;
+                            }
                         }
                         int p = this.detailPropAt(gx, gy, ord);
                         if (p >= 0) {
-                            tris = tris + this.props.triCount[p];
+                            tris = tris + this.props.triCount[p] + 8;    // prop + its blob shadow
                         }
                         x = x + 1;
                     }
@@ -736,15 +1004,23 @@ public bundle Agents {
                         float wx = cast<float>(gx * 2 + 1);
                         float wy = cast<float>(gy * 2 + 1);
                         float shade = this.shadeAt(gx, gy, 1, lvl);
-                        w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false, shade);
-                        float topZ = this.tileTop[ord] + zOff;
                         if (ord > 9 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
-                            w = this.emitRiver(buf, w, gx, gy, wx, wy, topZ, shade);
+                            int pk = this.pickRiver(gx, gy);
+                            w = this.emitRTile(buf, w, pk / 4, pk % 4, ord, wx, wy, zOff, shade);
+                        } else {
+                            w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false, shade);
                         }
                         int p = this.detailPropAt(gx, gy, ord);
                         if (p >= 0) {
                             float jx = (this.hash01(gx * 3 + 1, gy * 5 + 2) - 0.5) * 1.2;
                             float jy = (this.hash01(gx * 5 + 4, gy * 3 + 7) - 0.5) * 1.2;
+                            float topZ = this.tileTop[ord] + zOff;
+                            int ut = this.terr.triStart[ord] + 8;
+                            float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
+                            float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
+                            float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
+                            float rad = 0.55 * this.sScale[ord];
+                            w = this.emitShadow(buf, w, wx + jx, wy + jy, topZ + 0.055, rad, gr, gg, gb);
                             w = this.emitProp(buf, w, p, wx + jx, wy + jy, topZ, this.sScale[ord], shade);
                         }
                         x = x + 1;
@@ -1089,9 +1365,9 @@ public bundle Agents {
                 return "#version 330 core\nlayout(location=0) in vec3 aPos;\nlayout(location=1) in vec3 aNrm;\nlayout(location=2) in vec3 aCol;\nuniform mat4 uProj;\nuniform mat4 uView;\nuniform float uTime;\nout vec3 vNrm;\nout vec3 vCol;\nout float vDist;\nvoid main(){\n  vec3 p = aPos;\n  if (abs(aCol.r-0.8157)<0.03 && abs(aCol.g-0.9020)<0.03 && abs(aCol.b-0.9725)<0.03) {\n    p.y += sin(uTime*1.8 + p.x*1.3 + p.y*0.7)*0.18;\n    p.x += cos(uTime*1.4 + p.y*1.1)*0.12;\n  }\n  vec4 cp = uProj * uView * vec4(p,1.0);\n  gl_Position = cp;\n  vDist = cp.w;\n  vNrm=aNrm; vCol=aCol;\n}\n";
             }
 
-            // Stronger cel contrast + distance fog toward the sky colour.
+            // The approved cel contrast + distance fog toward the sky colour.
             private static method fragSrc() returns String {
-                return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nin float vDist;\nout vec4 FragColor;\nuniform vec2 uFog;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.52 + 0.55*ndl);\n  vec3 c = vCol*sh;\n  float f = clamp((vDist - uFog.x) / uFog.y, 0.0, 0.55);\n  c = mix(c, vec3(0.10,0.13,0.18), f);\n  FragColor = vec4(c, 1.0);\n}\n";
+                return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nin float vDist;\nout vec4 FragColor;\nuniform vec2 uFog;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.60 + 0.42*ndl);\n  vec3 c = vCol*sh;\n  float f = clamp((vDist - uFog.x) / uFog.y, 0.0, 0.55);\n  c = mix(c, vec3(0.10,0.13,0.18), f);\n  FragColor = vec4(c, 1.0);\n}\n";
             }
 
             private static method postVert() returns String {

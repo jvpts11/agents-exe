@@ -191,8 +191,9 @@ public bundle Agents {
                 win.setVSync(1);
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, 8, 1.1);
+                r.setup(g, terr, props, rivers, 8, 1.1);
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 mutable int lastX = win.cursorX();
                 mutable int lastY = win.cursorY();
@@ -242,11 +243,43 @@ public bundle Agents {
                 }
                 delete hud;
                 delete r;
+                delete rivers;
                 delete props;
                 delete terr;
                 delete g;
                 delete win;
                 return;
+            }
+
+            // Nearest land river cell to the map centre (for the close-up river verification frame).
+            private static method findRiver(Grid* g, int w, int h) returns int {
+                mutable int bestX = 0 - 1;
+                mutable int bestY = 0;
+                mutable int bestD = 2000000000;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        if (g.biomeAt(x, y) > 9 && g.hasFlag(x, y, Grid.FLAG_RIVER)) {
+                            mutable int dx = x - w / 2;
+                            if (dx < 0) { dx = 0 - dx; }
+                            mutable int dy = y - h / 2;
+                            if (dy < 0) { dy = 0 - dy; }
+                            int d = dx + dy;
+                            if (d < bestD) {
+                                bestD = d;
+                                bestX = x;
+                                bestY = y;
+                            }
+                        }
+                        x = x + 2;
+                    }
+                    y = y + 2;
+                }
+                if (bestX < 0) {
+                    return 0 - 1;
+                }
+                return bestY * w + bestX;
             }
 
             // Nearest forest-ish cell to the map centre (for the close-up verification frame).
@@ -302,8 +335,9 @@ public bundle Agents {
                 }
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, 8, 1.1);
+                r.setup(g, terr, props, rivers, 8, 1.1);
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 int cw = win.width();
                 int ch = win.height();
@@ -315,10 +349,13 @@ public bundle Agents {
                 byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
                 Main.writePpmFlipped(px, cw, ch, "gl_world.ppm");
                 delete px;
-                // near frame: aim at the closest forest and zoom under the detail threshold
-                int packed = Main.findForest(g, w, h);
+                // near frame: aim at the closest river (falls back to a forest), under the detail threshold
+                mutable int packed = Main.findRiver(g, w, h);
+                if (packed < 0) {
+                    packed = Main.findForest(g, w, h);
+                }
                 r.aimAt(packed % w, packed / w);
-                r.setView(42.0, 35.0, 130.0);
+                r.setView(42.0, 35.0, 110.0);
                 r.render(cw, ch);
                 hud.begin(cw, ch, 0);
                 r.drawCompass(hud, cw, ch);
@@ -328,6 +365,7 @@ public bundle Agents {
                 delete px2;
                 delete hud;
                 delete r;
+                delete rivers;
                 delete props;
                 delete terr;
                 delete g;
