@@ -69,6 +69,7 @@ public bundle Agents {
             private mutable int bkRow;
             private mutable int bkOx;
             private mutable int bkOy;
+            private mutable int bkPhase;        // 0 = counting, 1 = emitting
             private mutable int[] dRiverC;      // detail bake scratch: river variant per cell, or -1
             private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
             private mutable int[] btally;       // per-biome cell count inside one coarse block
@@ -152,6 +153,7 @@ public bundle Agents {
                 this.bkRow = 0;
                 this.bkOx = 0;
                 this.bkOy = 0;
+                this.bkPhase = 0;
                 this.dRiverC = new int[1]();
                 this.dPropC = new int[1]();
                 this.btally = new int[40]();
@@ -1292,12 +1294,6 @@ public bundle Agents {
             // in. Until then the previous geometry stays on screen, so nothing pops and no
             // frame pays for more than its slice.
             private method beginBake(int ox, int oy) returns void {
-                // The bake walks the window twice -- once to size the buffer, once to fill it -- and
-                // the two most expensive things per cell were being computed on BOTH passes:
-                // pickRiver alone costs eight neighbour lookups plus their flow directions. They are
-                // computed on the counting pass now and read back on the emitting one. This is the
-                // rebake that is felt as a stutter when panning, so halving its per-cell work is the
-                // cheapest thing available short of making the bake incremental.
                 int dn = this.detW * this.detH;
                 if (this.dRiverC.length() != dn) {
                     delete this.dRiverC;
@@ -1305,9 +1301,30 @@ public bundle Agents {
                     this.dRiverC = new int[dn]();
                     this.dPropC = new int[dn]();
                 }
-                mutable int tris = 0;
-                mutable int y = 0;
-                while (y < this.detH) {
+                this.bkTris = 0;
+                this.bkW = 0;
+                this.bkRow = 0;
+                this.bkOx = ox;
+                this.bkOy = oy;
+                this.bkPhase = 0;
+                this.baking = true;
+                return;
+            }
+
+            // Phase 0, sliced: size the buffer, and cache the two costly per-cell answers for the
+            // emitting phase to read back -- pickRiver alone costs eight neighbour lookups plus each
+            // neighbour's flow direction.
+            //
+            // This pass used to run whole in beginBake, and that is the hitch felt at the moment the
+            // LOD switches on: it walks the window exactly as the emitting pass does, so leaving it
+            // unsliced left half the bake blocking a single frame, and it grew with the window along
+            // with everything else.
+            private method countRows(int stop) returns void {
+                int ox = this.bkOx;
+                int oy = this.bkOy;
+                mutable int tris = this.bkTris;
+                mutable int y = this.bkRow;
+                while (y < stop) {
                     mutable int x = 0;
                     while (x < this.detW) {
                         int gx = ox + x;
@@ -1335,28 +1352,42 @@ public bundle Agents {
                     }
                     y = y + 1;
                 }
-                this.bkBuf = Memory.alloc(cast<long>(tris * 27 * 4 + 4));
                 this.bkTris = tris;
-                this.bkW = 0;
-                this.bkRow = 0;
-                this.bkOx = ox;
-                this.bkOy = oy;
-                this.baking = true;
+                this.bkRow = y;
+                if (y >= this.detH) {
+                    this.bkBuf = Memory.alloc(cast<long>(tris * 27 * 4 + 4));
+                    this.bkPhase = 1;
+                    this.bkRow = 0;
+                    this.bkW = 0;
+                }
                 return;
             }
 
-            // Emit one slice of rows. Sized so a full window lands in about eight frames:
-            // fast enough that the detail arrives while the camera is still moving, small
-            // enough that no single frame shows a hitch.
+            // One slice of work per call, in CELLS rather than rows. A fixed row count made the
+            // slice grow with the window, which is the sustained stutter felt while panning far from
+            // the ground: the window is at its widest there, so every rebake cost the most per frame
+            // exactly where there was the most of it to do. A cell budget makes the per-frame cost
+            // the same at any zoom, and simply takes more frames when there is more to build.
             private method stepBake() returns void {
                 if (!this.baking) {
+                    return;
+                }
+                mutable int rows = 16384 / this.detW;
+                if (rows < 1) {
+                    rows = 1;
+                }
+                if (this.bkPhase == 0) {
+                    mutable int cstop = this.bkRow + rows;
+                    if (cstop > this.detH) {
+                        cstop = this.detH;
+                    }
+                    this.countRows(cstop);
                     return;
                 }
                 address buf = this.bkBuf;
                 int ox = this.bkOx;
                 int oy = this.bkOy;
                 mutable int w = this.bkW;
-                mutable int rows = this.detH / 8 + 1;
                 mutable int y = this.bkRow;
                 int stop = y + rows;
                 while (y < this.detH && y < stop) {
