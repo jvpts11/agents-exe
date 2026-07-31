@@ -62,6 +62,8 @@ public bundle Agents {
             private mutable int forestClumped;  // tree cells living in a patch of CLUMP or more
             private mutable int massesLivable;  // landmasses with wood AND stone AND water
             private mutable int massesCounted;
+            private mutable boolean[] compLivable;
+            private mutable int[] ranked;      // component ids of the biggest landmasses, in order
 
             public constructor WorldAudit(Grid* grid) {
                 this.g = grid;
@@ -102,6 +104,8 @@ public bundle Agents {
                 this.forestClumped = 0;
                 this.massesLivable = 0;
                 this.massesCounted = 0;
+                this.compLivable = new boolean[this.capacity]();
+                this.ranked = new int[32]();
             }
 
             public destructor ~WorldAudit() returns void {
@@ -119,6 +123,8 @@ public bundle Agents {
                 delete this.subCount;
                 delete this.biomeCells;
                 delete this.biomeTrees;
+                delete this.compLivable;
+                delete this.ranked;
             }
 
             private method isLand(int x, int y) returns boolean {
@@ -697,9 +703,10 @@ public bundle Agents {
                 this.massesCounted = 0;
                 int floor = this.noiseFloor();
                 for (int c in 0..lim) {
+                    this.compLivable[c] = wood[c] && stone[c] && water[c];
                     if (seen[c] && this.area[c] > floor) {
                         this.massesCounted = this.massesCounted + 1;
-                        if (wood[c] && stone[c] && water[c]) {
+                        if (this.compLivable[c]) {
                             this.massesLivable = this.massesLivable + 1;
                         }
                     }
@@ -841,11 +848,51 @@ public bundle Agents {
                 return this.massesLivable;
             }
 
+            // Of the `want` BIGGEST landmasses -- the continents -- how many an agent could actually
+            // start on. An island without stone is a fact of geography and not a defect; a continent
+            // without it is a generation failure, and only this number tells them apart.
+            public method livableContinents(int want) returns int {
+                int lim = this.compLimit();
+                mutable int ok = 0;
+                mutable int rank2 = 0;
+                while (rank2 < want) {
+                    mutable int bestC = 0 - 1;
+                    mutable int bestA = 0;
+                    for (int c in 0..lim) {
+                        if (this.area[c] > bestA && !this.compRanked(c, rank2)) {
+                            bestA = this.area[c];
+                            bestC = c;
+                        }
+                    }
+                    if (bestC < 0) {
+                        return ok;
+                    }
+                    this.ranked[rank2] = bestC;
+                    if (this.compLivable[bestC]) {
+                        ok = ok + 1;
+                    }
+                    rank2 = rank2 + 1;
+                }
+                return ok;
+            }
+
+            // Already taken by an earlier rank in the selection above.
+            private method compRanked(int c, int upto) returns boolean {
+                mutable int k = 0;
+                while (k < upto) {
+                    if (this.ranked[k] == c) {
+                        return true;
+                    }
+                    k = k + 1;
+                }
+                return false;
+            }
+
             public method countedMasses() returns int {
                 return this.massesCounted;
             }
 
-            public method resourceReport() returns void {
+            public method resourceReport(int wantContinents) returns void {
                 StringBuilder rs = new StringBuilder() on heap;
                 rs.append("resources: surface ");
                 rs.appendInt(this.nodeCells);
@@ -868,7 +915,11 @@ public bundle Agents {
                 fp.appendInt(this.forestBiggest);
                 fp.append(" | in woods (64+) ");
                 fp.appendInt(this.clumpShare());
-                fp.append("/1000 | landmasses with wood+stone+water ");
+                fp.append("/1000 | wood+stone+water: continents ");
+                fp.appendInt(this.livableContinents(wantContinents));
+                fp.append("/");
+                fp.appendInt(wantContinents);
+                fp.append(", all landmasses ");
                 fp.appendInt(this.massesLivable);
                 fp.append("/");
                 fp.appendInt(this.massesCounted);
@@ -1033,7 +1084,7 @@ public bundle Agents {
                 rl.appendInt(this.straightestH());
                 System.IO.Console.println(rl.toString());
                 delete rl;
-                this.resourceReport();
+                this.resourceReport(wantContinents);
                 int v = this.verdict(wantContinents);
                 String nm = this.reasonName(v);
                 StringBuilder s2 = new StringBuilder() on heap;

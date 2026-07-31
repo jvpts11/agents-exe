@@ -1,0 +1,331 @@
+import System.IO.Console;
+
+// Everything that grows or lies on the ground and is not a tree: berries, mushrooms, herbs, the
+// fibre and grain plants, reeds, cactus, loose stone, and the fishing spots out on the water.
+//
+// It runs AFTER Flora and reads what Flora wrote, because where undergrowth lives is defined by the
+// trees: at the forest EDGE and in its CLEARINGS, not under a closed canopy and not out in the open.
+// A cell that holds no tree but has trees around it is exactly that place, and it costs one
+// neighbourhood count to find.
+//
+// Reeds, fishing spots and boulders are not undergrowth and do not follow that rule -- they key off
+// fresh water, off shallow water near a shore, and off exposed rock. They are here rather than in
+// Flora because they are the same KIND of thing: one surface node per cell, placed by a gate and a
+// draw, and splitting them across two files would only mean two copies of the machinery.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public class Groundcover implements WorldPass {
+            private mutable int seed;
+            private mutable int w;
+            private mutable int h;
+            // undergrowth: up to three species per biome and its peak share, per mille
+            private mutable int[] ua;
+            private mutable int[] ub;
+            private mutable int[] uc;
+            private mutable int[] ucov;
+            // loose surface stone per biome, per mille
+            private mutable int[] bcov;
+            private mutable int[] dFresh;   // rings to river or lake
+            private mutable int[] dLand;    // rings to land, for the fishing spots
+
+            public constructor Groundcover(int seed) {
+                this.seed = seed;
+                this.w = 1;
+                this.h = 1;
+                this.ua = new int[Biomes.COUNT]();
+                this.ub = new int[Biomes.COUNT]();
+                this.uc = new int[Biomes.COUNT]();
+                this.ucov = new int[Biomes.COUNT]();
+                this.bcov = new int[Biomes.COUNT]();
+                this.dFresh = new int[1]();
+                this.dLand = new int[1]();
+                this.buildTables();
+            }
+
+            public destructor ~Groundcover() returns void {
+                delete this.ua;
+                delete this.ub;
+                delete this.uc;
+                delete this.ucov;
+                delete this.bcov;
+                delete this.dFresh;
+                delete this.dLand;
+            }
+
+            public override method name() returns String {
+                return "groundcover";
+            }
+
+            private method setUnder(int biome, int a, int b, int c, int cov) returns void
+                requires biome >= 0
+                requires biome < Biomes.COUNT
+                requires cov >= 0
+                requires cov <= 1000
+            {
+                this.ua[biome] = a;
+                this.ub[biome] = b;
+                this.uc[biome] = c;
+                this.ucov[biome] = cov;
+            }
+
+            private method setStone(int biome, int cov) returns void
+                requires biome >= 0
+                requires biome < Biomes.COUNT
+                requires cov >= 0
+                requires cov <= 1000
+            {
+                this.bcov[biome] = cov;
+            }
+
+            private method buildTables() returns void {
+                int berry = cast<int>(NodeKind.BerryBush);
+                int shroom = cast<int>(NodeKind.MushroomPatch);
+                int herb = cast<int>(NodeKind.HerbPlant);
+                int wheat = cast<int>(NodeKind.WheatField);
+                int vine = cast<int>(NodeKind.WildVine);
+                int cotton = cast<int>(NodeKind.CottonPlant);
+                int flax = cast<int>(NodeKind.FlaxPlant);
+                int reeds = cast<int>(NodeKind.Reeds);
+                int cactus = cast<int>(NodeKind.Cactus);
+                int none = 0;
+                // wetlands: reeds and fungus
+                this.setUnder(10, reeds, herb, none, 260);              // Marsh
+                this.setUnder(11, shroom, reeds, herb, 170);            // Swamp
+                this.setUnder(12, shroom, reeds, none, 140);            // Bog
+                this.setUnder(13, reeds, none, none, 90);               // Mangrove
+                // warm forest: vines and fruit
+                this.setUnder(14, vine, shroom, herb, 190);             // TropicalRainforest
+                this.setUnder(15, vine, berry, herb, 140);              // TropSeasonalForest
+                // warm open: fibre
+                this.setUnder(16, cotton, herb, none, 70);              // Savanna
+                this.setUnder(17, cactus, cotton, none, 80);            // ThornScrub
+                this.setUnder(18, cactus, none, none, 30);              // HotDesert
+                this.setUnder(19, herb, flax, berry, 130);              // MedShrubland
+                this.setUnder(20, wheat, flax, herb, 110);              // WarmGrassland
+                // temperate and boreal forest: berries and fungus
+                this.setUnder(21, berry, herb, shroom, 160);            // LaurelForest
+                this.setUnder(22, berry, shroom, herb, 190);            // DeciduousForest
+                this.setUnder(23, shroom, berry, herb, 200);            // TemperateRainforest
+                this.setUnder(27, berry, shroom, none, 170);            // Taiga
+                // temperate open: wild grain and flax
+                this.setUnder(24, wheat, flax, herb, 120);              // Prairie
+                this.setUnder(25, wheat, flax, none, 80);               // Steppe
+                this.setUnder(26, herb, none, none, 20);                // ColdDesert
+                this.setUnder(28, berry, herb, none, 70);               // Tundra
+                // high ground and the oasis
+                this.setUnder(32, berry, herb, flax, 100);              // Hills
+                this.setUnder(34, herb, berry, none, 150);              // AlpineMeadow
+                this.setUnder(37, cactus, none, none, 25);              // Badlands
+                this.setUnder(39, herb, wheat, none, 220);              // Oasis
+                // loose stone, wherever rock is at or near the surface
+                this.setStone(9, 90);                                   // RockyShore
+                this.setStone(26, 30);                                  // ColdDesert
+                this.setStone(31, 15);                                  // Snowfield
+                this.setStone(32, 70);                                  // Hills
+                this.setStone(33, 120);                                 // Mountain
+                this.setStone(34, 45);                                  // AlpineMeadow
+                this.setStone(36, 60);                                  // Volcanic
+                this.setStone(37, 130);                                 // Badlands
+                return;
+            }
+
+            private method idx(int x, int y) returns int {
+                mutable int xx = x;
+                if (xx < 0) {
+                    xx = 0;
+                }
+                if (xx >= this.w) {
+                    xx = this.w - 1;
+                }
+                mutable int yy = y;
+                if (yy < 0) {
+                    yy = 0;
+                }
+                if (yy >= this.h) {
+                    yy = this.h - 1;
+                }
+                return yy * this.w + xx;
+            }
+
+            private method dilate(int[] d, int rings) returns void {
+                mutable int p = 0;
+                while (p < rings) {
+                    mutable int y = 0;
+                    while (y < this.h) {
+                        mutable int x = 0;
+                        while (x < this.w) {
+                            int i = y * this.w + x;
+                            mutable int m = d[i];
+                            int a = d[this.idx(x - 1, y)] + 1;
+                            int b = d[this.idx(x + 1, y)] + 1;
+                            int c = d[this.idx(x, y - 1)] + 1;
+                            int e = d[this.idx(x, y + 1)] + 1;
+                            if (a < m) {
+                                m = a;
+                            }
+                            if (b < m) {
+                                m = b;
+                            }
+                            if (c < m) {
+                                m = c;
+                            }
+                            if (e < m) {
+                                m = e;
+                            }
+                            d[i] = m;
+                            x = x + 1;
+                        }
+                        y = y + 1;
+                    }
+                    p = p + 1;
+                }
+                return;
+            }
+
+            private method distanceFields(Grid* g) returns void {
+                int n = this.w * this.h;
+                for (int i in 0..n) {
+                    int x = i % this.w;
+                    int y = i / this.w;
+                    boolean fresh = g.hasFlag(x, y, Grid.FLAG_RIVER) || g.hasFlag(x, y, Grid.FLAG_LAKE);
+                    if (fresh) {
+                        this.dFresh[i] = 0;
+                    } else {
+                        this.dFresh[i] = 9999;
+                    }
+                    if (g.biomeAt(x, y) >= 8) {
+                        this.dLand[i] = 0;
+                    } else {
+                        this.dLand[i] = 9999;
+                    }
+                }
+                this.dilate(this.dFresh, 3);
+                this.dilate(this.dLand, 4);
+                return;
+            }
+
+            // How many of the surrounding cells hold a tree, sampled over a 5x5. Zero means open
+            // country; a high count means closed canopy; in between is the forest edge and the rim
+            // of a clearing, which is where almost everything that is not a tree actually grows.
+            private method treesNear(Grid* g, int x, int y) returns int {
+                mutable int c = 0;
+                mutable int dy = 0 - 2;
+                while (dy <= 2) {
+                    mutable int dx = 0 - 2;
+                    while (dx <= 2) {
+                        if (Nodes.isTree(g.nodeAt(x + dx, y + dy))) {
+                            c = c + 1;
+                        }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                return c;
+            }
+
+            private method placeAt(Grid* g, int x, int y, int kind, float vary) returns void {
+                int qty = Nodes.baseQty(kind) * (70 + cast<int>(vary * 60.0)) / 100;
+                g.setNode(x, y, kind, qty);
+                return;
+            }
+
+            public override method apply(Grid* g, WorldField* f) returns void {
+                this.w = g.width();
+                this.h = g.height();
+                int n = this.w * this.h;
+                delete this.dFresh;
+                delete this.dLand;
+                this.dFresh = new int[n]();
+                this.dLand = new int[n]();
+                this.distanceFields(g);
+                int reeds = cast<int>(NodeKind.Reeds);
+                int boulder = cast<int>(NodeKind.Boulder);
+                int fishing = cast<int>(NodeKind.FishingSpot);
+                mutable int nUnder = 0;
+                mutable int nReed = 0;
+                mutable int nStone = 0;
+                mutable int nFish = 0;
+                for (int y in 0..this.h) {
+                    float ny = cast<float>(y) / cast<float>(this.h);
+                    for (int x in 0..this.w) {
+                        int i = y * this.w + x;
+                        if (g.hasNode(x, y)) {
+                            continue;                       // a cell holds one thing
+                        }
+                        int biome = g.biomeAt(x, y);
+                        float nx = cast<float>(x) / cast<float>(this.w);
+                        // One shared patchiness field for everything here, so a berry thicket, a
+                        // reed bed and a boulder field are all PATCHES rather than an even sprinkle
+                        // -- the same reason the trees needed a field, at a smaller scale.
+                        float patch = LandMath.fbm(this.seed ^ 0x9A17, nx, ny, 60, 3);
+                        float draw = LandMath.hash01(this.seed ^ 0x4C0F, x * 7 + 5, y * 13 + 11);
+                        float vary = LandMath.hash01(this.seed ^ 0x1E93, x * 11 + 2, y * 3 + 9);
+                        if (biome < 8) {
+                            // OPEN WATER: fishing spots, in the shallows within reach of a shore.
+                            // A spot no boat can be launched to is not a resource.
+                            if (biome == 3 || biome == 4 || biome == 6) {
+                                if (this.dLand[i] <= 4 && patch > 0.52 && draw < 0.030) {
+                                    this.placeAt(g, x, y, fishing, vary);
+                                    nFish = nFish + 1;
+                                }
+                            }
+                            continue;
+                        }
+                        // REEDS first: the margin of fresh water beats whatever else the biome grows
+                        // there, which is what a reed bed looks like from the bank.
+                        if (this.dFresh[i] <= 1 && Biomes.walkable(biome)) {
+                            if (draw < 0.42 * (0.4 + patch)) {
+                                this.placeAt(g, x, y, reeds, vary);
+                                nReed = nReed + 1;
+                                continue;
+                            }
+                        }
+                        // LOOSE STONE, wherever rock reaches the surface.
+                        int bc = this.bcov[biome];
+                        if (bc > 0) {
+                            float bd = cast<float>(bc) / 1000.0 * (0.35 + 1.3 * patch);
+                            if (draw < bd) {
+                                this.placeAt(g, x, y, boulder, vary);
+                                nStone = nStone + 1;
+                                continue;
+                            }
+                        }
+                        // UNDERGROWTH: three times likelier beside trees than out in the open, and
+                        // the cell is tree-free by the test at the top -- so what is left is the
+                        // edge and the clearing.
+                        int uc2 = this.ucov[biome];
+                        if (uc2 == 0) {
+                            continue;
+                        }
+                        mutable float shade = 0.55;
+                        int near = this.treesNear(g, x, y);
+                        if (near > 0) {
+                            shade = 1.8;
+                        }
+                        float ud = cast<float>(uc2) / 1000.0 * (0.30 + 1.4 * patch) * shade;
+                        if (draw >= ud) {
+                            continue;
+                        }
+                        float zone = LandMath.fbm(this.seed ^ 0x71D3, nx, ny, 14, 3);
+                        mutable int kind = this.ua[biome];
+                        if (vary > 0.88 && this.uc[biome] != 0) {
+                            kind = this.uc[biome];
+                        } else if (zone > 0.50 && this.ub[biome] != 0) {
+                            kind = this.ub[biome];
+                        }
+                        if (kind == 0) {
+                            continue;
+                        }
+                        this.placeAt(g, x, y, kind, vary);
+                        nUnder = nUnder + 1;
+                    }
+                }
+                System.IO.Console.println($"groundcover: {nUnder} undergrowth, {nReed} reeds, {nStone} stone, {nFish} fishing");
+                return;
+            }
+        }
+    }
+}
