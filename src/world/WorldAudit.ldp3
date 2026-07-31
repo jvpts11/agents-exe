@@ -30,6 +30,20 @@ public bundle Agents {
             private mutable int[] top;         // the 32 biggest landmasses, descending
             private mutable int nReal;         // components bigger than the noise floor
 
+            // relief: 8-connected components of the HIGHLAND band, and of the volcanic biome
+            private mutable int[] rcomp;
+            private mutable int[] rarea;
+            private mutable int[] rx0;
+            private mutable int[] ry0;
+            private mutable int[] rx1;
+            private mutable int[] ry1;
+            private mutable int highCells;
+            private mutable int peakMax;
+            private mutable int chainElong;    // area-weighted length/width, x100
+            private mutable int ventArcs;
+            private mutable int ventLargest;
+            private mutable int ventCells;
+
             public constructor WorldAudit(Grid* grid) {
                 this.g = grid;
                 this.w = grid.width();
@@ -42,6 +56,18 @@ public bundle Agents {
                 this.ncomp = 0;
                 this.landCells = 0;
                 this.nReal = 0;
+                this.rcomp = new int[this.w * this.h]();
+                this.rarea = new int[this.capacity]();
+                this.rx0 = new int[this.capacity]();
+                this.ry0 = new int[this.capacity]();
+                this.rx1 = new int[this.capacity]();
+                this.ry1 = new int[this.capacity]();
+                this.highCells = 0;
+                this.peakMax = 0;
+                this.chainElong = 0;
+                this.ventArcs = 0;
+                this.ventLargest = 0;
+                this.ventCells = 0;
             }
 
             public destructor ~WorldAudit() returns void {
@@ -49,6 +75,12 @@ public bundle Agents {
                 delete this.area;
                 delete this.stack;
                 delete this.top;
+                delete this.rcomp;
+                delete this.rarea;
+                delete this.rx0;
+                delete this.ry0;
+                delete this.rx1;
+                delete this.ry1;
             }
 
             private method isLand(int x, int y) returns boolean {
@@ -119,7 +151,191 @@ public bundle Agents {
                     y = y + 1;
                 }
                 this.rank();
+                this.analyseRelief();
                 return;
+            }
+
+            // ---- relief ------------------------------------------------------------------------
+            // The highland band is read off the ELEVATION, not off the biome names: 0.63 is the
+            // contract line, and measuring it directly is what catches a mismatch between what the
+            // generator built and what classify decided to call it.
+            public static int HIGH_CUT = 6300;
+
+            private method isHigh(int x, int y) returns boolean {
+                return this.isLand(x, y) && this.g.elevAt(x, y) >= WorldAudit.HIGH_CUT;
+            }
+
+            private method isVent(int x, int y) returns boolean {
+                return this.g.biomeAt(x, y) == 36;
+            }
+
+            private method analyseRelief() returns void {
+                this.peakMax = 0;
+                this.highCells = 0;
+                this.ventCells = 0;
+                mutable int i = 0;
+                int n = this.w * this.h;
+                while (i < n) {
+                    int x = i % this.w;
+                    int y = i / this.w;
+                    if (this.isLand(x, y)) {
+                        int e = this.g.elevAt(x, y);
+                        if (e > this.peakMax) {
+                            this.peakMax = e;
+                        }
+                        if (e >= WorldAudit.HIGH_CUT) {
+                            this.highCells = this.highCells + 1;
+                        }
+                    }
+                    if (this.isVent(x, y)) {
+                        this.ventCells = this.ventCells + 1;
+                    }
+                    i = i + 1;
+                }
+                this.chainElong = this.floodRelief(0);
+                this.floodRelief(1);
+                return;
+            }
+
+            // 8-connected components of the relief predicate. mode 0 = highland (returns the
+            // area-weighted elongation x100), mode 1 = volcanic (fills ventArcs/ventLargest).
+            private method floodRelief(int mode) returns int {
+                mutable int i = 0;
+                int n = this.w * this.h;
+                while (i < n) {
+                    this.rcomp[i] = 0 - 1;
+                    i = i + 1;
+                }
+                mutable int nc = 0;
+                mutable int y = 0;
+                while (y < this.h) {
+                    mutable int x = 0;
+                    while (x < this.w) {
+                        int seedCell = y * this.w + x;
+                        mutable boolean hit = this.isHigh(x, y);
+                        if (mode == 1) {
+                            hit = this.isVent(x, y);
+                        }
+                        if (hit && this.rcomp[seedCell] == 0 - 1 && nc < this.capacity) {
+                            int id = nc;
+                            nc = nc + 1;
+                            mutable int sp = 0;
+                            this.stack[sp] = seedCell;
+                            sp = sp + 1;
+                            this.rcomp[seedCell] = id;
+                            mutable int count = 0;
+                            mutable int bx0 = x;
+                            mutable int by0 = y;
+                            mutable int bx1 = x;
+                            mutable int by1 = y;
+                            while (sp > 0) {
+                                sp = sp - 1;
+                                int cell = this.stack[sp];
+                                int cx = cell % this.w;
+                                int cy = cell / this.w;
+                                count = count + 1;
+                                if (cx < bx0) {
+                                    bx0 = cx;
+                                }
+                                if (cy < by0) {
+                                    by0 = cy;
+                                }
+                                if (cx > bx1) {
+                                    bx1 = cx;
+                                }
+                                if (cy > by1) {
+                                    by1 = cy;
+                                }
+                                mutable int dy = 0 - 1;
+                                while (dy <= 1) {
+                                    mutable int dx = 0 - 1;
+                                    while (dx <= 1) {
+                                        int nx = cx + dx;
+                                        int ny = cy + dy;
+                                        if (nx >= 0 && ny >= 0 && nx < this.w && ny < this.h) {
+                                            int ni = ny * this.w + nx;
+                                            mutable boolean ok = this.isHigh(nx, ny);
+                                            if (mode == 1) {
+                                                ok = this.isVent(nx, ny);
+                                            }
+                                            if (this.rcomp[ni] == 0 - 1 && ok) {
+                                                this.rcomp[ni] = id;
+                                                this.stack[sp] = ni;
+                                                sp = sp + 1;
+                                            }
+                                        }
+                                        dx = dx + 1;
+                                    }
+                                    dy = dy + 1;
+                                }
+                            }
+                            this.rarea[id] = count;
+                            this.rx0[id] = bx0;
+                            this.ry0[id] = by0;
+                            this.rx1[id] = bx1;
+                            this.ry1[id] = by1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                int floorSz = this.noiseFloor();
+                if (mode == 1) {
+                    mutable int arcs = 0;
+                    mutable int big = 0;
+                    i = 0;
+                    while (i < nc) {
+                        if (this.rarea[i] >= floorSz) {
+                            arcs = arcs + 1;
+                        }
+                        if (this.rarea[i] > big) {
+                            big = this.rarea[i];
+                        }
+                        i = i + 1;
+                    }
+                    this.ventArcs = arcs;
+                    this.ventLargest = big;
+                    return 0;
+                }
+                // Length over width, area-weighted. A range is long and thin; a slab is not.
+                // Width is derived (area / length) rather than measured, because a chain that bends
+                // has no single cross-section -- what matters is that it does not fill its own box.
+                mutable int wsum = 0;
+                mutable int acc = 0;
+                i = 0;
+                while (i < nc) {
+                    int a = this.rarea[i];
+                    if (a >= floorSz) {
+                        mutable int len = this.rx1[i] - this.rx0[i] + 1;
+                        int hgt = this.ry1[i] - this.ry0[i] + 1;
+                        if (hgt > len) {
+                            len = hgt;
+                        }
+                        int elong = len * len * 100 / a;
+                        acc = acc + elong * a;
+                        wsum = wsum + a;
+                    }
+                    i = i + 1;
+                }
+                if (wsum == 0) {
+                    return 0;
+                }
+                return acc / wsum;
+            }
+
+            public method highlandShare() returns int {
+                if (this.landCells == 0) {
+                    return 0;
+                }
+                return this.highCells * 1000 / this.landCells;
+            }
+
+            public method peakElevation() returns int {
+                return this.peakMax;
+            }
+
+            public method chainElongation() returns int {
+                return this.chainElong;
             }
 
             // Continents are the N BIGGEST landmasses, not every component over some absolute
@@ -314,6 +530,19 @@ public bundle Agents {
                 if (isl < 3 || isl > 12) {
                     return cast<int>(RejectReason.IslandCount);
                 }
+                // relief
+                int hs = this.highlandShare();
+                if (hs < 80 || hs > 280) {
+                    return cast<int>(RejectReason.MountainShare);
+                }
+                if (this.chainElongation() < 250) {
+                    return cast<int>(RejectReason.MountainLinearity);
+                }
+                // the band has to be REACHED, not merely entered: a range that tops out at 0.70 has
+                // no snow line, and Glacier/SnowPeak never appear anywhere in the world
+                if (this.peakElevation() < 9000) {
+                    return cast<int>(RejectReason.FlatLandContract);
+                }
                 return cast<int>(RejectReason.None);
             }
 
@@ -349,6 +578,21 @@ public bundle Agents {
                 }
                 System.IO.Console.println(sz.toString());
                 delete sz;
+                StringBuilder rl = new StringBuilder() on heap;
+                rl.append("relief: highland ");
+                rl.appendInt(this.highlandShare());
+                rl.append("/1000 of land (want 80..280) | peak ");
+                rl.appendInt(this.peakElevation());
+                rl.append("/10000 (want 9000+) | chain elongation ");
+                rl.appendInt(this.chainElongation());
+                rl.append("/100 (want 250+) | volcanic ");
+                rl.appendInt(this.ventCells);
+                rl.append(" cells in ");
+                rl.appendInt(this.ventArcs);
+                rl.append(" arcs, biggest ");
+                rl.appendInt(this.ventLargest);
+                System.IO.Console.println(rl.toString());
+                delete rl;
                 int v = this.verdict(wantContinents);
                 String nm = this.reasonName(v);
                 StringBuilder s2 = new StringBuilder() on heap;
