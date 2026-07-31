@@ -1,0 +1,414 @@
+import System.IO.Console;
+
+// What lies UNDER the ground, and why it lies there.
+//
+// The one decision that matters here is that ore is placed by GEOLOGY and not by biome. Tectonics
+// already knows which boundaries collided, which subducted, which plates are old stable cratons and
+// where it put the volcanic arcs -- and until now every bit of that was thrown away the moment the
+// relief had been written into the elevation. It is the right input: a world with no volcanic arc
+// then simply has no porphyry copper, which is correct, and a mountain belt carries the metals that
+// mountain belts carry.
+//
+// A deposit is a blob -- a centre, a lumpy radius, a richness and a depth -- and blobs are placed by
+// sampling the origin field, so they cluster where the geology says they should and are absent
+// elsewhere. Depth is not stored per cell: nothing reads it yet, and it earns its place at
+// generation time instead, where a shallow blob is poorer but far likelier to break the surface.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        // Where a deposit came from. Ordinals are used as table rows, so the order is the table's.
+        public enum OreOrigin {
+            None,
+            Orogenic,       // continent met continent: the metals of a mountain belt
+            Porphyry,       // a volcanic arc over a subducting slab
+            Basin,          // low, flat, thick sediment
+            Craton,         // old stable crust, deep roots
+            Highland        // any high ground: building stone
+        }
+
+        public class Deposits implements WorldPass {
+            private mutable int seed;
+            private mutable int w;
+            private mutable int h;
+            private mutable int[] dVent;        // rings to the nearest volcano
+            private mutable int[] found;        // blobs placed, per OreOrigin
+            private mutable int[] cells;        // cells written, per OreOrigin
+
+            public constructor Deposits(int seed) {
+                this.seed = seed;
+                this.w = 1;
+                this.h = 1;
+                this.dVent = new int[1]();
+                this.found = new int[6]();
+                this.cells = new int[6]();
+            }
+
+            public destructor ~Deposits() returns void {
+                delete this.dVent;
+                delete this.found;
+                delete this.cells;
+            }
+
+            public override method name() returns String {
+                return "deposits";
+            }
+
+            private method idx(int x, int y) returns int {
+                mutable int xx = x;
+                if (xx < 0) {
+                    xx = 0;
+                }
+                if (xx >= this.w) {
+                    xx = this.w - 1;
+                }
+                mutable int yy = y;
+                if (yy < 0) {
+                    yy = 0;
+                }
+                if (yy >= this.h) {
+                    yy = this.h - 1;
+                }
+                return yy * this.w + xx;
+            }
+
+            private method ventField(Grid* g) returns void {
+                int n = this.w * this.h;
+                for (int i in 0..n) {
+                    if (g.hasFlag(i % this.w, i / this.w, Grid.FLAG_VENT)) {
+                        this.dVent[i] = 0;
+                    } else {
+                        this.dVent[i] = 9999;
+                    }
+                }
+                mutable int p = 0;
+                while (p < 14) {
+                    mutable int y = 0;
+                    while (y < this.h) {
+                        mutable int x = 0;
+                        while (x < this.w) {
+                            int i = y * this.w + x;
+                            mutable int m = this.dVent[i];
+                            int a = this.dVent[this.idx(x - 1, y)] + 1;
+                            int b = this.dVent[this.idx(x + 1, y)] + 1;
+                            int c = this.dVent[this.idx(x, y - 1)] + 1;
+                            int e = this.dVent[this.idx(x, y + 1)] + 1;
+                            if (a < m) {
+                                m = a;
+                            }
+                            if (b < m) {
+                                m = b;
+                            }
+                            if (c < m) {
+                                m = c;
+                            }
+                            if (e < m) {
+                                m = e;
+                            }
+                            this.dVent[i] = m;
+                            x = x + 1;
+                        }
+                        y = y + 1;
+                    }
+                    p = p + 1;
+                }
+                return;
+            }
+
+            // How steep the ground is around a cell, in 0..1 height units per cell.
+            private method slopeAt(Grid* g, int x, int y) returns int {
+                int e0 = g.elevAt(x, y);
+                mutable int worst = 0;
+                mutable int d = e0 - g.elevAt(x - 2, y);
+                if (d < 0) {
+                    d = 0 - d;
+                }
+                if (d > worst) {
+                    worst = d;
+                }
+                d = e0 - g.elevAt(x, y - 2);
+                if (d < 0) {
+                    d = 0 - d;
+                }
+                if (d > worst) {
+                    worst = d;
+                }
+                return worst;
+            }
+
+            // The origin of the crust under one cell. The order of the tests is the geology: a
+            // boundary overrides everything near it, a craton interior is defined by being far from
+            // one, and the last two are what is left over high and low.
+            private method originAt(Grid* g, WorldField* f, int x, int y) returns int {
+                int biome = g.biomeAt(x, y);
+                if (biome < 8) {
+                    return cast<int>(OreOrigin.None);       // no mining under open water
+                }
+                int i = y * this.w + x;
+                if (this.dVent[i] <= 14) {
+                    return cast<int>(OreOrigin.Porphyry);
+                }
+                mutable int cx = x * f.pw / f.w;
+                mutable int cy = y * f.ph / f.h;
+                if (cx >= f.pw) {
+                    cx = f.pw - 1;
+                }
+                if (cy >= f.ph) {
+                    cy = f.ph - 1;
+                }
+                int ci = cy * f.pw + cx;
+                int bk = cast<int>(f.borigin[ci]) & 255;
+                float near = f.bnear[ci];
+                if (near > 0.55 && bk == Tectonics.B_COLLISION) {
+                    return cast<int>(OreOrigin.Orogenic);
+                }
+                int e = g.elevAt(x, y);
+                int plate = f.plateAt(x, y);
+                if (near < 0.30 && f.pkind[plate] == 1) {
+                    return cast<int>(OreOrigin.Craton);
+                }
+                if (e >= 6300) {
+                    return cast<int>(OreOrigin.Highland);
+                }
+                if (e < 5500 && this.slopeAt(g, x, y) < 90) {
+                    return cast<int>(OreOrigin.Basin);      // low, flat, thick sediment
+                }
+                return cast<int>(OreOrigin.None);
+            }
+
+            // What each origin yields, drawn by weight out of 100. The tables are the design's, and
+            // they are the whole reason the ore map is not arbitrary.
+            private method kindFor(int origin, int roll) returns int {
+                switch (origin) {
+                    case 1 {                                 // Orogenic
+                        if (roll < 28) {
+                            return cast<int>(NodeKind.IronVein);
+                        }
+                        if (roll < 46) {
+                            return cast<int>(NodeKind.CopperVein);
+                        }
+                        if (roll < 58) {
+                            return cast<int>(NodeKind.TinVein);
+                        }
+                        if (roll < 68) {
+                            return cast<int>(NodeKind.SilverVein);
+                        }
+                        if (roll < 76) {
+                            return cast<int>(NodeKind.GoldVein);
+                        }
+                        if (roll < 86) {
+                            return cast<int>(NodeKind.GemRock);
+                        }
+                        return cast<int>(NodeKind.MarbleOutcrop);
+                    }
+                    case 2 {                                 // Porphyry
+                        if (roll < 34) {
+                            return cast<int>(NodeKind.CopperVein);
+                        }
+                        if (roll < 64) {
+                            return cast<int>(NodeKind.SulfurVent);
+                        }
+                        if (roll < 82) {
+                            return cast<int>(NodeKind.GoldVein);
+                        }
+                        return cast<int>(NodeKind.SilverVein);
+                    }
+                    case 3 {                                 // Basin
+                        if (roll < 32) {
+                            return cast<int>(NodeKind.CoalSeam);
+                        }
+                        if (roll < 56) {
+                            return cast<int>(NodeKind.OilSeep);
+                        }
+                        if (roll < 82) {
+                            return cast<int>(NodeKind.ClayPit);
+                        }
+                        return cast<int>(NodeKind.SaltDeposit);
+                    }
+                    case 4 {                                 // Craton
+                        if (roll < 45) {
+                            return cast<int>(NodeKind.RareEarth);
+                        }
+                        if (roll < 80) {
+                            return cast<int>(NodeKind.GemRock);
+                        }
+                        return cast<int>(NodeKind.GoldVein);
+                    }
+                    case 5 {                                 // Highland
+                        if (roll < 62) {
+                            return cast<int>(NodeKind.StoneRock);
+                        }
+                        return cast<int>(NodeKind.MarbleOutcrop);
+                    }
+                    default {
+                        return 0;
+                    }
+                }
+            }
+
+            // How many blobs of each origin a world of this size should carry.
+            private method quotaFor(int origin, int area) returns int {
+                mutable int base = 0;
+                switch (origin) {
+                    case 1 {
+                        base = 46;
+                        break;
+                    }
+                    case 2 {
+                        base = 30;
+                        break;
+                    }
+                    case 3 {
+                        base = 52;
+                        break;
+                    }
+                    case 4 {
+                        base = 30;
+                        break;
+                    }
+                    case 5 {
+                        base = 40;
+                        break;
+                    }
+                    default {
+                        base = 0;
+                    }
+                }
+                mutable int n = base * area / (2560 * 1440);
+                if (n < 3 && base > 0) {
+                    n = 3;
+                }
+                return n;
+            }
+
+            // Paint one blob. Not a disc: the radius is modulated by noise, so an ore body has the
+            // lumpy, lobed outline a real one has and two overlapping blobs read as one field rather
+            // than as two circles. Where blobs meet, the richer one keeps the cell.
+            private method paint(Grid* g, int cx, int cy, int rad, int kind, float rich,
+                                 int origin) returns void {
+                int base = Nodes.baseQty(kind);
+                mutable int y = cy - rad;
+                while (y <= cy + rad) {
+                    if (y >= 0 && y < this.h) {
+                        mutable int x = cx - rad;
+                        while (x <= cx + rad) {
+                            if (x >= 0 && x < this.w) {
+                                int dx = x - cx;
+                                int dy = y - cy;
+                                float dist = LandMath.sqrt(cast<float>(dx * dx + dy * dy));
+                                float dn = dist / cast<float>(rad);
+                                float lump = LandMath.fbm(this.seed ^ (cx * 31 + cy * 17),
+                                                          cast<float>(x) / cast<float>(this.w),
+                                                          cast<float>(y) / cast<float>(this.h),
+                                                          140, 3);
+                                if (dn < 0.55 + 0.75 * lump) {
+                                    if (g.biomeAt(x, y) >= 8) {
+                                        mutable float fall = 1.0 - dn * 0.7;
+                                        if (fall < 0.15) {
+                                            fall = 0.15;
+                                        }
+                                        mutable int q = cast<int>(cast<float>(base) * rich * fall);
+                                        if (q < 1) {
+                                            q = 1;
+                                        }
+                                        if (q > 32000) {
+                                            q = 32000;
+                                        }
+                                        if (g.subQtyAt(x, y) < q) {
+                                            if (!g.hasSub(x, y)) {
+                                                this.cells[origin] = this.cells[origin] + 1;
+                                            }
+                                            g.setSub(x, y, kind, q);
+                                        }
+                                    }
+                                }
+                            }
+                            x = x + 1;
+                        }
+                    }
+                    y = y + 1;
+                }
+                return;
+            }
+
+            public override method apply(Grid* g, WorldField* f) returns void {
+                this.w = g.width();
+                this.h = g.height();
+                int n = this.w * this.h;
+                delete this.dVent;
+                this.dVent = new int[n]();
+                this.ventField(g);
+                for (int k in 0..6) {
+                    this.found[k] = 0;
+                    this.cells[k] = 0;
+                }
+                Rng2 rng = new Rng2(this.seed ^ 0x0DEB0) on stack;
+                // Rejection sampling: throw a dart at the map, ask the geology what is under it, and
+                // seed a blob there if that origin still has quota. It needs no map of the origins
+                // and it cannot invent an origin the world does not have -- a world with no volcanic
+                // arc ends the loop with zero porphyry, which is the right answer.
+                mutable int attempts = 0;
+                mutable int budget = 200000;
+                mutable int placed = 0;
+                while (attempts < budget) {
+                    attempts = attempts + 1;
+                    int x = rng.nextInt(this.w);
+                    int y = rng.nextInt(this.h);
+                    int origin = this.originAt(g, f, x, y);
+                    if (origin == 0) {
+                        continue;
+                    }
+                    if (this.found[origin] >= this.quotaFor(origin, n)) {
+                        continue;
+                    }
+                    // Depth earns its keep here rather than in a per-cell layer: a deep body is
+                    // bigger and richer, a shallow one smaller and poorer but far likelier to reach
+                    // daylight, which is what the outcrop pass will look for.
+                    float deep = rng.unit();
+                    int rad = 7 + cast<int>(deep * 13.0);
+                    float rich = 0.45 + deep * 0.75;
+                    int kind = this.kindFor(origin, rng.nextInt(100));
+                    if (kind == 0) {
+                        continue;
+                    }
+                    this.paint(g, x, y, rad, kind, rich, origin);
+                    this.found[origin] = this.found[origin] + 1;
+                    placed = placed + 1;
+                }
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("deposits: ");
+                sb.appendInt(placed);
+                sb.append(" bodies |");
+                for (int k in 1..6) {
+                    sb.append(" ");
+                    sb.append(this.originName(k));
+                    sb.append("=");
+                    sb.appendInt(this.found[k]);
+                    sb.append("/");
+                    sb.appendInt(this.cells[k]);
+                }
+                sb.append(" (bodies/cells)");
+                System.IO.Console.println(sb.toString());
+                delete sb;
+                return;
+            }
+
+            private method originName(int o) returns String {
+                if (o == 1) {
+                    return "orogenic";
+                }
+                if (o == 2) {
+                    return "porphyry";
+                }
+                if (o == 3) {
+                    return "basin";
+                }
+                if (o == 4) {
+                    return "craton";
+                }
+                return "highland";
+            }
+        }
+    }
+}
