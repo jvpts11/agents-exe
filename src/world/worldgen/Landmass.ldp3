@@ -1,0 +1,289 @@
+import System.IO.Console;
+import Agents.World.Grid;
+
+// The silhouette stage. A landmass is the union of elliptical lobes planted along a short, gently
+// turning skeleton -- non-radial BY CONSTRUCTION.
+//
+// Why that matters: three previous generations of this worldgen failed the same way. All of them
+// described a continent as centre + radius + noise, and a noisy circle still reads as a circle;
+// the domain warp strong enough to disguise it is also strong enough to smear neighbouring
+// continents into one connected web. Lobes on a skeleton produce gulfs where two lobes meet and
+// peninsulas where one juts out, without any warp of the sampled position.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        // One blob of a landmass: an ellipse with its own size, flattening and rotation, plus the
+        // vector helpers the skeleton walk needs. (There is deliberately no Vec2 here: the project
+        // already has Agents.Math.Vec2, and declaring a second type of that name in another
+        // namespace corrupts symbol resolution -- see the compiler bug filed for it.)
+        public struct Lobe {
+            public mutable float cx;
+            public mutable float cy;
+            public mutable float rx;
+            public mutable float ry;
+            public mutable float ang;
+
+            public constructor Lobe(float cx, float cy, float rx, float ry, float ang) {
+                this.cx = cx;
+                this.cy = cy;
+                this.rx = rx;
+                this.ry = ry;
+                this.ang = ang;
+            }
+
+            // Normalized elliptical distance from this lobe to a point: 1.0 is the lobe's rim.
+            public method distanceTo(float px, float py, float aspect) returns float {
+                float dx = (px - this.cx) * aspect;
+                float dy = py - this.cy;
+                float ca = LandMath.cos(this.ang);
+                float sa = LandMath.sin(this.ang);
+                float ux = (dx * ca + dy * sa) / this.rx;
+                float uy = (dy * ca - dx * sa) / this.ry;
+                return LandMath.sqrt(ux * ux + uy * uy);
+            }
+        }
+
+        // Scalar maths the worldgen stages share. Kept as statics so Landmass and Tectonics use
+        // ONE implementation: two divergent noise functions would silently desynchronise the
+        // coastline from the climate that is sampled over it.
+        public class LandMath {
+            public static method sqrt(float v) returns float {
+                if (v <= 0.0) {
+                    return 0.0;
+                }
+                mutable float g = v;
+                mutable int i = 0;
+                while (i < 16) {
+                    g = 0.5 * (g + v / g);
+                    i = i + 1;
+                }
+                return g;
+            }
+
+            public static method sin(float x) returns float {
+                mutable float t = x;
+                float pi = 3.14159265;
+                float two = 2.0 * pi;
+                while (t > pi) {
+                    t = t - two;
+                }
+                while (t < 0.0 - pi) {
+                    t = t + two;
+                }
+                float t2 = t * t;
+                return t - t * t2 / 6.0 + t * t2 * t2 / 120.0 - t * t2 * t2 * t2 / 5040.0;
+            }
+
+            public static method cos(float x) returns float {
+                return LandMath.sin(x + 1.5707963);
+            }
+
+            // exp by range reduction: exp(x) = exp(x/64)^64, with a 4-term Taylor on the small
+            // argument. Accurate enough for the crest profile and cheap.
+            public static method exp(float x) returns float {
+                mutable boolean negative = false;
+                mutable float v = x;
+                if (v < 0.0) {
+                    v = 0.0 - v;
+                    negative = true;
+                }
+                if (v > 40.0) {
+                    v = 40.0;
+                }
+                float t = v / 64.0;
+                mutable float e = 1.0 + t + t * t * 0.5 + t * t * t / 6.0 + t * t * t * t / 24.0;
+                mutable int i = 0;
+                while (i < 6) {
+                    e = e * e;
+                    i = i + 1;
+                }
+                if (negative) {
+                    return 1.0 / e;
+                }
+                return e;
+            }
+
+            public static method hash01(int seed, int xi, int yi) returns float {
+                mutable int n = xi * 374761393;
+                n = n + yi * 668265263;
+                n = n + seed * 1442695041;
+                n = n ^ (n >> 13);
+                n = n * 1274126177;
+                n = n ^ (n >> 16);
+                int m = n & 2147483647;
+                return cast<float>(m) / 2147483647.0;
+            }
+
+            private static method smooth(float t) returns float {
+                return t * t * (3.0 - 2.0 * t);
+            }
+
+            public static method vnoise(int seed, float fx, float fy, int period) returns float {
+                mutable int p = period;
+                if (p < 1) {
+                    p = 1;
+                }
+                int x0 = cast<int>(fx);
+                int y0 = cast<int>(fy);
+                float tx = fx - cast<float>(x0);
+                float ty = fy - cast<float>(y0);
+                int x0w = x0 % p;
+                int x1w = (x0 + 1) % p;
+                float sx = LandMath.smooth(tx);
+                float sy = LandMath.smooth(ty);
+                float a = LandMath.hash01(seed, x0w, y0);
+                float b = LandMath.hash01(seed, x1w, y0);
+                float c = LandMath.hash01(seed, x0w, y0 + 1);
+                float d = LandMath.hash01(seed, x1w, y0 + 1);
+                float ab = a + (b - a) * sx;
+                float cd = c + (d - c) * sx;
+                return ab + (cd - ab) * sy;
+            }
+
+            // multi-octave value noise over normalized coordinates
+            public static method fbm(int seed, float nx, float ny, int cells, int octaves) returns float {
+                mutable float sum = 0.0;
+                mutable float amp = 1.0;
+                mutable float tot = 0.0;
+                mutable int c = cells;
+                mutable int o = 0;
+                while (o < octaves) {
+                    float v = LandMath.vnoise(seed, nx * cast<float>(c), ny * cast<float>(c), c);
+                    sum = sum + v * amp;
+                    tot = tot + amp;
+                    amp = amp * 0.5;
+                    c = c * 2;
+                    o = o + 1;
+                }
+                return sum / tot;
+            }
+        }
+
+        // NOTE: this was a `record ContinentProfile(int lobes, float wander, ...)`. A record with
+        // any float field cannot be declared at all right now -- its synthesized toString() calls
+        // .toString() on every field and float has none (compiler bug filed). The profile
+        // therefore lives in the parallel arrays inside Landmass, which is what the per-cell hot
+        // path wants anyway; restore the record once float gains a string conversion.
+
+        public class Landmass {
+            private mutable int seed;
+            private mutable int nmass;
+            // profile fields, one entry per landmass
+            private mutable int[] pLobes;
+            private mutable float[] pWander;
+            private mutable float[] pTurn;
+            private mutable float[] pAspect;
+            private mutable float[] pCoastAmp;
+            private mutable float[] pCoastFreq;
+            private mutable float[] pShare;
+
+            public constructor Landmass(int seed) {
+                this.seed = seed;
+                this.nmass = 0;
+                this.pLobes = new int[1]();
+                this.pWander = new float[1]();
+                this.pTurn = new float[1]();
+                this.pAspect = new float[1]();
+                this.pCoastAmp = new float[1]();
+                this.pCoastFreq = new float[1]();
+                this.pShare = new float[1]();
+            }
+
+            public destructor ~Landmass() returns void {
+                delete this.pLobes;
+                delete this.pWander;
+                delete this.pTurn;
+                delete this.pAspect;
+                delete this.pCoastAmp;
+                delete this.pCoastFreq;
+                delete this.pShare;
+            }
+
+            public method profileCount() returns int {
+                return this.nmass;
+            }
+
+            public method lobesOf(int i) returns int {
+                return this.pLobes[i];
+            }
+
+            public method shareOf(int i) returns float {
+                return this.pShare[i];
+            }
+
+            private method allocProfiles(int n) returns void {
+                delete this.pLobes;
+                delete this.pWander;
+                delete this.pTurn;
+                delete this.pAspect;
+                delete this.pCoastAmp;
+                delete this.pCoastFreq;
+                delete this.pShare;
+                this.pLobes = new int[n]();
+                this.pWander = new float[n]();
+                this.pTurn = new float[n]();
+                this.pAspect = new float[n]();
+                this.pCoastAmp = new float[n]();
+                this.pCoastFreq = new float[n]();
+                this.pShare = new float[n]();
+                this.nmass = n;
+                return;
+            }
+
+            // Sizes follow a linear ramp with largest:smallest = 3:1, jittered +-15%, normalised so
+            // the shares sum to 1. Drawn from a DEDICATED stream so the geography never shifts when
+            // an unrelated stage changes how many random numbers it consumes -- a lesson from the
+            // previous rewrite, where re-rolling one jitter silently emptied two biomes.
+            public method drawProfiles(int n) returns void {
+                this.allocProfiles(n);
+                Rng2 rng = new Rng2(this.seed ^ 0x2C0F) on stack;
+                float[] raw = new float[n]();
+                mutable float total = 0.0;
+                mutable int i = 0;
+                while (i < n) {
+                    mutable float ramp = 3.0;
+                    if (n > 1) {
+                        ramp = 3.0 - 2.0 * cast<float>(i) / cast<float>(n - 1);
+                    }
+                    float jitter = 0.85 + 0.30 * rng.unit();
+                    raw[i] = ramp * jitter;
+                    total = total + raw[i];
+                    i = i + 1;
+                }
+                i = 0;
+                while (i < n) {
+                    this.pLobes[i] = 3 + rng.nextInt(6);
+                    this.pWander[i] = 0.35 + 0.50 * rng.unit();
+                    this.pTurn[i] = 0.35 + 0.85 * rng.unit();
+                    this.pAspect[i] = 1.0 + 1.5 * rng.unit();
+                    this.pCoastAmp[i] = 0.06 + 0.28 * rng.unit();
+                    this.pCoastFreq[i] = 3.0 + 11.0 * rng.unit();
+                    this.pShare[i] = raw[i] / total;
+                    i = i + 1;
+                }
+                delete raw;
+                return;
+            }
+
+            // Floats are printed as scaled integers: string interpolation does not accept float
+            // (filed as a language gap), so every fractional value here is shown x1000.
+            public method dumpProfiles() returns void {
+                mutable int i = 0;
+                while (i < this.nmass) {
+                    int lobes = this.pLobes[i];
+                    int wander = cast<int>(this.pWander[i] * 1000.0);
+                    int turn = cast<int>(this.pTurn[i] * 1000.0);
+                    int aspect = cast<int>(this.pAspect[i] * 1000.0);
+                    int amp = cast<int>(this.pCoastAmp[i] * 1000.0);
+                    int freq = cast<int>(this.pCoastFreq[i] * 1000.0);
+                    int share = cast<int>(this.pShare[i] * 1000.0);
+                    System.IO.Console.println($"continent {i}: lobes={lobes} wander={wander} turn={turn} aspect={aspect} coastAmp={amp} coastFreq={freq} share={share}  (fractions x1000)");
+                    i = i + 1;
+                }
+                return;
+            }
+        }
+    }
+}
