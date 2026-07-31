@@ -46,6 +46,22 @@ public bundle Agents {
             private mutable int vAtX;
             private mutable int vAtY;
 
+            // resources: the census. Built before the generator that fills it, on purpose -- the
+            // worldgen rewrites that were rejected on sight were all judged by eye first, and the
+            // numbers only arrived after the third attempt.
+            private mutable int[] nodeCount;   // surface nodes per NodeKind ordinal
+            private mutable int[] subCount;    // buried deposits per NodeKind ordinal
+            private mutable int[] biomeCells;  // land cells per biome
+            private mutable int[] biomeTrees;  // of those, cells holding a tree
+            private mutable int nodeCells;
+            private mutable int subCells;
+            private mutable int prospected;
+            private mutable int forestPatches;
+            private mutable int forestCells;
+            private mutable int forestBiggest;
+            private mutable int massesLivable;  // landmasses with wood AND stone AND water
+            private mutable int massesCounted;
+
             public constructor WorldAudit(Grid* grid) {
                 this.g = grid;
                 this.w = grid.width();
@@ -72,6 +88,18 @@ public bundle Agents {
                 this.ventCells = 0;
                 this.vAtX = 0;
                 this.vAtY = 0;
+                this.nodeCount = new int[Nodes.count()]();
+                this.subCount = new int[Nodes.count()]();
+                this.biomeCells = new int[Biomes.COUNT]();
+                this.biomeTrees = new int[Biomes.COUNT]();
+                this.nodeCells = 0;
+                this.subCells = 0;
+                this.prospected = 0;
+                this.forestPatches = 0;
+                this.forestCells = 0;
+                this.forestBiggest = 0;
+                this.massesLivable = 0;
+                this.massesCounted = 0;
             }
 
             public destructor ~WorldAudit() returns void {
@@ -85,6 +113,10 @@ public bundle Agents {
                 delete this.ry0;
                 delete this.rx1;
                 delete this.ry1;
+                delete this.nodeCount;
+                delete this.subCount;
+                delete this.biomeCells;
+                delete this.biomeTrees;
             }
 
             private method isLand(int x, int y) returns boolean {
@@ -156,6 +188,9 @@ public bundle Agents {
                 }
                 this.rank();
                 this.analyseRelief();
+                // The resource census reads the component map this pass just built, so it belongs
+                // here rather than at a call site that could forget the ordering.
+                this.analyseResources();
                 return;
             }
 
@@ -570,6 +605,274 @@ public bundle Agents {
                 return yy * this.w + xx;
             }
 
+            // ---- the resource census ----
+            // Runs after analyse(), because the per-landmass check reads its component map.
+
+            private method waterNear(int x, int y) returns boolean {
+                if (this.g.hasFlag(x, y, Grid.FLAG_RIVER)) {
+                    return true;
+                }
+                if (this.g.hasFlag(x, y, Grid.FLAG_LAKE)) {
+                    return true;
+                }
+                if (this.g.biomeAt(x - 1, y) < 8) { return true; }
+                if (this.g.biomeAt(x + 1, y) < 8) { return true; }
+                if (this.g.biomeAt(x, y - 1) < 8) { return true; }
+                if (this.g.biomeAt(x, y + 1) < 8) { return true; }
+                return false;
+            }
+
+            private method isStoneSource(int kind) returns boolean {
+                if (kind == cast<int>(NodeKind.Boulder)) {
+                    return true;
+                }
+                if (kind == cast<int>(NodeKind.StoneRock)) {
+                    return true;
+                }
+                return false;
+            }
+
+            public method analyseResources() returns void {
+                for (int k in 0..Nodes.count()) {
+                    this.nodeCount[k] = 0;
+                    this.subCount[k] = 0;
+                }
+                for (int b in 0..Biomes.COUNT) {
+                    this.biomeCells[b] = 0;
+                    this.biomeTrees[b] = 0;
+                }
+                this.nodeCells = 0;
+                this.subCells = 0;
+                this.prospected = 0;
+                // Per landmass, the three things an agent cannot start without. Sized to the
+                // component table, so an unranked island is judged on the same terms as a continent.
+                int lim = this.compLimit();
+                boolean[] wood = new boolean[lim + 1]();
+                boolean[] stone = new boolean[lim + 1]();
+                boolean[] water = new boolean[lim + 1]();
+                boolean[] seen = new boolean[lim + 1]();
+                for (int y in 0..this.h) {
+                    for (int x in 0..this.w) {
+                        int ord = this.g.biomeAt(x, y);
+                        boolean land = ord >= 8;
+                        if (land) {
+                            this.biomeCells[ord] = this.biomeCells[ord] + 1;
+                        }
+                        int kind = this.g.nodeAt(x, y);
+                        if (kind != 0) {
+                            this.nodeCount[kind] = this.nodeCount[kind] + 1;
+                            this.nodeCells = this.nodeCells + 1;
+                            if (land && Nodes.isTree(kind)) {
+                                this.biomeTrees[ord] = this.biomeTrees[ord] + 1;
+                            }
+                        }
+                        int burd = this.g.subAt(x, y);
+                        if (burd != 0) {
+                            this.subCount[burd] = this.subCount[burd] + 1;
+                            this.subCells = this.subCells + 1;
+                        }
+                        if (this.g.hasFlag(x, y, Grid.FLAG_PROSPECTED)) {
+                            this.prospected = this.prospected + 1;
+                        }
+                        if (land) {
+                            int c = this.comp[y * this.w + x];
+                            if (c >= 0 && c < lim) {
+                                seen[c] = true;
+                                if (Nodes.isTree(kind)) {
+                                    wood[c] = true;
+                                }
+                                if (this.isStoneSource(kind)) {
+                                    stone[c] = true;
+                                }
+                                if (!water[c] && this.waterNear(x, y)) {
+                                    water[c] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                this.massesLivable = 0;
+                this.massesCounted = 0;
+                int floor = this.noiseFloor();
+                for (int c in 0..lim) {
+                    if (seen[c] && this.area[c] > floor) {
+                        this.massesCounted = this.massesCounted + 1;
+                        if (wood[c] && stone[c] && water[c]) {
+                            this.massesLivable = this.massesLivable + 1;
+                        }
+                    }
+                }
+                delete wood;
+                delete stone;
+                delete water;
+                delete seen;
+                this.forestPatches = this.floodForest();
+                return;
+            }
+
+            // 8-connected components over cells holding a TREE. The one number that says whether a
+            // forest generator worked at all: a per-cell density produces thousands of one-cell
+            // patches, a field produces tens of big ones, and the two are indistinguishable in a
+            // total count.
+            private method floodForest() returns int {
+                int n = this.w * this.h;
+                int[] mark = new int[n]();          // zero-initialised: 0 = not yet visited
+                mutable int patches = 0;
+                mutable int cells = 0;
+                mutable int biggest = 0;
+                for (int sy in 0..this.h) {
+                    for (int sx in 0..this.w) {
+                        int s0 = sy * this.w + sx;
+                        if (mark[s0] == 0 && Nodes.isTree(this.g.nodeAt(sx, sy))) {
+                            mutable int sp = 0;
+                            this.stack[sp] = s0;
+                            sp = sp + 1;
+                            mark[s0] = 1;
+                            mutable int size = 0;
+                            while (sp > 0) {
+                                sp = sp - 1;
+                                int cur = this.stack[sp];
+                                size = size + 1;
+                                int cx = cur % this.w;
+                                int cy = cur / this.w;
+                                mutable int dy = 0 - 1;
+                                while (dy <= 1) {
+                                    mutable int dx = 0 - 1;
+                                    while (dx <= 1) {
+                                        int nx = cx + dx;
+                                        int ny = cy + dy;
+                                        if (nx >= 0 && ny >= 0 && nx < this.w && ny < this.h) {
+                                            int j = ny * this.w + nx;
+                                            if (mark[j] == 0 && Nodes.isTree(this.g.nodeAt(nx, ny))) {
+                                                mark[j] = 1;
+                                                this.stack[sp] = j;
+                                                sp = sp + 1;
+                                            }
+                                        }
+                                        dx = dx + 1;
+                                    }
+                                    dy = dy + 1;
+                                }
+                            }
+                            patches = patches + 1;
+                            cells = cells + size;
+                            if (size > biggest) {
+                                biggest = size;
+                            }
+                        }
+                    }
+                }
+                delete mark;
+                this.forestCells = cells;
+                this.forestBiggest = biggest;
+                return patches;
+            }
+
+            public method nodeTotal() returns int {
+                return this.nodeCells;
+            }
+
+            public method subTotal() returns int {
+                return this.subCells;
+            }
+
+            public method prospectedCells() returns int {
+                return this.prospected;
+            }
+
+            public method patchCount() returns int {
+                return this.forestPatches;
+            }
+
+            // Mean cells per forest patch. Dust reads as 1, a wood as hundreds.
+            public method meanPatch() returns int {
+                if (this.forestPatches == 0) {
+                    return 0;
+                }
+                return this.forestCells / this.forestPatches;
+            }
+
+            public method largestPatch() returns int {
+                return this.forestBiggest;
+            }
+
+            // Per mille of a biome's cells that carry a tree.
+            public method treeCover(int biomeOrd) returns int {
+                if (this.biomeCells[biomeOrd] == 0) {
+                    return 0;
+                }
+                return this.biomeTrees[biomeOrd] * 1000 / this.biomeCells[biomeOrd];
+            }
+
+            // How many NodeKinds never appear anywhere: a missing kind breaks a chain in ECONOMY.md,
+            // so it has to fail as loudly as a missing biome does.
+            public method kindsMissing() returns int {
+                mutable int miss = 0;
+                for (int k in 1..Nodes.count()) {
+                    if (this.nodeCount[k] == 0 && this.subCount[k] == 0) {
+                        miss = miss + 1;
+                    }
+                }
+                return miss;
+            }
+
+            public method livableMasses() returns int {
+                return this.massesLivable;
+            }
+
+            public method countedMasses() returns int {
+                return this.massesCounted;
+            }
+
+            public method resourceReport() returns void {
+                StringBuilder rs = new StringBuilder() on heap;
+                rs.append("resources: surface ");
+                rs.appendInt(this.nodeCells);
+                rs.append(" nodes | buried ");
+                rs.appendInt(this.subCells);
+                rs.append(" cells | prospected ");
+                rs.appendInt(this.prospected);
+                rs.append(" | kinds missing ");
+                rs.appendInt(this.kindsMissing());
+                rs.append(" of ");
+                rs.appendInt(Nodes.count() - 1);
+                System.IO.Console.println(rs.toString());
+                delete rs;
+                StringBuilder fp = new StringBuilder() on heap;
+                fp.append("  forest: ");
+                fp.appendInt(this.forestPatches);
+                fp.append(" patches, mean ");
+                fp.appendInt(this.meanPatch());
+                fp.append(" cells, biggest ");
+                fp.appendInt(this.forestBiggest);
+                fp.append(" | landmasses with wood+stone+water ");
+                fp.appendInt(this.massesLivable);
+                fp.append("/");
+                fp.appendInt(this.massesCounted);
+                System.IO.Console.println(fp.toString());
+                delete fp;
+                // Per-kind tally, only for kinds that exist, so the line stays readable.
+                StringBuilder kc = new StringBuilder() on heap;
+                kc.append("  by kind:");
+                mutable boolean any = false;
+                for (int k in 1..Nodes.count()) {
+                    int tot = this.nodeCount[k] + this.subCount[k];
+                    if (tot > 0) {
+                        kc.append(" ");
+                        kc.append(Nodes.name(k));
+                        kc.append("=");
+                        kc.appendInt(tot);
+                        any = true;
+                    }
+                }
+                if (!any) {
+                    kc.append(" (none placed)");
+                }
+                System.IO.Console.println(kc.toString());
+                delete kc;
+                return;
+            }
+
             public method reasonName(int ordinal) returns String {
                 if (ordinal == 0) {
                     return "PASS";
@@ -693,6 +996,7 @@ public bundle Agents {
                 rl.appendInt(this.straightestH());
                 System.IO.Console.println(rl.toString());
                 delete rl;
+                this.resourceReport();
                 int v = this.verdict(wantContinents);
                 String nm = this.reasonName(v);
                 StringBuilder s2 = new StringBuilder() on heap;

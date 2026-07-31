@@ -1,0 +1,237 @@
+import System.IO.Console;
+
+// What a cell can hold: the world's resource nodes. The set is not a free list -- docs/ECONOMY.md
+// section 1 is a contract between the world and the economy, and every node named there has a raw
+// resource, a harvesting building and an era already assigned to it. So the contract is written as a
+// `catalog`: NodeKind must contain every value EconomyNodes declares, and dropping one from the
+// generator is a COMPILE error rather than a chain that silently starves at runtime.
+//
+// NodeKind's own constants are the ones the world adds on top of that contract: `None` (the empty
+// cell) and the eight prop meshes promoted to nodes -- seven more tree species and the boulder --
+// which give the forests a real species palette using art that already exists. They keep living in
+// props.index, so each kind records WHICH atlas holds its mesh; the mesh file is named after the
+// kind either way.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        // The economy's side of the contract (ECONOMY.md section 1), in that document's order.
+        public catalog EconomyNodes {
+            OakTree,
+            PineTree,
+            BirchTree,
+            BerryBush,
+            MushroomPatch,
+            HerbPlant,
+            WheatField,
+            WildVine,
+            CottonPlant,
+            FlaxPlant,
+            Reeds,
+            FishingSpot,
+            Cactus,
+            StoneRock,
+            MarbleOutcrop,
+            ClayPit,
+            SaltDeposit,
+            GemRock,
+            IronVein,
+            CopperVein,
+            TinVein,
+            GoldVein,
+            SilverVein,
+            CoalSeam,
+            SulfurVent,
+            OilSeep,
+            RareEarth
+        }
+
+        // What a cell holds. Ordinal 0 is None, so an untouched grid is an empty one and the whole
+        // set still fits in the byte the Grid stores per cell.
+        public enum NodeKind extends EconomyNodes {
+            None,
+            Broadleaf,
+            Pine,
+            Palm,
+            Acacia,
+            SwampTree,
+            Mangrove,
+            Laurel,
+            Boulder
+
+            byCatalog {
+                OakTree,
+                PineTree,
+                BirchTree,
+                BerryBush,
+                MushroomPatch,
+                HerbPlant,
+                WheatField,
+                WildVine,
+                CottonPlant,
+                FlaxPlant,
+                Reeds,
+                FishingSpot,
+                Cactus,
+                StoneRock,
+                MarbleOutcrop,
+                ClayPit,
+                SaltDeposit,
+                GemRock,
+                IronVein,
+                CopperVein,
+                TinVein,
+                GoldVein,
+                SilverVein,
+                CoalSeam,
+                SulfurVent,
+                OilSeep,
+                RareEarth
+            }
+        }
+
+        // How a node is grouped for the audit and for the prospecting rule: only the two mineral
+        // classes ever have a body underground, and biology is surface-only by decision.
+        public enum NodeClass {
+            Biological,
+            StoneEarth,
+            MetalEnergy
+        }
+
+        // Which atlas holds a kind's mesh.
+        public enum NodeAtlas {
+            Nodes,
+            Props
+        }
+
+        // The per-kind table, in the same parallel-array style as Biomes: filled once at class load,
+        // read by ordinal. Sized from NodeKind.count() so it cannot drift from the enum.
+        public class Nodes {
+            private static mutable String[] NAME;
+            private static mutable int[] ATLAS;
+            private static mutable int[] KLASS;
+            private static mutable boolean[] BURY;
+            private static mutable int[] QTY;
+
+            onClassLoad {
+                int n = NodeKind.count();
+                Nodes.NAME = new String[n]();
+                Nodes.ATLAS = new int[n]();
+                Nodes.KLASS = new int[n]();
+                Nodes.BURY = new boolean[n]();
+                Nodes.QTY = new int[n]();
+                mutable int i = 0;
+                while (i < n) {
+                    Nodes.NAME[i] = "None";
+                    i = i + 1;
+                }
+                int nodes = cast<int>(NodeAtlas.Nodes);
+                int props = cast<int>(NodeAtlas.Props);
+                int bio = cast<int>(NodeClass.Biological);
+                int rock = cast<int>(NodeClass.StoneEarth);
+                int ore = cast<int>(NodeClass.MetalEnergy);
+
+                // kind, mesh atlas, class, has a buried body, units in an average node
+                Nodes.put(cast<int>(NodeKind.None), "None", nodes, bio, false, 0);
+
+                // The promoted prop meshes: seven tree species and the boulder, art already in
+                // props.index.
+                Nodes.put(cast<int>(NodeKind.Broadleaf), "Broadleaf", props, bio, false, 120);
+                Nodes.put(cast<int>(NodeKind.Pine), "Pine", props, bio, false, 120);
+                Nodes.put(cast<int>(NodeKind.Palm), "Palm", props, bio, false, 90);
+                Nodes.put(cast<int>(NodeKind.Acacia), "Acacia", props, bio, false, 80);
+                Nodes.put(cast<int>(NodeKind.SwampTree), "SwampTree", props, bio, false, 110);
+                Nodes.put(cast<int>(NodeKind.Mangrove), "Mangrove", props, bio, false, 100);
+                Nodes.put(cast<int>(NodeKind.Laurel), "Laurel", props, bio, false, 115);
+                Nodes.put(cast<int>(NodeKind.Boulder), "Boulder", props, rock, false, 200);
+
+                // Surface biology: never buried, whatever its class.
+                Nodes.put(cast<int>(NodeKind.OakTree), "OakTree", nodes, bio, false, 130);
+                Nodes.put(cast<int>(NodeKind.PineTree), "PineTree", nodes, bio, false, 120);
+                Nodes.put(cast<int>(NodeKind.BirchTree), "BirchTree", nodes, bio, false, 105);
+                Nodes.put(cast<int>(NodeKind.BerryBush), "BerryBush", nodes, bio, false, 40);
+                Nodes.put(cast<int>(NodeKind.MushroomPatch), "MushroomPatch", nodes, bio, false, 30);
+                Nodes.put(cast<int>(NodeKind.HerbPlant), "HerbPlant", nodes, bio, false, 25);
+                Nodes.put(cast<int>(NodeKind.WheatField), "WheatField", nodes, bio, false, 60);
+                Nodes.put(cast<int>(NodeKind.WildVine), "WildVine", nodes, bio, false, 45);
+                Nodes.put(cast<int>(NodeKind.CottonPlant), "CottonPlant", nodes, bio, false, 50);
+                Nodes.put(cast<int>(NodeKind.FlaxPlant), "FlaxPlant", nodes, bio, false, 50);
+                Nodes.put(cast<int>(NodeKind.Reeds), "Reeds", nodes, bio, false, 60);
+                Nodes.put(cast<int>(NodeKind.FishingSpot), "FishingSpot", nodes, bio, false, 900);
+                Nodes.put(cast<int>(NodeKind.Cactus), "Cactus", nodes, bio, false, 35);
+
+                // Stone and earth: an outcrop on the surface over a body underground.
+                Nodes.put(cast<int>(NodeKind.StoneRock), "StoneRock", nodes, rock, true, 1200);
+                Nodes.put(cast<int>(NodeKind.MarbleOutcrop), "MarbleOutcrop", nodes, rock, true, 800);
+                Nodes.put(cast<int>(NodeKind.ClayPit), "ClayPit", nodes, rock, true, 700);
+                Nodes.put(cast<int>(NodeKind.SaltDeposit), "SaltDeposit", nodes, rock, true, 600);
+
+                // Metals and energy: the same, and the reason prospecting exists.
+                Nodes.put(cast<int>(NodeKind.GemRock), "GemRock", nodes, ore, true, 120);
+                Nodes.put(cast<int>(NodeKind.IronVein), "IronVein", nodes, ore, true, 900);
+                Nodes.put(cast<int>(NodeKind.CopperVein), "CopperVein", nodes, ore, true, 800);
+                Nodes.put(cast<int>(NodeKind.TinVein), "TinVein", nodes, ore, true, 500);
+                Nodes.put(cast<int>(NodeKind.GoldVein), "GoldVein", nodes, ore, true, 250);
+                Nodes.put(cast<int>(NodeKind.SilverVein), "SilverVein", nodes, ore, true, 350);
+                Nodes.put(cast<int>(NodeKind.CoalSeam), "CoalSeam", nodes, ore, true, 1500);
+                Nodes.put(cast<int>(NodeKind.SulfurVent), "SulfurVent", nodes, ore, true, 400);
+                Nodes.put(cast<int>(NodeKind.OilSeep), "OilSeep", nodes, ore, true, 1200);
+                Nodes.put(cast<int>(NodeKind.RareEarth), "RareEarth", nodes, ore, true, 200);
+            }
+
+            private static method put(int ord, String name, int atlas, int klass, boolean bury,
+                                      int qty) returns void {
+                Nodes.NAME[ord] = name;
+                Nodes.ATLAS[ord] = atlas;
+                Nodes.KLASS[ord] = klass;
+                Nodes.BURY[ord] = bury;
+                Nodes.QTY[ord] = qty;
+            }
+
+            public static method count() returns int {
+                return NodeKind.count();
+            }
+
+            // The kind's identifier, which is also the name of its .mesh file.
+            public static method name(int ord) returns String {
+                return Nodes.NAME[ord];
+            }
+
+            public static method atlas(int ord) returns int {
+                return Nodes.ATLAS[ord];
+            }
+
+            public static method klass(int ord) returns int {
+                return Nodes.KLASS[ord];
+            }
+
+            // True where a deposit of this kind can exist underground. It is a per-kind fact and not
+            // a rule derived from the class: a boulder is loose stone lying on the ground, and there
+            // is nothing under it to prospect for.
+            public static method buryable(int ord) returns boolean {
+                return Nodes.BURY[ord];
+            }
+
+            // Units an average node of this kind holds. Placement scales this by local richness --
+            // the number that makes exhaustion possible at all.
+            public static method baseQty(int ord) returns int {
+                return Nodes.QTY[ord];
+            }
+
+            public static method isTree(int ord) returns boolean {
+                if (ord == cast<int>(NodeKind.Broadleaf)) { return true; }
+                if (ord == cast<int>(NodeKind.Pine)) { return true; }
+                if (ord == cast<int>(NodeKind.Palm)) { return true; }
+                if (ord == cast<int>(NodeKind.Acacia)) { return true; }
+                if (ord == cast<int>(NodeKind.SwampTree)) { return true; }
+                if (ord == cast<int>(NodeKind.Mangrove)) { return true; }
+                if (ord == cast<int>(NodeKind.Laurel)) { return true; }
+                if (ord == cast<int>(NodeKind.OakTree)) { return true; }
+                if (ord == cast<int>(NodeKind.PineTree)) { return true; }
+                if (ord == cast<int>(NodeKind.BirchTree)) { return true; }
+                return false;
+            }
+        }
+    }
+}

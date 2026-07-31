@@ -17,6 +17,9 @@ public bundle Agents {
             public static fixed int FLAG_VENT = 4;
             public static fixed int FLAG_ENDORHEIC = 8;
             public static fixed int FLAG_COAST = 16;
+            // The buried deposit under this cell is known. Worldgen sets it on outcrops; a
+            // prospecting action, once the technology exists, sets it over an area.
+            public static fixed int FLAG_PROSPECTED = 32;
 
             private mutable int w;
             private mutable int h;
@@ -26,6 +29,15 @@ public bundle Agents {
             private mutable byte[] biome;         // Biome ordinal
             private mutable byte[] flags;         // bitset (FLAG_*)
             private mutable byte[] flow;          // downstream direction code: 0=none, else 1 + (dx+1) + (dy+1)*3
+            // Resources, in the same Structure-of-Arrays style. Two layers: what STANDS on the cell
+            // and what LIES UNDER it. The quantity lives with the node rather than with whatever
+            // harvests it, because that is what makes a node run out -- a resource without a
+            // quantity is decoration with a better name, and every chain in ECONOMY.md assumes
+            // deposits are finite.
+            private mutable byte[] node;          // surface NodeKind ordinal, 0 = none
+            private mutable short[] nodeQty;      // units left in the surface node
+            private mutable byte[] sub;           // buried NodeKind ordinal, 0 = none
+            private mutable short[] subQty;       // units left in the buried deposit
 
             public constructor Grid(int w, int h) {
                 this.w = w;
@@ -37,6 +49,10 @@ public bundle Agents {
                 this.biome = new byte[n]();
                 this.flags = new byte[n]();
                 this.flow = new byte[n]();
+                this.node = new byte[n]();
+                this.nodeQty = new short[n]();
+                this.sub = new byte[n]();
+                this.subQty = new short[n]();
             }
 
             public destructor ~Grid() returns void {
@@ -46,6 +62,10 @@ public bundle Agents {
                 delete this.biome;
                 delete this.flags;
                 delete this.flow;
+                delete this.node;
+                delete this.nodeQty;
+                delete this.sub;
+                delete this.subQty;
             }
 
             public method width() returns int {
@@ -119,6 +139,77 @@ public bundle Agents {
 
             public method hasFlag(int x, int y, int bit) returns boolean {
                 return (this.flagsAt(x, y) & bit) != 0;
+            }
+
+            public method clearFlag(int x, int y, int bit) returns void {
+                int i = this.idx(x, y);
+                this.flags[i] = cast<byte>(cast<int>(this.flags[i]) & ~bit);
+            }
+
+            // ---- resources: what stands on the cell, and what lies under it ----
+
+            public method nodeAt(int x, int y) returns int {
+                return cast<int>(this.node[this.idx(x, y)]) & 255;
+            }
+
+            public method nodeQtyAt(int x, int y) returns int {
+                return cast<int>(this.nodeQty[this.idx(x, y)]);
+            }
+
+            public method hasNode(int x, int y) returns boolean {
+                return this.nodeAt(x, y) != 0;
+            }
+
+            public method setNode(int x, int y, int kind, int qty) returns void
+                requires kind >= 0
+                requires kind < Nodes.count()
+                requires qty >= 0
+                requires qty <= 32767
+            {
+                int i = this.idx(x, y);
+                this.node[i] = cast<byte>(kind);
+                this.nodeQty[i] = cast<short>(qty);
+            }
+
+            public method clearNode(int x, int y) returns void {
+                int i = this.idx(x, y);
+                this.node[i] = cast<byte>(0);
+                this.nodeQty[i] = cast<short>(0);
+            }
+
+            public method subAt(int x, int y) returns int {
+                return cast<int>(this.sub[this.idx(x, y)]) & 255;
+            }
+
+            public method subQtyAt(int x, int y) returns int {
+                return cast<int>(this.subQty[this.idx(x, y)]);
+            }
+
+            public method hasSub(int x, int y) returns boolean {
+                return this.subAt(x, y) != 0;
+            }
+
+            // Only a kind with a body underground may be buried -- the contract that keeps biology
+            // on the surface, checked here rather than trusted at every call site.
+            public method setSub(int x, int y, int kind, int qty) returns void
+                requires kind > 0
+                requires kind < Nodes.count()
+                requires Nodes.buryable(kind)
+                requires qty >= 0
+                requires qty <= 32767
+            {
+                int i = this.idx(x, y);
+                this.sub[i] = cast<byte>(kind);
+                this.subQty[i] = cast<short>(qty);
+            }
+
+            // What a player may see of the buried layer: its kind once the cell is prospected, and
+            // 0 -- indistinguishable from bare ground -- until then.
+            public method knownSubAt(int x, int y) returns int {
+                if (!this.hasFlag(x, y, Grid.FLAG_PROSPECTED)) {
+                    return 0;
+                }
+                return this.subAt(x, y);
             }
 
             // Downstream flow direction as a per-cell code (0 = no flow). dx/dy are each in {-1,0,1}.
