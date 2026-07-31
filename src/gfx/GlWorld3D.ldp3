@@ -4,6 +4,8 @@ import opengl.gl.GL;
 import opengl.glsl.Shader;
 import opengl.glm.GlMat4;
 import Agents.World.Grid;
+import Agents.World.Nodes;
+import Agents.World.NodeAtlas;
 import System.Memory;
 
 // True-3D GL renderer for the world, two-level LOD:
@@ -42,6 +44,7 @@ public bundle Agents {
             private mutable Grid* grid;
             private mutable MeshAtlas* terr;
             private mutable MeshAtlas* props;
+            private mutable MeshAtlas* nodes;
             private mutable MeshAtlas* rivers;
             private mutable float[] riverTop;   // per-river-variant top-plate height
             // river variant ordinals in the rivers atlas
@@ -72,6 +75,7 @@ public bundle Agents {
             private mutable int bkPhase;        // 0 = counting, 1 = emitting
             private mutable int[] dRiverC;      // detail bake scratch: river variant per cell, or -1
             private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
+            private mutable int[] dNodeC;       // detail bake scratch: NodeKind per cell, or 0
             private mutable int[] btally;       // per-biome cell count inside one coarse block
             private mutable int[] connOrd;      // connection mask -> tile ordinal
             private mutable int[] fallOrd;      // outflow direction -> waterfall tile ordinal
@@ -89,6 +93,11 @@ public bundle Agents {
             private mutable int[] sMilli;
             private mutable float[] sScale;
             private mutable int hintProp;       // cheap tree drawn on forest blocks in the coarse LOD
+            // resource nodes, indexed by NodeKind ordinal. A kind's mesh lives in whichever atlas
+            // Nodes.atlas says: the seven promoted tree species and the boulder are still props.
+            private mutable int[] nModel;       // model index inside that atlas, or -1 if absent
+            private mutable boolean[] nInProps; // true = props atlas, false = nodes atlas
+            private mutable float[] nScale;
             // detail window state (cell coords of the window origin)
             private mutable int detW;
             private mutable int detH;
@@ -156,6 +165,10 @@ public bundle Agents {
                 this.bkPhase = 0;
                 this.dRiverC = new int[1]();
                 this.dPropC = new int[1]();
+                this.dNodeC = new int[1]();
+                this.nModel = new int[1]();
+                this.nInProps = new boolean[1]();
+                this.nScale = new float[1]();
                 this.btally = new int[40]();
                 this.connOrd = new int[1]();
                 this.fallOrd = new int[1]();
@@ -205,6 +218,10 @@ public bundle Agents {
                 delete this.sScale;
                 delete this.dRiverC;
                 delete this.dPropC;
+                delete this.dNodeC;
+                delete this.nModel;
+                delete this.nInProps;
+                delete this.nScale;
                 delete this.btally;
                 delete this.connOrd;
                 delete this.fallOrd;
@@ -226,11 +243,12 @@ public bundle Agents {
             // Terrain model (matches the original agents): every non-mountain tile sits at the SAME
             // ground level -- coasts read from the tiles' own art heights -- and only the mountain
             // family stacks up, in discrete steps of `stepH` derived from the cell's elevation.
-            public method setup(Grid* g, MeshAtlas* terr, MeshAtlas* props, MeshAtlas* rivers,
-                                int stride, float stepH) returns void {
+            public method setup(Grid* g, MeshAtlas* terr, MeshAtlas* props, MeshAtlas* nodes,
+                                MeshAtlas* rivers, int stride, float stepH) returns void {
                 this.grid = g;
                 this.terr = terr;
                 this.props = props;
+                this.nodes = nodes;
                 this.rivers = rivers;
                 this.srcW = g.width();
                 this.srcH = g.height();
@@ -312,6 +330,7 @@ public bundle Agents {
                 this.fallOrd[6] = rivers.ordOf("FallW");
                 this.fallOrd[7] = rivers.ordOf("FallNW");
                 this.initScatter();
+                this.initNodes();
                 this.bakeCoarse();
                 this.cx = cast<float>(this.srcW);
                 this.cy = cast<float>(this.srcH);
@@ -399,6 +418,70 @@ public bundle Agents {
                 this.setScatter(38, "SaltCrystal", 25, 1.0);    // SaltFlat
                 this.setScatter(39, "Palm", 150, 1.1);          // Oasis
                 this.hintProp = this.props.ordOf("Pine");
+            }
+
+            // Resolve every NodeKind to a model, once. A kind names its own mesh file, so the lookup
+            // is the kind's name in whichever atlas Nodes.atlas points at; a kind whose mesh is
+            // missing resolves to -1 and is simply never drawn, rather than indexing off the end of
+            // an atlas.
+            private method initNodes() returns void {
+                int n = Nodes.count();
+                delete this.nModel;
+                delete this.nInProps;
+                delete this.nScale;
+                this.nModel = new int[n]();
+                this.nInProps = new boolean[n]();
+                this.nScale = new float[n]();
+                mutable int k = 0;
+                while (k < n) {
+                    boolean inProps = Nodes.atlas(k) == cast<int>(NodeAtlas.Props);
+                    this.nInProps[k] = inProps;
+                    if (k == 0) {
+                        this.nModel[k] = 0 - 1;                 // None is never drawn
+                    } else if (inProps) {
+                        this.nModel[k] = this.props.ordOf(Nodes.name(k));
+                    } else {
+                        this.nModel[k] = this.nodes.ordOf(Nodes.name(k));
+                    }
+                    // Trees carry the scale their prop scatter used; the mineral art is authored at
+                    // tile scale already.
+                    if (Nodes.isTree(k)) {
+                        this.nScale[k] = 1.1;
+                    } else {
+                        this.nScale[k] = 1.0;
+                    }
+                    k = k + 1;
+                }
+                // A kind with no mesh is silently invisible in the world, and an invisible resource
+                // reads as a generator that failed to place it. Say so, once, at load.
+                mutable int miss = 0;
+                mutable int j = 1;
+                while (j < n) {
+                    if (this.nModel[j] < 0) {
+                        System.IO.Console.println($"GlWorld3D: no mesh for node kind {Nodes.name(j)}");
+                        miss = miss + 1;
+                    }
+                    j = j + 1;
+                }
+                if (miss > 0) {
+                    System.IO.Console.println($"GlWorld3D: {miss} node kinds have no mesh and will not draw");
+                }
+            }
+
+            private method nodeAtlasOf(int kind) returns MeshAtlas* {
+                if (this.nInProps[kind]) {
+                    return this.props;
+                }
+                return this.nodes;
+            }
+
+            // Triangles one node of this kind costs, or 0 where its mesh is missing.
+            private method nodeTris(int kind) returns int {
+                int m = this.nModel[kind];
+                if (m < 0) {
+                    return 0;
+                }
+                return this.nodeAtlasOf(kind).triCount[m];
             }
 
             // ---- deterministic per-cell hash (scatter placement) ----
@@ -755,11 +838,11 @@ public bundle Agents {
             // The clearance is 0.012, deliberately BELOW the 0.03-to-0.13 band the tile's own
             // surface decals occupy. At the old 0.055 the shadow sat inside that band and the two
             // fought for depth.
-            private method emitPropShadow(address buf, int w, int pord, float wx, float wy, float z,
-                                          float scale, float gr, float gg, float gb,
-                                          boolean perCell) returns int {
-                int t0 = this.props.triStart[pord];
-                int tn = this.props.triCount[pord];
+            private method emitMeshShadow(MeshAtlas* a, address buf, int w, int pord, float wx,
+                                          float wy, float z, float scale, float gr, float gg,
+                                          float gb, boolean perCell) returns int {
+                int t0 = a.triStart[pord];
+                int tn = a.triCount[pord];
                 mutable int p = w;
                 mutable int t = 0;
                 while (t < tn) {
@@ -769,9 +852,9 @@ public bundle Agents {
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
-                        float hz = this.props.pz[vi] * scale;
-                        ax = ax + this.props.px[vi] * scale + wx - hz * 0.368;
-                        ay = ay + this.props.py[vi] * scale + wy - hz * 0.579;
+                        float hz = a.pz[vi] * scale;
+                        ax = ax + a.px[vi] * scale + wx - hz * 0.368;
+                        ay = ay + a.py[vi] * scale + wy - hz * 0.579;
                         k = k + 1;
                     }
                     ax = ax / 3.0;
@@ -791,10 +874,10 @@ public bundle Agents {
                         k = 0;
                         while (k < 3) {
                             int vi = vb + k;
-                            float hz = this.props.pz[vi] * scale;
+                            float hz = a.pz[vi] * scale;
                             p = this.wr(buf, p,
-                                        this.props.px[vi] * scale + wx - hz * 0.368,
-                                        this.props.py[vi] * scale + wy - hz * 0.579,
+                                        a.px[vi] * scale + wx - hz * 0.368,
+                                        a.py[vi] * scale + wy - hz * 0.579,
                                         zt, 0.0, 0.0, 1.0, gr, gg, gb);
                             k = k + 1;
                         }
@@ -1157,24 +1240,24 @@ public bundle Agents {
                 return p;
             }
 
-            private method emitProp(address buf, int w, int pord, float wx, float wy, float wz, float scale,
-                                    float shade) returns int {
-                int t0 = this.props.triStart[pord];
-                int tn = this.props.triCount[pord];
+            private method emitMesh(MeshAtlas* a, address buf, int w, int pord, float wx, float wy,
+                                    float wz, float scale, float shade) returns int {
+                int t0 = a.triStart[pord];
+                int tn = a.triCount[pord];
                 mutable int p = w;
                 mutable int t = 0;
                 while (t < tn) {
                     int tri = t0 + t;
                     int vb = tri * 3;
-                    float r = cast<float>(this.props.cr[tri]) / 255.0 * shade;
-                    float g = cast<float>(this.props.cg[tri]) / 255.0 * shade;
-                    float b = cast<float>(this.props.cb[tri]) / 255.0 * shade;
+                    float r = cast<float>(a.cr[tri]) / 255.0 * shade;
+                    float g = cast<float>(a.cg[tri]) / 255.0 * shade;
+                    float b = cast<float>(a.cb[tri]) / 255.0 * shade;
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
-                        p = this.wr(buf, p, this.props.px[vi] * scale + wx, this.props.py[vi] * scale + wy,
-                                    this.props.pz[vi] * scale + wz,
-                                    this.props.nx[vi], this.props.ny[vi], this.props.nz[vi], r, g, b);
+                        p = this.wr(buf, p, a.px[vi] * scale + wx, a.py[vi] * scale + wy,
+                                    a.pz[vi] * scale + wz,
+                                    a.nx[vi], a.ny[vi], a.nz[vi], r, g, b);
                         k = k + 1;
                     }
                     t = t + 1;
@@ -1274,9 +1357,10 @@ public bundle Agents {
                             float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
                             float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
-                            hw = this.emitPropShadow(hbuf, hw, this.hintProp, wx, wy, topZ + 0.18,
-                                                     sc * 0.55, gr, gg, gb, false);
-                            hw = this.emitProp(hbuf, hw, this.hintProp, wx, wy, topZ, sc * 0.55, shade);
+                            hw = this.emitMeshShadow(this.props, hbuf, hw, this.hintProp, wx, wy,
+                                                     topZ + 0.18, sc * 0.55, gr, gg, gb, false);
+                            hw = this.emitMesh(this.props, hbuf, hw, this.hintProp, wx, wy, topZ,
+                                               sc * 0.55, shade);
                         }
                         bx = bx + 1;
                     }
@@ -1352,8 +1436,10 @@ public bundle Agents {
                 if (this.dRiverC.length() != dn) {
                     delete this.dRiverC;
                     delete this.dPropC;
+                    delete this.dNodeC;
                     this.dRiverC = new int[dn]();
                     this.dPropC = new int[dn]();
+                    this.dNodeC = new int[dn]();
                 }
                 this.bkTris = 0;
                 this.bkW = 0;
@@ -1397,10 +1483,21 @@ public bundle Agents {
                             this.dRiverC[slot] = 0 - 1;
                             tris = tris + this.countTile(ord, false, this.thinDecor(ord, gx, gy)) + 8;
                         }
-                        int p = this.detailPropAt(gx, gy, ord);
-                        this.dPropC[slot] = p;
-                        if (p >= 0) {
-                            tris = tris + this.props.triCount[p] * 2;    // prop + its projected shadow
+                        // A cell holds ONE thing. A resource node the world placed outranks the
+                        // biome's decorative scatter, which exists only to give an empty cell some
+                        // texture.
+                        int nk = this.grid.nodeAt(gx, gy);
+                        this.dNodeC[slot] = nk;
+                        if (nk != 0 && this.nModel[nk] >= 0) {
+                            this.dPropC[slot] = 0 - 1;
+                            tris = tris + this.nodeTris(nk) * 2;         // node + its projected shadow
+                        } else {
+                            this.dNodeC[slot] = 0;
+                            int p = this.detailPropAt(gx, gy, ord);
+                            this.dPropC[slot] = p;
+                            if (p >= 0) {
+                                tris = tris + this.props.triCount[p] * 2;
+                            }
                         }
                         x = x + 1;
                     }
@@ -1466,7 +1563,8 @@ public bundle Agents {
                                               this.thinDecor(ord, gx, gy), shade);
                         }
                         int p = this.dPropC[slot];
-                        if (p >= 0) {
+                        int nk = this.dNodeC[slot];
+                        if (p >= 0 || nk != 0) {
                             float jx = (this.hash01(gx * 3 + 1, gy * 5 + 2) - 0.5) * 1.2;
                             float jy = (this.hash01(gx * 5 + 4, gy * 3 + 7) - 0.5) * 1.2;
                             float topZ = this.tileTop[ord] + zOff;
@@ -1474,9 +1572,17 @@ public bundle Agents {
                             float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
                             float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
-                            w = this.emitPropShadow(buf, w, p, wx + jx, wy + jy, topZ + 0.012,
-                                                    this.sScale[ord], gr, gg, gb, true);
-                            w = this.emitProp(buf, w, p, wx + jx, wy + jy, topZ, this.sScale[ord], shade);
+                            mutable MeshAtlas* at = this.props;
+                            mutable int mord = p;
+                            mutable float msc = this.sScale[ord];
+                            if (nk != 0) {
+                                at = this.nodeAtlasOf(nk);
+                                mord = this.nModel[nk];
+                                msc = this.nScale[nk];
+                            }
+                            w = this.emitMeshShadow(at, buf, w, mord, wx + jx, wy + jy, topZ + 0.012,
+                                                    msc, gr, gg, gb, true);
+                            w = this.emitMesh(at, buf, w, mord, wx + jx, wy + jy, topZ, msc, shade);
                         }
                         x = x + 1;
                     }

@@ -7,6 +7,7 @@ import opengl.gl.Wgl;
 import Agents.World.Grid;
 import Agents.World.WorldGen;
 import Agents.World.Biomes;
+import Agents.World.Nodes;
 import Agents.World.WorldAudit;
 import Agents.World.Landmass;
 import Agents.Gfx.SoftPainter;
@@ -53,6 +54,10 @@ public bundle Agents {
                     }
                     if (args[0].equals("cliffshot")) {
                         Main.cliffShot();
+                        return;
+                    }
+                    if (args[0].equals("nodeshot")) {
+                        Main.nodeShot();
                         return;
                     }
                     if (args[0].equals("probe")) {
@@ -219,9 +224,10 @@ public bundle Agents {
                 win.setVSync(1);
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, rivers, 8, 1.1);
+                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 mutable int lastX = win.cursorX();
                 mutable int lastY = win.cursorY();
@@ -272,6 +278,7 @@ public bundle Agents {
                 delete hud;
                 delete r;
                 delete rivers;
+                delete nodeMesh;
                 delete props;
                 delete terr;
                 delete g;
@@ -363,9 +370,10 @@ public bundle Agents {
                 }
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, rivers, 8, 1.1);
+                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 int cw = win.width();
                 int ch = win.height();
@@ -402,6 +410,7 @@ public bundle Agents {
                 delete hud;
                 delete r;
                 delete rivers;
+                delete nodeMesh;
                 delete props;
                 delete terr;
                 delete g;
@@ -465,9 +474,10 @@ public bundle Agents {
                 }
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, rivers, 8, 1.1);
+                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
                 r.aimAt(fx, fy);
                 r.setView(35.0, 28.0, 90.0);
                 int cw = win.width();
@@ -486,11 +496,118 @@ public bundle Agents {
                 delete px2;
                 delete r;
                 delete rivers;
+                delete nodeMesh;
                 delete props;
                 delete terr;
                 delete g;
                 delete win;
                 System.IO.Console.println("cliffshot: wrote cliff.ppm");
+                return;
+            }
+
+            // Every resource node in one shot: one cell per NodeKind, in declaration order, on a run
+            // of flat ground. Nothing generates nodes yet, so this is how the art set gets checked --
+            // that each kind resolves to a mesh at all, at a sane scale, with its shadow on the
+            // ground -- before a generator starts placing thousands of them.
+            private static method nodeShot() returns void {
+                int w = 2560;
+                int h = 1440;
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(w, h);
+                // A grid rather than a line: 35 kinds strung out east-west end up a smear on the
+                // horizon, where nothing can be told apart.
+                int cols = 6;
+                int pitch = 5;
+                int rows = (Nodes.count() + cols - 1) / cols;
+                int spanX = cols * pitch;
+                int spanY = rows * pitch;
+                mutable int fx = 0 - 1;
+                mutable int fy = 0;
+                mutable int sy = 80;
+                while (sy < h - 80 - spanY && fx < 0) {
+                    mutable int sx = 80;
+                    while (sx < w - 80 - spanX && fx < 0) {
+                        mutable boolean ok = true;
+                        mutable int cy = 0;
+                        while (cy < spanY && ok) {
+                            mutable int cx = 0;
+                            while (cx < spanX && ok) {
+                                int ord = g.biomeAt(sx + cx, sy + cy);
+                                if (ord < 14 || ord > 27) {
+                                    ok = false;             // vegetated lowland, no coast, no ice
+                                } else if (g.elevAt(sx + cx, sy + cy) >= 6300) {
+                                    ok = false;
+                                } else if (g.hasFlag(sx + cx, sy + cy, Grid.FLAG_RIVER)) {
+                                    ok = false;
+                                }
+                                cx = cx + 2;
+                            }
+                            cy = cy + 2;
+                        }
+                        if (ok) {
+                            fx = sx;
+                            fy = sy;
+                        }
+                        sx = sx + 9;
+                    }
+                    sy = sy + 9;
+                }
+                if (fx < 0) {
+                    System.IO.Console.println("nodeshot: no flat patch of land found.");
+                    delete g;
+                    return;
+                }
+                StringBuilder order = new StringBuilder() on heap;
+                order.append("nodeshot: ");
+                order.appendInt(cols);
+                order.append(" per row at ");
+                order.appendInt(fx);
+                order.append(",");
+                order.appendInt(fy);
+                order.append(", reading left to right then down:");
+                mutable int kk = 1;
+                while (kk < Nodes.count()) {
+                    int px2 = fx + (kk % cols) * pitch;
+                    int py2 = fy + (kk / cols) * pitch;
+                    g.setNode(px2, py2, kk, Nodes.baseQty(kk));
+                    order.append(" ");
+                    order.append(Nodes.name(kk));
+                    kk = kk + 1;
+                }
+                System.IO.Console.println(order.toString());
+                delete order;
+                String root = Main.assetRoot();
+                GlWindow* win = new GlWindow() on heap;
+                if (root.length() == 0 || win.open("nodes", 1400, 900, 3, 3) == 0) {
+                    System.IO.Console.println("nodeshot: no GL window.");
+                    delete win;
+                    delete g;
+                    return;
+                }
+                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
+                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
+                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
+                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
+                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
+                int cw = win.width();
+                int ch = win.height();
+                r.aimAt(fx + spanX / 2, fy + spanY / 2);
+                r.setView(0.0, 62.0, 74.0);
+                r.flushDetail();
+                r.render(cw, ch);
+                byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
+                Main.writePpmFlipped(px, cw, ch, "nodes_a.ppm");
+                delete px;
+                delete r;
+                delete rivers;
+                delete nodeMesh;
+                delete props;
+                delete terr;
+                delete g;
+                delete win;
+                System.IO.Console.println("nodeshot: wrote nodes_a.ppm");
                 return;
             }
 
@@ -540,9 +657,10 @@ public bundle Agents {
                 }
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, rivers, 8, 1.1);
+                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
                 r.aimAt(fx, fy);
                 int cw = win.width();
                 int ch = win.height();
@@ -570,6 +688,7 @@ public bundle Agents {
                 }
                 delete r;
                 delete rivers;
+                delete nodeMesh;
                 delete props;
                 delete terr;
                 delete g;
@@ -643,6 +762,7 @@ public bundle Agents {
                 }
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 int sw = cols * tw;
                 int sh = rows * th;
@@ -661,7 +781,7 @@ public bundle Agents {
                     wa.report(6);
                     delete wa;
                     GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                    r.setup(g, terr, props, rivers, 8, 1.1);
+                    r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
                     int cw = win.width();
                     int ch = win.height();
                     r.flushDetail();
@@ -681,6 +801,7 @@ public bundle Agents {
                 Main.writePpm(sheet, sw, sh, "preview_sheet.ppm");
                 delete sheet;
                 delete rivers;
+                delete nodeMesh;
                 delete props;
                 delete terr;
                 delete win;
