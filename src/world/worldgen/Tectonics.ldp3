@@ -600,20 +600,46 @@ public bundle Agents {
                                     e = 1.0;
                                 }
                             } else {
-                                // a rift floor sinks but stays land: dropping it under the sea would
-                                // cut a continent in half after the flood already fixed the coasts
-                                e = e + v * 0.10;
-                                if (e < f.sea + 0.012) {
-                                    e = f.sea + 0.012;
+                                // A rift floor sinks but stays land: dropping it under the sea would
+                                // cut a continent in half after the flood already fixed the coasts.
+                                //
+                                // SQUEEZE toward the waterline; never clamp at it. The clamp that
+                                // used to be here gave every cell the rift dug deep enough exactly
+                                // the same elevation -- a dead flat plateau at 0.442, eight cells
+                                // running, with the ocean at 0.31 beside it. That cliff IS the
+                                // abrupt stop: the coast became the edge of a SATURATED REGION
+                                // instead of a contour, and the edge of a saturated region is always
+                                // a wall, and a wall drawn by a threshold is straight. Scaling the
+                                // headroom approaches the waterline without reaching it, and never
+                                // flattens, so the coast goes back to being a contour.
+                                float floorZ = f.sea + 0.012;
+                                mutable float shrink = 1.0 + v * 0.55;
+                                if (shrink < 0.15) {
+                                    shrink = 0.15;
                                 }
+                                e = floorZ + (e - floorZ) * shrink;
                             }
                         } else {
                             if (v < 0.0) {
-                                // trench: the only thing in the world allowed under 0.22
-                                e = e + v * 0.17;
-                                if (e < 0.04) {
-                                    e = 0.04;
+                                // Trench: the only thing in the world allowed under 0.22. It
+                                // approaches its floor rather than piling onto it -- a clamped floor
+                                // is a flat pan whose rim is the same kind of wall -- and it FADES
+                                // OUT at the shoreline.
+                                //
+                                // That fade is the actual "the island stops out of nowhere". With a
+                                // trench running close inshore the deepening applied right up to the
+                                // waterline, so the shelf was eaten and land at 0.441 sat directly
+                                // against ocean at 0.32: a cliff of an eighth of the whole elevation
+                                // range in a single cell, with no beach and no shallows. Real
+                                // trenches leave a shelf, however narrow.
+                                mutable float shelf = (f.sea - e) / 0.06;
+                                if (shelf > 1.0) {
+                                    shelf = 1.0;
                                 }
+                                if (shelf < 0.0) {
+                                    shelf = 0.0;
+                                }
+                                e = 0.04 + (e - 0.04) / (1.0 - v * 0.55 * shelf);
                             } else if (cast<int>(this.arcMask[i]) != 0) {
                                 // An island ARC is allowed to breach. This is the whole point of the
                                 // feature and it was silently disabled: every rise in the ocean was
@@ -627,11 +653,12 @@ public bundle Agents {
                                     e = 1.0;
                                 }
                             } else {
-                                // a mid-ocean ridge rises but never breaks the surface
-                                e = e + v * amp * 0.10;
-                                if (e > f.sea - 0.006) {
-                                    e = f.sea - 0.006;
-                                }
+                                // A mid-ocean ridge rises but never breaks the surface -- again by
+                                // closing the gap to the waterline rather than clamping onto it,
+                                // which would pave a flat shelf at exactly sea-0.006 and put a
+                                // straight rim around it.
+                                float lid = f.sea - 0.006;
+                                e = lid - (lid - e) / (1.0 + v * amp * 0.55);
                             }
                         }
                         f.eb[i] = e;

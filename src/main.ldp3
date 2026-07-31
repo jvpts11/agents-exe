@@ -47,6 +47,10 @@ public bundle Agents {
                         Main.audit();
                         return;
                     }
+                    if (args[0].equals("probe")) {
+                        Main.probeSeam();
+                        return;
+                    }
                     if (args[0].equals("preview")) {
                         Main.preview();
                         return;
@@ -401,6 +405,56 @@ public bundle Agents {
             // top-down biome map was how a visible grid of rectangular seams survived four rounds of
             // review: the proxy hid exactly the artefact the render showed. One seed proves nothing
             // either -- what matters is the pass rate over a spread of them.
+            // Cut the world open across its straightest stretch of coast and read the raw numbers.
+            // The whole question is whether the ELEVATION field has a cliff there or is smooth: a
+            // cliff means some generator wrote a step, while a smooth field crossing a threshold
+            // means the coast is exactly where the water level says and nothing is wrong with the
+            // generation at all. Arguing about it from a screenshot got this wrong twice.
+            private static method probeSeam() returns void {
+                int w = 2560;
+                int h = 1440;
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(w, h);
+                WorldAudit* wa = new WorldAudit(g) on heap;
+                wa.analyse();
+                int run = wa.straightestV();
+                int sx = wa.vSeamX();
+                int sy = wa.vSeamY();
+                System.IO.Console.println($"straightest vertical coast: {run} cells at x={sx}, y={sy}..{sy + run}");
+                delete wa;
+                // three horizontal cuts through the run: top, middle, bottom
+                mutable int k = 0;
+                while (k < 3) {
+                    int cy = sy + run * k / 2;
+                    System.IO.Console.println("");
+                    System.IO.Console.println($"---- cut across y={cy} (x from {sx - 8} to {sx + 8}) ----");
+                    System.IO.Console.println("   x   elev  biome              temp moist");
+                    mutable int dx = 0 - 8;
+                    while (dx <= 8) {
+                        int px = sx + dx;
+                        if (px >= 0 && px < w && cy >= 0 && cy < h) {
+                            StringBuilder sb = new StringBuilder() on heap;
+                            sb.append(Main.padNum(px, 5));
+                            sb.append(Main.padNum(g.elevAt(px, cy), 7));
+                            sb.append("  ");
+                            sb.append(Main.pad(Biomes.name(g.biomeAt(px, cy)), 18));
+                            sb.append(Main.padNum(g.tempAt(px, cy), 4));
+                            sb.append(Main.padNum(g.moistAt(px, cy), 6));
+                            if (dx == 0) {
+                                sb.append("   <-- seam");
+                            }
+                            System.IO.Console.println(sb.toString());
+                            delete sb;
+                        }
+                        dx = dx + 1;
+                    }
+                    k = k + 1;
+                }
+                delete g;
+                return;
+            }
+
             private static method preview() returns void {
                 int w = 2560;
                 int h = 1440;
