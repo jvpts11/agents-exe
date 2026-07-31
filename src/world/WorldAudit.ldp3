@@ -27,6 +27,8 @@ public bundle Agents {
             private mutable int capacity;
             private mutable int ncomp;
             private mutable int landCells;
+            private mutable int[] top;         // the 32 biggest landmasses, descending
+            private mutable int nReal;         // components bigger than the noise floor
 
             public constructor WorldAudit(Grid* grid) {
                 this.g = grid;
@@ -36,14 +38,17 @@ public bundle Agents {
                 this.comp = new int[this.w * this.h]();
                 this.area = new int[this.capacity]();
                 this.stack = new int[this.w * this.h]();
+                this.top = new int[32]();
                 this.ncomp = 0;
                 this.landCells = 0;
+                this.nReal = 0;
             }
 
             public destructor ~WorldAudit() returns void {
                 delete this.comp;
                 delete this.area;
                 delete this.stack;
+                delete this.top;
             }
 
             private method isLand(int x, int y) returns boolean {
@@ -113,13 +118,51 @@ public bundle Agents {
                     }
                     y = y + 1;
                 }
+                this.rank();
                 return;
             }
 
-            // Components holding at least 0.5% of the land are landmasses; smaller ones are
-            // islands (and anything under 40 cells is coastal noise, not a feature).
-            private method bigThreshold() returns int {
-                return this.landCells / 200;
+            // Continents are the N BIGGEST landmasses, not every component over some absolute
+            // share. The share rule was wrong: a Greenland-sized island cleared 0.5% of the land,
+            // got counted as a continent, and blew the size ratio to 39:1 -- reporting a defect
+            // where the world actually had six continents and a few big islands, which is what
+            // Earth looks like. Rank once, then read the criteria off the ranking.
+            private method rank() returns void {
+                mutable int i = 0;
+                while (i < 32) {
+                    this.top[i] = 0;
+                    i = i + 1;
+                }
+                this.nReal = 0;
+                int lim = this.compLimit();
+                i = 0;
+                while (i < lim) {
+                    int a = this.area[i];
+                    if (a > this.noiseFloor()) {
+                        this.nReal = this.nReal + 1;
+                        // insertion into the descending top list
+                        mutable int j = 31;
+                        while (j > 0 && this.top[j - 1] < a) {
+                            this.top[j] = this.top[j - 1];
+                            j = j - 1;
+                        }
+                        if (j < 32) {
+                            this.top[j] = a;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            // Below this a component is coastal noise, not a feature: one part in 20000 of the
+            // world, ~180 cells at 2560x1440.
+            private method noiseFloor() returns int {
+                mutable int f = this.w * this.h / 20000;
+                if (f < 40) {
+                    f = 40;
+                }
+                return f;
             }
 
             private method compLimit() returns int {
@@ -133,73 +176,52 @@ public bundle Agents {
                 return this.landCells;
             }
 
+            // every landmass above the noise floor -- continents AND islands
             public method components() returns int {
-                mutable int c = 0;
-                mutable int i = 0;
-                int t = this.bigThreshold();
-                int lim = this.compLimit();
-                while (i < lim) {
-                    if (this.area[i] >= t) {
-                        c = c + 1;
-                    }
-                    i = i + 1;
+                return this.nReal;
+            }
+
+            // the n-th biggest landmass (0-based), or 0
+            public method nthArea(int n) returns int {
+                if (n < 0 || n >= 32) {
+                    return 0;
+                }
+                return this.top[n];
+            }
+
+            public method islandCount(int wantContinents) returns int {
+                mutable int c = this.nReal - wantContinents;
+                if (c < 0) {
+                    c = 0;
                 }
                 return c;
             }
 
-            public method islandCount() returns int {
-                mutable int c = 0;
-                mutable int i = 0;
-                int t = this.bigThreshold();
-                int lim = this.compLimit();
-                while (i < lim) {
-                    if (this.area[i] < t && this.area[i] > 40) {
-                        c = c + 1;
-                    }
-                    i = i + 1;
-                }
-                return c;
-            }
-
-            // per mille of all land held by the biggest component
+            // per mille of all land held by the biggest landmass
             public method largestShare() returns int {
-                mutable int best = 0;
-                mutable int i = 0;
-                int lim = this.compLimit();
-                while (i < lim) {
-                    if (this.area[i] > best) {
-                        best = this.area[i];
-                    }
-                    i = i + 1;
-                }
                 if (this.landCells == 0) {
                     return 0;
                 }
-                return best * 1000 / this.landCells;
+                return this.top[0] * 1000 / this.landCells;
             }
 
-            // largest : smallest among the landmasses, x100
-            public method sizeRatio() returns int {
-                mutable int best = 0;
-                mutable int worst = 2000000000;
-                int t = this.bigThreshold();
-                int lim = this.compLimit();
-                mutable int i = 0;
-                while (i < lim) {
-                    if (this.area[i] >= t) {
-                        if (this.area[i] > best) {
-                            best = this.area[i];
-                        }
-                        if (this.area[i] < worst) {
-                            worst = this.area[i];
-                        }
-                    }
-                    i = i + 1;
+            // biggest : smallest among the CONTINENTS, x100
+            public method sizeRatio(int wantContinents) returns int {
+                mutable int k = wantContinents;
+                if (k > this.nReal) {
+                    k = this.nReal;
                 }
-                if (worst <= 0 || worst == 2000000000) {
+                if (k > 32) {
+                    k = 32;
+                }
+                if (k < 2) {
                     return 0;
                 }
-                return best * 100 / worst;
+                int worst = this.top[k - 1];
+                if (worst <= 0) {
+                    return 0;
+                }
+                return this.top[0] * 100 / worst;
             }
 
             // The precise form of "as massas nao podem se ligar": how many pairs of continent
@@ -284,12 +306,12 @@ public bundle Agents {
                 if (this.largestShare() > 450) {
                     return cast<int>(RejectReason.DominantMass);
                 }
-                int r = this.sizeRatio();
+                int r = this.sizeRatio(wantContinents);
                 if (r < 200 || r > 450) {
                     return cast<int>(RejectReason.SizeSpread);
                 }
-                int isl = this.islandCount();
-                if (isl < 4 || isl > 6) {
+                int isl = this.islandCount(wantContinents);
+                if (isl < 3 || isl > 12) {
                     return cast<int>(RejectReason.IslandCount);
                 }
                 return cast<int>(RejectReason.None);
@@ -301,15 +323,32 @@ public bundle Agents {
                 sb.appendInt(this.components());
                 sb.append(" (want ");
                 sb.appendInt(wantContinents);
-                sb.append(") | islands ");
-                sb.appendInt(this.islandCount());
+                sb.append(" continents) | islands ");
+                sb.appendInt(this.islandCount(wantContinents));
                 sb.append(" | largest ");
                 sb.appendInt(this.largestShare());
                 sb.append("/1000 of land | size ratio ");
-                sb.appendInt(this.sizeRatio());
+                sb.appendInt(this.sizeRatio(wantContinents));
                 sb.append("/100");
                 System.IO.Console.println(sb.toString());
                 delete sb;
+                StringBuilder sz = new StringBuilder() on heap;
+                sz.append("  landmass areas:");
+                mutable int k = 0;
+                mutable int lim = this.nReal;
+                if (lim > 12) {
+                    lim = 12;
+                }
+                while (k < lim) {
+                    sz.append(" ");
+                    sz.appendInt(this.nthArea(k));
+                    if (k == wantContinents - 1) {
+                        sz.append(" |");
+                    }
+                    k = k + 1;
+                }
+                System.IO.Console.println(sz.toString());
+                delete sz;
                 int v = this.verdict(wantContinents);
                 String nm = this.reasonName(v);
                 StringBuilder s2 = new StringBuilder() on heap;

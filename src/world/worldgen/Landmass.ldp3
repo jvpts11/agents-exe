@@ -1,49 +1,27 @@
 import System.IO.Console;
-import Agents.World.Grid;
 
-// The silhouette stage. A landmass is the union of elliptical lobes planted along a short, gently
-// turning skeleton -- non-radial BY CONSTRUCTION.
+// The relief stage: build a height field for the WHOLE map, then flood it. Continents are whatever
+// stays above water -- an emergent property, never a decision.
 //
-// Why that matters: three previous generations of this worldgen failed the same way. All of them
-// described a continent as centre + radius + noise, and a noisy circle still reads as a circle;
-// the domain warp strong enough to disguise it is also strong enough to smear neighbouring
-// continents into one connected web. Lobes on a skeleton produce gulfs where two lobes meet and
-// peninsulas where one juts out, without any warp of the sampled position.
+// Why the inversion. Four earlier generations were rejected, and they failed the same way: each one
+// decided WHERE a continent goes and then painted ocean around it. Placement is an explicit choice,
+// so it always carried a pattern -- symmetry, or fusion when the symmetry was broken, or crushing
+// when the fusion was fixed. With no placement step there is nothing to carry a pattern; fusion
+// stops being a bug (two high regions that touch simply ARE one continent -- Eurasia is exactly
+// that); and the size spread comes free, because an elevation distribution is naturally uneven.
+//
+// Why the plate partition is NOT Voronoi. Euclidean nearest-seed cuts the map into CONVEX polygons:
+// the edges are straight segments by construction, and noise on the boundary only serrates the line
+// while the macro shape stays a polygon -- that is where the triangles and rectangles came from.
+// Real plates are not "the points nearest a centre"; they are bounded by lines of weakness in the
+// lithosphere (sutures, old rifts, scars of earlier collisions), which is why they are sinuous,
+// non-convex and branching. So the METRIC changes: a cell belongs to the seed that can REACH it
+// most cheaply through a noisy resistance field. Plates spread fast through weak crust and stall
+// against strong crust. No straight line is ever computed, so none can appear in the result.
 program AgentsExe;
 
 public bundle Agents {
     public namespace World {
-
-        // One blob of a landmass: an ellipse with its own size, flattening and rotation, plus the
-        // vector helpers the skeleton walk needs. (There is deliberately no Vec2 here: the project
-        // already has Agents.Math.Vec2, and declaring a second type of that name in another
-        // namespace corrupts symbol resolution -- see the compiler bug filed for it.)
-        public struct Lobe {
-            public mutable float cx;
-            public mutable float cy;
-            public mutable float rx;
-            public mutable float ry;
-            public mutable float ang;
-
-            public constructor Lobe(float cx, float cy, float rx, float ry, float ang) {
-                this.cx = cx;
-                this.cy = cy;
-                this.rx = rx;
-                this.ry = ry;
-                this.ang = ang;
-            }
-
-            // Normalized elliptical distance from this lobe to a point: 1.0 is the lobe's rim.
-            public method distanceTo(float px, float py, float aspect) returns float {
-                float dx = (px - this.cx) * aspect;
-                float dy = py - this.cy;
-                float ca = LandMath.cos(this.ang);
-                float sa = LandMath.sin(this.ang);
-                float ux = (dx * ca + dy * sa) / this.rx;
-                float uy = (dy * ca - dx * sa) / this.ry;
-                return LandMath.sqrt(ux * ux + uy * uy);
-            }
-        }
 
         // Scalar maths the worldgen stages share. Kept as statics so Landmass and Tectonics use
         // ONE implementation: two divergent noise functions would silently desynchronise the
@@ -161,12 +139,6 @@ public bundle Agents {
             }
         }
 
-        // NOTE: this was a `record ContinentProfile(int lobes, float wander, ...)`. A record with
-        // any float field cannot be declared at all right now -- its synthesized toString() calls
-        // .toString() on every field and float has none (compiler bug filed). The profile
-        // therefore lives in the parallel arrays inside Landmass, which is what the per-cell hot
-        // path wants anyway; restore the record once float gains a string conversion.
-
         // The land mask has exactly one owner at a time: Landmass builds it, Tectonics consumes it.
         // `movable` makes the compiler enforce that -- a second reader is a compile error.
         public movable class LandMask {
@@ -202,343 +174,115 @@ public bundle Agents {
         }
 
         public class Landmass implements ElevationPass {
+            // Plate kinds. Ocean floor, thick continental crust, and a thin craton that only just
+            // clears the water -- the third is how islands exist without being a separate mechanism.
+            public static int KIND_OCEANIC = 0;
+            public static int KIND_CRATON = 1;
+            public static int KIND_ISLAND = 2;
+
             private mutable int seed;
-            private mutable int nmass;        // continents + islands
-            private mutable int nCont;        // how many of them are continents (islands follow)
-            private mutable int cellCols;     // continent cell grid
-            private mutable int cellRows;
-            // skeleton lobes, packed: [lobeStart[i] .. lobeStart[i]+lobeCount[i]) belong to mass i
-            private mutable Lobe[] lobe;
-            private mutable int[] lobeStart;
-            private mutable int[] lobeCount;
-            private mutable float[] cxs;        // skeleton origin, normalized
-            private mutable float[] cys;
-            private mutable float[] rad;        // base radius, in height-fractions
-            private mutable float[] bbx0;       // per-landmass bounding box, normalized
-            private mutable float[] bby0;
-            private mutable float[] bbx1;
-            private mutable float[] bby1;
+            private mutable int pw;             // coarse plate grid
+            private mutable int ph;
+            private mutable int nPlates;
+            private mutable int nCont;
+
+            // coarse fields, pw*ph
+            private mutable int[] owner;        // plate id per coarse cell
+            private mutable float[] cost;       // lithospheric resistance -- the growth metric
+            private mutable float[] dist;       // accumulated travel cost from the owning seed
+            private mutable float[] sdf;        // signed distance to the coast contour, in cells
+            private mutable float[] dt;         // chamfer scratch
+            private mutable float[] crust;      // crust thickness, saturated
+
+            // binary min-heap for the cost-distance growth
+            private mutable float[] hk;
+            private mutable int[] hv;
+            private mutable int hn;
+            private mutable int hcap;
+
+            // per plate
+            private mutable int[] psx;
+            private mutable int[] psy;
+            private mutable int[] pkind;
+            private mutable int[] pcont;        // continent id, or -1
+            private mutable int[] parea;
+            private mutable int[] pedge;        // 1 when the plate touches the map border
+            private mutable float[] pcx;        // centroid, coarse coords
+            private mutable float[] pcy;
+            private mutable float[] pmx;        // plate motion, unit vector (Tectonics reads it)
+            private mutable float[] pmy;
+            private mutable float[] cw;         // per continent: its drawn share weight
+            private mutable byte[] adj;         // nPlates*nPlates adjacency
+
+            private mutable int[] offX;         // 8-neighbourhood
+            private mutable int[] offY;
             private mutable LandMask mask;
-            // profile fields, one entry per landmass
-            private mutable int[] pLobes;
-            private mutable float[] pWander;
-            private mutable float[] pTurn;
-            private mutable float[] pAspect;
-            private mutable float[] pCoastAmp;
-            private mutable float[] pCoastFreq;
-            private mutable float[] pShare;
 
             public constructor Landmass(int seed) {
                 this.seed = seed;
-                this.nmass = 0;
+                this.pw = 1;
+                this.ph = 1;
+                this.nPlates = 0;
                 this.nCont = 0;
-                this.cellCols = 1;
-                this.cellRows = 1;
-                this.lobe = new Lobe[1]();
-                this.lobeStart = new int[1]();
-                this.lobeCount = new int[1]();
-                this.cxs = new float[1]();
-                this.cys = new float[1]();
-                this.rad = new float[1]();
-                this.bbx0 = new float[1]();
-                this.bby0 = new float[1]();
-                this.bbx1 = new float[1]();
-                this.bby1 = new float[1]();
+                this.hn = 0;
+                this.hcap = 1;
+                this.owner = new int[1]();
+                this.cost = new float[1]();
+                this.dist = new float[1]();
+                this.sdf = new float[1]();
+                this.dt = new float[1]();
+                this.crust = new float[1]();
+                this.hk = new float[1]();
+                this.hv = new int[1]();
+                this.psx = new int[1]();
+                this.psy = new int[1]();
+                this.pkind = new int[1]();
+                this.pcont = new int[1]();
+                this.parea = new int[1]();
+                this.pedge = new int[1]();
+                this.pcx = new float[1]();
+                this.pcy = new float[1]();
+                this.pmx = new float[1]();
+                this.pmy = new float[1]();
+                this.cw = new float[1]();
+                this.adj = new byte[1]();
+                this.offX = new int[8]();
+                this.offY = new int[8]();
                 this.mask = new LandMask(1) on heap;
-                this.pLobes = new int[1]();
-                this.pWander = new float[1]();
-                this.pTurn = new float[1]();
-                this.pAspect = new float[1]();
-                this.pCoastAmp = new float[1]();
-                this.pCoastFreq = new float[1]();
-                this.pShare = new float[1]();
+                this.offX[0] = 0 - 1;   this.offY[0] = 0;
+                this.offX[1] = 1;       this.offY[1] = 0;
+                this.offX[2] = 0;       this.offY[2] = 0 - 1;
+                this.offX[3] = 0;       this.offY[3] = 1;
+                this.offX[4] = 0 - 1;   this.offY[4] = 0 - 1;
+                this.offX[5] = 1;       this.offY[5] = 0 - 1;
+                this.offX[6] = 0 - 1;   this.offY[6] = 1;
+                this.offX[7] = 1;       this.offY[7] = 1;
             }
 
             public destructor ~Landmass() returns void {
-                delete this.lobe;
-                delete this.lobeStart;
-                delete this.lobeCount;
-                delete this.cxs;
-                delete this.cys;
-                delete this.rad;
-                delete this.bbx0;
-                delete this.bby0;
-                delete this.bbx1;
-                delete this.bby1;
+                delete this.owner;
+                delete this.cost;
+                delete this.dist;
+                delete this.sdf;
+                delete this.dt;
+                delete this.crust;
+                delete this.hk;
+                delete this.hv;
+                delete this.psx;
+                delete this.psy;
+                delete this.pkind;
+                delete this.pcont;
+                delete this.parea;
+                delete this.pedge;
+                delete this.pcx;
+                delete this.pcy;
+                delete this.pmx;
+                delete this.pmy;
+                delete this.cw;
+                delete this.adj;
+                delete this.offX;
+                delete this.offY;
                 delete this.mask;
-                delete this.pLobes;
-                delete this.pWander;
-                delete this.pTurn;
-                delete this.pAspect;
-                delete this.pCoastAmp;
-                delete this.pCoastFreq;
-                delete this.pShare;
-            }
-
-            public method profileCount() returns int {
-                return this.nmass;
-            }
-
-            public method lobesOf(int i) returns int {
-                return this.pLobes[i];
-            }
-
-            public method shareOf(int i) returns float {
-                return this.pShare[i];
-            }
-
-            private method allocProfiles(int n) returns void {
-                delete this.pLobes;
-                delete this.pWander;
-                delete this.pTurn;
-                delete this.pAspect;
-                delete this.pCoastAmp;
-                delete this.pCoastFreq;
-                delete this.pShare;
-                this.pLobes = new int[n]();
-                this.pWander = new float[n]();
-                this.pTurn = new float[n]();
-                this.pAspect = new float[n]();
-                this.pCoastAmp = new float[n]();
-                this.pCoastFreq = new float[n]();
-                this.pShare = new float[n]();
-                this.nmass = n;
-                return;
-            }
-
-            // Sizes follow a linear ramp with largest:smallest = 3:1, jittered +-15%, normalised so
-            // the shares sum to 1. Drawn from a DEDICATED stream so the geography never shifts when
-            // an unrelated stage changes how many random numbers it consumes -- a lesson from the
-            // previous rewrite, where re-rolling one jitter silently emptied two biomes.
-            public method drawProfiles(int nc, int nIsl) returns void {
-                int n = nc + nIsl;
-                this.allocProfiles(n);
-                this.nCont = nc;
-                Rng2 rng = new Rng2(this.seed ^ 0x2C0F) on stack;
-                float[] raw = new float[nc]();
-                mutable float total = 0.0;
-                mutable int i = 0;
-                while (i < nc) {
-                    mutable float ramp = 3.0;
-                    if (nc > 1) {
-                        ramp = 3.0 - 2.0 * cast<float>(i) / cast<float>(nc - 1);
-                    }
-                    float jitter = 0.85 + 0.30 * rng.unit();
-                    raw[i] = ramp * jitter;
-                    total = total + raw[i];
-                    i = i + 1;
-                }
-                i = 0;
-                while (i < nc) {
-                    this.pLobes[i] = 3 + rng.nextInt(6);
-                    this.pWander[i] = 0.35 + 0.50 * rng.unit();
-                    this.pTurn[i] = 0.35 + 0.85 * rng.unit();
-                    this.pAspect[i] = 1.0 + 1.5 * rng.unit();
-                    this.pCoastAmp[i] = 0.06 + 0.28 * rng.unit();
-                    this.pCoastFreq[i] = 3.0 + 11.0 * rng.unit();
-                    this.pShare[i] = raw[i] / total;
-                    i = i + 1;
-                }
-                // Islands: a single lobe each, small, and ragged out of proportion to their size --
-                // that is what reads as an island rather than a shrunken continent.
-                while (i < n) {
-                    this.pLobes[i] = 1;
-                    this.pWander[i] = 0.0;
-                    this.pTurn[i] = 0.0;
-                    this.pAspect[i] = 1.0 + 1.2 * rng.unit();
-                    this.pCoastAmp[i] = 0.16 + 0.24 * rng.unit();
-                    this.pCoastFreq[i] = 9.0 + 12.0 * rng.unit();
-                    this.pShare[i] = 0.0;
-                    i = i + 1;
-                }
-                delete raw;
-                return;
-            }
-
-            private method allocMasses(int n) returns void {
-                delete this.lobeStart;
-                delete this.lobeCount;
-                delete this.cxs;
-                delete this.cys;
-                delete this.rad;
-                delete this.bbx0;
-                delete this.bby0;
-                delete this.bbx1;
-                delete this.bby1;
-                this.lobeStart = new int[n]();
-                this.lobeCount = new int[n]();
-                this.cxs = new float[n]();
-                this.cys = new float[n]();
-                this.rad = new float[n]();
-                this.bbx0 = new float[n]();
-                this.bby0 = new float[n]();
-                this.bbx1 = new float[n]();
-                this.bby1 = new float[n]();
-                return;
-            }
-
-            // Where a landmass's skeleton starts, for the audit's fused-continent test.
-            public method centreX(int i, int w) returns int {
-                return cast<int>(this.cxs[i] * cast<float>(w));
-            }
-
-            public method centreY(int i, int h) returns int {
-                return cast<int>(this.cys[i] * cast<float>(h));
-            }
-
-            public method massCount() returns int {
-                return this.nmass;
-            }
-
-            // Continental centres by dart throwing with a guaranteed separation, then a short
-            // turning walk per landmass with an elliptical lobe at every node. The first lobe is
-            // full radius (the core); the rest vary 0.4x..1.3x, so a mass has a body and limbs
-            // rather than being one uniform cloud.
-            private method plantSkeletons(float aspect) returns void {
-                Rng2 rng = new Rng2(this.seed ^ 0x51ED) on stack;
-                mutable int total = 0;
-                mutable int i = 0;
-                while (i < this.nmass) {
-                    total = total + this.pLobes[i];
-                    i = i + 1;
-                }
-                delete this.lobe;
-                this.lobe = new Lobe[total]();
-                mutable int w = 0;
-                i = 0;
-                while (i < this.nmass) {
-                    // Each continent owns a disjoint CELL of the map and never leaves it, so
-                    // "the continents do not touch" holds by construction. Relaxation was tried
-                    // first and could not work: masses built by a walk have wildly irregular
-                    // footprints, so pushing them apart either fused them or crushed them all into
-                    // the middle depending on how the clearance was estimated. Cells make the
-                    // packing a layout decision instead of an emergent one; the size differences
-                    // still come from each mass's own area target, which just leaves the smaller
-                    // ones with room to spare inside their cell.
-                    if (i < this.nCont) {
-                        int gx = i % this.cellCols;
-                        int gy = i / this.cellCols;
-                        this.cxs[i] = this.cellX0(gx) + this.cellW() * (0.35 + 0.30 * rng.unit());
-                        this.cys[i] = this.cellY0(gy) + this.cellH() * (0.35 + 0.30 * rng.unit());
-                    } else {
-                        // islands live in open water: throw darts, reject anything landing on a
-                        // continent's box
-                        mutable int tries = 0;
-                        mutable boolean placed = false;
-                        while (!placed && tries < 300) {
-                            float tx = 0.06 + rng.unit() * 0.88;
-                            float ty = 0.08 + rng.unit() * 0.84;
-                            mutable boolean ok = true;
-                            mutable int j = 0;
-                            while (j < this.nCont) {
-                                if (tx > this.bbx0[j] - 0.02 && tx < this.bbx1[j] + 0.02
-                                    && ty > this.bby0[j] - 0.02 && ty < this.bby1[j] + 0.02) {
-                                    ok = false;
-                                    j = this.nCont;
-                                }
-                                j = j + 1;
-                            }
-                            if (ok) {
-                                this.cxs[i] = tx;
-                                this.cys[i] = ty;
-                                placed = true;
-                            }
-                            tries = tries + 1;
-                        }
-                        if (!placed) {
-                            this.cxs[i] = 0.06 + rng.unit() * 0.88;
-                            this.cys[i] = 0.08 + rng.unit() * 0.84;
-                        }
-                    }
-                    this.lobeStart[i] = w;
-                    this.lobeCount[i] = this.pLobes[i];
-                    mutable float px = this.cxs[i];
-                    mutable float py = this.cys[i];
-                    mutable float dir = rng.unit() * 6.28318;
-                    mutable int k = 0;
-                    while (k < this.pLobes[i]) {
-                        mutable float lr = this.rad[i];
-                        if (k > 0) {
-                            lr = this.rad[i] * (0.4 + 0.9 * rng.unit());
-                        }
-                        float asp = 1.0 + (this.pAspect[i] - 1.0) * rng.unit();
-                        this.lobe[w] = new Lobe(px, py, lr, lr / asp, rng.unit() * 3.14159);
-                        w = w + 1;
-                        dir = dir + (rng.unit() * 2.0 - 1.0) * this.pTurn[i];
-                        float stride = this.pWander[i] * this.rad[i];
-                        px = px + LandMath.cos(dir) * stride / aspect;
-                        py = py + LandMath.sin(dir) * stride;
-                        k = k + 1;
-                    }
-                    this.computeBox(i, aspect);
-                    i = i + 1;
-                }
-                return;
-            }
-
-            // Bounding box over a landmass's lobes, padded by the coast noise AND by the offshore
-            // band the depth ramp needs. Cells reject a whole landmass with four comparisons;
-            // without this the inner loop would test ~50 lobes on every one of 3.7M cells.
-            private method computeBox(int i, float aspect) returns void {
-                float pad = 1.0 + this.pCoastAmp[i] + 0.40;
-                mutable float x0 = 9.0;
-                mutable float y0 = 9.0;
-                mutable float x1 = 0.0 - 9.0;
-                mutable float y1 = 0.0 - 9.0;
-                mutable int k = 0;
-                while (k < this.lobeCount[i]) {
-                    int li = this.lobeStart[i] + k;
-                    float ex = this.lobe[li].rx * pad / aspect;
-                    float ey = this.lobe[li].ry * pad;
-                    float cx = this.lobe[li].cx;
-                    float cy = this.lobe[li].cy;
-                    if (cx - ex < x0) {
-                        x0 = cx - ex;
-                    }
-                    if (cy - ey < y0) {
-                        y0 = cy - ey;
-                    }
-                    if (cx + ex > x1) {
-                        x1 = cx + ex;
-                    }
-                    if (cy + ey > y1) {
-                        y1 = cy + ey;
-                    }
-                    k = k + 1;
-                }
-                this.bbx0[i] = x0;
-                this.bby0[i] = y0;
-                this.bbx1[i] = x1;
-                this.bby1[i] = y1;
-                return;
-            }
-
-            // Union of a landmass's lobes as a MIN over normalized elliptical distances. The result
-            // is NOT clamped: positive means land (and how far inland), negative means sea (and how
-            // far offshore), so one field yields both the plateau and the shelf-to-deep ramp.
-            // Coast noise is added to the DISTANCE, never to the sampled position -- that ravels the
-            // coastline without dragging one landmass into its neighbour, which is the trick the
-            // original agents.exe uses (replica_world.md 6c) and the reason the previous rewrites,
-            // which warped the position instead, welded their continents together.
-            private method massValue(int i, float nx, float ny, float aspect) returns float {
-                if (nx < this.bbx0[i] || nx > this.bbx1[i] || ny < this.bby0[i] || ny > this.bby1[i]) {
-                    return 0.0 - 9.0;
-                }
-                mutable float d = 9.0;
-                mutable int k = 0;
-                while (k < this.lobeCount[i]) {
-                    float dd = this.lobe[this.lobeStart[i] + k].distanceTo(nx, ny, aspect);
-                    if (dd < d) {
-                        d = dd;
-                    }
-                    k = k + 1;
-                }
-                float freq = this.pCoastFreq[i];
-                float n1 = LandMath.vnoise(this.seed + i * 37, nx * freq, ny * freq, cast<int>(freq));
-                float n2 = LandMath.vnoise(this.seed + i * 91, nx * freq * 2.7 + 5.0,
-                                           ny * freq * 2.7 + 9.0, cast<int>(freq * 2.7) + 1);
-                d = d + (n1 - 0.5) * this.pCoastAmp[i] + (n2 - 0.5) * this.pCoastAmp[i] * 0.45;
-                return 1.0 - d;
             }
 
             public override method name() returns String {
@@ -546,397 +290,928 @@ public bundle Agents {
             }
 
             public override method apply(WorldField* f) returns void {
-                float aspect = cast<float>(f.w) / cast<float>(f.h);
                 mutable int nc = f.nContinents;
                 if (nc <= 0) {
                     nc = 6;
                 }
-                int nIsl = 5;
-                this.nmass = nc + nIsl;
-                this.drawProfiles(nc, nIsl);
-                this.allocMasses(this.nmass);
+                this.nCont = nc;
+                // Eight plates per continent. Enough craton plates to weld into continents AND
+                // enough oceanic ones left over to keep them apart -- but the real reason for the
+                // number is GRANULARITY: with five, a continent that needed to grow was often boxed
+                // in by its neighbours, the balancing loop stalled, and continental crust came in at
+                // 34% against a 46% target, which let the flood cut BELOW the cratons and merge
+                // landmasses across open water. Smaller plates give the loop somewhere to go.
+                this.nPlates = nc * 8;
+                if (this.nPlates < 32) {
+                    this.nPlates = 32;
+                }
+                // FIXED coarse resolution, not w/8. Deriving it from the render size made the plate
+                // partition depend on it, so the same seed produced a different world at 1280x720
+                // than at 2560x1440 -- and the plate diagnostic was describing a world the audit
+                // never saw. 320 cells on the long axis is finer than any plate margin.
+                this.pw = 320;
+                this.ph = 320 * f.h / f.w;
+                if (this.ph < 48) {
+                    this.ph = 48;
+                }
+                this.allocGrids(this.pw * this.ph);
+                this.allocPlates(this.nPlates);
+
+                this.buildCost();
+                this.seedPlates();
+                this.growPlates();
+                this.measurePlates();
+                this.buildAdjacency();
+                this.chooseCratons();
+                this.buildCrust();
+
                 mutable float landT = f.landRatio;
                 if (landT < 0.0) {
                     landT = 0.38;
                 }
-                // First guess only: a landmass is a WALK of lobes, so its real area is several
-                // times one circle of this radius. fitRadii measures and corrects.
-                mutable int i = 0;
-                while (i < nc) {
-                    this.rad[i] = LandMath.sqrt(this.pShare[i] * landT * aspect / 3.14159) * 0.45;
-                    i = i + 1;
-                }
-                while (i < this.nmass) {
-                    this.rad[i] = 0.022 + 0.020 * LandMath.hash01(this.seed + i * 17, i, 3);
-                    i = i + 1;
-                }
-                this.cellCols = cast<int>(LandMath.sqrt(cast<float>(nc) * aspect + 0.5));
-                if (this.cellCols < 1) {
-                    this.cellCols = 1;
-                }
-                this.cellRows = (nc + this.cellCols - 1) / this.cellCols;
-                this.plantSkeletons(aspect);
-                mutable int fi = 0;
-                while (fi < this.nCont) {
-                    this.fitToCell(fi, aspect);
-                    fi = fi + 1;
-                }
-                this.fitRadii(f, aspect, landT);
-                this.rasterize(f, aspect);
+                this.raiseAndFlood(f, landT);
+                this.publish(f);
                 return;
             }
 
-            // ---- the continent cell grid ----------------------------------------------------
-            // A cell per continent, laid out over the usable map with a gutter between them. The
-            // gutter is the ocean that guarantees separation.
-            private method cellW() returns float {
-                return 0.94 / cast<float>(this.cellCols);
+            private method allocGrids(int pn) returns void {
+                delete this.owner;
+                delete this.cost;
+                delete this.dist;
+                delete this.sdf;
+                delete this.dt;
+                delete this.crust;
+                delete this.hk;
+                delete this.hv;
+                this.owner = new int[pn]();
+                this.cost = new float[pn]();
+                this.dist = new float[pn]();
+                this.sdf = new float[pn]();
+                this.dt = new float[pn]();
+                this.crust = new float[pn]();
+                this.hcap = pn * 8;
+                this.hk = new float[this.hcap]();
+                this.hv = new int[this.hcap]();
+                this.hn = 0;
+                return;
             }
 
-            private method cellH() returns float {
-                return 0.90 / cast<float>(this.cellRows);
+            private method allocPlates(int np) returns void {
+                delete this.psx;
+                delete this.psy;
+                delete this.pkind;
+                delete this.pcont;
+                delete this.parea;
+                delete this.pedge;
+                delete this.pcx;
+                delete this.pcy;
+                delete this.pmx;
+                delete this.pmy;
+                delete this.cw;
+                delete this.adj;
+                this.psx = new int[np]();
+                this.psy = new int[np]();
+                this.pkind = new int[np]();
+                this.pcont = new int[np]();
+                this.parea = new int[np]();
+                this.pedge = new int[np]();
+                this.pcx = new float[np]();
+                this.pcy = new float[np]();
+                this.pmx = new float[np]();
+                this.pmy = new float[np]();
+                this.cw = new float[np]();
+                this.adj = new byte[np * np]();
+                return;
             }
 
-            private method cellX0(int gx) returns float {
-                return 0.03 + this.cellW() * cast<float>(gx);
-            }
-
-            private method cellY0(int gy) returns float {
-                return 0.05 + this.cellH() * cast<float>(gy);
-            }
-
-            // Shrink a continent until its shoreline box fits inside its own cell, leaving the
-            // gutter clear. Called after every growth step, so a mass can chase its area target
-            // but can never spill into a neighbour.
-            private method fitToCell(int i, float aspect) returns void {
-                if (i >= this.nCont) {
-                    return;
+            // ---- 1. the resistance field --------------------------------------------------------
+            // Two scales on purpose: the low-frequency term makes a growing plate take
+            // continental-scale detours, the high-frequency one makes the boundary ragged where it
+            // finally stalls. Raised to the 4th power so most of the map is cheap and the walls are
+            // rare and strong (~17:1) -- that contrast is what produces fingers, gulfs and triple
+            // junctions instead of blobs. A flat cost field would give back the polygons.
+            private method buildCost() returns void {
+                int pn = this.pw * this.ph;
+                mutable int i = 0;
+                while (i < pn) {
+                    int x = i % this.pw;
+                    int y = i / this.pw;
+                    float nx = cast<float>(x) / cast<float>(this.pw);
+                    float ny = cast<float>(y) / cast<float>(this.ph);
+                    float lo = LandMath.fbm(this.seed ^ 0x0C57, nx, ny, 3, 3);
+                    float hi = LandMath.fbm(this.seed ^ 0x5A17, nx, ny, 13, 3);
+                    float r = lo * 0.72 + hi * 0.28;
+                    float r2 = r * r;
+                    this.cost[i] = 0.05 + 3.0 * r2 * r2;
+                    i = i + 1;
                 }
-                int gx = i % this.cellCols;
-                int gy = i / this.cellCols;
-                float gutX = this.cellW() * 0.10;
-                float gutY = this.cellH() * 0.10;
-                float lx = this.cellX0(gx) + gutX;
-                float hx = this.cellX0(gx) + this.cellW() - gutX;
-                float ly = this.cellY0(gy) + gutY;
-                float hy = this.cellY0(gy) + this.cellH() - gutY;
+                return;
+            }
+
+            // ---- 2. seeds ----------------------------------------------------------------------
+            // Seeds are placed with a plain minimum separation. That is not a contradiction of the
+            // non-Euclidean partition: the seed POSITIONS only decide how many plates there are and
+            // roughly where they nucleate. Their SHAPE comes entirely from the cost field.
+            private method seedPlates() returns void {
+                Rng2 rng = new Rng2(this.seed ^ 0x7A31) on stack;
+                float cellArea = cast<float>(this.pw * this.ph) / cast<float>(this.nPlates);
+                mutable float minSep = LandMath.sqrt(cellArea) * 0.62;
+                mutable int placed = 0;
                 mutable int guard = 0;
-                while (guard < 12) {
-                    mutable float k = 1.0;
-                    if (this.bbx1[i] - this.bbx0[i] > hx - lx) {
-                        k = (hx - lx) / (this.bbx1[i] - this.bbx0[i]);
-                    }
-                    float ky = 1.0;
-                    if (this.bby1[i] - this.bby0[i] > hy - ly) {
-                        float k2 = (hy - ly) / (this.bby1[i] - this.bby0[i]);
-                        if (k2 < k) {
-                            k = k2;
+                while (placed < this.nPlates && guard < 30000) {
+                    int tx = rng.nextInt(this.pw);
+                    int ty = rng.nextInt(this.ph);
+                    mutable boolean ok = true;
+                    mutable int j = 0;
+                    while (j < placed) {
+                        float dx = cast<float>(tx - this.psx[j]);
+                        float dy = cast<float>(ty - this.psy[j]);
+                        if (dx * dx + dy * dy < minSep * minSep) {
+                            ok = false;
+                            j = placed;
                         }
+                        j = j + 1;
                     }
-                    if (k < 0.999) {
-                        this.scaleMass(i, k * 0.98, aspect);
-                    } else {
-                        guard = 12;
+                    if (ok) {
+                        this.psx[placed] = tx;
+                        this.psy[placed] = ty;
+                        placed = placed + 1;
                     }
                     guard = guard + 1;
+                    if (guard % 5000 == 0) {
+                        minSep = minSep * 0.82;
+                    }
                 }
-                // slide it fully inside the cell
-                mutable float dx = 0.0;
-                mutable float dy = 0.0;
-                if (this.bbx0[i] < lx) {
-                    dx = lx - this.bbx0[i];
+                while (placed < this.nPlates) {
+                    this.psx[placed] = rng.nextInt(this.pw);
+                    this.psy[placed] = rng.nextInt(this.ph);
+                    placed = placed + 1;
                 }
-                if (this.bbx1[i] > hx) {
-                    dx = hx - this.bbx1[i];
-                }
-                if (this.bby0[i] < ly) {
-                    dy = ly - this.bby0[i];
-                }
-                if (this.bby1[i] > hy) {
-                    dy = hy - this.bby1[i];
-                }
-                if (dx != 0.0 || dy != 0.0) {
-                    this.translateMass(i, dx, dy, aspect);
+                mutable int i = 0;
+                while (i < this.nPlates) {
+                    float a = rng.unit() * 6.28318;
+                    this.pmx[i] = LandMath.cos(a);
+                    this.pmy[i] = LandMath.sin(a);
+                    i = i + 1;
                 }
                 return;
             }
 
-            // How far a landmass actually reaches from its skeleton origin: the walk carries lobes
-            // well past `rad`, so a circle of `rad` is not the footprint.
-            private method effRadius(int i, float aspect) returns float {
-                mutable float best = 0.0;
-                mutable int k = 0;
-                while (k < this.lobeCount[i]) {
-                    int li = this.lobeStart[i] + k;
-                    float dx = (this.lobe[li].cx - this.cxs[i]) * aspect;
-                    float dy = this.lobe[li].cy - this.cys[i];
-                    mutable float r = this.lobe[li].rx;
-                    if (this.lobe[li].ry > r) {
-                        r = this.lobe[li].ry;
+            // ---- 3. cost-distance growth (the non-Euclidean core) -------------------------------
+            // Multi-source Dijkstra over the coarse grid. A step is charged the MEAN resistance of
+            // the two cells times its length (1 or sqrt(2)), so the graph itself adds no directional
+            // bias -- a 4-neighbourhood would impose a diamond metric and a uniform cost field an
+            // octagonal one, both of which are just Euclidean artefacts wearing a different shape.
+            private method growPlates() returns void {
+                int pn = this.pw * this.ph;
+                mutable int i = 0;
+                while (i < pn) {
+                    this.dist[i] = 1000000000.0;
+                    this.owner[i] = 0 - 1;
+                    i = i + 1;
+                }
+                this.hn = 0;
+                i = 0;
+                while (i < this.nPlates) {
+                    int c = this.psy[i] * this.pw + this.psx[i];
+                    this.dist[c] = 0.0;
+                    this.owner[c] = i;
+                    this.hpush(0.0, c);
+                    i = i + 1;
+                }
+                while (this.hn > 0) {
+                    float d = this.hk[0];
+                    int c = this.hpop();
+                    // stale heap entry: this cell was relaxed again after being pushed
+                    if (d <= this.dist[c] + 0.0000001) {
+                        int cx = c % this.pw;
+                        int cy = c / this.pw;
+                        int who = this.owner[c];
+                        mutable int k = 0;
+                        while (k < 8) {
+                            int nx = cx + this.offX[k];
+                            int ny = cy + this.offY[k];
+                            if (nx >= 0 && nx < this.pw && ny >= 0 && ny < this.ph) {
+                                int nc = ny * this.pw + nx;
+                                mutable float len = 1.0;
+                                if (k >= 4) {
+                                    len = 1.41421356;
+                                }
+                                float nd = d + 0.5 * (this.cost[c] + this.cost[nc]) * len;
+                                if (nd < this.dist[nc]) {
+                                    this.dist[nc] = nd;
+                                    this.owner[nc] = who;
+                                    this.hpush(nd, nc);
+                                }
+                            }
+                            k = k + 1;
+                        }
                     }
-                    // The coast noise is added to the DISTANCE, so it pushes the shoreline out by
-                    // up to coastAmp of the lobe radius. Separation that ignores that leaves a gap
-                    // the noise then bridges -- which is precisely how two masses kept touching.
-                    r = r * (1.0 + this.pCoastAmp[i]);
-                    float reach = LandMath.sqrt(dx * dx + dy * dy) + r;
-                    if (reach > best) {
-                        best = reach;
+                }
+                // any cell the heap could not reach (only possible if it overflowed) falls to the
+                // nearest seed so the partition is always total
+                i = 0;
+                while (i < pn) {
+                    if (this.owner[i] < 0) {
+                        this.owner[i] = this.nearestSeed(i % this.pw, i / this.pw);
                     }
-                    k = k + 1;
+                    i = i + 1;
+                }
+                return;
+            }
+
+            private method nearestSeed(int x, int y) returns int {
+                mutable int best = 0;
+                mutable int bd = 2000000000;
+                mutable int i = 0;
+                while (i < this.nPlates) {
+                    int dx = x - this.psx[i];
+                    int dy = y - this.psy[i];
+                    int d = dx * dx + dy * dy;
+                    if (d < bd) {
+                        bd = d;
+                        best = i;
+                    }
+                    i = i + 1;
                 }
                 return best;
             }
 
-            private method translateMass(int i, float dx, float dy, float aspect) returns void {
-                this.cxs[i] = this.cxs[i] + dx;
-                this.cys[i] = this.cys[i] + dy;
-                mutable int k = 0;
-                while (k < this.lobeCount[i]) {
-                    int li = this.lobeStart[i] + k;
-                    this.lobe[li] = new Lobe(this.lobe[li].cx + dx, this.lobe[li].cy + dy,
-                                             this.lobe[li].rx, this.lobe[li].ry, this.lobe[li].ang);
-                    k = k + 1;
+            private method hpush(float key, int val) returns void {
+                if (this.hn >= this.hcap) {
+                    return;
                 }
-                this.computeBox(i, aspect);
+                mutable int i = this.hn;
+                this.hk[i] = key;
+                this.hv[i] = val;
+                this.hn = this.hn + 1;
+                while (i > 0) {
+                    int p = (i - 1) / 2;
+                    if (this.hk[p] <= this.hk[i]) {
+                        i = 0;
+                    } else {
+                        float tk = this.hk[p];
+                        int tv = this.hv[p];
+                        this.hk[p] = this.hk[i];
+                        this.hv[p] = this.hv[i];
+                        this.hk[i] = tk;
+                        this.hv[i] = tv;
+                        i = p;
+                    }
+                }
                 return;
             }
 
-            // Relaxation on BOUNDING BOXES, not circles. A landmass built by a walk is long and
-            // thin, so a circle around its origin claims several times its real footprint: asking
-            // for circle clearance demanded more room than the map has, the relaxation saturated
-            // against the walls, and every mass jammed into the middle and fused. Boxes are tight,
-            // and pushing along the axis of LEAST overlap slides masses past each other instead of
-            // shoving them all outward. Translation only -- each mass keeps its shape.
-            private method separateMasses(float aspect) returns void {
-                // shoreline reach without the shelf padding computeBox adds for the depth ramp
-                float shrink = 0.40;
-                mutable int pass = 0;
-                while (pass < 30) {
-                    mutable boolean moved = false;
-                    mutable int i = 0;
-                    while (i < this.nmass) {
-                        mutable int j = i + 1;
-                        while (j < this.nmass) {
-                            float ax0 = this.bbx0[i] + shrink * this.rad[i] / aspect;
-                            float ax1 = this.bbx1[i] - shrink * this.rad[i] / aspect;
-                            float ay0 = this.bby0[i] + shrink * this.rad[i];
-                            float ay1 = this.bby1[i] - shrink * this.rad[i];
-                            float bx0 = this.bbx0[j] + shrink * this.rad[j] / aspect;
-                            float bx1 = this.bbx1[j] - shrink * this.rad[j] / aspect;
-                            float by0 = this.bby0[j] + shrink * this.rad[j];
-                            float by1 = this.bby1[j] - shrink * this.rad[j];
-                            float gap = 0.012;
-                            float overX = this.overlapOf(ax0, ax1, bx0, bx1) + gap;
-                            float overY = this.overlapOf(ay0, ay1, by0, by1) + gap;
-                            if (overX > gap && overY > gap) {
-                                // separate along whichever axis needs the smaller move
-                                if (overX * aspect < overY) {
-                                    mutable float s = overX * 0.5;
-                                    if (this.cxs[i] > this.cxs[j]) {
-                                        s = 0.0 - s;
-                                    }
-                                    this.translateMass(i, 0.0 - s, 0.0, aspect);
-                                    this.translateMass(j, s, 0.0, aspect);
-                                } else {
-                                    mutable float s = overY * 0.5;
-                                    if (this.cys[i] > this.cys[j]) {
-                                        s = 0.0 - s;
-                                    }
-                                    this.translateMass(i, 0.0, 0.0 - s, aspect);
-                                    this.translateMass(j, 0.0, s, aspect);
-                                }
-                                moved = true;
-                            }
-                            j = j + 1;
-                        }
-                        i = i + 1;
+            private method hpop() returns int {
+                int top = this.hv[0];
+                this.hn = this.hn - 1;
+                this.hk[0] = this.hk[this.hn];
+                this.hv[0] = this.hv[this.hn];
+                mutable int i = 0;
+                mutable boolean go = true;
+                while (go) {
+                    int l = 2 * i + 1;
+                    int r = l + 1;
+                    mutable int s = i;
+                    if (l < this.hn && this.hk[l] < this.hk[s]) {
+                        s = l;
                     }
-                    // keep every mass inside the map, with room for the border ocean falloff
+                    if (r < this.hn && this.hk[r] < this.hk[s]) {
+                        s = r;
+                    }
+                    if (s == i) {
+                        go = false;
+                    } else {
+                        float tk = this.hk[s];
+                        int tv = this.hv[s];
+                        this.hk[s] = this.hk[i];
+                        this.hv[s] = this.hv[i];
+                        this.hk[i] = tk;
+                        this.hv[i] = tv;
+                        i = s;
+                    }
+                }
+                return top;
+            }
+
+            // ---- 4. plate statistics and adjacency ----------------------------------------------
+            private method measurePlates() returns void {
+                mutable int i = 0;
+                while (i < this.nPlates) {
+                    this.parea[i] = 0;
+                    this.pedge[i] = 0;
+                    this.pcx[i] = 0.0;
+                    this.pcy[i] = 0.0;
+                    i = i + 1;
+                }
+                int pn = this.pw * this.ph;
+                i = 0;
+                while (i < pn) {
+                    int p = this.owner[i];
+                    int x = i % this.pw;
+                    int y = i / this.pw;
+                    this.parea[p] = this.parea[p] + 1;
+                    this.pcx[p] = this.pcx[p] + cast<float>(x);
+                    this.pcy[p] = this.pcy[p] + cast<float>(y);
+                    if (x == 0 || y == 0 || x == this.pw - 1 || y == this.ph - 1) {
+                        this.pedge[p] = 1;
+                    }
+                    i = i + 1;
+                }
+                i = 0;
+                while (i < this.nPlates) {
+                    if (this.parea[i] > 0) {
+                        this.pcx[i] = this.pcx[i] / cast<float>(this.parea[i]);
+                        this.pcy[i] = this.pcy[i] / cast<float>(this.parea[i]);
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            private method buildAdjacency() returns void {
+                mutable int i = 0;
+                int nn = this.nPlates * this.nPlates;
+                while (i < nn) {
+                    this.adj[i] = cast<byte>(0);
+                    i = i + 1;
+                }
+                mutable int y = 0;
+                while (y < this.ph) {
+                    mutable int x = 0;
+                    while (x < this.pw) {
+                        int c = y * this.pw + x;
+                        int a = this.owner[c];
+                        if (x + 1 < this.pw) {
+                            int b = this.owner[c + 1];
+                            if (b != a) {
+                                this.adj[a * this.nPlates + b] = cast<byte>(1);
+                                this.adj[b * this.nPlates + a] = cast<byte>(1);
+                            }
+                        }
+                        if (y + 1 < this.ph) {
+                            int b = this.owner[c + this.pw];
+                            if (b != a) {
+                                this.adj[a * this.nPlates + b] = cast<byte>(1);
+                                this.adj[b * this.nPlates + a] = cast<byte>(1);
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                return;
+            }
+
+            private method touches(int a, int b) returns boolean {
+                return cast<int>(this.adj[a * this.nPlates + b]) != 0;
+            }
+
+            // Is plate p next to any plate already owned by continent c?
+            private method nextToCont(int p, int c) returns boolean {
+                mutable int i = 0;
+                while (i < this.nPlates) {
+                    if (this.pcont[i] == c && this.touches(p, i)) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            // Is plate p next to any continent OTHER than c? (c = -1 asks about any continent.)
+            private method nextToOther(int p, int c) returns boolean {
+                mutable int i = 0;
+                while (i < this.nPlates) {
+                    if (this.pcont[i] >= 0 && this.pcont[i] != c && this.touches(p, i)) {
+                        return true;
+                    }
+                    i = i + 1;
+                }
+                return false;
+            }
+
+            // ---- 5. cratons and welding ---------------------------------------------------------
+            // Nuclei by farthest-point sampling, then each absorbs 0..3 adjacent plates. A candidate
+            // that also touches ANOTHER continent is refused, so an oceanic plate always survives
+            // between two continents: the separation is topological, not geometric, which is why
+            // there is no packing step and no grid to show through.
+            //
+            // The size spread therefore comes from a DISCRETE, physical quantity -- how many plates
+            // got welded. A four-plate continent beside a one-plate continent is Eurasia beside
+            // Australia. No ratio is imposed anywhere.
+            private method chooseCratons() returns void {
+                Rng2 rng = new Rng2(this.seed ^ 0x1BEE) on stack;
+                mutable int i = 0;
+                while (i < this.nPlates) {
+                    this.pkind[i] = Landmass.KIND_OCEANIC;
+                    this.pcont[i] = 0 - 1;
+                    i = i + 1;
+                }
+                mutable float avg = 0.0;
+                i = 0;
+                while (i < this.nPlates) {
+                    avg = avg + cast<float>(this.parea[i]);
+                    i = i + 1;
+                }
+                avg = avg / cast<float>(this.nPlates);
+                if (avg < 1.0) {
+                    avg = 1.0;
+                }
+
+                // first nucleus: the biggest interior plate
+                mutable int first = 0;
+                mutable float bestA = 0.0 - 1.0;
+                i = 0;
+                while (i < this.nPlates) {
+                    mutable float a = cast<float>(this.parea[i]);
+                    if (this.pedge[i] != 0) {
+                        a = a * 0.35;
+                    }
+                    if (a > bestA) {
+                        bestA = a;
+                        first = i;
+                    }
+                    i = i + 1;
+                }
+                this.pkind[first] = Landmass.KIND_CRATON;
+                this.pcont[first] = 0;
+                mutable int made = 1;
+                mutable boolean more = true;
+                while (made < this.nCont && more) {
+                    mutable int pick = 0 - 1;
+                    mutable float bestScore = 0.0 - 1.0;
                     i = 0;
-                    while (i < this.nmass) {
-                        mutable float dx = 0.0;
-                        mutable float dy = 0.0;
-                        if (this.bbx0[i] < 0.02) {
-                            dx = 0.02 - this.bbx0[i];
-                        }
-                        if (this.bbx1[i] > 0.98) {
-                            dx = 0.98 - this.bbx1[i];
-                        }
-                        if (this.bby0[i] < 0.03) {
-                            dy = 0.03 - this.bby0[i];
-                        }
-                        if (this.bby1[i] > 0.97) {
-                            dy = 0.97 - this.bby1[i];
-                        }
-                        if (dx != 0.0 || dy != 0.0) {
-                            this.translateMass(i, dx, dy, aspect);
-                            moved = true;
-                        }
-                        i = i + 1;
-                    }
-                    if (!moved) {
-                        pass = 30;
-                    }
-                    pass = pass + 1;
-                }
-                return;
-            }
-
-            // Overlap of two intervals, negative when they are already apart.
-            private method overlapOf(float a0, float a1, float b0, float b1) returns float {
-                mutable float hi = a1;
-                if (b1 < hi) {
-                    hi = b1;
-                }
-                mutable float lo = a0;
-                if (b0 > lo) {
-                    lo = b0;
-                }
-                return hi - lo;
-            }
-
-            // Closed loop instead of a guess: rasterise at 1/8 resolution (58k cells, trivial),
-            // measure the area each CONTINENT actually claims, and scale its radius by the square
-            // root of the error. Overlap between lobes, the coast noise and the walk's spread are
-            // all absorbed by the measurement rather than modelled. Islands are left alone.
-            private method fitRadii(WorldField* f, float aspect, float landT) returns void {
-                int sw = f.w / 8;
-                int sh = f.h / 8;
-                int[] got = new int[this.nmass]();
-                mutable int round = 0;
-                while (round < 4) {
-                    mutable int i = 0;
-                    while (i < this.nmass) {
-                        got[i] = 0;
-                        i = i + 1;
-                    }
-                    mutable int y = 0;
-                    while (y < sh) {
-                        float ny = cast<float>(y) / cast<float>(sh);
-                        mutable int x = 0;
-                        while (x < sw) {
-                            float nx = cast<float>(x) / cast<float>(sw);
-                            mutable float best = 0.0;
-                            mutable int who = 0 - 1;
-                            i = 0;
-                            while (i < this.nmass) {
-                                float v = this.massValue(i, nx, ny, aspect);
-                                if (v > best) {
-                                    best = v;
-                                    who = i;
+                    while (i < this.nPlates) {
+                        if (this.pcont[i] < 0 && !this.nextToOther(i, 0 - 1)) {
+                            mutable float md = 1000000000.0;
+                            mutable int j = 0;
+                            while (j < this.nPlates) {
+                                if (this.pcont[j] >= 0) {
+                                    float dx = this.pcx[i] - this.pcx[j];
+                                    float dy = this.pcy[i] - this.pcy[j];
+                                    float dd = LandMath.sqrt(dx * dx + dy * dy);
+                                    if (dd < md) {
+                                        md = dd;
+                                    }
                                 }
-                                i = i + 1;
+                                j = j + 1;
                             }
-                            if (who >= 0) {
-                                got[who] = got[who] + 1;
+                            mutable float sc = md * (0.55 + 0.90 * cast<float>(this.parea[i]) / avg);
+                            if (this.pedge[i] != 0) {
+                                sc = sc * 0.60;
                             }
-                            x = x + 1;
+                            if (sc > bestScore) {
+                                bestScore = sc;
+                                pick = i;
+                            }
                         }
-                        y = y + 1;
+                        i = i + 1;
                     }
-                    int total = sw * sh;
+                    if (pick < 0) {
+                        more = false;
+                    } else {
+                        this.pkind[pick] = Landmass.KIND_CRATON;
+                        this.pcont[pick] = made;
+                        made = made + 1;
+                    }
+                }
+                this.nCont = made;
+
+                // Continents grow toward their OWN weighted share of the crust. The weight is drawn
+                // once per continent and is where the size spread comes from -- it has to be a draw,
+                // because a loop that simply feeds the smallest continent until coverage is reached
+                // is an EQUALISER: chasing only the crust target it drove all six continents to
+                // within 1.68:1 of each other, which is the symmetry this rewrite exists to remove,
+                // arriving by a different road.
+                //
+                // Weights run 1.0 to 2.4. Land area grows faster than plate area -- the flood cuts a
+                // fixed depth into every margin, so a craton twice the size keeps more than twice the
+                // land -- and the ~2.2:1 spread six draws actually produce lands near 3:1 in the land
+                // the audit measures.
+                mutable float wsum = 0.0;
+                i = 0;
+                while (i < this.nCont) {
+                    float u = rng.unit();
+                    this.cw[i] = 1.0 + u * u * 1.4;
+                    wsum = wsum + this.cw[i];
+                    i = i + 1;
+                }
+
+                // Closed loop, not a plate count: plate areas vary by 10x, so any fixed number of
+                // welds lands somewhere different on every seed. Each round feeds whichever continent
+                // is furthest below its own quota, so coverage and spread are reached together.
+                int total = this.pw * this.ph;
+                int target = cast<int>(cast<float>(total) * 0.46);
+                int[] boxedIn = new int[this.nCont]();
+                mutable boolean progress = true;
+                while (progress && this.cratonArea() < target) {
+                    progress = false;
+                    mutable int pick = 0 - 1;
+                    mutable float worstGap = 0.0 - 1000000000.0;
                     i = 0;
                     while (i < this.nCont) {
-                        float actual = cast<float>(got[i]) / cast<float>(total);
-                        float target = this.pShare[i] * landT;
-                        if (actual > 0.00002) {
-                            mutable float k = LandMath.sqrt(target / actual);
-                            if (k > 1.6) {
-                                k = 1.6;
+                        if (boxedIn[i] == 0) {
+                            float quota = this.cw[i] / wsum * cast<float>(target);
+                            float gap = quota - cast<float>(this.contArea(i));
+                            if (gap > worstGap) {
+                                worstGap = gap;
+                                pick = i;
                             }
-                            if (k < 0.62) {
-                                k = 0.62;
-                            }
-                            this.scaleMass(i, k, aspect);
-                            this.fitToCell(i, aspect);
                         }
                         i = i + 1;
                     }
-                    round = round + 1;
+                    if (pick >= 0) {
+                        // a continent with no free neighbour left is out of the running, but the
+                        // others may still grow
+                        if (!this.weldOne(pick)) {
+                            boxedIn[pick] = 1;
+                        }
+                        progress = true;
+                    }
                 }
-                delete got;
+                delete boxedIn;
+
+                // Island cratons: oceanic plates whose crust only clears the water deep in the plate
+                // interior. (Real island ARCS are a boundary product and belong to Tectonics; these
+                // are the isolated ones -- Iceland, Hawaii.)
+                //
+                // At most ONE adjacent continent, which is exactly the anti-bridge condition:
+                // welding two continents needs a plate that touches both. Banning ALL adjacency
+                // instead was safe but found no candidates at all; allowing any adjacency turned an
+                // island into a land bridge and merged two continents into half of all land.
+                mutable int isl = 0;
+                mutable boolean going = true;
+                while (isl < 5 && going) {
+                    mutable int pick = 0 - 1;
+                    mutable float bestSc = 0.0 - 1.0;
+                    i = 0;
+                    while (i < this.nPlates) {
+                        if (this.pkind[i] == Landmass.KIND_OCEANIC
+                            && this.adjacentContinents(i) <= 1
+                            && cast<float>(this.parea[i]) > avg * 0.35) {
+                            mutable float far = 1000000000.0;
+                            mutable int j = 0;
+                            while (j < this.nPlates) {
+                                if (this.pkind[j] == Landmass.KIND_CRATON) {
+                                    float dx = this.pcx[i] - this.pcx[j];
+                                    float dy = this.pcy[i] - this.pcy[j];
+                                    float dd = LandMath.sqrt(dx * dx + dy * dy);
+                                    if (dd < far) {
+                                        far = dd;
+                                    }
+                                }
+                                j = j + 1;
+                            }
+                            float sc = far * (0.7 + 0.6 * rng.unit());
+                            if (sc > bestSc) {
+                                bestSc = sc;
+                                pick = i;
+                            }
+                        }
+                        i = i + 1;
+                    }
+                    if (pick < 0) {
+                        going = false;
+                    } else {
+                        this.pkind[pick] = Landmass.KIND_ISLAND;
+                        this.pcont[pick] = 0 - 1;
+                        isl = isl + 1;
+                    }
+                }
                 return;
             }
 
-            // Grow or shrink one landmass about its skeleton origin: the lobes keep their relative
-            // layout, so the shape it was given survives the resize.
-            private method scaleMass(int i, float k, float aspect) returns void {
-                this.rad[i] = this.rad[i] * k;
-                mutable int j = 0;
-                while (j < this.lobeCount[i]) {
-                    int li = this.lobeStart[i] + j;
-                    float ox = this.lobe[li].cx - this.cxs[i];
-                    float oy = this.lobe[li].cy - this.cys[i];
-                    this.lobe[li] = new Lobe(this.cxs[i] + ox * k, this.cys[i] + oy * k,
-                                             this.lobe[li].rx * k, this.lobe[li].ry * k,
-                                             this.lobe[li].ang);
-                    j = j + 1;
+            // Weld the biggest available plate onto continent c. A candidate that also touches
+            // ANOTHER continent is refused, so an oceanic plate always survives in between.
+            private method weldOne(int c) returns boolean {
+                mutable int pick = 0 - 1;
+                mutable int pickA = 0 - 1;
+                mutable int i = 0;
+                while (i < this.nPlates) {
+                    if (this.pcont[i] < 0 && this.nextToCont(i, c) && !this.nextToOther(i, c)) {
+                        if (this.parea[i] > pickA) {
+                            pickA = this.parea[i];
+                            pick = i;
+                        }
+                    }
+                    i = i + 1;
                 }
-                this.computeBox(i, aspect);
+                if (pick < 0) {
+                    return false;
+                }
+                this.pkind[pick] = Landmass.KIND_CRATON;
+                this.pcont[pick] = c;
+                return true;
+            }
+
+            private method cratonArea() returns int {
+                mutable int a = 0;
+                mutable int i = 0;
+                while (i < this.nPlates) {
+                    if (this.pkind[i] == Landmass.KIND_CRATON) {
+                        a = a + this.parea[i];
+                    }
+                    i = i + 1;
+                }
+                return a;
+            }
+
+            // How many distinct continents plate p touches. Two is a land bridge.
+            private method adjacentContinents(int p) returns int {
+                mutable int seen = 0;
+                mutable int c = 0;
+                while (c < this.nCont) {
+                    if (this.nextToCont(p, c)) {
+                        seen = seen + 1;
+                    }
+                    c = c + 1;
+                }
+                return seen;
+            }
+
+            private method contArea(int c) returns int {
+                mutable int a = 0;
+                mutable int i = 0;
+                while (i < this.nPlates) {
+                    if (this.pcont[i] == c) {
+                        a = a + this.parea[i];
+                    }
+                    i = i + 1;
+                }
+                return a;
+            }
+
+            // ---- 6. crust thickness --------------------------------------------------------------
+            // A signed distance to the continental/oceanic border, softened and wobbled. The border
+            // is already irregular (it is a cost-distance boundary), so its distance transform is
+            // irregular everywhere -- thick core, thin margins, no circle anywhere.
+            private method buildCrust() returns void {
+                int pn = this.pw * this.ph;
+                // distance from every cell to the nearest OCEANIC cell -> depth into the crust
+                this.chamfer(true);
+                mutable int i = 0;
+                while (i < pn) {
+                    this.sdf[i] = this.dt[i];
+                    i = i + 1;
+                }
+                // distance to the nearest CONTINENTAL cell -> how far offshore
+                this.chamfer(false);
+                i = 0;
+                while (i < pn) {
+                    if (this.pkind[this.owner[i]] == Landmass.KIND_OCEANIC) {
+                        this.sdf[i] = 0.0 - this.dt[i];
+                    }
+                    i = i + 1;
+                }
+
+                float margin = 0.055 * cast<float>(this.ph);
+                i = 0;
+                while (i < pn) {
+                    int x = i % this.pw;
+                    int y = i / this.pw;
+                    float nx = cast<float>(x) / cast<float>(this.pw);
+                    float ny = cast<float>(y) / cast<float>(this.ph);
+                    mutable float s = this.sdf[i] / margin;
+                    if (this.pkind[this.owner[i]] == Landmass.KIND_ISLAND) {
+                        // Only the deep interior of an island plate clears the water, and low. The
+                        // inset is in MARGINS, so it has to stay well under half a plate's width or
+                        // the island vanishes entirely -- at 1.55 margins the smaller plates came
+                        // out at a few hundred cells, under the audit's noise floor.
+                        s = (s - 0.90) * 0.60;
+                    }
+                    // Shift the CONTOUR, never the sampled position. Warping the position is what
+                    // welded neighbouring landmasses together in the earlier rewrites; moving the
+                    // contour ravels a coast without dragging anything into anything else.
+                    float wob = LandMath.fbm(this.seed ^ 0x33A9, nx, ny, 5, 4) - 0.5;
+                    s = s - wob * 1.35;
+                    mutable float sat = s;
+                    if (s > 0.0) {
+                        sat = s / (1.0 + s * 0.45);
+                    } else {
+                        sat = s / (1.0 - s * 0.45);
+                    }
+                    this.crust[i] = sat;
+                    i = i + 1;
+                }
                 return;
             }
 
-            // Full-resolution pass. Land tops out at 0.62 BY CONSTRUCTION (0.44 + 0.14 + 0.04), so
-            // nothing here can reach the 0.63 mountain band -- only Tectonics may do that, which is
-            // what stops mountain coverage from being a side effect of noise tuning.
-            private method rasterize(WorldField* f, float aspect) returns void {
-                delete this.mask;
-                this.mask = new LandMask(f.w * f.h) on heap;
+            // Two-pass chamfer distance transform into this.dt. `fromOceanic` seeds the oceanic
+            // cells (so continental cells learn how far inland they are) and vice versa.
+            private method chamfer(boolean fromOceanic) returns void {
+                int pn = this.pw * this.ph;
+                mutable int i = 0;
+                while (i < pn) {
+                    boolean oceanic = this.pkind[this.owner[i]] == Landmass.KIND_OCEANIC;
+                    mutable boolean isSeed = oceanic;
+                    if (!fromOceanic) {
+                        isSeed = !oceanic;
+                    }
+                    if (isSeed) {
+                        this.dt[i] = 0.0;
+                    } else {
+                        this.dt[i] = 1000000000.0;
+                    }
+                    i = i + 1;
+                }
+                float dOrt = 1.0;
+                float dDia = 1.41421356;
+                mutable int y = 0;
+                while (y < this.ph) {
+                    mutable int x = 0;
+                    while (x < this.pw) {
+                        int c = y * this.pw + x;
+                        mutable float b = this.dt[c];
+                        if (x > 0 && this.dt[c - 1] + dOrt < b) {
+                            b = this.dt[c - 1] + dOrt;
+                        }
+                        if (y > 0 && this.dt[c - this.pw] + dOrt < b) {
+                            b = this.dt[c - this.pw] + dOrt;
+                        }
+                        if (x > 0 && y > 0 && this.dt[c - this.pw - 1] + dDia < b) {
+                            b = this.dt[c - this.pw - 1] + dDia;
+                        }
+                        if (x + 1 < this.pw && y > 0 && this.dt[c - this.pw + 1] + dDia < b) {
+                            b = this.dt[c - this.pw + 1] + dDia;
+                        }
+                        this.dt[c] = b;
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                y = this.ph - 1;
+                while (y >= 0) {
+                    mutable int x = this.pw - 1;
+                    while (x >= 0) {
+                        int c = y * this.pw + x;
+                        mutable float b = this.dt[c];
+                        if (x + 1 < this.pw && this.dt[c + 1] + dOrt < b) {
+                            b = this.dt[c + 1] + dOrt;
+                        }
+                        if (y + 1 < this.ph && this.dt[c + this.pw] + dOrt < b) {
+                            b = this.dt[c + this.pw] + dOrt;
+                        }
+                        if (x + 1 < this.pw && y + 1 < this.ph && this.dt[c + this.pw + 1] + dDia < b) {
+                            b = this.dt[c + this.pw + 1] + dDia;
+                        }
+                        if (x > 0 && y + 1 < this.ph && this.dt[c + this.pw - 1] + dDia < b) {
+                            b = this.dt[c + this.pw - 1] + dDia;
+                        }
+                        this.dt[c] = b;
+                        x = x - 1;
+                    }
+                    y = y - 1;
+                }
+                return;
+            }
+
+            private method crustAt(float nx, float ny) returns float {
+                mutable float gx = nx * cast<float>(this.pw) - 0.5;
+                mutable float gy = ny * cast<float>(this.ph) - 0.5;
+                if (gx < 0.0) {
+                    gx = 0.0;
+                }
+                if (gy < 0.0) {
+                    gy = 0.0;
+                }
+                mutable int x0 = cast<int>(gx);
+                mutable int y0 = cast<int>(gy);
+                if (x0 > this.pw - 2) {
+                    x0 = this.pw - 2;
+                }
+                if (y0 > this.ph - 2) {
+                    y0 = this.ph - 2;
+                }
+                if (x0 < 0) {
+                    x0 = 0;
+                }
+                if (y0 < 0) {
+                    y0 = 0;
+                }
+                mutable float tx = gx - cast<float>(x0);
+                mutable float ty = gy - cast<float>(y0);
+                if (tx < 0.0) {
+                    tx = 0.0;
+                }
+                if (tx > 1.0) {
+                    tx = 1.0;
+                }
+                if (ty < 0.0) {
+                    ty = 0.0;
+                }
+                if (ty > 1.0) {
+                    ty = 1.0;
+                }
+                int c = y0 * this.pw + x0;
+                float a = this.crust[c];
+                float b = this.crust[c + 1];
+                float d = this.crust[c + this.pw];
+                float e = this.crust[c + this.pw + 1];
+                float ab = a + (b - a) * tx;
+                float de = d + (e - d) * tx;
+                return ab + (de - ab) * ty;
+            }
+
+            // ---- 7. raise, flood, remap ---------------------------------------------------------
+            // The height field has no fixed range: the flood picks the contour that yields the
+            // requested land ratio, and only then is everything remapped into the elevation
+            // contract. Pouring a fixed volume of water IS a percentile -- the reason the percentile
+            // failed before is that the old field was a plateau over a flat sea floor, so the
+            // percentile snapped to the floor and handed back the whole shelf as land. A continuum
+            // has no such step to snap to.
+            //
+            // Ordinary land tops out at 0.62 BY CONSTRUCTION and the sea floor bottoms out at 0.26.
+            // Nothing here can enter the 0.63 mountain band or the trench band below 0.22 -- those
+            // belong to Tectonics, which is what stops mountain coverage and trenches from being
+            // side effects of noise tuning.
+            private method raiseAndFlood(WorldField* f, float landT) returns void {
+                int n = f.w * f.h;
+                mutable float lo = 1000000000.0;
+                mutable float hi = 0.0 - 1000000000.0;
                 mutable int y = 0;
                 while (y < f.h) {
                     float ny = cast<float>(y) / cast<float>(f.h);
                     mutable int x = 0;
                     while (x < f.w) {
                         float nx = cast<float>(x) / cast<float>(f.w);
-                        mutable float m = 0.0 - 9.0;
-                        mutable int i = 0;
-                        while (i < this.nmass) {
-                            float v = this.massValue(i, nx, ny, aspect);
-                            if (v > m) {
-                                m = v;
-                            }
-                            i = i + 1;
+                        mutable float v = this.crustAt(nx, ny);
+                        // full-resolution coastline ravel, on the value (= on the contour)
+                        v = v - (LandMath.fbm(this.seed ^ 0x77C1, nx, ny, 26, 4) - 0.5) * 0.62;
+                        // interior texture, so the flood never meets a flat surface
+                        v = v + (LandMath.fbm(this.seed ^ 0x2D4B, nx, ny, 9, 5) - 0.5) * 0.30;
+                        // Map-edge ocean, subtracted on the RAW field so the flood counts it. As a
+                        // later pass it drowned land the percentile had already counted as land,
+                        // and the world came out at 31.4% against a 38% target -- the same mistake
+                        // as eroding after the flood, in a different place.
+                        mutable float edge = nx;
+                        if (1.0 - nx < edge) {
+                            edge = 1.0 - nx;
+                        }
+                        if (ny < edge) {
+                            edge = ny;
+                        }
+                        if (1.0 - ny < edge) {
+                            edge = 1.0 - ny;
+                        }
+                        if (edge < 0.07) {
+                            mutable float te = edge / 0.07;
+                            te = te * te * (3.0 - 2.0 * te);
+                            v = v - (1.0 - te) * 1.40;
                         }
                         int cell = y * f.w + x;
-                        if (m > 0.0) {
-                            this.mask.set(cell);
-                            mutable float plateau = m * 2.8;
-                            if (plateau > 1.0) {
-                                plateau = 1.0;
-                            }
-                            float d = LandMath.fbm(f.seed, nx, ny, 6, 5);
-                            f.eb[cell] = 0.44 + 0.14 * plateau + 0.04 * d;
-                        } else {
-                            // Steep drop, not a gentle ramp. The sea level is a PERCENTILE over
-                            // every cell, so a wide ocean band puts that percentile in the middle
-                            // of the sea floor and half the ocean comes back as shallows and ice.
-                            // x12 keeps the shelf a narrow coastal strip and drops the rest to the
-                            // floor, so the percentile lands where the coast actually is.
-                            mutable float depth = (0.0 - m) * 12.0;
-                            if (depth > 1.0) {
-                                depth = 1.0;
-                            }
-                            f.eb[cell] = 0.42 - 0.32 * depth;
-                        }
+                        f.eb[cell] = v;
                         x = x + 1;
                     }
                     y = y + 1;
                 }
-                this.borderFalloff(f);
-                return;
-            }
 
-            // Map-edge ocean, floor 0.30: a 0.15 floor used to push border cells under the trench
-            // cut and painted the artificial trench ring along the south edge.
-            private method borderFalloff(WorldField* f) returns void {
-                float margin = 0.07;
+                // Erode BEFORE flooding, not after. Erosion happens to terrain and the sea fills
+                // what is left -- and mechanically it has to be this way round: a relaxation run on
+                // the finished field averages a coastal land cell against the ocean beside it and
+                // drags it under, which cost 6 points of land ratio (31.7% against a 38% target)
+                // when this ran as a later pass. On the raw continuum there is no coastline yet, so
+                // there is nothing to drag anything across.
+                this.erodeRaw(f, 3);
+
                 mutable int i = 0;
-                int n = f.w * f.h;
                 while (i < n) {
-                    int x = i % f.w;
-                    int y = i / f.w;
-                    float nx = cast<float>(x) / cast<float>(f.w - 1);
-                    float ny = cast<float>(y) / cast<float>(f.h - 1);
+                    float v = f.eb[i];
+                    if (v < lo) {
+                        lo = v;
+                    }
+                    if (v > hi) {
+                        hi = v;
+                    }
+                    i = i + 1;
+                }
+                if (hi - lo < 0.000001) {
+                    hi = lo + 1.0;
+                }
+
+                // Two histograms. The sea contour is a quantile over EVERY cell -- that is what
+                // makes the land ratio exact. The depth SCALE is a quantile over the interior only:
+                // the map-edge penalty puts a deep frame at the bottom of the distribution, and
+                // reading the 98th percentile off it dragged the reference far below any real sea
+                // floor, which squashed the whole ocean into the shallow band (deep ocean fell from
+                // 18.6% to 4.8% of the world).
+                int bins = 2048;
+                int[] hist = new int[bins]();
+                int[] hin = new int[bins]();
+                float span = hi - lo;
+                mutable int nin = 0;
+                i = 0;
+                while (i < n) {
+                    mutable int b = cast<int>((f.eb[i] - lo) / span * cast<float>(bins));
+                    if (b < 0) {
+                        b = 0;
+                    }
+                    if (b >= bins) {
+                        b = bins - 1;
+                    }
+                    hist[b] = hist[b] + 1;
+                    float nx = cast<float>(i % f.w) / cast<float>(f.w);
+                    float ny = cast<float>(i / f.w) / cast<float>(f.h);
                     mutable float edge = nx;
                     if (1.0 - nx < edge) {
                         edge = 1.0 - nx;
@@ -947,37 +1222,199 @@ public bundle Agents {
                     if (1.0 - ny < edge) {
                         edge = 1.0 - ny;
                     }
-                    if (edge < margin) {
-                        mutable float t = edge / margin;
-                        t = t * t * (3.0 - 2.0 * t);
-                        // Pull TOWARD the deep-ocean floor, never below it. Multiplying the value
-                        // scaled open ocean down too and drew a visible rectangle where the margin
-                        // began; interpolating leaves an already-deep cell untouched.
-                        float floorZ = 0.10;
-                        if (f.eb[i] > floorZ) {
-                            f.eb[i] = floorZ + (f.eb[i] - floorZ) * t;
-                        }
+                    if (edge >= 0.07) {
+                        hin[b] = hin[b] + 1;
+                        nin = nin + 1;
                     }
+                    i = i + 1;
+                }
+                float sea = this.quantile(hist, bins, lo, span, n, landT);
+                float top = this.quantile(hin, bins, lo, span, nin, 0.02);
+                float bot = this.quantile(hin, bins, lo, span, nin, 0.98);
+                delete hist;
+                delete hin;
+
+                mutable float up = top - sea;
+                if (up < 0.000001) {
+                    up = 0.000001;
+                }
+                mutable float down = sea - bot;
+                if (down < 0.000001) {
+                    down = 0.000001;
+                }
+
+                delete this.mask;
+                this.mask = new LandMask(n) on heap;
+                i = 0;
+                while (i < n) {
+                    float v = f.eb[i];
+                    if (v >= sea) {
+                        mutable float t = (v - sea) / up;
+                        if (t > 1.0) {
+                            t = 1.0;
+                        }
+                        // slightly concave: broad lowlands, a minority of high interior
+                        float t2 = t * (0.35 + 0.65 * t);
+                        f.eb[i] = 0.44 + 0.18 * t2;
+                        this.mask.set(i);
+                    } else {
+                        mutable float t = (sea - v) / down;
+                        if (t > 1.0) {
+                            t = 1.0;
+                        }
+                        float t2 = t * (0.45 + 0.55 * t);
+                        f.eb[i] = 0.429 - 0.169 * t2;
+                    }
+                    i = i + 1;
+                }
+                f.sea = 0.43;
+                return;
+            }
+
+            // Thermal relaxation on the raw field: 4-neighbour, in place, edges clamped.
+            private method erodeRaw(WorldField* f, int passes) returns void {
+                mutable int p = 0;
+                while (p < passes) {
+                    mutable int y = 0;
+                    while (y < f.h) {
+                        mutable int x = 0;
+                        while (x < f.w) {
+                            int i = y * f.w + x;
+                            float c = f.eb[i];
+                            float l = f.eb[f.idx(x - 1, y)];
+                            float r = f.eb[f.idx(x + 1, y)];
+                            float u = f.eb[f.idx(x, y - 1)];
+                            float d = f.eb[f.idx(x, y + 1)];
+                            float avg = (l + r + u + d) * 0.25;
+                            f.eb[i] = c * 0.6 + avg * 0.4;
+                            x = x + 1;
+                        }
+                        y = y + 1;
+                    }
+                    p = p + 1;
+                }
+                return;
+            }
+
+            // The value with `frac` of all cells above it.
+            private method quantile(int[] hist, int bins, float lo, float span, int n, float frac) returns float {
+                int want = cast<int>(cast<float>(n) * frac);
+                mutable int cum = 0;
+                mutable int b = bins - 1;
+                while (b > 0 && cum < want) {
+                    cum = cum + hist[b];
+                    b = b - 1;
+                }
+                return lo + span * cast<float>(b) / cast<float>(bins);
+            }
+
+            // Hand the plate partition to the next pass. Tectonics deforms boundaries, so it needs
+            // who owns what, which plates are continental, and how each one is moving.
+            private method publish(WorldField* f) returns void {
+                f.pw = this.pw;
+                f.ph = this.ph;
+                f.nPlates = this.nPlates;
+                f.nCont = this.nCont;
+                delete f.plate;
+                delete f.pkind;
+                delete f.pcont;
+                delete f.pmx;
+                delete f.pmy;
+                int pn = this.pw * this.ph;
+                f.plate = new int[pn]();
+                f.pkind = new int[this.nPlates]();
+                f.pcont = new int[this.nPlates]();
+                f.pmx = new float[this.nPlates]();
+                f.pmy = new float[this.nPlates]();
+                mutable int i = 0;
+                while (i < pn) {
+                    f.plate[i] = this.owner[i];
+                    i = i + 1;
+                }
+                i = 0;
+                while (i < this.nPlates) {
+                    f.pkind[i] = this.pkind[i];
+                    f.pcont[i] = this.pcont[i];
+                    f.pmx[i] = this.pmx[i];
+                    f.pmy[i] = this.pmy[i];
                     i = i + 1;
                 }
                 return;
             }
 
-            // Floats are printed as scaled integers: string interpolation does not accept float
-            // (filed as a language gap), so every fractional value here is shown x1000.
-            public method dumpProfiles() returns void {
-                mutable int i = 0;
-                while (i < this.nmass) {
-                    int lobes = this.pLobes[i];
-                    int wander = cast<int>(this.pWander[i] * 1000.0);
-                    int turn = cast<int>(this.pTurn[i] * 1000.0);
-                    int aspect = cast<int>(this.pAspect[i] * 1000.0);
-                    int amp = cast<int>(this.pCoastAmp[i] * 1000.0);
-                    int freq = cast<int>(this.pCoastFreq[i] * 1000.0);
-                    int share = cast<int>(this.pShare[i] * 1000.0);
-                    System.IO.Console.println($"continent {i}: lobes={lobes} wander={wander} turn={turn} aspect={aspect} coastAmp={amp} coastFreq={freq} share={share}  (fractions x1000)");
-                    i = i + 1;
+            public method plateCount() returns int {
+                return this.nPlates;
+            }
+
+            public method continentCount() returns int {
+                return this.nCont;
+            }
+
+            // Diagnostic: run the pass on a small field and print what the plates turned into.
+            // The number that matters is the last one -- what share of LAND sits on continental
+            // crust. If land spills off the cratons the flood is cutting a noise field instead of
+            // a crust field, which is exactly the failure this rewrite exists to avoid.
+            public method dumpPlates(int w, int h, int nc) returns void {
+                WorldField* f = new WorldField(w, h, this.seed) on heap;
+                f.nContinents = nc;
+                ElevationPass* pass = this;
+                pass.apply(f);
+
+                System.IO.Console.println("continent  plates   coarse area   share of map");
+                mutable int c = 0;
+                while (c < this.nCont) {
+                    mutable int plates = 0;
+                    mutable int i = 0;
+                    while (i < this.nPlates) {
+                        if (this.pcont[i] == c) {
+                            plates = plates + 1;
+                        }
+                        i = i + 1;
+                    }
+                    int area = this.contArea(c);
+                    int share = area * 1000 / (this.pw * this.ph);
+                    System.IO.Console.println($"    {c}         {plates}        {area}          {share} per mille");
+                    c = c + 1;
                 }
+
+                mutable int cratons = 0;
+                mutable int islands = 0;
+                mutable int i2 = 0;
+                while (i2 < this.nPlates) {
+                    if (this.pkind[i2] == Landmass.KIND_CRATON) {
+                        cratons = cratons + 1;
+                    }
+                    if (this.pkind[i2] == Landmass.KIND_ISLAND) {
+                        islands = islands + 1;
+                    }
+                    i2 = i2 + 1;
+                }
+                int crustShare = this.cratonArea() * 100 / (this.pw * this.ph);
+
+                // where the land actually landed
+                mutable int land = 0;
+                mutable int onCraton = 0;
+                mutable int cell = 0;
+                int n = w * h;
+                while (cell < n) {
+                    if (this.mask.at(cell)) {
+                        land = land + 1;
+                        int gx = (cell % w) * this.pw / w;
+                        int gy = (cell / w) * this.ph / h;
+                        if (this.pkind[this.owner[gy * this.pw + gx]] != Landmass.KIND_OCEANIC) {
+                            onCraton = onCraton + 1;
+                        }
+                    }
+                    cell = cell + 1;
+                }
+                int landPct = land * 100 / n;
+                mutable int fit = 100;
+                if (land > 0) {
+                    fit = onCraton * 100 / land;
+                }
+                System.IO.Console.println($"continents {this.nCont}, craton plates {cratons} + {islands} island, of {this.nPlates}");
+                System.IO.Console.println($"continental crust {crustShare} percent of the map, land {landPct} percent, land on continental crust {fit} percent");
+                delete f;
                 return;
             }
         }

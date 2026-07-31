@@ -4,14 +4,14 @@ import Agents.World.Grid;
 import Agents.World.Biome;
 
 // World generation: deterministic, size-agnostic.
-// Pipeline: landmass silhouette -> tectonic relief -> thermal erosion -> climate (latitude/lapse
+// Pipeline: relief + flood -> tectonic deformation -> thermal erosion -> climate (latitude/lapse
 // temp, moisture with belts + coastal bonus) -> hydrology (steepest-descent rivers + lake pits) ->
 // BIOME_CATALOG classification (with river/lake/vent/endorheic overrides). Scratch buffers live in
 // fields (freed at the end) so passes share them without array-copy semantics.
 //
-// The elevation stages are two ElevationPass implementations: Landmass decides WHERE land is and
-// leaves it flat; Tectonics receives that mask and only deforms it. Land first, plates second --
-// the reverse (plates drawing the coastlines) is what produced the connected web this replaced.
+// The elevation stages are ElevationPass implementations. Landmass builds a height field for the
+// whole map and floods it -- continents are whatever stays above water, never a placement decision
+// -- and hands its plate partition on through WorldField; Tectonics then deforms the boundaries.
 program AgentsExe;
 
 public bundle Agents {
@@ -36,6 +36,19 @@ public bundle Agents {
             public mutable float sea;
             public mutable float[] eb;
 
+            // The plate partition, filled in by Landmass and read by Tectonics. It lives on the
+            // COARSE grid (pw x ph): boundary physics works at the scale of a plate margin, and a
+            // full-resolution copy would cost 15 MB to say the same thing.
+            public mutable int pw;
+            public mutable int ph;
+            public mutable int nPlates;
+            public mutable int nCont;
+            public mutable int[] plate;      // pw*ph -> plate id
+            public mutable int[] pkind;      // 0 oceanic, 1 craton, 2 island craton
+            public mutable int[] pcont;      // continent id, or -1
+            public mutable float[] pmx;      // plate drift, unit vector
+            public mutable float[] pmy;
+
             public constructor WorldField(int w, int h, int seed) {
                 this.w = w;
                 this.h = h;
@@ -45,10 +58,43 @@ public bundle Agents {
                 this.landRatio = 0.0 - 1.0;
                 this.sea = 0.42;
                 this.eb = new float[w * h]();
+                this.pw = 1;
+                this.ph = 1;
+                this.nPlates = 0;
+                this.nCont = 0;
+                this.plate = new int[1]();
+                this.pkind = new int[1]();
+                this.pcont = new int[1]();
+                this.pmx = new float[1]();
+                this.pmy = new float[1]();
             }
 
             public destructor ~WorldField() returns void {
                 delete this.eb;
+                delete this.plate;
+                delete this.pkind;
+                delete this.pcont;
+                delete this.pmx;
+                delete this.pmy;
+            }
+
+            // Plate id at a FULL-resolution cell.
+            public method plateAt(int x, int y) returns int {
+                mutable int gx = x * this.pw / this.w;
+                mutable int gy = y * this.ph / this.h;
+                if (gx >= this.pw) {
+                    gx = this.pw - 1;
+                }
+                if (gy >= this.ph) {
+                    gy = this.ph - 1;
+                }
+                if (gx < 0) {
+                    gx = 0;
+                }
+                if (gy < 0) {
+                    gy = 0;
+                }
+                return this.plate[gy * this.pw + gx];
             }
 
             public method idx(int x, int y) returns int {
@@ -74,8 +120,7 @@ public bundle Agents {
             private mutable int seed;
             private mutable int octaves;
             private mutable int baseCells;
-            private mutable float sea;          // sea level in [0,1] -- derived from landRatio per world
-            private mutable int nPlates;
+            private mutable float sea;          // sea level in [0,1] -- the flood contour Landmass reports
             private mutable int worldType;      // 0 Continents, 1 Pangaea, 2 Archipelago, 3 InlandSeas
             private mutable float landRatio;    // fraction of the map that is land; < 0 = use world default
             private mutable int nContinents;    // Continental mode: number of continents; <= 0 = auto by aspect
@@ -88,26 +133,15 @@ public bundle Agents {
             private mutable int[] wtr;          // ring distance to water
             private mutable int[] dn;           // downstream cell index, or -1
             private mutable float[] fl;         // flow accumulation
-            private mutable int[] plateId;
             private mutable float[] fld;        // pit/flat-filled elevation (priority-flood)
             private mutable float[] hkey;       // binary min-heap: keys (flood elevation)
             private mutable int[] hval;         // binary min-heap: values (cell index)
-
-            // plate descriptors
-            private mutable int[] px;
-            private mutable int[] py;
-            private mutable int[] ptype;        // 0 oceanic, 1 continental
-            private mutable float[] pbase;
-            private mutable float[] pdx;
-            private mutable float[] pdy;
-            private mutable float[] crad;       // continental plates: plateau-mask radius (height fractions)
 
             public constructor WorldGen(int seed) {
                 this.seed = seed;
                 this.octaves = 6;
                 this.baseCells = 3;
                 this.sea = 0.42;
-                this.nPlates = 12;
                 this.worldType = 0;
                 this.landRatio = 0.0 - 1.0;
                 this.nContinents = 0;
@@ -209,512 +243,6 @@ public bundle Agents {
                     yy = this.h - 1;
                 }
                 return yy * this.w + xx;
-            }
-
-            // Plain X distance between two columns (no wrap -- finite rectangular world).
-            private method dxWrap(int a, int b) returns int {
-                mutable int d = a - b;
-                if (d < 0) {
-                    d = 0 - d;
-                }
-                return d;
-            }
-
-            private method gridCols(int nc) returns int {
-                float aspect = cast<float>(this.w) / cast<float>(this.h);
-                mutable int cols = cast<int>(this.fsqrt(cast<float>(nc) * aspect + 0.5));
-                if (cols < 1) {
-                    cols = 1;
-                }
-                return cols;
-            }
-
-            // How many plates the chosen world mode lays out (must match buildPlates).
-            private method platesFor(int t) returns int {
-                if (t == 1) {
-                    return 12;                       // Pangaea: 2 continental core + 10 oceanic
-                }
-                if (t == 2) {
-                    return 12;                       // Archipelago: all oceanic (arcs make the islands)
-                }
-                if (t == 3) {
-                    return 14;                       // InlandSeas: 9 continental + 5 oceanic basins
-                }
-                mutable int nc = this.nContinents;
-                if (nc <= 0) {
-                    nc = 6;
-                }
-                int cols = this.gridCols(nc);
-                int rows = (nc + cols - 1) / cols;
-                // continents + 8 border ring + a dual-grid oceanic seed at every corner between
-                // continents (the plate GRAPH powers the boundary physics; the land SHAPE itself
-                // is the plateau mask anchored on the continental plates)
-                return nc + 8 + (cols + 1) * (rows + 1);
-            }
-
-            private method seedPlate(int p, int x, int y, int typ, float base, Rng2 rng) returns void {
-                this.px[p] = x;
-                this.py[p] = y;
-                this.ptype[p] = typ;
-                this.pbase[p] = base;
-                this.pdx[p] = rng.unit() * 2.0 - 1.0;
-                this.pdy[p] = rng.unit() * 2.0 - 1.0;
-            }
-
-            // ---- pass 1: TECTONIC plates -> the whole large-scale world ----
-            // Continents ARE the continental plates and ocean basins ARE the oceanic plates (the
-            // blended plate field decides land vs sea; the percentile sea level fine-tunes the
-            // ratio). Boundary physics on top: continent-continent collision -> mountain ranges;
-            // oceanic subduction -> offshore TRENCH + coastal range + a CONTIGUOUS volcanic arc;
-            // ocean-ocean convergence -> island arc paired with a trench; divergence -> a low
-            // mid-ocean ridge. This is what makes coasts, ranges and volcano lands line up the way
-            // real tectonics does.
-            private method buildPlates(Grid* g) returns void {
-                Rng2 rng = new Rng2(this.seed ^ 0x51ED) on stack;
-                mutable int p = 0;
-                if (this.worldType == 0) {
-                    // Continental: continental plates on a jittered grid, inset from the borders;
-                    // 8 oceanic seeds ringing the map edge + a few interior oceanic basins between.
-                    mutable int nc = this.nContinents;
-                    if (nc <= 0) {
-                        nc = 6;
-                    }
-                    mutable int cols = this.gridCols(nc);
-                    int rows = (nc + cols - 1) / cols;
-                    // plateau-mask radius sized from the LAND TARGET (blob area ~ land ratio)
-                    mutable float landT = this.landRatio;
-                    if (landT < 0.0) {
-                        landT = this.defaultLand(this.worldType);
-                    }
-                    float aspect2 = cast<float>(this.w) / cast<float>(this.h);
-                    float r0 = this.fsqrt(landT * aspect2 / (cast<float>(nc) * 3.14159));
-                    // Continental centres on the jittered grid, drawn from a DEDICATED stream:
-                    // the continental geography (the layout the game's look depends on) stays
-                    // stable no matter how the plate physics evolves its own draws.
-                    Rng2 crng = new Rng2(this.seed ^ 0x2C0F) on stack;
-                    mutable int c = 0;
-                    while (c < nc) {
-                        int gxi = c % cols;
-                        int gyi = c / cols;
-                        mutable float cxn = (cast<float>(gxi) + 0.5) / cast<float>(cols) + (crng.unit() - 0.5) * 0.6 / cast<float>(cols);
-                        mutable float cyn = (cast<float>(gyi) + 0.5) / cast<float>(rows) + (crng.unit() - 0.5) * 0.6 / cast<float>(rows);
-                        cxn = 0.10 + cxn * 0.80;
-                        cyn = 0.15 + cyn * 0.70;
-                        this.seedPlate(p, cast<int>(cxn * cast<float>(this.w)), cast<int>(cyn * cast<float>(this.h)),
-                                       1, 0.52 + 0.10 * rng.unit(), rng);
-                        this.crad[p] = r0 * (1.05 + 0.30 * crng.unit());
-                        p = p + 1;
-                        c = c + 1;
-                    }
-                    mutable int k = 0;
-                    while (k < 8) {
-                        mutable float bxn = 0.5;
-                        mutable float byn = 0.5;
-                        if (k == 0) { bxn = 0.03; byn = 0.04; }
-                        if (k == 1) { bxn = 0.50; byn = 0.02; }
-                        if (k == 2) { bxn = 0.97; byn = 0.04; }
-                        if (k == 3) { bxn = 0.02; byn = 0.50; }
-                        if (k == 4) { bxn = 0.98; byn = 0.50; }
-                        if (k == 5) { bxn = 0.03; byn = 0.96; }
-                        if (k == 6) { bxn = 0.50; byn = 0.98; }
-                        if (k == 7) { bxn = 0.97; byn = 0.96; }
-                        bxn = bxn + (rng.unit() - 0.5) * 0.06;
-                        byn = byn + (rng.unit() - 0.5) * 0.06;
-                        this.seedPlate(p, cast<int>(bxn * cast<float>(this.w)), cast<int>(byn * cast<float>(this.h)),
-                                       0, 0.10 + 0.06 * rng.unit(), rng);
-                        p = p + 1;
-                        k = k + 1;
-                    }
-                    // Oceanic seeds on the dual grid (one per corner between continents): the plate
-                    // GRAPH this creates -- who converges with whom, and where -- drives the
-                    // boundary physics; the coastline itself comes from the plateau mask anchored
-                    // on the continental seeds (applyWorldShape).
-                    mutable int gy = 0;
-                    while (gy <= rows) {
-                        mutable int gx = 0;
-                        while (gx <= cols) {
-                            mutable float oxn = 0.10 + (cast<float>(gx) / cast<float>(cols) + (rng.unit() - 0.5) * 0.30 / cast<float>(cols)) * 0.80;
-                            mutable float oyn = 0.15 + (cast<float>(gy) / cast<float>(rows) + (rng.unit() - 0.5) * 0.30 / cast<float>(rows)) * 0.70;
-                            this.seedPlate(p, cast<int>(oxn * cast<float>(this.w)), cast<int>(oyn * cast<float>(this.h)),
-                                           0, 0.10 + 0.06 * rng.unit(), rng);
-                            p = p + 1;
-                            gx = gx + 1;
-                        }
-                        gy = gy + 1;
-                    }
-                } else if (this.worldType == 1) {
-                    // Pangaea: two fused continental plates in the middle, oceanic everywhere else.
-                    this.seedPlate(0, this.w / 2 - this.w / 12, this.h / 2 - this.h / 10, 1, 0.54 + 0.08 * rng.unit(), rng);
-                    this.seedPlate(1, this.w / 2 + this.w / 12, this.h / 2 + this.h / 10, 1, 0.54 + 0.08 * rng.unit(), rng);
-                    p = 2;
-                    mutable int k = 0;
-                    while (k < 10) {
-                        mutable int ox = rng.nextInt(this.w);
-                        mutable int oy = rng.nextInt(this.h);
-                        // keep oceanic seeds away from the centre so the core stays continental
-                        if (this.dxWrap(ox, this.w / 2) < this.w / 5 && oy > this.h / 3 && oy < this.h * 2 / 3) {
-                            ox = (ox + this.w / 2) % this.w;
-                        }
-                        this.seedPlate(p, ox, oy, 0, 0.10 + 0.06 * rng.unit(), rng);
-                        p = p + 1;
-                        k = k + 1;
-                    }
-                } else if (this.worldType == 2) {
-                    // Archipelago: all oceanic -- land comes from island arcs + the fragment noise.
-                    while (p < 12) {
-                        this.seedPlate(p, rng.nextInt(this.w), rng.nextInt(this.h), 0, 0.12 + 0.06 * rng.unit(), rng);
-                        p = p + 1;
-                    }
-                } else {
-                    // InlandSeas: a 3x3 continental sheet covering the map, oceanic basins INSIDE it.
-                    mutable int c = 0;
-                    while (c < 9) {
-                        int gxi = c % 3;
-                        int gyi = c / 3;
-                        float cxn = 0.06 + (cast<float>(gxi) + 0.5) / 3.0 * 0.88 + (rng.unit() - 0.5) * 0.10;
-                        float cyn = 0.06 + (cast<float>(gyi) + 0.5) / 3.0 * 0.88 + (rng.unit() - 0.5) * 0.10;
-                        this.seedPlate(p, cast<int>(cxn * cast<float>(this.w)), cast<int>(cyn * cast<float>(this.h)),
-                                       1, 0.52 + 0.08 * rng.unit(), rng);
-                        p = p + 1;
-                        c = c + 1;
-                    }
-                    mutable int k = 0;
-                    while (k < 5) {
-                        this.seedPlate(p, rng.nextInt(this.w), this.h / 6 + rng.nextInt(this.h * 2 / 3),
-                                       0, 0.12 + 0.06 * rng.unit(), rng);
-                        p = p + 1;
-                        k = k + 1;
-                    }
-                }
-                mutable int y = 0;
-                while (y < this.h) {
-                    mutable int x = 0;
-                    while (x < this.w) {
-                        int i = y * this.w + x;
-                        // Domain-warp the sample point so plate boundaries (and thus coastlines) are
-                        // organic wiggles, not straight Voronoi edges.
-                        float nx = cast<float>(x) / cast<float>(this.w);
-                        float ny = cast<float>(y) / cast<float>(this.h);
-                        float warp = cast<float>(this.w) * 0.12;
-                        mutable int wx = x + cast<int>((this.vnoise(nx * 3.0, ny * 3.0, 3) - 0.5) * 2.0 * warp);
-                        mutable int wy = y + cast<int>((this.vnoise(nx * 3.0 + 11.0, ny * 3.0 + 7.0, 3) - 0.5) * 2.0 * warp);
-                        if (wx < 0) {
-                            wx = 0;
-                        }
-                        if (wx >= this.w) {
-                            wx = this.w - 1;
-                        }
-                        if (wy < 0) {
-                            wy = 0;
-                        }
-                        if (wy >= this.h) {
-                            wy = this.h - 1;
-                        }
-                        mutable int best = 0;
-                        mutable int bestd = 2000000000;
-                        mutable int second = 0;
-                        mutable int secondd = 2000000000;
-                        mutable float sumW = 0.0;
-                        mutable float sumB = 0.0;
-                        mutable int k = 0;
-                        while (k < this.nPlates) {
-                            int ddx = this.dxWrap(wx, this.px[k]);
-                            int ddy = wy - this.py[k];
-                            int dist = ddx * ddx + ddy * ddy;
-                            // SHARP inverse-distance blend (cubed weight): the nearest plate
-                            // dominates, so each plate's interior is a plateau at ITS base height
-                            // with a narrow ramp at the boundary. Gentler weights averaged all the
-                            // plates into a mid-height mush -- no deep basins, no high interiors --
-                            // and the more plates in the layout, the sharper this needs to be.
-                            float invd = 1.0 / (cast<float>(dist) + 4096.0);
-                            float wgt = invd * invd * invd;
-                            sumW = sumW + wgt;
-                            sumB = sumB + this.pbase[k] * wgt;
-                            if (dist < bestd) {
-                                secondd = bestd;
-                                second = best;
-                                bestd = dist;
-                                best = k;
-                            } else {
-                                if (dist < secondd) {
-                                    secondd = dist;
-                                    second = k;
-                                }
-                            }
-                            k = k + 1;
-                        }
-                        this.plateId[i] = best;
-                        mutable float base = sumB / sumW;
-                        // boundary: closeness of the two nearest plates -> mountain ridges where they converge
-                        float db = cast<float>(bestd);
-                        float ds = cast<float>(secondd);
-                        mutable float border = 0.0;
-                        if (ds > 0.0) {
-                            border = 1.0 - (ds - db) / ds;
-                        }
-                        if (border > 0.55) {
-                            mutable float conv = this.convergence(best, second);
-                            if (conv > 1.0) {
-                                conv = 1.0;
-                            }
-                            float edge = (border - 0.55) / 0.45;
-                            // Strength varies ALONG the boundary (low-frequency noise): ranges swell
-                            // and pinch, and the volcanic arcs break into segmented chains instead of
-                            // one unbroken ribbon snaking across the map.
-                            float bmod = 0.45 + 1.10 * this.vnoise(nx * 9.0, ny * 9.0, 9);
-                            if (conv > 0.0) {
-                                // sqrt(edge): the strong zone reaches further from the boundary line,
-                                // so ranges have body instead of a knife-edge crest
-                                float eff = conv * this.fsqrt(edge) * bmod;
-                                int tA = this.ptype[best];
-                                int tB = this.ptype[second];
-                                if (tA == 1 && tB == 1) {
-                                    // continent-continent collision: the big mountain ranges
-                                    base = base + 0.70 * eff;
-                                } else if (tA == 1) {
-                                    // an oceanic plate subducts under us: coastal range + a
-                                    // volcanic arc along the strongest stretches
-                                    base = base + 0.60 * eff;
-                                    if (conv > 0.55 && eff > 0.40) {
-                                        g.setFlag(x, y, Grid.FLAG_VENT);
-                                    }
-                                } else if (tB == 1) {
-                                    // we are the subducting oceanic side: the offshore trench.
-                                    // Deep coefficient (the boundary blend bleeds the continental
-                                    // base into this side), but ONLY in oceanic context -- carving
-                                    // where the land mask later covers the spot sliced water
-                                    // channels straight through continents.
-                                    if (base < 0.35) {
-                                        base = base - 0.55 * eff;
-                                    }
-                                } else {
-                                    // ocean-ocean convergence: island arc on one side of the
-                                    // boundary, trench on the other (deterministic pairing)
-                                    if (best < second) {
-                                        base = base + 0.40 * eff;
-                                        if (conv > 0.55 && eff > 0.45) {
-                                            g.setFlag(x, y, Grid.FLAG_VENT);
-                                        }
-                                    } else {
-                                        if (base < 0.35) {
-                                            base = base - 0.40 * eff;
-                                        }
-                                    }
-                                }
-                            } else {
-                                if (conv < 0.0 - 0.25 && this.ptype[best] == 0 && this.ptype[second] == 0) {
-                                    // divergent oceanic boundary: a low mid-ocean ridge
-                                    base = base + 0.06 * (0.0 - conv) * edge;
-                                }
-                            }
-                        }
-                        if (base < 0.0) { base = 0.0; }
-                        if (base > 1.0) { base = 1.0; }
-                        this.eb[i] = base;
-                        x = x + 1;
-                    }
-                    y = y + 1;
-                }
-            }
-
-            // do plates `a` and `b` push together (+) or apart (-)? Sign of relative drift along the link.
-            private method convergence(int a, int b) returns float {
-                float lx = cast<float>(this.px[b] - this.px[a]);
-                float ly = cast<float>(this.py[b] - this.py[a]);
-                float len = lx * lx + ly * ly;
-                if (len < 0.001) {
-                    return 0.0;
-                }
-                float inv = 1.0 / this.fsqrt(len);
-                float ux = lx * inv;
-                float uy = ly * inv;
-                float toward = (this.pdx[a] * ux + this.pdy[a] * uy) - (this.pdx[b] * ux + this.pdy[b] * uy);
-                return toward;   // >0 converging
-            }
-
-            private method fsqrt(float v) returns float {
-                if (v <= 0.0) {
-                    return 0.0;
-                }
-                mutable float g = v;
-                mutable int i = 0;
-                while (i < 12) {
-                    g = 0.5 * (g + v / g);
-                    i = i + 1;
-                }
-                return g;
-            }
-
-            // ---- pass 2: blend in fractal detail, normalize ----
-            private method addDetail() returns void {
-                mutable int i = 0;
-                int n = this.w * this.h;
-                while (i < n) {
-                    int x = i % this.w;
-                    int y = i / this.w;
-                    float d = this.fbm(x, y, 0);
-                    this.eb[i] = 0.62 * this.eb[i] + 0.38 * d;
-                    i = i + 1;
-                }
-            }
-
-            // Land shape on top of the tectonic plate field. The COASTLINE comes from a plateau
-            // mask anchored on the continental plates (organic warped blobs -- the proven look);
-            // underneath it the plate field carries the boundary physics (collision ranges,
-            // trenches, volcanic arcs), kept alive in the ocean at reduced weight.
-            private method applyWorldShape() returns void {
-                int n = this.w * this.h;
-                if (this.worldType == 0) {
-                    mutable int i = 0;
-                    while (i < n) {
-                        int x = i % this.w;
-                        int y = i / this.w;
-                        float nx = cast<float>(x) / cast<float>(this.w);
-                        float ny = cast<float>(y) / cast<float>(this.h);
-                        float wxf = nx + (this.vnoise(nx * 3.0, ny * 3.0, 3) - 0.5) * 0.30
-                                    + (this.vnoise(nx * 7.0 + 2.0, ny * 7.0 + 4.0, 7) - 0.5) * 0.14;
-                        float wyf = ny + (this.vnoise(nx * 3.0 + 5.0, ny * 3.0 + 9.0, 3) - 0.5) * 0.30
-                                    + (this.vnoise(nx * 7.0 + 8.0, ny * 7.0 + 1.0, 7) - 0.5) * 0.14;
-                        mutable float mask = 0.0;
-                        mutable int k = 0;
-                        while (k < this.nPlates) {
-                            if (this.ptype[k] == 1) {
-                                float cxn = cast<float>(this.px[k]) / cast<float>(this.w);
-                                float cyn = cast<float>(this.py[k]) / cast<float>(this.h);
-                                float dxn = (wxf - cxn) * cast<float>(this.w) / cast<float>(this.h);
-                                float dyn = wyf - cyn;
-                                float d2 = this.fsqrt(dxn * dxn + dyn * dyn);
-                                float m = 1.0 - d2 / this.crad[k];
-                                if (m > mask) {
-                                    mask = m;
-                                }
-                            }
-                            k = k + 1;
-                        }
-                        if (mask < 0.0) {
-                            mask = 0.0;
-                        }
-                        mutable float shaped = mask * 2.8;
-                        if (shaped > 1.0) {
-                            shaped = 1.0;
-                        }
-                        // land: plateau over the plate field (ridges survive inside the 0.62 term);
-                        // sea: the plate field at reduced weight, so trenches, island arcs and
-                        // mid-ocean ridges still shape the ocean floor
-                        // ocean side: the plate field at HALF weight, capped -- trenches and arcs
-                        // still texture the sea floor, but a boundary ridge crossing a strait shows
-                        // as an island chain at most, never as a land bridge
-                        mutable float oc = this.eb[i];
-                        if (oc > 0.32) {
-                            oc = 0.32;
-                        }
-                        this.eb[i] = shaped * (0.30 + 0.62 * this.eb[i]) + (1.0 - shaped) * 0.55 * oc;
-                        i = i + 1;
-                    }
-                } else if (this.worldType == 1) {
-                    int cx = this.w / 2;
-                    int cy = this.h / 2;
-                    mutable int i = 0;
-                    while (i < n) {
-                        int x = i % this.w;
-                        int y = i / this.w;
-                        float fx = cast<float>(this.dxWrap(x, cx)) / (cast<float>(this.w) * 0.5);
-                        float fy = cast<float>(y - cy) / (cast<float>(this.h) * 0.5);
-                        float r = this.fsqrt(fx * fx + fy * fy);
-                        float nx = cast<float>(x) / cast<float>(this.w);
-                        float ny = cast<float>(y) / cast<float>(this.h);
-                        float wob = 0.78 + 0.55 * this.vnoise(nx * 2.0, ny * 2.0, 2);
-                        mutable float blob = wob - r;
-                        if (blob < 0.0) {
-                            blob = 0.0;
-                        }
-                        mutable float shaped = blob * 2.6;
-                        if (shaped > 1.0) {
-                            shaped = 1.0;
-                        }
-                        // ocean side: the plate field at HALF weight, capped -- trenches and arcs
-                        // still texture the sea floor, but a boundary ridge crossing a strait shows
-                        // as an island chain at most, never as a land bridge
-                        mutable float oc = this.eb[i];
-                        if (oc > 0.32) {
-                            oc = 0.32;
-                        }
-                        this.eb[i] = shaped * (0.30 + 0.62 * this.eb[i]) + (1.0 - shaped) * 0.55 * oc;
-                        i = i + 1;
-                    }
-                }
-                if (this.worldType == 2) {
-                    // Archipelago: fragment the oceanic field with high-frequency noise so the island
-                    // arcs break into chains instead of continuous ribbons.
-                    mutable int i = 0;
-                    while (i < n) {
-                        int x = i % this.w;
-                        int y = i / this.w;
-                        float nx = cast<float>(x) / cast<float>(this.w);
-                        float ny = cast<float>(y) / cast<float>(this.h);
-                        float hi = this.vnoise(nx * 11.0, ny * 11.0, 11);
-                        this.eb[i] = this.eb[i] * 0.55 + hi * 0.45;
-                        i = i + 1;
-                    }
-                }
-                // Ocean border falloff (Continents / Archipelago): push elevation down toward every map
-                // edge so land never runs off the border -- the world reads as continents in an ocean,
-                // not terrain cropped by the map. The percentile sea level keeps the land ratio exact.
-                if (this.worldType == 0 || this.worldType == 2) {
-                    float margin = 0.07;
-                    mutable int i = 0;
-                    while (i < n) {
-                        int x = i % this.w;
-                        int y = i / this.w;
-                        float nx = cast<float>(x) / cast<float>(this.w - 1);
-                        float ny = cast<float>(y) / cast<float>(this.h - 1);
-                        mutable float edge = nx;
-                        if (1.0 - nx < edge) { edge = 1.0 - nx; }
-                        if (ny < edge) { edge = ny; }
-                        if (1.0 - ny < edge) { edge = 1.0 - ny; }
-                        if (edge < margin) {
-                            mutable float t = edge / margin;
-                            t = t * t * (3.0 - 2.0 * t);
-                            this.eb[i] = this.eb[i] * (0.15 + 0.85 * t);
-                        }
-                        i = i + 1;
-                    }
-                }
-            }
-
-            // Choose the sea level so that exactly `land` fraction of cells sit above it, via a histogram of
-            // the final elevation field. This makes the land/water ratio exact regardless of world shape.
-            private method computeSeaLevel(float land) returns float {
-                int n = this.w * this.h;
-                int bins = 2048;
-                int[] hist = new int[bins]();
-                mutable int i = 0;
-                while (i < n) {
-                    mutable int bi = cast<int>(this.eb[i] * cast<float>(bins));
-                    if (bi < 0) {
-                        bi = 0;
-                    }
-                    if (bi >= bins) {
-                        bi = bins - 1;
-                    }
-                    hist[bi] = hist[bi] + 1;
-                    i = i + 1;
-                }
-                int waterTarget = cast<int>(cast<float>(n) * (1.0 - land));
-                mutable int acc = 0;
-                mutable int seaBin = bins - 1;
-                mutable int b = 0;
-                while (b < bins) {
-                    acc = acc + hist[b];
-                    if (acc >= waterTarget) {
-                        seaBin = b;
-                        b = bins;
-                    } else {
-                        b = b + 1;
-                    }
-                }
-                delete hist;
-                return cast<float>(seaBin) / cast<float>(bins);
             }
 
             // ---- pass 3: thermal erosion (a few relaxation passes, 4-neighbour) ----
@@ -1263,9 +791,8 @@ public bundle Agents {
             public method generate(int w, int h) returns Grid* {
                 this.w = w;
                 this.h = h;
-                this.nPlates = this.platesFor(this.worldType);
-                // Generation descriptors (profiles, lobes, plate records) live in one arena freed
-                // in a single call; the big per-cell grids stay explicit heap arrays.
+                // Generation descriptors live in one arena freed in a single call; the big per-cell
+                // grids stay explicit heap arrays.
                 region descriptors = itself.allocate(4 megabytes);
                 defer {
                     release region descriptors;
@@ -1276,24 +803,21 @@ public bundle Agents {
                 this.wtr = new int[n]();
                 this.dn = new int[n]();
                 this.fl = new float[n]();
-                this.plateId = new int[n]();
                 this.fld = new float[n]();
                 this.hkey = new float[n]();
                 this.hval = new int[n]();
-                this.px = new int[this.nPlates]();
-                this.py = new int[this.nPlates]();
-                this.ptype = new int[this.nPlates]();
-                this.pbase = new float[this.nPlates]();
-                this.pdx = new float[this.nPlates]();
-                this.pdy = new float[this.nPlates]();
-                this.crad = new float[this.nPlates]();
 
-                // Elevation is built by the passes, through the interface: Landmass decides WHERE
-                // land is and leaves it flat, then (from the next slice) Tectonics deforms it.
+                // Elevation is built by the passes, through the interface: Landmass builds the
+                // relief and floods it, then (from the next slice) Tectonics deforms the plate
+                // boundaries it left behind.
                 WorldField* wf = new WorldField(w, h, this.seed) on heap;
                 wf.worldType = this.worldType;
                 wf.nContinents = this.nContinents;
-                wf.landRatio = this.landRatio;
+                mutable float land = this.landRatio;
+                if (land < 0.0) {
+                    land = this.defaultLand(this.worldType);
+                }
+                wf.landRatio = land;
                 Landmass* landPass = new Landmass(this.seed) on heap;
                 ElevationPass* pass = landPass;
                 pass.apply(wf);
@@ -1302,17 +826,13 @@ public bundle Agents {
                     this.eb[ci] = wf.eb[ci];
                     ci = ci + 1;
                 }
-                this.erode(3);
-                mutable float land = this.landRatio;
-                if (land < 0.0) {
-                    land = this.defaultLand(this.worldType);
-                }
-                // FIXED sea level, not a percentile. Landmass now decides the coastline directly
-                // (its fit loop targets the land area), so the shoreline is the 0.43 contour by
-                // construction. The percentile made the two fight each other: with most of the sea
-                // floor at one value the percentile snapped to it, and everything above -- the
-                // whole shelf -- came back as land.
-                this.sea = 0.43;
+                // Erosion now happens inside Landmass, on the raw field BEFORE the flood: running
+                // it here averaged coastal land against the ocean next to it and quietly ate 6
+                // points of the land ratio.
+                //
+                // The flood already placed the coastline at the requested land ratio, so the sea
+                // level is whatever contour it chose -- not a number tuned here.
+                this.sea = wf.sea;
                 this.climate(g);
                 this.hydrology(g);
                 // hydrology reused wtr as its visited flag -- rebuild the distance-to-water field
@@ -1326,17 +846,9 @@ public bundle Agents {
                 delete this.wtr;
                 delete this.dn;
                 delete this.fl;
-                delete this.plateId;
                 delete this.fld;
                 delete this.hkey;
                 delete this.hval;
-                delete this.px;
-                delete this.py;
-                delete this.ptype;
-                delete this.pbase;
-                delete this.pdx;
-                delete this.pdy;
-                delete this.crad;
                 return g;
             }
         }
