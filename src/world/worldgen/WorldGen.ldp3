@@ -1,16 +1,74 @@
 import System.IO.Console;
+import System.Memory.Units.megabytes;
 import Agents.World.Grid;
 import Agents.World.Biome;
 
-// World generation (slices 2+3): deterministic, size-agnostic, cylinder (X wraps).
-// Pipeline: tectonic plates -> fractal detail -> thermal erosion -> climate (latitude/lapse temp,
-// moisture with belts + coastal bonus) -> hydrology (steepest-descent rivers + lake pits) ->
+// World generation: deterministic, size-agnostic.
+// Pipeline: landmass silhouette -> tectonic relief -> thermal erosion -> climate (latitude/lapse
+// temp, moisture with belts + coastal bonus) -> hydrology (steepest-descent rivers + lake pits) ->
 // BIOME_CATALOG classification (with river/lake/vent/endorheic overrides). Scratch buffers live in
 // fields (freed at the end) so passes share them without array-copy semantics.
+//
+// The elevation stages are two ElevationPass implementations: Landmass decides WHERE land is and
+// leaves it flat; Tectonics receives that mask and only deforms it. Land first, plates second --
+// the reverse (plates drawing the coastlines) is what produced the connected web this replaced.
 program AgentsExe;
 
 public bundle Agents {
     public namespace World {
+
+        // One stage of elevation construction, so the pipeline is a list rather than a hardcoded
+        // call chain and each stage can be tested on its own.
+        public interface ElevationPass {
+            method name() returns String;
+            method apply(WorldField* f) returns void;
+        }
+
+        // The scratch shared by the passes: dimensions, parameters and the elevation field.
+        // Owned by WorldGen for the duration of generate().
+        public class WorldField {
+            public mutable int w;
+            public mutable int h;
+            public mutable int seed;
+            public mutable int worldType;
+            public mutable int nContinents;
+            public mutable float landRatio;
+            public mutable float sea;
+            public mutable float[] eb;
+
+            public constructor WorldField(int w, int h, int seed) {
+                this.w = w;
+                this.h = h;
+                this.seed = seed;
+                this.worldType = 0;
+                this.nContinents = 6;
+                this.landRatio = 0.0 - 1.0;
+                this.sea = 0.42;
+                this.eb = new float[w * h]();
+            }
+
+            public destructor ~WorldField() returns void {
+                delete this.eb;
+            }
+
+            public method idx(int x, int y) returns int {
+                mutable int xx = x;
+                if (xx < 0) {
+                    xx = 0;
+                }
+                if (xx >= this.w) {
+                    xx = this.w - 1;
+                }
+                mutable int yy = y;
+                if (yy < 0) {
+                    yy = 0;
+                }
+                if (yy >= this.h) {
+                    yy = this.h - 1;
+                }
+                return yy * this.w + xx;
+            }
+        }
 
         public class WorldGen {
             private mutable int seed;
@@ -1202,6 +1260,12 @@ public bundle Agents {
                 this.w = w;
                 this.h = h;
                 this.nPlates = this.platesFor(this.worldType);
+                // Generation descriptors (profiles, lobes, plate records) live in one arena freed
+                // in a single call; the big per-cell grids stay explicit heap arrays.
+                region descriptors = itself.allocate(4 megabytes);
+                defer {
+                    release region descriptors;
+                }
                 int n = w * h;
                 Grid* g = new Grid(w, h) on heap;
                 this.eb = new float[n]();
