@@ -737,6 +737,34 @@ public bundle Agents {
             // level. Using the min level (so the coarse layer stays strictly under the detail layer)
             // but an arbitrary CORNER cell's biome painted mountain-grey slabs flat on the ground
             // wherever a block mixed mountains with plains -- the z-fighting quads.
+            // The lowest stack step anywhere in the block, over every cell and every biome.
+            private method blockMinLvl(int bx, int by) returns int {
+                mutable int best = 99;
+                mutable int y = 0;
+                while (y < this.stride) {
+                    mutable int x = 0;
+                    while (x < this.stride) {
+                        int gx = bx * this.stride + x;
+                        int gy = by * this.stride + y;
+                        if (gx < this.srcW && gy < this.srcH) {
+                            int lvl = this.stackLvl(this.grid.biomeAt(gx, gy), gx, gy);
+                            if (lvl < best) {
+                                best = lvl;
+                                if (best == 0) {
+                                    return 0;
+                                }
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                if (best > 90) {
+                    return 0;
+                }
+                return best;
+            }
+
             private method blockRep(int bx, int by) returns int {
                 // The block is painted with its DOMINANT biome, and placed at the lowest step that
                 // biome occupies. Taking whatever biome the first lowest cell happened to be is
@@ -1103,7 +1131,16 @@ public bundle Agents {
                     while (bx < bw) {
                         int rep = this.blockRep(bx, by);
                         int ord = this.grid.biomeAt(rep % this.srcW, rep / this.srcW);
-                        int lvl = this.stackLvl(ord, rep % this.srcW, rep / this.srcW);
+                        // The biome is the block's DOMINANT one, but the height must be the block's
+                        // ABSOLUTE minimum step, taken over every cell whatever its biome. Reading
+                        // the level off the representative cell instead ties it to the dominant
+                        // biome's own lowest step, and in a block that mixes a plateau with a valley
+                        // -- with the plateau dominant -- that puts the coarse plate at the plateau's
+                        // height, where it COVERS the real terrain in the valley beside it. That is
+                        // the raised slab of giant blocks, and it is why the fault only ever showed
+                        // on high ground. The coarse layer has to stay strictly under the detail
+                        // layer, and only the true minimum guarantees it.
+                        int lvl = this.blockMinLvl(bx, by);
                         bOrd[by * bw + bx] = ord;
                         bLvl[by * bw + bx] = lvl;
                         tris = tris + this.countTile(ord, true, false);
@@ -1337,12 +1374,19 @@ public bundle Agents {
                 if (want < 112) {
                     want = 112;
                 }
-                if (want > 288) {
-                    want = 288;
+                if (want > 256) {
+                    want = 256;
                 }
-                want = want / 16 * 16;
+                want = want / 32 * 32;
+                // A resize costs a full rebake, so it needs a dead band of its own: quantising alone
+                // still fires on every step across a boundary, and a wheel zoom crosses several. The
+                // window only changes when the wanted size is a whole step away from the one in use.
                 mutable boolean resized = false;
-                if (want != this.detW) {
+                mutable int gap = want - this.detW;
+                if (gap < 0) {
+                    gap = 0 - gap;
+                }
+                if (gap >= 32) {
                     this.detW = want;
                     this.detH = want;
                     resized = true;
