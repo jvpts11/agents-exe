@@ -95,7 +95,10 @@ public bundle Agents {
             private mutable int detY0;
             private mutable boolean haveDetail;
             private mutable boolean detailOn;
-            private mutable float detailDist;
+            // The widest detail window the renderer will build, in cells. It is BOTH the size cap
+            // and the LOD threshold: detail is on exactly while the camera's ground footprint fits
+            // inside a window this big, which is what makes "detail is on" mean "all of it".
+            private mutable int detailCap;
             // framing + inspection camera (elevation gimbal-locked between horizon and top-down)
             private mutable float cx;
             private mutable float cy;
@@ -167,7 +170,7 @@ public bundle Agents {
                 this.detY0 = 0;
                 this.haveDetail = false;
                 this.detailOn = false;
-                this.detailDist = 340.0;
+                this.detailCap = 320;
                 this.camAz = 45.0;
                 this.camEl = 40.0;
                 this.camDist = 20.0;
@@ -1438,14 +1441,36 @@ public bundle Agents {
                 float pi = 3.14159265;
                 float e = this.camEl * pi / 180.0;
                 float a = this.camAz * pi / 180.0;
-                float alt = this.camDist * this.fsin(e);
+                // HOW FAR THE CAMERA CAN ACTUALLY SEE on the ground, as a half-extent in world
+                // units measured from the window's centre. Along the view the frustum's lower edge
+                // reaches d*tan(halfFov)/sin(elevation) past the target -- which is why a shallow
+                // angle sees so much further -- and across it about d*tan(halfFov)*aspect. The
+                // window's centre sits midway between the camera's footprint and the target, so
+                // half of that separation has to be covered too.
+                float tanHalf = 0.384;                       // tan(21 deg), the vertical half-FOV
+                mutable float se = this.fsin(e);
+                if (se < 0.08) {
+                    se = 0.08;
+                }
+                mutable float reach = this.camDist * tanHalf / se;
+                float across = this.camDist * tanHalf * 1.8;
+                if (across > reach) {
+                    reach = across;
+                }
+                reach = reach + this.camDist * this.fcos(e) * 0.5;
+                int need = cast<int>(reach) + 24;            // window half-extent in CELLS
+                // And the threshold is that need, not a fixed altitude. The old rule let detail
+                // switch on while the view still reached far past the window, so the screen came out
+                // as a detailed square with coarse blocks all around it -- detail was on, but not
+                // everywhere it was being looked at. Detail is on exactly when the whole footprint
+                // fits, so whenever it is on, everything on screen is at full detail.
                 if (this.detailOn) {
-                    if (alt > this.detailDist * 1.2) {
+                    if (need > this.detailCap * 5 / 4) {
                         this.detailOn = false;
                         return;
                     }
                 } else {
-                    if (alt > this.detailDist) {
+                    if (need > this.detailCap) {
                         return;
                     }
                     this.detailOn = true;
@@ -1464,13 +1489,12 @@ public bundle Agents {
                 // and an enormous span.
                 //
                 // Quantised to 16 cells so drifting the camera does not rebake on every frame.
-                float ceW = this.fcos(e);
-                mutable int want = cast<int>(this.camDist * ceW / 2.0) + 96;
+                mutable int want = need;
                 if (want < 112) {
                     want = 112;
                 }
-                if (want > 256) {
-                    want = 256;
+                if (want > this.detailCap) {
+                    want = this.detailCap;
                 }
                 want = want / 32 * 32;
                 // A resize costs a full rebake, so it needs a dead band of its own: quantising alone
