@@ -170,7 +170,7 @@ public bundle Agents {
                 this.detY0 = 0;
                 this.haveDetail = false;
                 this.detailOn = false;
-                this.detailCap = 320;
+                this.detailCap = 384;
                 this.camAz = 45.0;
                 this.camEl = 40.0;
                 this.camDist = 20.0;
@@ -1447,18 +1447,33 @@ public bundle Agents {
                 // angle sees so much further -- and across it about d*tan(halfFov)*aspect. The
                 // window's centre sits midway between the camera's footprint and the target, so
                 // half of that separation has to be covered too.
-                float tanHalf = 0.384;                       // tan(21 deg), the vertical half-FOV
-                mutable float se = this.fsin(e);
-                if (se < 0.08) {
-                    se = 0.08;
+                float phi = 0.3665;                          // 21 deg, the vertical half-FOV
+                float altH = this.camDist * this.fsin(e);
+                // Where the frustum's edges MEET THE GROUND, which is the whole question. The far
+                // edge is at altitude / tan(elevation - halfFov) from the camera's footprint and the
+                // near edge at altitude / tan(elevation + halfFov). The first version of this used
+                // d*tan(halfFov)/sin(elevation), which is not that: at 35 degrees it is less than
+                // half the true reach, and the strip it missed is precisely the far band that kept
+                // coming out coarse.
+                mutable float elm = e - phi;
+                if (elm < 0.12) {
+                    elm = 0.12;                              // near the horizon the ground runs away
                 }
-                mutable float reach = this.camDist * tanHalf / se;
-                float across = this.camDist * tanHalf * 1.8;
-                if (across > reach) {
-                    reach = across;
+                mutable float elp = e + phi;
+                if (elp > 1.50) {
+                    elp = 1.50;
                 }
-                reach = reach + this.camDist * this.fcos(e) * 0.5;
-                int need = cast<int>(reach) + 24;            // window half-extent in CELLS
+                float farD = altH * this.fcos(elm) / this.fsin(elm);
+                float nearD = altH * this.fcos(elp) / this.fsin(elp);
+                float midD = (farD + nearD) * 0.5;
+                mutable float half = (farD - nearD) * 0.5;
+                // and the width at the far edge, where the frustum is widest: the horizontal half
+                // angle is atan(tan(halfFov) * aspect), about 35 degrees on a 16:9 window
+                float across = farD * 0.70;
+                if (across > half) {
+                    half = across;
+                }
+                int need = cast<int>(half) + 16;             // window half-extent in CELLS
                 // And the threshold is that need, not a fixed altitude. The old rule let detail
                 // switch on while the view still reached far past the window, so the screen came out
                 // as a detailed square with coarse blocks all around it -- detail was on, but not
@@ -1524,8 +1539,8 @@ public bundle Agents {
                 float ce = this.fcos(e);
                 float egx = this.camTx + this.camDist * ce * this.fsin(a);
                 float egy = this.camTy + this.camDist * ce * this.fcos(a);
-                float cxw = (egx + this.camTx) * 0.5;
-                float cyw = (egy + this.camTy) * 0.5;
+                float cxw = egx - this.fsin(a) * midD;
+                float cyw = egy - this.fcos(a) * midD;
                 mutable int tx = cast<int>(cxw / 2.0) - this.detW / 2;
                 mutable int ty = cast<int>(cyw / 2.0) - this.detH / 2;
                 if (tx < 0) { tx = 0; }
