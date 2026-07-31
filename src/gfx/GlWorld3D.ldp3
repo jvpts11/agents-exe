@@ -61,6 +61,14 @@ public bundle Agents {
             private mutable int rvB135b;
             private mutable int rvCDiag;
             private mutable int rvStar;
+            // a detail bake in flight, spread over frames
+            private mutable boolean baking;
+            private mutable address bkBuf;
+            private mutable int bkTris;
+            private mutable int bkW;
+            private mutable int bkRow;
+            private mutable int bkOx;
+            private mutable int bkOy;
             private mutable int[] dRiverC;      // detail bake scratch: river variant per cell, or -1
             private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
             private mutable int[] btally;       // per-biome cell count inside one coarse block
@@ -134,6 +142,13 @@ public bundle Agents {
                 this.sProp = new int[1]();
                 this.sMilli = new int[1]();
                 this.sScale = new float[1]();
+                this.baking = false;
+                this.bkBuf = cast<address>(0);
+                this.bkTris = 0;
+                this.bkW = 0;
+                this.bkRow = 0;
+                this.bkOx = 0;
+                this.bkOy = 0;
                 this.dRiverC = new int[1]();
                 this.dPropC = new int[1]();
                 this.btally = new int[40]();
@@ -1264,7 +1279,16 @@ public bundle Agents {
                 return 0 - 1;
             }
 
-            private method bakeDetail(int ox, int oy) returns void {
+            // The bake is SPREAD ACROSS FRAMES. Done in one go it walks the whole window,
+            // and that single call is what is felt as a stutter when panning or zooming --
+            // and it is also why the window could not be refreshed eagerly, since every
+            // refresh cost a hitch, which is the reason the detail lagged behind the camera.
+            //
+            // Counting and buffer allocation happen once, here; the rows are emitted a slice
+            // at a time by stepBake, and the GPU buffer is only replaced when the last row is
+            // in. Until then the previous geometry stays on screen, so nothing pops and no
+            // frame pays for more than its slice.
+            private method beginBake(int ox, int oy) returns void {
                 // The bake walks the window twice -- once to size the buffer, once to fill it -- and
                 // the two most expensive things per cell were being computed on BOTH passes:
                 // pickRiver alone costs eight neighbour lookups plus their flow directions. They are
@@ -1308,10 +1332,31 @@ public bundle Agents {
                     }
                     y = y + 1;
                 }
-                address buf = Memory.alloc(cast<long>(tris * 27 * 4 + 4));
-                mutable int w = 0;
-                y = 0;
-                while (y < this.detH) {
+                this.bkBuf = Memory.alloc(cast<long>(tris * 27 * 4 + 4));
+                this.bkTris = tris;
+                this.bkW = 0;
+                this.bkRow = 0;
+                this.bkOx = ox;
+                this.bkOy = oy;
+                this.baking = true;
+                return;
+            }
+
+            // Emit one slice of rows. Sized so a full window lands in about eight frames:
+            // fast enough that the detail arrives while the camera is still moving, small
+            // enough that no single frame shows a hitch.
+            private method stepBake() returns void {
+                if (!this.baking) {
+                    return;
+                }
+                address buf = this.bkBuf;
+                int ox = this.bkOx;
+                int oy = this.bkOy;
+                mutable int w = this.bkW;
+                mutable int rows = this.detH / 8 + 1;
+                mutable int y = this.bkRow;
+                int stop = y + rows;
+                while (y < this.detH && y < stop) {
                     mutable int x = 0;
                     while (x < this.detW) {
                         int gx = ox + x;
@@ -1349,22 +1394,47 @@ public bundle Agents {
                     }
                     y = y + 1;
                 }
+                this.bkW = w;
+                this.bkRow = y;
+                if (y < this.detH) {
+                    return;
+                }
                 this.gl.bindVertexArray(this.dvao);
                 this.gl.bindBuffer(GL.ARRAY_BUFFER, this.dvbo);
-                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4), cast<long>(buf), GL.STATIC_DRAW);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(this.bkTris * 27 * 4), cast<long>(buf), GL.STATIC_DRAW);
                 this.gl.bindVertexArray(0);
-                this.dnverts = tris * 3;
+                this.dnverts = this.bkTris * 3;
                 Memory.free(buf);
                 this.detX0 = ox;
                 this.detY0 = oy;
                 this.haveDetail = true;
+                this.baking = false;
+                return;
             }
 
             // The detail LOD keys off the camera's HEIGHT ABOVE THE GROUND (with hysteresis), not the
             // orbit distance -- at a grazing angle you are near the ground even when the look-at target
             // is far. And the window is centred just AHEAD OF THE CAMERA on the ground, so the
             // foreground -- the terrain closest to the player -- is always the part in full detail.
+            // Run a bake to completion right now. A single-frame capture has no later frames to
+            // finish it in, and the very first bake has nothing on screen to show meanwhile, so
+            // both want the whole thing at once.
+            public method flushDetail() returns void {
+                this.ensureDetail();
+                mutable int guard = 0;
+                while (this.baking && guard < 4096) {
+                    this.stepBake();
+                    guard = guard + 1;
+                }
+                return;
+            }
+
             private method ensureDetail() returns void {
+                // One bake at a time: the window's size and origin must hold still for the whole of
+                // it, and the scratch it reads is sized to that window.
+                if (this.baking) {
+                    return;
+                }
                 float pi = 3.14159265;
                 float e = this.camEl * pi / 180.0;
                 float a = this.camAz * pi / 180.0;
@@ -1443,14 +1513,15 @@ public bundle Agents {
                     if (mx < 0) { mx = 0 - mx; }
                     mutable int my = ty - this.detY0;
                     if (my < 0) { my = 0 - my; }
-                    // A rebake walks the whole window and reallocates, so it is felt as a stutter
-                    // when panning or zooming. Only redo it once the view has drifted a third of
-                    // the way out, rather than a quarter.
-                    if (mx <= this.detW / 3 && my <= this.detH / 3) {
+                    // A rebake no longer blocks a frame, so it can be triggered EARLY: back down to
+                    // a sixth of the window. The wide dead band was there to hide the hitch, and it
+                    // was also why the detail visibly lagged the camera -- the view had to drift a
+                    // third of the way out before anything happened.
+                    if (mx <= this.detW / 6 && my <= this.detH / 6) {
                         return;
                     }
                 }
-                this.bakeDetail(tx, ty);
+                this.beginBake(tx, ty);
             }
 
             // ---- inspection camera ----
@@ -1504,6 +1575,16 @@ public bundle Agents {
             // ---- frame ----
             public method render(int fbW, int fbH) returns void {
                 this.ensureDetail();
+                if (this.baking && !this.haveDetail) {
+                    // nothing on screen to cover the wait: finish the first one outright
+                    mutable int g0 = 0;
+                    while (this.baking && g0 < 4096) {
+                        this.stepBake();
+                        g0 = g0 + 1;
+                    }
+                } else {
+                    this.stepBake();
+                }
                 if (this.pixelate) {
                     if (this.fbo == 0) {
                         this.initPost(640, 400);
