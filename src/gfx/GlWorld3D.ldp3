@@ -735,23 +735,77 @@ public bundle Agents {
             // The prop's OWN shadow: its geometry flattened onto the ground, each vertex displaced
             // along the sun direction by its height -- a real projected silhouette, not a blob.
             // (Light comes from +x/+y, so shadows stretch toward -x/-y.)
+            // The top surface of one cell, in world Z, as the detail layer draws it.
+            private method groundTopAt(int gx, int gy) returns float {
+                int ord = this.grid.biomeAt(gx, gy);
+                int lvl = this.stackLvl(ord, gx, gy);
+                return this.tileTop[ord] + cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
+            }
+
+            // A prop's shadow: its silhouette sheared along the sun direction, laid on the ground.
+            //
+            // It used to be laid on ONE plane, at the height of the cell the prop stands in. The
+            // shear carries it into the neighbouring cells, so wherever the ground next door sits at
+            // a different step the shadow floated over it or sank into it -- which is the shadow not
+            // being on the ground. Each triangle is now placed at the height of the cell its own
+            // centroid falls in, so the shadow steps down a slope with the terrain instead of
+            // hanging off it, and a triangle that lands outside the world is dropped rather than
+            // drawn over nothing.
+            //
+            // The clearance is 0.012, deliberately BELOW the 0.03-to-0.13 band the tile's own
+            // surface decals occupy. At the old 0.055 the shadow sat inside that band and the two
+            // fought for depth.
             private method emitPropShadow(address buf, int w, int pord, float wx, float wy, float z,
-                                          float scale, float gr, float gg, float gb) returns int {
+                                          float scale, float gr, float gg, float gb,
+                                          boolean perCell) returns int {
                 int t0 = this.props.triStart[pord];
                 int tn = this.props.triCount[pord];
                 mutable int p = w;
                 mutable int t = 0;
                 while (t < tn) {
                     int vb = (t0 + t) * 3;
+                    mutable float ax = 0.0;
+                    mutable float ay = 0.0;
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
                         float hz = this.props.pz[vi] * scale;
-                        p = this.wr(buf, p,
-                                    this.props.px[vi] * scale + wx - hz * 0.368,
-                                    this.props.py[vi] * scale + wy - hz * 0.579,
-                                    z, 0.0, 0.0, 1.0, gr, gg, gb);
+                        ax = ax + this.props.px[vi] * scale + wx - hz * 0.368;
+                        ay = ay + this.props.py[vi] * scale + wy - hz * 0.579;
                         k = k + 1;
+                    }
+                    ax = ax / 3.0;
+                    ay = ay / 3.0;
+                    mutable float zt = z;
+                    mutable boolean keep = true;
+                    if (perCell) {
+                        int cgx = cast<int>(ax * 0.5);
+                        int cgy = cast<int>(ay * 0.5);
+                        if (cgx < 0 || cgy < 0 || cgx >= this.srcW || cgy >= this.srcH) {
+                            keep = false;
+                        } else {
+                            zt = this.groundTopAt(cgx, cgy) + 0.012;
+                        }
+                    }
+                    if (keep) {
+                        k = 0;
+                        while (k < 3) {
+                            int vi = vb + k;
+                            float hz = this.props.pz[vi] * scale;
+                            p = this.wr(buf, p,
+                                        this.props.px[vi] * scale + wx - hz * 0.368,
+                                        this.props.py[vi] * scale + wy - hz * 0.579,
+                                        zt, 0.0, 0.0, 1.0, gr, gg, gb);
+                            k = k + 1;
+                        }
+                    } else {
+                        // a dropped triangle still has to occupy its slot in the buffer, since the
+                        // count was made before any of them were placed: collapse it to a point
+                        k = 0;
+                        while (k < 3) {
+                            p = this.wr(buf, p, wx, wy, 0.0 - 500.0, 0.0, 0.0, 1.0, gr, gg, gb);
+                            k = k + 1;
+                        }
                     }
                     t = t + 1;
                 }
@@ -1221,7 +1275,7 @@ public bundle Agents {
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
                             float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
                             hw = this.emitPropShadow(hbuf, hw, this.hintProp, wx, wy, topZ + 0.18,
-                                                     sc * 0.55, gr, gg, gb);
+                                                     sc * 0.55, gr, gg, gb, false);
                             hw = this.emitProp(hbuf, hw, this.hintProp, wx, wy, topZ, sc * 0.55, shade);
                         }
                         bx = bx + 1;
@@ -1420,8 +1474,8 @@ public bundle Agents {
                             float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
                             float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
-                            w = this.emitPropShadow(buf, w, p, wx + jx, wy + jy, topZ + 0.055,
-                                                    this.sScale[ord], gr, gg, gb);
+                            w = this.emitPropShadow(buf, w, p, wx + jx, wy + jy, topZ + 0.012,
+                                                    this.sScale[ord], gr, gg, gb, true);
                             w = this.emitProp(buf, w, p, wx + jx, wy + jy, topZ, this.sScale[ord], shade);
                         }
                         x = x + 1;
