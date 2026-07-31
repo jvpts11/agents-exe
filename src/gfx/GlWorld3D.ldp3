@@ -61,6 +61,8 @@ public bundle Agents {
             private mutable int rvB135b;
             private mutable int rvCDiag;
             private mutable int rvStar;
+            private mutable int[] dRiverC;      // detail bake scratch: river variant per cell, or -1
+            private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
             private mutable int[] btally;       // per-biome cell count inside one coarse block
             private mutable int[] connOrd;      // connection mask -> tile ordinal
             private mutable int[] fallOrd;      // outflow direction -> waterfall tile ordinal
@@ -132,6 +134,8 @@ public bundle Agents {
                 this.sProp = new int[1]();
                 this.sMilli = new int[1]();
                 this.sScale = new float[1]();
+                this.dRiverC = new int[1]();
+                this.dPropC = new int[1]();
                 this.btally = new int[40]();
                 this.connOrd = new int[1]();
                 this.fallOrd = new int[1]();
@@ -179,6 +183,8 @@ public bundle Agents {
                 delete this.sProp;
                 delete this.sMilli;
                 delete this.sScale;
+                delete this.dRiverC;
+                delete this.dPropC;
                 delete this.btally;
                 delete this.connOrd;
                 delete this.fallOrd;
@@ -1259,6 +1265,19 @@ public bundle Agents {
             }
 
             private method bakeDetail(int ox, int oy) returns void {
+                // The bake walks the window twice -- once to size the buffer, once to fill it -- and
+                // the two most expensive things per cell were being computed on BOTH passes:
+                // pickRiver alone costs eight neighbour lookups plus their flow directions. They are
+                // computed on the counting pass now and read back on the emitting one. This is the
+                // rebake that is felt as a stutter when panning, so halving its per-cell work is the
+                // cheapest thing available short of making the bake incremental.
+                int dn = this.detW * this.detH;
+                if (this.dRiverC.length() != dn) {
+                    delete this.dRiverC;
+                    delete this.dPropC;
+                    this.dRiverC = new int[dn]();
+                    this.dPropC = new int[dn]();
+                }
                 mutable int tris = 0;
                 mutable int y = 0;
                 while (y < this.detH) {
@@ -1271,12 +1290,17 @@ public bundle Agents {
                         // ord > 7: river tiles on any LAND cell including Beach/RockyShore -- most of
                         // a river's lower course crosses the coast band, and skipping it there cut
                         // every river short of the sea
+                        int slot = y * this.detW + x;
                         if (ord > 7 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
-                            tris = tris + this.countRTile(this.pickRiver(gx, gy) / 4, lvl);
+                            int pk = this.pickRiver(gx, gy);
+                            this.dRiverC[slot] = pk;
+                            tris = tris + this.countRTile(pk / 4, lvl);
                         } else {
+                            this.dRiverC[slot] = 0 - 1;
                             tris = tris + this.countTile(ord, false, this.thinDecor(ord, gx, gy)) + 8;
                         }
                         int p = this.detailPropAt(gx, gy, ord);
+                        this.dPropC[slot] = p;
                         if (p >= 0) {
                             tris = tris + this.props.triCount[p] * 2;    // prop + its projected shadow
                         }
@@ -1300,14 +1324,15 @@ public bundle Agents {
                         float wx = cast<float>(gx * 2 + 1);
                         float wy = cast<float>(gy * 2 + 1);
                         float shade = this.shadeAt(gx, gy, 1, lvl);
-                        if (ord > 7 && this.grid.hasFlag(gx, gy, Grid.FLAG_RIVER)) {
-                            int pk = this.pickRiver(gx, gy);
+                        int slot = y * this.detW + x;
+                        int pk = this.dRiverC[slot];
+                        if (pk >= 0) {
                             w = this.emitRTile(buf, w, pk / 4, pk % 4, ord, wx, wy, zOff, shade);
                         } else {
                             w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false,
                                               this.thinDecor(ord, gx, gy), shade);
                         }
-                        int p = this.detailPropAt(gx, gy, ord);
+                        int p = this.dPropC[slot];
                         if (p >= 0) {
                             float jx = (this.hash01(gx * 3 + 1, gy * 5 + 2) - 0.5) * 1.2;
                             float jy = (this.hash01(gx * 5 + 4, gy * 3 + 7) - 0.5) * 1.2;
