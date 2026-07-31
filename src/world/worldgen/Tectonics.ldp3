@@ -1,0 +1,530 @@
+import System.IO.Console;
+
+// The deformation stage. Landmass built the relief and flooded it; every mountain, trench, rift and
+// volcanic arc in the world is put here, and ONLY here.
+//
+// That division is deliberate. Landmass caps ordinary land at 0.62 by construction, so nothing it
+// does can enter the 0.63 mountain band -- which means mountain coverage can never become a side
+// effect of tuning a noise amplitude somewhere else. It is set by one number in this file, closed
+// against a measurement.
+//
+// Relief follows PLATE BOUNDARIES, so a range is linear because the boundary it sits on is a long
+// sinuous curve, not because linearity was imposed on a blob. What happens at a boundary is decided
+// by physics: who is converging with whom, and whether the crust meeting there is continental or
+// oceanic.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public class Tectonics implements ElevationPass {
+            public static int B_NONE = 0;
+            public static int B_COLLISION = 1;      // continent meets continent: Himalaya
+            public static int B_SUBDUCTION = 2;     // ocean dives under continent: Andes + trench
+            public static int B_ISLANDARC = 3;      // ocean meets ocean: arc + trench
+            public static int B_RIFT = 4;           // continent pulls apart: valley with shoulders
+            public static int B_RIDGE = 5;          // sea floor spreads: mid-ocean ridge
+
+            // Ordinary land ends at 0.62 and the mountain family owns 0.63..1.0, so this is the
+            // whole headroom an uplift of 1.0 is allowed to use.
+            public static float BAND = 0.42;
+
+            private mutable int seed;
+            private mutable int pw;
+            private mutable int ph;
+            private mutable int nPlates;
+
+            private mutable float[] bdist;      // coarse: distance to the nearest plate boundary
+            private mutable int[] bpair;        // coarse: which boundary that is, or -1
+            private mutable float[] pcx;        // plate centroids, coarse coords
+            private mutable float[] pcy;
+            private mutable int[] bkind;        // per pair
+            private mutable float[] bstr;       // per pair: |convergence|, 0..1
+            private mutable int[] bover;        // per pair: the plate that rides OVER the other
+            private mutable float[] def;        // full res: + uplift, - depression, before scaling
+            private mutable float mountainShare;
+
+            public constructor Tectonics(int seed) {
+                this.seed = seed;
+                this.pw = 1;
+                this.ph = 1;
+                this.nPlates = 0;
+                this.mountainShare = 0.16;
+                this.bdist = new float[1]();
+                this.bpair = new int[1]();
+                this.pcx = new float[1]();
+                this.pcy = new float[1]();
+                this.bkind = new int[1]();
+                this.bstr = new float[1]();
+                this.bover = new int[1]();
+                this.def = new float[1]();
+            }
+
+            public destructor ~Tectonics() returns void {
+                delete this.bdist;
+                delete this.bpair;
+                delete this.pcx;
+                delete this.pcy;
+                delete this.bkind;
+                delete this.bstr;
+                delete this.bover;
+                delete this.def;
+            }
+
+            public override method name() returns String {
+                return "tectonics";
+            }
+
+            // What share of LAND the mountain family should cover. The one knob.
+            public method setMountainShare(float s) returns void {
+                this.mountainShare = s;
+            }
+
+            public override method apply(WorldField* f) returns void {
+                this.pw = f.pw;
+                this.ph = f.ph;
+                this.nPlates = f.nPlates;
+                if (this.nPlates <= 0) {
+                    return;
+                }
+                int pn = this.pw * this.ph;
+                delete this.bdist;
+                delete this.bpair;
+                delete this.pcx;
+                delete this.pcy;
+                delete this.bkind;
+                delete this.bstr;
+                delete this.bover;
+                delete this.def;
+                this.bdist = new float[pn]();
+                this.bpair = new int[pn]();
+                this.pcx = new float[this.nPlates]();
+                this.pcy = new float[this.nPlates]();
+                int np2 = this.nPlates * this.nPlates;
+                this.bkind = new int[np2]();
+                this.bstr = new float[np2]();
+                this.bover = new int[np2]();
+                this.def = new float[f.w * f.h]();
+
+                this.centroids(f);
+                this.findBoundaries(f);
+                this.classifyBoundaries(f);
+                this.buildDeformation(f);
+                this.fitAndApply(f);
+                return;
+            }
+
+            private method centroids(WorldField* f) returns void {
+                int[] cnt = new int[this.nPlates]();
+                mutable int i = 0;
+                while (i < this.nPlates) {
+                    this.pcx[i] = 0.0;
+                    this.pcy[i] = 0.0;
+                    i = i + 1;
+                }
+                int pn = this.pw * this.ph;
+                i = 0;
+                while (i < pn) {
+                    int p = f.plate[i];
+                    this.pcx[p] = this.pcx[p] + cast<float>(i % this.pw);
+                    this.pcy[p] = this.pcy[p] + cast<float>(i / this.pw);
+                    cnt[p] = cnt[p] + 1;
+                    i = i + 1;
+                }
+                i = 0;
+                while (i < this.nPlates) {
+                    if (cnt[i] > 0) {
+                        this.pcx[i] = this.pcx[i] / cast<float>(cnt[i]);
+                        this.pcy[i] = this.pcy[i] / cast<float>(cnt[i]);
+                    }
+                    i = i + 1;
+                }
+                delete cnt;
+                return;
+            }
+
+            private method pairOf(int a, int b) returns int {
+                if (a < b) {
+                    return a * this.nPlates + b;
+                }
+                return b * this.nPlates + a;
+            }
+
+            // Distance to the nearest plate boundary, carrying WHICH boundary it is. Two-pass
+            // chamfer, propagating the label along with the distance -- the label crossing to the
+            // far side of a boundary is harmless and in fact wanted: both sides of a subduction zone
+            // need to know they are on it, one to raise a range and the other to sink a trench.
+            private method findBoundaries(WorldField* f) returns void {
+                int pn = this.pw * this.ph;
+                mutable int i = 0;
+                while (i < pn) {
+                    int x = i % this.pw;
+                    int y = i / this.pw;
+                    int self = f.plate[i];
+                    mutable int other = 0 - 1;
+                    if (x > 0 && f.plate[i - 1] != self) {
+                        other = f.plate[i - 1];
+                    }
+                    if (x + 1 < this.pw && f.plate[i + 1] != self) {
+                        other = f.plate[i + 1];
+                    }
+                    if (y > 0 && f.plate[i - this.pw] != self) {
+                        other = f.plate[i - this.pw];
+                    }
+                    if (y + 1 < this.ph && f.plate[i + this.pw] != self) {
+                        other = f.plate[i + this.pw];
+                    }
+                    if (other >= 0) {
+                        this.bdist[i] = 0.0;
+                        this.bpair[i] = this.pairOf(self, other);
+                    } else {
+                        this.bdist[i] = 1000000000.0;
+                        this.bpair[i] = 0 - 1;
+                    }
+                    i = i + 1;
+                }
+                float dOrt = 1.0;
+                float dDia = 1.41421356;
+                mutable int y2 = 0;
+                while (y2 < this.ph) {
+                    mutable int x2 = 0;
+                    while (x2 < this.pw) {
+                        int c = y2 * this.pw + x2;
+                        if (x2 > 0) {
+                            this.relax(c, c - 1, dOrt);
+                        }
+                        if (y2 > 0) {
+                            this.relax(c, c - this.pw, dOrt);
+                        }
+                        if (x2 > 0 && y2 > 0) {
+                            this.relax(c, c - this.pw - 1, dDia);
+                        }
+                        if (x2 + 1 < this.pw && y2 > 0) {
+                            this.relax(c, c - this.pw + 1, dDia);
+                        }
+                        x2 = x2 + 1;
+                    }
+                    y2 = y2 + 1;
+                }
+                y2 = this.ph - 1;
+                while (y2 >= 0) {
+                    mutable int x2 = this.pw - 1;
+                    while (x2 >= 0) {
+                        int c = y2 * this.pw + x2;
+                        if (x2 + 1 < this.pw) {
+                            this.relax(c, c + 1, dOrt);
+                        }
+                        if (y2 + 1 < this.ph) {
+                            this.relax(c, c + this.pw, dOrt);
+                        }
+                        if (x2 + 1 < this.pw && y2 + 1 < this.ph) {
+                            this.relax(c, c + this.pw + 1, dDia);
+                        }
+                        if (x2 > 0 && y2 + 1 < this.ph) {
+                            this.relax(c, c + this.pw - 1, dDia);
+                        }
+                        x2 = x2 - 1;
+                    }
+                    y2 = y2 - 1;
+                }
+                return;
+            }
+
+            // `step` and `from` are both LDP3 keywords -- hence the names.
+            private method relax(int c, int src, float span) returns void {
+                float cand = this.bdist[src] + span;
+                if (cand < this.bdist[c]) {
+                    this.bdist[c] = cand;
+                    this.bpair[c] = this.bpair[src];
+                }
+                return;
+            }
+
+            // Convergence is the relative drift of the two plates ALONG the line joining them:
+            // positive means they are closing. Everything a boundary does follows from its sign,
+            // its magnitude, and whether the crust on each side is continental or oceanic.
+            private method classifyBoundaries(WorldField* f) returns void {
+                mutable int a = 0;
+                while (a < this.nPlates) {
+                    mutable int b = a + 1;
+                    while (b < this.nPlates) {
+                        int p = a * this.nPlates + b;
+                        float lx = this.pcx[b] - this.pcx[a];
+                        float ly = this.pcy[b] - this.pcy[a];
+                        float len = LandMath.sqrt(lx * lx + ly * ly);
+                        if (len > 0.001) {
+                            float ux = lx / len;
+                            float uy = ly / len;
+                            float conv = (f.pmx[a] - f.pmx[b]) * ux + (f.pmy[a] - f.pmy[b]) * uy;
+                            // island crust is thin: for boundary physics it behaves like ocean floor
+                            boolean contA = f.pkind[a] == 1;
+                            boolean contB = f.pkind[b] == 1;
+                            mutable float s = conv;
+                            if (s < 0.0) {
+                                s = 0.0 - s;
+                            }
+                            if (s > 1.0) {
+                                s = 1.0;
+                            }
+                            this.bstr[p] = s;
+                            this.bover[p] = a;
+                            if (conv > 0.15) {
+                                if (contA && contB) {
+                                    this.bkind[p] = Tectonics.B_COLLISION;
+                                } else if (contA || contB) {
+                                    this.bkind[p] = Tectonics.B_SUBDUCTION;
+                                    // the continental plate always rides over the oceanic one
+                                    if (contB) {
+                                        this.bover[p] = b;
+                                    }
+                                } else {
+                                    this.bkind[p] = Tectonics.B_ISLANDARC;
+                                }
+                            } else if (conv < 0.0 - 0.15) {
+                                if (contA || contB) {
+                                    this.bkind[p] = Tectonics.B_RIFT;
+                                } else {
+                                    this.bkind[p] = Tectonics.B_RIDGE;
+                                }
+                            } else {
+                                this.bkind[p] = Tectonics.B_NONE;
+                            }
+                        }
+                        b = b + 1;
+                    }
+                    a = a + 1;
+                }
+                return;
+            }
+
+            // exp(-t*t): the crest profile. mu is how far from the boundary the feature sits, sigma
+            // how wide it is -- both in COARSE cells, so a sigma of 3 is about 24 map cells and a
+            // range rises over tens of cells rather than ramping across a continent.
+            private method crest(float d, float mu, float sigma) returns float {
+                float t = (d - mu) / sigma;
+                return LandMath.exp(0.0 - t * t);
+            }
+
+            private method distAt(float nx, float ny) returns float {
+                mutable float gx = nx * cast<float>(this.pw) - 0.5;
+                mutable float gy = ny * cast<float>(this.ph) - 0.5;
+                if (gx < 0.0) {
+                    gx = 0.0;
+                }
+                if (gy < 0.0) {
+                    gy = 0.0;
+                }
+                mutable int x0 = cast<int>(gx);
+                mutable int y0 = cast<int>(gy);
+                if (x0 > this.pw - 2) {
+                    x0 = this.pw - 2;
+                }
+                if (y0 > this.ph - 2) {
+                    y0 = this.ph - 2;
+                }
+                if (x0 < 0) {
+                    x0 = 0;
+                }
+                if (y0 < 0) {
+                    y0 = 0;
+                }
+                float tx = gx - cast<float>(x0);
+                float ty = gy - cast<float>(y0);
+                int c = y0 * this.pw + x0;
+                float p00 = this.bdist[c];
+                float p10 = this.bdist[c + 1];
+                float p01 = this.bdist[c + this.pw];
+                float p11 = this.bdist[c + this.pw + 1];
+                float ab = p00 + (p10 - p00) * tx;
+                float cd = p01 + (p11 - p01) * tx;
+                return ab + (cd - ab) * ty;
+            }
+
+            private method buildDeformation(WorldField* f) returns void {
+                mutable int y = 0;
+                while (y < f.h) {
+                    float ny = cast<float>(y) / cast<float>(f.h);
+                    int gy = y * this.ph / f.h;
+                    mutable int x = 0;
+                    while (x < f.w) {
+                        int cell = y * f.w + x;
+                        float nx = cast<float>(x) / cast<float>(f.w);
+                        int gx = x * this.pw / f.w;
+                        int gi = gy * this.pw + gx;
+                        int pair = this.bpair[gi];
+                        if (pair >= 0) {
+                            int kind = this.bkind[pair];
+                            if (kind != Tectonics.B_NONE) {
+                                // Noise on the DISTANCE again: it makes a range wander, fork and
+                                // vary in height along its length instead of tracing the boundary
+                                // like a drawn line, and it cannot pull the range off the boundary
+                                // the way warping the sampled position would.
+                                float wob = LandMath.fbm(this.seed ^ 0x39A1, nx, ny, 17, 4) - 0.5;
+                                float d = this.distAt(nx, ny) + wob * 3.4;
+                                int self = f.plate[gi];
+                                float str = this.bstr[pair];
+                                mutable float v = 0.0;
+                                mutable float arc = 0.0;
+                                if (kind == Tectonics.B_COLLISION) {
+                                    // two continents pile into each other: one broad high belt
+                                    // straddling the suture, no trench and no volcanoes
+                                    v = str * this.crest(d, 0.0, 6.5);
+                                } else if (kind == Tectonics.B_SUBDUCTION) {
+                                    if (self == this.bover[pair]) {
+                                        // overriding continent: coastal range, then the volcanic
+                                        // arc further inland -- the Andes and their volcanoes
+                                        v = str * (this.crest(d, 2.0, 3.2) * 0.95);
+                                        arc = str * this.crest(d, 8.5, 2.4);
+                                        v = v + arc * 0.70;
+                                    } else {
+                                        // the descending slab drags the sea floor down
+                                        v = 0.0 - str * this.crest(d, 3.0, 2.2);
+                                    }
+                                } else if (kind == Tectonics.B_ISLANDARC) {
+                                    if (self == this.bover[pair]) {
+                                        v = str * this.crest(d, 3.5, 1.9) * 1.15;
+                                        arc = v;
+                                    } else {
+                                        v = 0.0 - str * this.crest(d, 3.0, 2.0);
+                                    }
+                                } else if (kind == Tectonics.B_RIFT) {
+                                    // the floor drops between two raised shoulders
+                                    v = str * this.crest(d, 5.0, 2.2) * 0.55
+                                        - str * this.crest(d, 0.0, 2.0) * 0.70;
+                                } else {
+                                    v = str * this.crest(d, 0.0, 4.5) * 0.55;
+                                }
+                                // Sharpen the uplift: the crest keeps its value while the flanks
+                                // shrink. Coverage and peak height are two different questions --
+                                // the fit loop below sets the amplitude from the SHARE of land in
+                                // the band, so a profile with fat flanks reaches its share while the
+                                // amplitude is still small and the highest summit stops at 0.86,
+                                // below the snow line, with no SnowPeak anywhere in the world.
+                                // Thinning the flanks forces a larger amplitude for the same share.
+                                if (v > 0.0) {
+                                    v = 0.68 * v + 0.32 * v * v * v;
+                                }
+                                this.def[cell] = v;
+                                if (arc > 0.55) {
+                                    f.vent[cell] = cast<byte>(1);
+                                }
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                return;
+            }
+
+            // Choose the uplift amplitude so the mountain family covers its share of land, then
+            // apply once. This is solved, not searched: a land cell crosses 0.63 exactly when
+            // amp >= (0.63 - e) / (BAND * def), so histogramming that per-cell threshold gives the
+            // whole curve of share-against-amplitude in a single pass.
+            private method fitAndApply(WorldField* f) returns void {
+                int n = f.w * f.h;
+                int bins = 2048;
+                float span = 4.0;
+                int[] hist = new int[bins]();
+                mutable int land = 0;
+                mutable int i = 0;
+                while (i < n) {
+                    if (f.eb[i] >= f.sea) {
+                        land = land + 1;
+                        if (this.def[i] > 0.0001) {
+                            float need = (0.63 - f.eb[i]) / (Tectonics.BAND * this.def[i]);
+                            if (need < span) {
+                                mutable int b = cast<int>(need / span * cast<float>(bins));
+                                if (b < 0) {
+                                    b = 0;
+                                }
+                                hist[b] = hist[b] + 1;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                int want = cast<int>(cast<float>(land) * this.mountainShare);
+                mutable int acc = 0;
+                mutable int bin = 0;
+                while (bin < bins && acc < want) {
+                    acc = acc + hist[bin];
+                    bin = bin + 1;
+                }
+                delete hist;
+                mutable float amp = span * cast<float>(bin) / cast<float>(bins);
+                if (amp < 0.15) {
+                    amp = 0.15;
+                }
+                if (amp > span) {
+                    amp = span;
+                }
+
+                i = 0;
+                while (i < n) {
+                    float v = this.def[i];
+                    if (v != 0.0) {
+                        mutable float e = f.eb[i];
+                        if (e >= f.sea) {
+                            if (v > 0.0) {
+                                e = e + v * amp * Tectonics.BAND;
+                                if (e > 1.0) {
+                                    e = 1.0;
+                                }
+                            } else {
+                                // a rift floor sinks but stays land: dropping it under the sea would
+                                // cut a continent in half after the flood already fixed the coasts
+                                e = e + v * 0.10;
+                                if (e < f.sea + 0.012) {
+                                    e = f.sea + 0.012;
+                                }
+                            }
+                        } else {
+                            if (v < 0.0) {
+                                // trench: the only thing in the world allowed under 0.22
+                                e = e + v * 0.17;
+                                if (e < 0.04) {
+                                    e = 0.04;
+                                }
+                            } else {
+                                // a ridge rises but never breaks the surface -- islands are made by
+                                // arcs, which are land by construction, not by the sea floor
+                                e = e + v * amp * 0.10;
+                                if (e > f.sea - 0.006) {
+                                    e = f.sea - 0.006;
+                                }
+                            }
+                        }
+                        f.eb[i] = e;
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            // Diagnostic: how many boundaries of each kind the seed produced.
+            public method dumpBoundaries() returns void {
+                int[] cnt = new int[6]();
+                mutable int a = 0;
+                while (a < this.nPlates) {
+                    mutable int b = a + 1;
+                    while (b < this.nPlates) {
+                        int k = this.bkind[a * this.nPlates + b];
+                        cnt[k] = cnt[k] + 1;
+                        b = b + 1;
+                    }
+                    a = a + 1;
+                }
+                int none = cnt[0];
+                int coll = cnt[1];
+                int sub = cnt[2];
+                int arc = cnt[3];
+                int rift = cnt[4];
+                int ridge = cnt[5];
+                System.IO.Console.println($"boundaries: collision {coll}, subduction {sub}, island arc {arc}, rift {rift}, ridge {ridge}, quiet {none}");
+                delete cnt;
+                return;
+            }
+        }
+    }
+}

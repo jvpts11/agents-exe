@@ -48,6 +48,7 @@ public bundle Agents {
             public mutable int[] pcont;      // continent id, or -1
             public mutable float[] pmx;      // plate drift, unit vector
             public mutable float[] pmy;
+            public mutable byte[] vent;      // full res: 1 where Tectonics put a volcano
 
             public constructor WorldField(int w, int h, int seed) {
                 this.w = w;
@@ -67,6 +68,7 @@ public bundle Agents {
                 this.pcont = new int[1]();
                 this.pmx = new float[1]();
                 this.pmy = new float[1]();
+                this.vent = new byte[w * h]();
             }
 
             public destructor ~WorldField() returns void {
@@ -76,6 +78,7 @@ public bundle Agents {
                 delete this.pcont;
                 delete this.pmx;
                 delete this.pmy;
+                delete this.vent;
             }
 
             // Plate id at a FULL-resolution cell.
@@ -657,7 +660,11 @@ public bundle Agents {
                 // Volcanic lands live on HIGH ground near the convergent ridges, and volcanic ARCS
                 // hug the coast (distw): where a subduction boundary runs deep under a continent's
                 // interior, the same uplift shows as an ordinary mountain range instead.
-                if ((fg & Grid.FLAG_VENT) != 0 && e >= this.sea && e >= 0.55 && distw <= 24) { return cast<int>(Biome.Volcanic); }
+                // A vent is now PLACED, by Tectonics, on the volcanic arc of a subduction zone --
+                // so it is trusted. The old distance-to-water gate existed to stop volcanic blobs
+                // appearing wherever noise happened to peak inland; it would also have cut the real
+                // arcs, which sit tens of cells behind the coastal range.
+                if ((fg & Grid.FLAG_VENT) != 0 && e >= this.sea && e >= 0.55) { return cast<int>(Biome.Volcanic); }
                 if ((fg & Grid.FLAG_LAKE) != 0 && e >= this.sea) {
                     // a basin in a bone-dry climate is a dried-up salt flat, not a lake
                     if (m < 0.22) { return cast<int>(Biome.SaltFlat); }
@@ -819,11 +826,17 @@ public bundle Agents {
                 }
                 wf.landRatio = land;
                 Landmass* landPass = new Landmass(this.seed) on heap;
-                ElevationPass* pass = landPass;
+                mutable ElevationPass* pass = landPass;
+                pass.apply(wf);
+                Tectonics* tecPass = new Tectonics(this.seed) on heap;
+                pass = tecPass;
                 pass.apply(wf);
                 mutable int ci = 0;
                 while (ci < n) {
                     this.eb[ci] = wf.eb[ci];
+                    if (cast<int>(wf.vent[ci]) != 0) {
+                        g.setFlag(ci % w, ci / w, Grid.FLAG_VENT);
+                    }
                     ci = ci + 1;
                 }
                 // Erosion now happens inside Landmass, on the raw field BEFORE the flood: running
@@ -841,6 +854,7 @@ public bundle Agents {
                 this.classifyAll(g);
 
                 delete landPass;
+                delete tecPass;
                 delete wf;
                 delete this.eb;
                 delete this.wtr;
