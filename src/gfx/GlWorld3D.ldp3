@@ -1325,10 +1325,17 @@ public bundle Agents {
                 // blocks. That reads as the LOD not switching at all, which is exactly what it
                 // looks like from the ground.
                 //
+                // The size is set by the SEPARATION between the camera's footprint and its target,
+                // since the window is centred between them and has to hold both: that separation is
+                // camDist * cos(elevation), in world units, and a cell is two of those. Altitude
+                // alone was the wrong measure -- a low camera zoomed far out has a small altitude
+                // and an enormous span.
+                //
                 // Quantised to 16 cells so drifting the camera does not rebake on every frame.
-                mutable int want = 128 + cast<int>(alt * 0.95);
-                if (want < 128) {
-                    want = 128;
+                float ceW = this.fcos(e);
+                mutable int want = cast<int>(this.camDist * ceW / 2.0) + 96;
+                if (want < 112) {
+                    want = 112;
                 }
                 if (want > 288) {
                     want = 288;
@@ -1340,13 +1347,22 @@ public bundle Agents {
                     this.detH = want;
                     resized = true;
                 }
-                // camera's ground footprint, then a nudge forward toward what it is looking at
+                // Centre the window MIDWAY between the camera's ground footprint and what it is
+                // aimed at, because both are on screen and both need to be real terrain.
+                //
+                // It used to sit at the footprint, nudged a fixed 90 units toward the target. That
+                // fixed nudge is nothing next to the distance between the two, which grows with the
+                // zoom: at 600 units out the target ended up some 470 units from the window centre
+                // and fell straight out of it, so the middle of the screen was coarse. Pinning it
+                // to the target instead would only move the hole to the near field, under the
+                // camera -- which is the other half of what the screenshots show. The midpoint
+                // holds both, and it works out because the window's size grows with altitude on the
+                // same scale that this separation does.
                 float ce = this.fcos(e);
                 float egx = this.camTx + this.camDist * ce * this.fsin(a);
                 float egy = this.camTy + this.camDist * ce * this.fcos(a);
-                float ahead = 90.0;
-                float cxw = egx - this.fsin(a) * ahead;
-                float cyw = egy - this.fcos(a) * ahead;
+                float cxw = (egx + this.camTx) * 0.5;
+                float cyw = (egy + this.camTy) * 0.5;
                 mutable int tx = cast<int>(cxw / 2.0) - this.detW / 2;
                 mutable int ty = cast<int>(cyw / 2.0) - this.detH / 2;
                 if (tx < 0) { tx = 0; }
@@ -1358,7 +1374,10 @@ public bundle Agents {
                     if (mx < 0) { mx = 0 - mx; }
                     mutable int my = ty - this.detY0;
                     if (my < 0) { my = 0 - my; }
-                    if (mx <= this.detW / 4 && my <= this.detH / 4) {
+                    // A rebake walks the whole window and reallocates, so it is felt as a stutter
+                    // when panning or zooming. Only redo it once the view has drifted a third of
+                    // the way out, rather than a quarter.
+                    if (mx <= this.detW / 3 && my <= this.detH / 3) {
                         return;
                     }
                 }
