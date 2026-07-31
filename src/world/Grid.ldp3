@@ -212,6 +212,63 @@ public bundle Agents {
                 return this.subAt(x, y);
             }
 
+            // The prospecting action itself, for whatever technology comes to gate it. It reveals
+            // what is ALREADY THERE -- worldgen placed every deposit, and prospecting only stops
+            // them being invisible. Returns how many buried cells became known, which is the
+            // feedback the action wants: prospecting bare ground tells you something too.
+            public method prospect(int cx, int cy, int radius) returns int
+                requires radius >= 0
+            {
+                mutable int revealed = 0;
+                mutable int y = cy - radius;
+                while (y <= cy + radius) {
+                    if (y >= 0 && y < this.h) {
+                        mutable int x = cx - radius;
+                        while (x <= cx + radius) {
+                            if (x >= 0 && x < this.w) {
+                                int dx = x - cx;
+                                int dy = y - cy;
+                                if (dx * dx + dy * dy <= radius * radius) {
+                                    if (!this.hasFlag(x, y, Grid.FLAG_PROSPECTED)) {
+                                        this.setFlag(x, y, Grid.FLAG_PROSPECTED);
+                                        if (this.hasSub(x, y)) {
+                                            revealed = revealed + 1;
+                                        }
+                                    }
+                                }
+                            }
+                            x = x + 1;
+                        }
+                    }
+                    y = y + 1;
+                }
+                return revealed;
+            }
+
+            // Take up to `amount` from the surface node here, and clear the cell when it runs out.
+            // Returns what was actually taken. This is what makes the quantity mean anything: a
+            // resource that never runs out is decoration with a better name, and every chain in
+            // ECONOMY.md is written as though deposits are finite.
+            public method harvest(int x, int y, int amount) returns int
+                requires amount >= 0
+            {
+                int i = this.idx(x, y);
+                mutable int have = cast<int>(this.nodeQty[i]);
+                if (have <= 0 || cast<int>(this.node[i]) == 0) {
+                    return 0;
+                }
+                mutable int take = amount;
+                if (take > have) {
+                    take = have;
+                }
+                have = have - take;
+                this.nodeQty[i] = cast<short>(have);
+                if (have == 0) {
+                    this.node[i] = cast<byte>(0);
+                }
+                return take;
+            }
+
             // Downstream flow direction as a per-cell code (0 = no flow). dx/dy are each in {-1,0,1}.
             public method setFlowDir(int x, int y, int dx, int dy) returns void {
                 this.flow[this.idx(x, y)] = cast<byte>((dy + 1) * 3 + (dx + 1) + 1);
