@@ -47,6 +47,10 @@ public bundle Agents {
                         Main.audit();
                         return;
                     }
+                    if (args[0].equals("preview")) {
+                        Main.preview();
+                        return;
+                    }
                     if (args[0].equals("plates")) {
                         Landmass* lm = new Landmass(42) on heap;
                         lm.dumpPlates(1280, 720, 6);
@@ -390,6 +394,142 @@ public bundle Agents {
                 delete g;
                 delete win;
                 System.IO.Console.println("captureGlWorld: wrote gl_world.ppm + gl_world_near.ppm");
+                return;
+            }
+
+            // Twelve seeds, each judged and then captured AS THE GAME DRAWS IT. Judging a world on a
+            // top-down biome map was how a visible grid of rectangular seams survived four rounds of
+            // review: the proxy hid exactly the artefact the render showed. One seed proves nothing
+            // either -- what matters is the pass rate over a spread of them.
+            private static method preview() returns void {
+                int w = 2560;
+                int h = 1440;
+                int cols = 4;
+                int rows = 3;
+                int tw = 560;
+                int th = 350;
+                String root = Main.assetRoot();
+                if (root.length() == 0) {
+                    System.IO.Console.println("preview: assets/models not found.");
+                    return;
+                }
+                GlWindow* win = new GlWindow() on heap;
+                if (win.open("preview", tw, th, 3, 3) == 0) {
+                    System.IO.Console.println("preview: no GL window.");
+                    delete win;
+                    return;
+                }
+                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
+                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
+                int sw = cols * tw;
+                int sh = rows * th;
+                byte[] sheet = new byte[sw * sh * 3]();
+                mutable int passed = 0;
+                mutable int k = 0;
+                while (k < cols * rows) {
+                    int seed = 42 + k * 7717;
+                    WorldGen gen = new WorldGen(seed) on stack;
+                    gen.setWorld(0, 0.0 - 1.0);
+                    Grid* g = gen.generate(w, h);
+                    WorldAudit* wa = new WorldAudit(g) on heap;
+                    wa.analyse();
+                    int v = wa.verdict(6);
+                    System.IO.Console.println($"---- seed {seed} ----");
+                    wa.report(6);
+                    delete wa;
+                    GlWorld3D* r = new GlWorld3D(win.gl) on heap;
+                    r.setup(g, terr, props, rivers, 8, 1.1);
+                    int cw = win.width();
+                    int ch = win.height();
+                    r.render(cw, ch);
+                    byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
+                    Main.blitTile(sheet, sw, sh, px, cw, ch,
+                                  (k % cols) * tw, (k / cols) * th, tw, th, v == 0);
+                    delete px;
+                    delete r;
+                    delete g;
+                    if (v == 0) {
+                        passed = passed + 1;
+                    }
+                    k = k + 1;
+                }
+                Main.writePpm(sheet, sw, sh, "preview_sheet.ppm");
+                delete sheet;
+                delete rivers;
+                delete props;
+                delete terr;
+                delete win;
+                int total = cols * rows;
+                System.IO.Console.println($"preview: {passed}/{total} seeds PASS -- wrote preview_sheet.ppm");
+                return;
+            }
+
+            // Copy one capture into the contact sheet, flipping it (GL reads bottom-up) and framing
+            // it in the colour of its verdict: green passed, red rejected.
+            private static method blitTile(byte[] sheet, int sw, int sh, byte[] px, int cw, int ch,
+                                           int ox, int oy, int tw, int th, boolean ok) returns void {
+                mutable int y = 0;
+                while (y < th) {
+                    mutable int x = 0;
+                    while (x < tw) {
+                        int dx = ox + x;
+                        int dy = oy + y;
+                        if (dx < sw && dy < sh) {
+                            int di = (dy * sw + dx) * 3;
+                            mutable int rr = 20;
+                            mutable int gg = 22;
+                            mutable int bb = 28;
+                            if (x < 5 || y < 5 || x >= tw - 5 || y >= th - 5) {
+                                if (ok) {
+                                    rr = 60;
+                                    gg = 200;
+                                    bb = 90;
+                                } else {
+                                    rr = 220;
+                                    gg = 70;
+                                    bb = 60;
+                                }
+                            } else if (x < cw && y < ch) {
+                                int si = ((ch - 1 - y) * cw + x) * 3;
+                                rr = cast<int>(px[si]) & 255;
+                                gg = cast<int>(px[si + 1]) & 255;
+                                bb = cast<int>(px[si + 2]) & 255;
+                            }
+                            sheet[di] = cast<byte>(rr);
+                            sheet[di + 1] = cast<byte>(gg);
+                            sheet[di + 2] = cast<byte>(bb);
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                return;
+            }
+
+            private static method writePpm(byte[] px, int w, int h, String path) returns void {
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("P3\n");
+                sb.appendInt(w);
+                sb.append(" ");
+                sb.appendInt(h);
+                sb.append("\n255\n");
+                mutable int i = 0;
+                int n = w * h;
+                while (i < n) {
+                    sb.appendInt(cast<int>(px[i * 3]) & 255);
+                    sb.append(" ");
+                    sb.appendInt(cast<int>(px[i * 3 + 1]) & 255);
+                    sb.append(" ");
+                    sb.appendInt(cast<int>(px[i * 3 + 2]) & 255);
+                    sb.append(" ");
+                    if ((i + 1) % w == 0) {
+                        sb.append("\n");
+                    }
+                    i = i + 1;
+                }
+                File.writeAll(path, sb.toString());
+                delete sb;
                 return;
             }
 

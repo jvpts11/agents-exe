@@ -42,6 +42,7 @@ public bundle Agents {
             private mutable float[] bstr;       // per pair: |convergence|, 0..1
             private mutable int[] bover;        // per pair: the plate that rides OVER the other
             private mutable float[] def;        // full res: + uplift, - depression, before scaling
+            private mutable byte[] arcMask;     // full res: 1 on an island arc, which MAY breach
             private mutable float mountainShare;
 
             public constructor Tectonics(int seed) {
@@ -58,6 +59,7 @@ public bundle Agents {
                 this.bstr = new float[1]();
                 this.bover = new int[1]();
                 this.def = new float[1]();
+                this.arcMask = new byte[1]();
             }
 
             public destructor ~Tectonics() returns void {
@@ -69,6 +71,7 @@ public bundle Agents {
                 delete this.bstr;
                 delete this.bover;
                 delete this.def;
+                delete this.arcMask;
             }
 
             public override method name() returns String {
@@ -96,6 +99,7 @@ public bundle Agents {
                 delete this.bstr;
                 delete this.bover;
                 delete this.def;
+                delete this.arcMask;
                 this.bdist = new float[pn]();
                 this.bpair = new int[pn]();
                 this.pcx = new float[this.nPlates]();
@@ -105,6 +109,7 @@ public bundle Agents {
                 this.bstr = new float[np2]();
                 this.bover = new int[np2]();
                 this.def = new float[f.w * f.h]();
+                this.arcMask = new byte[f.w * f.h]();
 
                 this.centroids(f);
                 this.findBoundaries(f);
@@ -382,8 +387,16 @@ public bundle Agents {
                                     }
                                 } else if (kind == Tectonics.B_ISLANDARC) {
                                     if (self == this.bover[pair]) {
-                                        v = str * this.crest(d, 3.5, 1.9) * 1.15;
+                                        // BEADS, not a crest. An arc that breaches along its whole
+                                        // length is a causeway: it reached a continent on each end
+                                        // and welded them, and the biggest landmass jumped from 24%
+                                        // to 38% of all land. Real arcs are a line of separate
+                                        // volcanic cones, so a high-frequency modulation drops the
+                                        // ridge back under water between them.
+                                        float bead = LandMath.fbm(this.seed ^ 0x5E4D, nx, ny, 44, 3);
+                                        v = str * this.crest(d, 3.5, 1.9) * (0.0 - 0.15 + 1.55 * bead);
                                         arc = v;
+                                        this.arcMask[cell] = cast<byte>(1);
                                     } else {
                                         v = 0.0 - str * this.crest(d, 3.0, 2.0);
                                     }
@@ -427,6 +440,9 @@ public bundle Agents {
                 float span = 4.0;
                 int[] hist = new int[bins]();
                 mutable int land = 0;
+                mutable float bestTop = 0.0;
+                mutable float bestBase = 0.0;
+                mutable float bestGain = 1.0;
                 mutable int i = 0;
                 while (i < n) {
                     if (f.eb[i] >= f.sea) {
@@ -439,6 +455,14 @@ public bundle Agents {
                                     b = 0;
                                 }
                                 hist[b] = hist[b] + 1;
+                            }
+                            // remember the cell that will end up highest, so the amplitude can be
+                            // held to a floor that guarantees the band is actually reached
+                            float gain = this.def[i] * Tectonics.BAND;
+                            if (f.eb[i] + gain > bestTop) {
+                                bestTop = f.eb[i] + gain;
+                                bestBase = f.eb[i];
+                                bestGain = gain;
                             }
                         }
                     }
@@ -453,6 +477,16 @@ public bundle Agents {
                 }
                 delete hist;
                 mutable float amp = span * cast<float>(bin) / cast<float>(bins);
+                // Coverage alone does not guarantee height. The share can be reached while the
+                // tallest summit is still at 0.89 -- under the snow line, so no SnowPeak and no
+                // Glacier exist anywhere. Hold the amplitude to whatever puts the highest cell at
+                // 0.94; the share band is wide enough to absorb the difference.
+                if (bestGain > 0.0001) {
+                    float needPeak = (0.94 - bestBase) / bestGain;
+                    if (needPeak > amp) {
+                        amp = needPeak;
+                    }
+                }
                 if (amp < 0.15) {
                     amp = 0.15;
                 }
@@ -486,9 +520,20 @@ public bundle Agents {
                                 if (e < 0.04) {
                                     e = 0.04;
                                 }
+                            } else if (cast<int>(this.arcMask[i]) != 0) {
+                                // An island ARC is allowed to breach. This is the whole point of the
+                                // feature and it was silently disabled: every rise in the ocean was
+                                // clamped under the sea level, so ocean-ocean convergence built a
+                                // submarine ridge and no island ever appeared. Five of twelve seeds
+                                // were rejected for having too few islands because of it.
+                                // a fraction of the land band: only cones standing on the shallower
+                                // sea floor break the surface, which is what keeps them islands
+                                e = e + v * amp * 0.16;
+                                if (e > 1.0) {
+                                    e = 1.0;
+                                }
                             } else {
-                                // a ridge rises but never breaks the surface -- islands are made by
-                                // arcs, which are land by construction, not by the sea floor
+                                // a mid-ocean ridge rises but never breaks the surface
                                 e = e + v * amp * 0.10;
                                 if (e > f.sea - 0.006) {
                                     e = f.sea - 0.006;

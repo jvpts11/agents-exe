@@ -793,7 +793,7 @@ public bundle Agents {
                 i = 0;
                 while (i < this.nCont) {
                     float u = rng.unit();
-                    this.cw[i] = 1.0 + u * u * 1.4;
+                    this.cw[i] = 1.0 + u * u * 1.8;
                     wsum = wsum + this.cw[i];
                     i = i + 1;
                 }
@@ -832,6 +832,40 @@ public bundle Agents {
                 }
                 delete boxedIn;
 
+                // A continent hemmed in by its neighbours cannot reach its quota, and the spread
+                // then reflects the accident of who had room rather than the weights that were
+                // drawn -- over twelve seeds that showed up as land ratios from 1.5:1 to 10:1. Pull
+                // the extreme back by feeding the smaller continents, never the leader, and stop as
+                // soon as the spread is merely acceptable rather than equal.
+                int ceiling = cast<int>(cast<float>(total) * 0.55);
+                mutable boolean pulling = true;
+                while (pulling && this.cratonArea() < ceiling && this.contRatio() > 260) {
+                    pulling = false;
+                    int mean = this.cratonArea() / this.nCont;
+                    mutable int lowMark = 0 - 1;
+                    mutable int tried = 0;
+                    while (tried < this.nCont && !pulling) {
+                        mutable int pick = 0 - 1;
+                        mutable int least = 2000000000;
+                        mutable int j = 0;
+                        while (j < this.nCont) {
+                            int a = this.contArea(j);
+                            if (a > lowMark && a < least && a < mean) {
+                                least = a;
+                                pick = j;
+                            }
+                            j = j + 1;
+                        }
+                        if (pick < 0) {
+                            tried = this.nCont;
+                        } else {
+                            pulling = this.weldOne(pick);
+                            lowMark = least;
+                            tried = tried + 1;
+                        }
+                    }
+                }
+
                 // Island cratons: oceanic plates whose crust only clears the water deep in the plate
                 // interior. (Real island ARCS are a boundary product and belong to Tectonics; these
                 // are the isolated ones -- Iceland, Hawaii.)
@@ -842,7 +876,7 @@ public bundle Agents {
                 // island into a land bridge and merged two continents into half of all land.
                 mutable int isl = 0;
                 mutable boolean going = true;
-                while (isl < 5 && going) {
+                while (isl < 2 && going) {
                     mutable int pick = 0 - 1;
                     mutable float bestSc = 0.0 - 1.0;
                     i = 0;
@@ -928,6 +962,27 @@ public bundle Agents {
                     c = c + 1;
                 }
                 return seen;
+            }
+
+            // biggest : smallest continent by plate area, x100
+            private method contRatio() returns int {
+                mutable int big = 0;
+                mutable int small = 2000000000;
+                mutable int i = 0;
+                while (i < this.nCont) {
+                    int a = this.contArea(i);
+                    if (a > big) {
+                        big = a;
+                    }
+                    if (a < small) {
+                        small = a;
+                    }
+                    i = i + 1;
+                }
+                if (small <= 0) {
+                    return 0;
+                }
+                return big * 100 / small;
             }
 
             private method contArea(int c) returns int {
