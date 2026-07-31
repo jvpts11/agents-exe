@@ -1,0 +1,328 @@
+import System.IO.Console;
+import System.Text.StringBuilder;
+import Agents.World.Grid;
+import Agents.World.Biome;
+
+// Objective acceptance criteria for a generated world. Generation is a search, and without a judge
+// that runs before a human looks, every tuning round is a coin flip: three worldgen rewrites were
+// rejected on sight for defects nobody had defined a number for. Every measure here is a number,
+// and `verdict` returns the FIRST criterion that fails.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public enum RejectReason {
+            None, TooFewLandmasses, FusedContinents, DominantMass, SizeSpread,
+            IslandCount, MountainShare, MountainLinearity, FlatLandContract
+        }
+
+        public class WorldAudit {
+            private mutable Grid* g;
+            private mutable int w;
+            private mutable int h;
+            private mutable int[] comp;        // component id per cell, -1 = water
+            private mutable int[] area;        // area per component id
+            private mutable int[] stack;       // flood-fill worklist
+            private mutable int capacity;
+            private mutable int ncomp;
+            private mutable int landCells;
+
+            public constructor WorldAudit(Grid* grid) {
+                this.g = grid;
+                this.w = grid.width();
+                this.h = grid.height();
+                this.capacity = 65536;
+                this.comp = new int[this.w * this.h]();
+                this.area = new int[this.capacity]();
+                this.stack = new int[this.w * this.h]();
+                this.ncomp = 0;
+                this.landCells = 0;
+            }
+
+            public destructor ~WorldAudit() returns void {
+                delete this.comp;
+                delete this.area;
+                delete this.stack;
+            }
+
+            private method isLand(int x, int y) returns boolean {
+                return this.g.biomeAt(x, y) >= 8;
+            }
+
+            // 8-connected flood fill over land, iterative: a 3.7M-cell world would blow a
+            // recursive stack long before it finished.
+            public method analyse() returns void {
+                mutable int i = 0;
+                int n = this.w * this.h;
+                while (i < n) {
+                    this.comp[i] = 0 - 1;
+                    i = i + 1;
+                }
+                i = 0;
+                while (i < this.capacity) {
+                    this.area[i] = 0;
+                    i = i + 1;
+                }
+                this.ncomp = 0;
+                this.landCells = 0;
+                mutable int y = 0;
+                while (y < this.h) {
+                    mutable int x = 0;
+                    while (x < this.w) {
+                        int seedCell = y * this.w + x;
+                        if (this.isLand(x, y) && this.comp[seedCell] == 0 - 1) {
+                            int id = this.ncomp;
+                            this.ncomp = this.ncomp + 1;
+                            mutable int sp = 0;
+                            this.stack[sp] = seedCell;
+                            sp = sp + 1;
+                            this.comp[seedCell] = id;
+                            mutable int count = 0;
+                            while (sp > 0) {
+                                sp = sp - 1;
+                                int cell = this.stack[sp];
+                                int cx = cell % this.w;
+                                int cy = cell / this.w;
+                                count = count + 1;
+                                mutable int dy = 0 - 1;
+                                while (dy <= 1) {
+                                    mutable int dx = 0 - 1;
+                                    while (dx <= 1) {
+                                        int nx = cx + dx;
+                                        int ny = cy + dy;
+                                        if (nx >= 0 && ny >= 0 && nx < this.w && ny < this.h) {
+                                            int ni = ny * this.w + nx;
+                                            if (this.comp[ni] == 0 - 1 && this.isLand(nx, ny)) {
+                                                this.comp[ni] = id;
+                                                this.stack[sp] = ni;
+                                                sp = sp + 1;
+                                            }
+                                        }
+                                        dx = dx + 1;
+                                    }
+                                    dy = dy + 1;
+                                }
+                            }
+                            if (id < this.capacity) {
+                                this.area[id] = count;
+                            }
+                            this.landCells = this.landCells + count;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                return;
+            }
+
+            // Components holding at least 0.5% of the land are landmasses; smaller ones are
+            // islands (and anything under 40 cells is coastal noise, not a feature).
+            private method bigThreshold() returns int {
+                return this.landCells / 200;
+            }
+
+            private method compLimit() returns int {
+                if (this.ncomp < this.capacity) {
+                    return this.ncomp;
+                }
+                return this.capacity;
+            }
+
+            public method landTotal() returns int {
+                return this.landCells;
+            }
+
+            public method components() returns int {
+                mutable int c = 0;
+                mutable int i = 0;
+                int t = this.bigThreshold();
+                int lim = this.compLimit();
+                while (i < lim) {
+                    if (this.area[i] >= t) {
+                        c = c + 1;
+                    }
+                    i = i + 1;
+                }
+                return c;
+            }
+
+            public method islandCount() returns int {
+                mutable int c = 0;
+                mutable int i = 0;
+                int t = this.bigThreshold();
+                int lim = this.compLimit();
+                while (i < lim) {
+                    if (this.area[i] < t && this.area[i] > 40) {
+                        c = c + 1;
+                    }
+                    i = i + 1;
+                }
+                return c;
+            }
+
+            // per mille of all land held by the biggest component
+            public method largestShare() returns int {
+                mutable int best = 0;
+                mutable int i = 0;
+                int lim = this.compLimit();
+                while (i < lim) {
+                    if (this.area[i] > best) {
+                        best = this.area[i];
+                    }
+                    i = i + 1;
+                }
+                if (this.landCells == 0) {
+                    return 0;
+                }
+                return best * 1000 / this.landCells;
+            }
+
+            // largest : smallest among the landmasses, x100
+            public method sizeRatio() returns int {
+                mutable int best = 0;
+                mutable int worst = 2000000000;
+                int t = this.bigThreshold();
+                int lim = this.compLimit();
+                mutable int i = 0;
+                while (i < lim) {
+                    if (this.area[i] >= t) {
+                        if (this.area[i] > best) {
+                            best = this.area[i];
+                        }
+                        if (this.area[i] < worst) {
+                            worst = this.area[i];
+                        }
+                    }
+                    i = i + 1;
+                }
+                if (worst <= 0 || worst == 2000000000) {
+                    return 0;
+                }
+                return best * 100 / worst;
+            }
+
+            // The precise form of "as massas nao podem se ligar": how many pairs of continent
+            // centres share a connected component. A narrow waist INSIDE one landmass is
+            // legitimate (Panama exists) and is deliberately not punished.
+            public method fusedContinents(int[] cx, int[] cy, int n) returns int {
+                int[] owner = new int[n]();
+                mutable int i = 0;
+                while (i < n) {
+                    owner[i] = this.comp[this.clampIdx(cx[i], cy[i])];
+                    i = i + 1;
+                }
+                mutable int fused = 0;
+                i = 0;
+                while (i < n) {
+                    if (owner[i] >= 0) {
+                        mutable int j = i + 1;
+                        while (j < n) {
+                            if (owner[j] == owner[i]) {
+                                fused = fused + 1;
+                            }
+                            j = j + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                delete owner;
+                return fused;
+            }
+
+            private method clampIdx(int x, int y) returns int {
+                mutable int xx = x;
+                if (xx < 0) {
+                    xx = 0;
+                }
+                if (xx >= this.w) {
+                    xx = this.w - 1;
+                }
+                mutable int yy = y;
+                if (yy < 0) {
+                    yy = 0;
+                }
+                if (yy >= this.h) {
+                    yy = this.h - 1;
+                }
+                return yy * this.w + xx;
+            }
+
+            public method reasonName(int ordinal) returns String {
+                if (ordinal == 0) {
+                    return "PASS";
+                }
+                if (ordinal == 1) {
+                    return "TooFewLandmasses";
+                }
+                if (ordinal == 2) {
+                    return "FusedContinents";
+                }
+                if (ordinal == 3) {
+                    return "DominantMass";
+                }
+                if (ordinal == 4) {
+                    return "SizeSpread";
+                }
+                if (ordinal == 5) {
+                    return "IslandCount";
+                }
+                if (ordinal == 6) {
+                    return "MountainShare";
+                }
+                if (ordinal == 7) {
+                    return "MountainLinearity";
+                }
+                return "FlatLandContract";
+            }
+
+            // Shape verdict. The relief criteria join this method once Tectonics exists.
+            public method verdict(int wantContinents) returns int {
+                if (this.components() < wantContinents) {
+                    return cast<int>(RejectReason.TooFewLandmasses);
+                }
+                if (this.largestShare() > 450) {
+                    return cast<int>(RejectReason.DominantMass);
+                }
+                int r = this.sizeRatio();
+                if (r < 200 || r > 450) {
+                    return cast<int>(RejectReason.SizeSpread);
+                }
+                int isl = this.islandCount();
+                if (isl < 4 || isl > 6) {
+                    return cast<int>(RejectReason.IslandCount);
+                }
+                return cast<int>(RejectReason.None);
+            }
+
+            public method report(int wantContinents) returns void {
+                StringBuilder sb = new StringBuilder() on heap;
+                sb.append("shape: landmasses ");
+                sb.appendInt(this.components());
+                sb.append(" (want ");
+                sb.appendInt(wantContinents);
+                sb.append(") | islands ");
+                sb.appendInt(this.islandCount());
+                sb.append(" | largest ");
+                sb.appendInt(this.largestShare());
+                sb.append("/1000 of land | size ratio ");
+                sb.appendInt(this.sizeRatio());
+                sb.append("/100");
+                System.IO.Console.println(sb.toString());
+                delete sb;
+                int v = this.verdict(wantContinents);
+                String nm = this.reasonName(v);
+                StringBuilder s2 = new StringBuilder() on heap;
+                if (v == 0) {
+                    s2.append("verdict: PASS");
+                } else {
+                    s2.append("verdict: FAIL - ");
+                    s2.append(nm);
+                }
+                System.IO.Console.println(s2.toString());
+                delete s2;
+                return;
+            }
+        }
+    }
+}
