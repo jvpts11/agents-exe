@@ -61,6 +61,7 @@ public bundle Agents {
             private mutable int rvB135b;
             private mutable int rvCDiag;
             private mutable int rvStar;
+            private mutable int[] btally;       // per-biome cell count inside one coarse block
             private mutable int[] connOrd;      // connection mask -> tile ordinal
             private mutable int[] fallOrd;      // outflow direction -> waterfall tile ordinal
             private mutable int srcW;
@@ -131,6 +132,7 @@ public bundle Agents {
                 this.sProp = new int[1]();
                 this.sMilli = new int[1]();
                 this.sScale = new float[1]();
+                this.btally = new int[40]();
                 this.connOrd = new int[1]();
                 this.fallOrd = new int[1]();
                 this.uProj = gl.getUniformLocation(this.prog, "uProj");
@@ -177,6 +179,7 @@ public bundle Agents {
                 delete this.sProp;
                 delete this.sMilli;
                 delete this.sScale;
+                delete this.btally;
                 delete this.connOrd;
                 delete this.fallOrd;
             }
@@ -735,25 +738,66 @@ public bundle Agents {
             // but an arbitrary CORNER cell's biome painted mountain-grey slabs flat on the ground
             // wherever a block mixed mountains with plains -- the z-fighting quads.
             private method blockRep(int bx, int by) returns int {
-                mutable int best = 99;
-                mutable int rep = (by * this.stride) * this.srcW + bx * this.stride;
+                // The block is painted with its DOMINANT biome, and placed at the lowest step that
+                // biome occupies. Taking whatever biome the first lowest cell happened to be is
+                // what cut coastlines off in a straight line: a block holding one deep-ocean cell
+                // and hundreds of shelf cells came out entirely deep ocean, and the shelf ended
+                // dead at the block edge -- the rectangular patches of the wrong terrain. It is the
+                // same fault that painted mountain-grey slabs flat across plains.
+                mutable int i = 0;
+                while (i < 40) {
+                    this.btally[i] = 0;
+                    i = i + 1;
+                }
                 mutable int y = 0;
                 while (y < this.stride) {
                     mutable int x = 0;
                     while (x < this.stride) {
                         int gx = bx * this.stride + x;
                         int gy = by * this.stride + y;
-                        int lvl = this.stackLvl(this.grid.biomeAt(gx, gy), gx, gy);
-                        if (lvl < best) {
-                            best = lvl;
-                            rep = gy * this.srcW + gx;
-                            if (best == 0) {
-                                return rep;
+                        if (gx < this.srcW && gy < this.srcH) {
+                            int o = this.grid.biomeAt(gx, gy);
+                            if (o >= 0 && o < 40) {
+                                this.btally[o] = this.btally[o] + 1;
                             }
                         }
                         x = x + 1;
                     }
                     y = y + 1;
+                }
+                mutable int domOrd = 0;
+                mutable int domN = 0 - 1;
+                i = 0;
+                while (i < 40) {
+                    if (this.btally[i] > domN) {
+                        domN = this.btally[i];
+                        domOrd = i;
+                    }
+                    i = i + 1;
+                }
+                mutable int best = 99;
+                mutable int rep = 0 - 1;
+                y = 0;
+                while (y < this.stride) {
+                    mutable int x = 0;
+                    while (x < this.stride) {
+                        int gx = bx * this.stride + x;
+                        int gy = by * this.stride + y;
+                        if (gx < this.srcW && gy < this.srcH) {
+                            if (this.grid.biomeAt(gx, gy) == domOrd) {
+                                int lvl = this.stackLvl(domOrd, gx, gy);
+                                if (lvl < best) {
+                                    best = lvl;
+                                    rep = gy * this.srcW + gx;
+                                }
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                if (rep < 0) {
+                    rep = (by * this.stride) * this.srcW + bx * this.stride;
                 }
                 return rep;
             }
