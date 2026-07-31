@@ -14,7 +14,9 @@ public bundle Agents {
 
         public enum RejectReason {
             None, TooFewLandmasses, FusedContinents, DominantMass, SizeSpread,
-            IslandCount, MountainShare, MountainLinearity, FlatLandContract
+            IslandCount, MountainShare, MountainLinearity, FlatLandContract,
+            // resources
+            MissingResource, BarrenContinent, ForestDust, ForestCover, OreUnreachable
         }
 
         public class WorldAudit {
@@ -57,6 +59,8 @@ public bundle Agents {
             private mutable int subCells;
             private mutable int prospected;
             private mutable int knownSub;      // buried cells a player can already see
+            private mutable int oreBodies;
+            private mutable int oreSeen;
             private mutable int forestPatches;
             private mutable int forestCells;
             private mutable int forestBiggest;
@@ -100,6 +104,8 @@ public bundle Agents {
                 this.subCells = 0;
                 this.prospected = 0;
                 this.knownSub = 0;
+                this.oreBodies = 0;
+                this.oreSeen = 0;
                 this.forestPatches = 0;
                 this.forestCells = 0;
                 this.forestBiggest = 0;
@@ -722,6 +728,7 @@ public bundle Agents {
                 delete water;
                 delete seen;
                 this.forestPatches = this.floodForest();
+                this.analyseOre();
                 return;
             }
 
@@ -786,6 +793,105 @@ public bundle Agents {
                 this.forestBiggest = biggest;
                 this.forestClumped = clumped;
                 return patches;
+            }
+
+            // 8-connected components of the buried layer, one kind at a time, and how many of them
+            // hold a cell the player can already see. Measured HERE rather than taken from the
+            // generator's own tally, because an audit that trusts the thing it is auditing cannot
+            // catch it lying -- and this is the number the early game lives on.
+            private method analyseOre() returns void {
+                int n = this.w * this.h;
+                int[] mark = new int[n]();
+                mutable int bodies = 0;
+                mutable int reach = 0;
+                for (int sy in 0..this.h) {
+                    for (int sx in 0..this.w) {
+                        int s0 = sy * this.w + sx;
+                        int kind = this.g.subAt(sx, sy);
+                        if (mark[s0] != 0 || kind == 0) {
+                            continue;
+                        }
+                        mutable int sp = 0;
+                        this.stack[sp] = s0;
+                        sp = sp + 1;
+                        mark[s0] = 1;
+                        mutable boolean seenHere = false;
+                        while (sp > 0) {
+                            sp = sp - 1;
+                            int cur = this.stack[sp];
+                            int cx = cur % this.w;
+                            int cy = cur / this.w;
+                            if (this.g.hasFlag(cx, cy, Grid.FLAG_PROSPECTED)) {
+                                seenHere = true;
+                            }
+                            mutable int dy = 0 - 1;
+                            while (dy <= 1) {
+                                mutable int dx = 0 - 1;
+                                while (dx <= 1) {
+                                    int nx = cx + dx;
+                                    int ny = cy + dy;
+                                    if (nx >= 0 && ny >= 0 && nx < this.w && ny < this.h) {
+                                        int j = ny * this.w + nx;
+                                        if (mark[j] == 0 && this.g.subAt(nx, ny) == kind) {
+                                            mark[j] = 1;
+                                            this.stack[sp] = j;
+                                            sp = sp + 1;
+                                        }
+                                    }
+                                    dx = dx + 1;
+                                }
+                                dy = dy + 1;
+                            }
+                        }
+                        bodies = bodies + 1;
+                        if (seenHere) {
+                            reach = reach + 1;
+                        }
+                    }
+                }
+                delete mark;
+                this.oreBodies = bodies;
+                this.oreSeen = reach;
+                return;
+            }
+
+            public method oreBodyCount() returns int {
+                return this.oreBodies;
+            }
+
+            // Per mille of ore bodies with at least one cell showing at the surface. Low means the
+            // early game starves: everything is down there and nothing can be found.
+            public method oreReach() returns int {
+                if (this.oreBodies == 0) {
+                    return 0;
+                }
+                return this.oreSeen * 1000 / this.oreBodies;
+            }
+
+            // The first forest biome whose tree cover falls outside the band, or -1. Biomes with
+            // almost no cells are skipped: a seed that rolled three cells of taiga should not fail
+            // on the cover of three cells.
+            public method forestCoverFail() returns int {
+                int[] want = new int[5]();
+                want[0] = 14;                                   // TropicalRainforest
+                want[1] = 21;                                   // LaurelForest
+                want[2] = 22;                                   // DeciduousForest
+                want[3] = 23;                                   // TemperateRainforest
+                want[4] = 27;                                   // Taiga
+                mutable int bad = 0 - 1;
+                for (int k in 0..5) {
+                    int b = want[k];
+                    if (this.biomeCells[b] >= 20000) {
+                        int c = this.treeCover(b);
+                        if (c < 250 || c > 900) {
+                            if (bad < 0) {
+                                bad = b;
+                            }
+                        }
+                    }
+                }
+                delete want;
+                return bad;
             }
 
             public method nodeTotal() returns int {
@@ -912,6 +1018,11 @@ public bundle Agents {
                 rs.appendInt(this.kindsMissing());
                 rs.append(" of ");
                 rs.appendInt(Nodes.count() - 1);
+                rs.append(" | ore bodies ");
+                rs.appendInt(this.oreBodyCount());
+                rs.append(", reachable ");
+                rs.appendInt(this.oreReach());
+                rs.append("/1000 (want 450+)");
                 System.IO.Console.println(rs.toString());
                 delete rs;
                 StringBuilder fp = new StringBuilder() on heap;
@@ -994,7 +1105,22 @@ public bundle Agents {
                 if (ordinal == 7) {
                     return "MountainLinearity";
                 }
-                return "FlatLandContract";
+                if (ordinal == 8) {
+                    return "FlatLandContract";
+                }
+                if (ordinal == 9) {
+                    return "MissingResource";
+                }
+                if (ordinal == 10) {
+                    return "BarrenContinent";
+                }
+                if (ordinal == 11) {
+                    return "ForestDust";
+                }
+                if (ordinal == 12) {
+                    return "ForestCover";
+                }
+                return "OreUnreachable";
             }
 
             // Shape verdict. The relief criteria join this method once Tectonics exists.
@@ -1033,6 +1159,28 @@ public bundle Agents {
                 // no snow line, and Glacier/SnowPeak never appear anywhere in the world
                 if (this.peakElevation() < 9000) {
                     return cast<int>(RejectReason.FlatLandContract);
+                }
+                // resources. A missing kind comes first because it is not a matter of degree: every
+                // node in ECONOMY.md section 1 has a building and an era behind it, and a world
+                // without one has a chain that can never complete.
+                if (this.kindsMissing() > 0) {
+                    return cast<int>(RejectReason.MissingResource);
+                }
+                if (this.livableContinents(wantContinents) < wantContinents) {
+                    return cast<int>(RejectReason.BarrenContinent);
+                }
+                // Dust versus forest, independent of density: below this the trees are a sprinkle,
+                // whatever the cover says.
+                if (this.clumpShare() < 400) {
+                    return cast<int>(RejectReason.ForestDust);
+                }
+                if (this.forestCoverFail() >= 0) {
+                    return cast<int>(RejectReason.ForestCover);
+                }
+                // If most ore bodies show nowhere, everything is down there and nothing can be
+                // found, and the early game starves before prospecting is ever unlocked.
+                if (this.oreBodyCount() > 0 && this.oreReach() < 450) {
+                    return cast<int>(RejectReason.OreUnreachable);
                 }
                 return cast<int>(RejectReason.None);
             }
