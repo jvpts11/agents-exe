@@ -61,6 +61,8 @@ public bundle Agents {
             private mutable int rvB135b;
             private mutable int rvCDiag;
             private mutable int rvStar;
+            private mutable int[] connOrd;      // connection mask -> tile ordinal
+            private mutable int[] fallOrd;      // outflow direction -> waterfall tile ordinal
             private mutable int srcW;
             private mutable int srcH;
             private mutable int stride;
@@ -129,6 +131,8 @@ public bundle Agents {
                 this.sProp = new int[1]();
                 this.sMilli = new int[1]();
                 this.sScale = new float[1]();
+                this.connOrd = new int[1]();
+                this.fallOrd = new int[1]();
                 this.uProj = gl.getUniformLocation(this.prog, "uProj");
                 this.uView = gl.getUniformLocation(this.prog, "uView");
                 this.uTime = gl.getUniformLocation(this.prog, "uTime");
@@ -173,6 +177,8 @@ public bundle Agents {
                 delete this.sProp;
                 delete this.sMilli;
                 delete this.sScale;
+                delete this.connOrd;
+                delete this.fallOrd;
             }
 
             private method setupVao(int vao, int vbo) returns void {
@@ -253,6 +259,29 @@ public bundle Agents {
                 this.rvB135b = rivers.ordOf("Bend135B");
                 this.rvCDiag = rivers.ordOf("CornerDiag");
                 this.rvStar = rivers.ordOf("Star");
+                // One authored tile per connection mask: a junction gets exactly as many arms as
+                // there are rivers meeting it, with no rotation table and no fallback.
+                delete this.connOrd;
+                this.connOrd = new int[256]();
+                mutable int cmask = 0;
+                while (cmask < 256) {
+                    StringBuilder cn = new StringBuilder() on heap;
+                    cn.append("Conn");
+                    cn.appendInt(cmask);
+                    this.connOrd[cmask] = rivers.ordOf(cn.toString());
+                    delete cn;
+                    cmask = cmask + 1;
+                }
+                delete this.fallOrd;
+                this.fallOrd = new int[8]();
+                this.fallOrd[0] = rivers.ordOf("FallN");
+                this.fallOrd[1] = rivers.ordOf("FallNE");
+                this.fallOrd[2] = rivers.ordOf("FallE");
+                this.fallOrd[3] = rivers.ordOf("FallSE");
+                this.fallOrd[4] = rivers.ordOf("FallS");
+                this.fallOrd[5] = rivers.ordOf("FallSW");
+                this.fallOrd[6] = rivers.ordOf("FallW");
+                this.fallOrd[7] = rivers.ordOf("FallNW");
                 this.initScatter();
                 this.bakeCoarse();
                 this.cx = cast<float>(this.srcW);
@@ -506,6 +535,28 @@ public bundle Agents {
                         k = ((d + 1) / 2) % 4;                   // diagonal end: nearest quarter turn
                     }
                     return this.rvSource * 4 + k;
+                }
+                // A drop: the cell the water leaves for sits a stack level lower, so it pours over
+                // the lip instead of flowing on flat. Nothing marked a descent before, and a river
+                // changing level simply teleported down a step.
+                if (this.grid.hasFlow(gx, gy)) {
+                    int fdx = this.grid.flowDx(gx, gy);
+                    int fdy = this.grid.flowDy(gx, gy);
+                    int nx2 = gx + fdx;
+                    int ny2 = gy + fdy;
+                    if (nx2 >= 0 && ny2 >= 0 && nx2 < this.srcW && ny2 < this.srcH) {
+                        int hereL = this.stackLvl(this.grid.biomeAt(gx, gy), gx, gy);
+                        int thereL = this.stackLvl(this.grid.biomeAt(nx2, ny2), nx2, ny2);
+                        if (thereL < hereL && !mouth) {
+                            int fd = this.meshDir(fdx, fdy);
+                            if (fd >= 0 && this.fallOrd[fd] >= 0) {
+                                return this.fallOrd[fd] * 4;
+                            }
+                        }
+                    }
+                }
+                if (n >= 2 && this.connOrd[conn] >= 0) {
+                    return this.connOrd[conn] * 4;
                 }
                 if (n == 2) {
                     mutable int k = this.matchRot(1 | 16, conn);              // Straight {N,S}
