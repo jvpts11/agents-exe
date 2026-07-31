@@ -230,17 +230,21 @@ public bundle Agents {
                     }
                     float aspect2 = cast<float>(this.w) / cast<float>(this.h);
                     float r0 = this.fsqrt(landT * aspect2 / (cast<float>(nc) * 3.14159));
+                    // Continental centres on the jittered grid, drawn from a DEDICATED stream:
+                    // the continental geography (the layout the game's look depends on) stays
+                    // stable no matter how the plate physics evolves its own draws.
+                    Rng2 crng = new Rng2(this.seed ^ 0x2C0F) on stack;
                     mutable int c = 0;
                     while (c < nc) {
                         int gxi = c % cols;
                         int gyi = c / cols;
-                        mutable float cxn = (cast<float>(gxi) + 0.5) / cast<float>(cols) + (rng.unit() - 0.5) * 0.5 / cast<float>(cols);
-                        mutable float cyn = (cast<float>(gyi) + 0.5) / cast<float>(rows) + (rng.unit() - 0.5) * 0.5 / cast<float>(rows);
+                        mutable float cxn = (cast<float>(gxi) + 0.5) / cast<float>(cols) + (crng.unit() - 0.5) * 0.6 / cast<float>(cols);
+                        mutable float cyn = (cast<float>(gyi) + 0.5) / cast<float>(rows) + (crng.unit() - 0.5) * 0.6 / cast<float>(rows);
                         cxn = 0.10 + cxn * 0.80;
                         cyn = 0.15 + cyn * 0.70;
                         this.seedPlate(p, cast<int>(cxn * cast<float>(this.w)), cast<int>(cyn * cast<float>(this.h)),
                                        1, 0.52 + 0.10 * rng.unit(), rng);
-                        this.crad[p] = r0 * (0.95 + 0.25 * rng.unit());
+                        this.crad[p] = r0 * (1.05 + 0.30 * crng.unit());
                         p = p + 1;
                         c = c + 1;
                     }
@@ -418,9 +422,13 @@ public bundle Agents {
                                     }
                                 } else if (tB == 1) {
                                     // we are the subducting oceanic side: the offshore trench.
-                                    // Deep coefficient: at the boundary the blend bleeds the high
-                                    // continental base into this side, and the dip must beat it.
-                                    base = base - 0.55 * eff;
+                                    // Deep coefficient (the boundary blend bleeds the continental
+                                    // base into this side), but ONLY in oceanic context -- carving
+                                    // where the land mask later covers the spot sliced water
+                                    // channels straight through continents.
+                                    if (base < 0.35) {
+                                        base = base - 0.55 * eff;
+                                    }
                                 } else {
                                     // ocean-ocean convergence: island arc on one side of the
                                     // boundary, trench on the other (deterministic pairing)
@@ -430,7 +438,9 @@ public bundle Agents {
                                             g.setFlag(x, y, Grid.FLAG_VENT);
                                         }
                                     } else {
-                                        base = base - 0.40 * eff;
+                                        if (base < 0.35) {
+                                            base = base - 0.40 * eff;
+                                        }
                                     }
                                 }
                             } else {
@@ -485,11 +495,7 @@ public bundle Agents {
                     int x = i % this.w;
                     int y = i / this.w;
                     float d = this.fbm(x, y, 0);
-                    // The TECTONIC field dominates; the fractal only decorates. At 0.38 the noise
-                    // drowned the plate relief at the waterline -- the sea level landed inside the
-                    // basins' noise distribution, turning a quarter of the world into noise-bump
-                    // shallows instead of plate-shaped oceans.
-                    this.eb[i] = 0.80 * this.eb[i] + 0.20 * d;
+                    this.eb[i] = 0.62 * this.eb[i] + 0.38 * d;
                     i = i + 1;
                 }
             }
@@ -537,7 +543,14 @@ public bundle Agents {
                         // land: plateau over the plate field (ridges survive inside the 0.62 term);
                         // sea: the plate field at reduced weight, so trenches, island arcs and
                         // mid-ocean ridges still shape the ocean floor
-                        this.eb[i] = shaped * (0.30 + 0.62 * this.eb[i]) + (1.0 - shaped) * 0.85 * this.eb[i];
+                        // ocean side: the plate field at HALF weight, capped -- trenches and arcs
+                        // still texture the sea floor, but a boundary ridge crossing a strait shows
+                        // as an island chain at most, never as a land bridge
+                        mutable float oc = this.eb[i];
+                        if (oc > 0.32) {
+                            oc = 0.32;
+                        }
+                        this.eb[i] = shaped * (0.30 + 0.62 * this.eb[i]) + (1.0 - shaped) * 0.55 * oc;
                         i = i + 1;
                     }
                 } else if (this.worldType == 1) {
@@ -561,7 +574,14 @@ public bundle Agents {
                         if (shaped > 1.0) {
                             shaped = 1.0;
                         }
-                        this.eb[i] = shaped * (0.30 + 0.62 * this.eb[i]) + (1.0 - shaped) * 0.85 * this.eb[i];
+                        // ocean side: the plate field at HALF weight, capped -- trenches and arcs
+                        // still texture the sea floor, but a boundary ridge crossing a strait shows
+                        // as an island chain at most, never as a land bridge
+                        mutable float oc = this.eb[i];
+                        if (oc > 0.32) {
+                            oc = 0.32;
+                        }
+                        this.eb[i] = shaped * (0.30 + 0.62 * this.eb[i]) + (1.0 - shaped) * 0.55 * oc;
                         i = i + 1;
                     }
                 }
@@ -743,10 +763,9 @@ public bundle Agents {
                         float e = this.eb[i];
                         mutable float lapse = 0.0;
                         if (e > this.sea) {
-                            // 0.55: the tectonic plateaus sit well above the sea, and a strong lapse
-                            // froze the whole interior -- high ground still cools (rock, glacier,
-                            // meadow bands on the ridges) without turning every continent boreal
-                            lapse = 0.55 * (e - this.sea);
+                            // 0.75: high ground cools into rock/glacier/meadow bands without
+                            // freezing whole continents (0.9 froze everything above e~0.70)
+                            lapse = 0.75 * (e - this.sea);
                         }
                         float tnoise = (this.fbm(x, y, 17) - 0.5) * 0.14;   // wavy climate bands, not straight lines
                         mutable float t = latBand - lapse + tnoise;

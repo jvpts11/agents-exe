@@ -53,6 +53,7 @@ public bundle Agents {
             private mutable int rvCross;
             private mutable int rvFork;
             private mutable int rvSource;
+            private mutable int rvSrcDiag;
             private mutable int rvDelta;
             private mutable int rvB45a;
             private mutable int rvB45b;
@@ -244,6 +245,7 @@ public bundle Agents {
                 this.rvCross = rivers.ordOf("Crossing");
                 this.rvFork = rivers.ordOf("Fork");
                 this.rvSource = rivers.ordOf("Source");
+                this.rvSrcDiag = rivers.ordOf("SourceDiag");
                 this.rvDelta = rivers.ordOf("Delta");
                 this.rvB45a = rivers.ordOf("Bend45A");
                 this.rvB45b = rivers.ordOf("Bend45B");
@@ -265,8 +267,10 @@ public bundle Agents {
             }
 
             // Mountain-family stack level for a cell (0 = flat ground). Quantized from elevation so
-            // neighbouring mountain cells step like stacked blocks.
-            private method baseLvl(int ord, int x, int y) returns int {
+            // neighbouring mountain cells step like stacked blocks. Rivers do NOT carve this: a
+            // river BORN in the mountains renders at each cell's own level and steps down with the
+            // terrain -- it leaves the range, it never tunnels through it.
+            private method stackLvl(int ord, int x, int y) returns int {
                 if (ord <= 9) {
                     return 0;                                   // water and coast never stack
                 }
@@ -286,24 +290,6 @@ public bundle Agents {
                 if (q < 0) { q = 0; }
                 if (q > 4) { q = 4; }
                 return base + q;
-            }
-
-            // Stack level with the RIVER CARVE: a river crossing stacked terrain cuts down to its
-            // downstream step, so the channel runs through a gorge instead of over the plateau top
-            // ("how does a river climb a mountain?").
-            private method stackLvl(int ord, int x, int y) returns int {
-                int own = this.baseLvl(ord, x, y);
-                if (own > 0 && this.grid.hasFlag(x, y, Grid.FLAG_RIVER) && this.grid.hasFlow(x, y)) {
-                    int nx = x + this.grid.flowDx(x, y);
-                    int ny = y + this.grid.flowDy(x, y);
-                    if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
-                        int dLvl = this.baseLvl(this.grid.biomeAt(nx, ny), nx, ny);
-                        if (dLvl < own) {
-                            return dLvl;
-                        }
-                    }
-                }
-                return own;
             }
 
             private method setScatter(int ord, String prop, int milli, float scale) returns void {
@@ -504,15 +490,20 @@ public bundle Agents {
                 }
                 if (n == 1) {
                     int d = this.firstDir(conn);
-                    mutable int k = d / 2;
-                    if (d % 2 == 1) {
-                        k = ((d + 1) / 2) % 4;                   // diagonal end: nearest quarter turn
-                    }
                     if (mouth) {
                         // Delta: the fan (mesh S) faces the water; rotate S(4) onto d.
                         mutable int kd = (d + 4) / 2;
                         if (kd >= 4) { kd = kd - 4; }
                         return this.rvDelta * 4 + kd;
+                    }
+                    if (d % 2 == 1 && this.rvSrcDiag >= 0) {
+                        // diagonal outflow: the authored DIAGONAL spring (opening NE) -- rounding
+                        // to a cardinal left the spring visibly detached from its river
+                        return this.rvSrcDiag * 4 + (d - 1) / 2;
+                    }
+                    mutable int k = d / 2;
+                    if (d % 2 == 1) {
+                        k = ((d + 1) / 2) % 4;                   // diagonal end: nearest quarter turn
                     }
                     return this.rvSource * 4 + k;
                 }
@@ -716,12 +707,15 @@ public bundle Agents {
                 return rep;
             }
 
-            // Coral thinning: the reef tile art carries coral clusters, and EVERY reef cell showing
-            // them read as a solid coral carpet -- keep the clusters on ~30% of reef cells (the foam
-            // animation stays on all of them).
+            // Decoration thinning for tiles whose authored decor spams when EVERY cell shows it:
+            // coral clusters on ~30% of reef cells, boulders on ~45% of rocky-shore cells (the flat
+            // parts and foam stay on all of them).
             private method thinDecor(int ord, int x, int y) returns boolean {
                 if (ord == 4) {
                     return this.hash01(x * 7 + 3, y * 11 + 9) > 0.30;
+                }
+                if (ord == 9) {
+                    return this.hash01(x * 7 + 3, y * 11 + 9) > 0.45;
                 }
                 return false;
             }
