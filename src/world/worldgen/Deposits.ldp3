@@ -35,6 +35,16 @@ public bundle Agents {
             private mutable int[] dVent;        // rings to the nearest volcano
             private mutable int[] found;        // blobs placed, per OreOrigin
             private mutable int[] cells;        // cells written, per OreOrigin
+            // Which body owns each buried cell, so the outcrops can be decided per BODY rather than
+            // per cell -- an ore field that produced no outcrop anywhere is invisible, and one such
+            // field is a whole resource an agent can never reach.
+            private mutable int[] owner;
+            private mutable int[] shallow;      // 0..100 per body: how near the surface it sits
+            private mutable int[] outCount;     // outcrops produced, per body
+            private mutable int[] outFallback;  // an exposed cell of that body, or -1
+            private mutable int[] outKind;      // what that body is made of
+            private mutable int[] bodyOrigin;   // which OreOrigin seeded it
+            private mutable int nBodies;
 
             public constructor Deposits(int seed) {
                 this.seed = seed;
@@ -43,12 +53,25 @@ public bundle Agents {
                 this.dVent = new int[1]();
                 this.found = new int[6]();
                 this.cells = new int[6]();
+                this.owner = new int[1]();
+                this.shallow = new int[1]();
+                this.outCount = new int[1]();
+                this.outFallback = new int[1]();
+                this.outKind = new int[1]();
+                this.bodyOrigin = new int[1]();
+                this.nBodies = 0;
             }
 
             public destructor ~Deposits() returns void {
                 delete this.dVent;
                 delete this.found;
                 delete this.cells;
+                delete this.owner;
+                delete this.shallow;
+                delete this.outCount;
+                delete this.outFallback;
+                delete this.outKind;
+                delete this.bodyOrigin;
             }
 
             public override method name() returns String {
@@ -286,7 +309,7 @@ public bundle Agents {
             // lumpy, lobed outline a real one has and two overlapping blobs read as one field rather
             // than as two circles. Where blobs meet, the richer one keeps the cell.
             private method paint(Grid* g, int cx, int cy, int rad, int kind, float rich,
-                                 int origin) returns void {
+                                 int origin, int body) returns void {
                 int base = Nodes.baseQty(kind);
                 mutable int y = cy - rad;
                 while (y <= cy + rad) {
@@ -320,6 +343,7 @@ public bundle Agents {
                                                 this.cells[origin] = this.cells[origin] + 1;
                                             }
                                             g.setSub(x, y, kind, q);
+                                            this.owner[y * this.w + x] = body;
                                         }
                                     }
                                 }
@@ -332,17 +356,143 @@ public bundle Agents {
                 return;
             }
 
+            // Whether a body of THIS kind would show at the surface on THIS cell. Not one rule for
+            // everything: bare rock is what exposes a metal vein, but clay shows in a river cut and
+            // salt in a dry pan, and a coal seam is seen where a valley has sliced through it. A
+            // single "is the rock bare" test would have made half the economy invisible in exactly
+            // the flat country where its resources actually are.
+            private method exposedFor(Grid* g, int kind, int x, int y) returns boolean {
+                int biome = g.biomeAt(x, y);
+                boolean bareRock = biome == 9 || biome == 26 || biome == 32 || biome == 33
+                                   || biome == 35 || biome == 36 || biome == 37;
+                boolean cut = this.slopeAt(g, x, y) >= 140;      // a valley side or a scarp
+                if (kind == cast<int>(NodeKind.ClayPit)) {
+                    if (g.hasFlag(x, y, Grid.FLAG_RIVER) || g.hasFlag(x, y, Grid.FLAG_LAKE)) {
+                        return true;
+                    }
+                    if (g.hasFlag(x - 1, y, Grid.FLAG_RIVER) || g.hasFlag(x + 1, y, Grid.FLAG_RIVER)) {
+                        return true;
+                    }
+                    if (g.hasFlag(x, y - 1, Grid.FLAG_RIVER) || g.hasFlag(x, y + 1, Grid.FLAG_RIVER)) {
+                        return true;
+                    }
+                    return biome == 10 || biome == 8;            // marsh bank, beach
+                }
+                if (kind == cast<int>(NodeKind.SaltDeposit)) {
+                    return biome == 38 || biome == 18 || biome == 26 || biome == 8;
+                }
+                if (kind == cast<int>(NodeKind.OilSeep)) {
+                    return cut || biome == 12 || biome == 38;    // a seep in a cut, a bog or a pan
+                }
+                if (kind == cast<int>(NodeKind.CoalSeam)) {
+                    return bareRock || cut;
+                }
+                return bareRock || cut;
+            }
+
+            // Where a body reaches daylight. This is the link between the two layers and the point
+            // of the whole design: prospecting does not reveal random ore, it reveals that the vein
+            // you can ALREADY SEE carries on. An outcrop is a promise, which is why prospecting was
+            // ever worth doing, and why a player has a reason to read the terrain.
+            //
+            // Decided per body, not per cell, and every body that touches daylight anywhere produces
+            // at least one -- otherwise an ore field can come out entirely invisible, and that is a
+            // whole resource nobody can reach however hard they look.
+            private method outcrops(Grid* g) returns int {
+                mutable int made = 0;
+                for (int b in 0..this.nBodies) {
+                    this.outCount[b] = 0;
+                    this.outFallback[b] = 0 - 1;
+                }
+                for (int y in 0..this.h) {
+                    for (int x in 0..this.w) {
+                        int i = y * this.w + x;
+                        int b = this.owner[i];
+                        if (b < 0) {
+                            continue;
+                        }
+                        int kind = g.subAt(x, y);
+                        if (kind == 0) {
+                            continue;
+                        }
+                        if (!this.exposedFor(g, kind, x, y)) {
+                            continue;
+                        }
+                        if (this.outFallback[b] < 0) {
+                            this.outFallback[b] = i;
+                        }
+                        // A shallow body breaks the surface all along its length; a deep one barely
+                        // shows at all.
+                        float p = 0.006 + 0.030 * cast<float>(this.shallow[b]) / 100.0;
+                        if (LandMath.hash01(this.seed ^ 0x0C90, x * 5 + 1, y * 9 + 3) >= p) {
+                            continue;
+                        }
+                        this.placeOutcrop(g, x, y, kind);
+                        this.outCount[b] = this.outCount[b] + 1;
+                        made = made + 1;
+                    }
+                }
+                // The guarantee: a body that showed nowhere, but has somewhere it could have, gets
+                // exactly one.
+                for (int b in 0..this.nBodies) {
+                    if (this.outCount[b] == 0 && this.outFallback[b] >= 0) {
+                        int i = this.outFallback[b];
+                        int x = i % this.w;
+                        int y = i / this.w;
+                        this.placeOutcrop(g, x, y, g.subAt(x, y));
+                        this.outCount[b] = 1;
+                        made = made + 1;
+                    }
+                }
+                return made;
+            }
+
+            // The outcrop replaces whatever grew there -- an ore body breaking the surface outranks
+            // a berry bush -- and carries the modest amount you can work without a mine. Only THIS
+            // cell is known; the body under it stays hidden until somebody prospects.
+            private method placeOutcrop(Grid* g, int x, int y, int kind) returns void {
+                mutable int q = Nodes.baseQty(kind) / 3;
+                if (q < 1) {
+                    q = 1;
+                }
+                g.setNode(x, y, kind, q);
+                g.setFlag(x, y, Grid.FLAG_PROSPECTED);
+                return;
+            }
+
             public override method apply(Grid* g, WorldField* f) returns void {
                 this.w = g.width();
                 this.h = g.height();
                 int n = this.w * this.h;
                 delete this.dVent;
+                delete this.owner;
                 this.dVent = new int[n]();
+                this.owner = new int[n]();
+                for (int i in 0..n) {
+                    this.owner[i] = 0 - 1;
+                }
                 this.ventField(g);
                 for (int k in 0..6) {
                     this.found[k] = 0;
                     this.cells[k] = 0;
                 }
+                // Enough room for every quota, plus slack: the loop stops at the quotas, so this is
+                // an upper bound and not a cap that could silently truncate.
+                mutable int maxBodies = 0;
+                for (int k in 1..6) {
+                    maxBodies = maxBodies + this.quotaFor(k, n);
+                }
+                delete this.shallow;
+                delete this.outCount;
+                delete this.outFallback;
+                delete this.outKind;
+                delete this.bodyOrigin;
+                this.bodyOrigin = new int[maxBodies + 1]();
+                this.shallow = new int[maxBodies + 1]();
+                this.outCount = new int[maxBodies + 1]();
+                this.outFallback = new int[maxBodies + 1]();
+                this.outKind = new int[maxBodies + 1]();
+                this.nBodies = 0;
                 Rng2 rng = new Rng2(this.seed ^ 0x0DEB0) on stack;
                 // Rejection sampling: throw a dart at the map, ask the geology what is under it, and
                 // seed a blob there if that origin still has quota. It needs no map of the origins
@@ -372,10 +522,28 @@ public bundle Agents {
                     if (kind == 0) {
                         continue;
                     }
-                    this.paint(g, x, y, rad, kind, rich, origin);
+                    int body = this.nBodies;
+                    this.nBodies = this.nBodies + 1;
+                    this.shallow[body] = 100 - cast<int>(deep * 100.0);
+                    this.outKind[body] = kind;
+                    this.bodyOrigin[body] = origin;
+                    this.paint(g, x, y, rad, kind, rich, origin, body);
                     this.found[origin] = this.found[origin] + 1;
                     placed = placed + 1;
                 }
+                int shown = this.outcrops(g);
+                mutable int reachable = 0;
+                int[] reachBy = new int[6]();
+                for (int b in 0..this.nBodies) {
+                    if (this.outCount[b] > 0) {
+                        reachable = reachable + 1;
+                        int o = this.bodyOrigin[b];
+                        reachBy[o] = reachBy[o] + 1;
+                    }
+                }
+                int buriedBodies = this.nBodies;
+                delete this.owner;
+                this.owner = new int[1]();
                 StringBuilder sb = new StringBuilder() on heap;
                 sb.append("deposits: ");
                 sb.appendInt(placed);
@@ -391,6 +559,25 @@ public bundle Agents {
                 sb.append(" (bodies/cells)");
                 System.IO.Console.println(sb.toString());
                 delete sb;
+                StringBuilder oc = new StringBuilder() on heap;
+                oc.append("  outcrops: ");
+                oc.appendInt(shown);
+                oc.append(" | bodies reachable without prospecting ");
+                oc.appendInt(reachable);
+                oc.append("/");
+                oc.appendInt(buriedBodies);
+                oc.append(" |");
+                for (int k in 1..6) {
+                    oc.append(" ");
+                    oc.append(this.originName(k));
+                    oc.append("=");
+                    oc.appendInt(reachBy[k]);
+                    oc.append("/");
+                    oc.appendInt(this.found[k]);
+                }
+                System.IO.Console.println(oc.toString());
+                delete oc;
+                delete reachBy;
                 return;
             }
 
