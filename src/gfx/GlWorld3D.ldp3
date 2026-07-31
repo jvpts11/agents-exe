@@ -966,10 +966,38 @@ public bundle Agents {
                     if (dropExtras && this.isFoam(tri)) {
                         skip = true;
                     }
-                    if ((dropExtras && !keepDecor) || dropDecor) {
-                        if (decor) {
-                            skip = true;
+                    mutable float triMin = this.terr.pz[tri * 3];
+                    mutable float triMax = this.terr.pz[tri * 3];
+                    mutable int vz = 1;
+                    while (vz < 3) {
+                        float pz = this.terr.pz[tri * 3 + vz];
+                        if (pz < triMin) {
+                            triMin = pz;
                         }
+                        if (pz > triMax) {
+                            triMax = pz;
+                        }
+                        vz = vz + 1;
+                    }
+                    if (dropExtras) {
+                        // A coarse block is a PLATE, not one cell's artwork blown up eight times.
+                        // Everything a tile draws ON TOP of its plate -- the surface patches, the
+                        // lava cracks, the boulders -- is authored at cell scale, so emitting the
+                        // tile at block scale turns a one-cell mark into an eight-cell graphic: the
+                        // giant khaki crosses lying on grassland, the huge orange slabs on volcanic
+                        // rock, and, because the block sits at its MINIMUM level, those slabs hang
+                        // in the air over the lower ground at a plateau edge.
+                        //
+                        // Only a TALL feature on a mountain survives, because a cone is what makes
+                        // a range read as a range from across the world.
+                        if (triMax > top + 0.0001) {
+                            if (!(keepDecor && triMax > top + 0.05)) {
+                                skip = true;
+                            }
+                        }
+                    }
+                    if (dropDecor && decor) {
+                        skip = true;
                     }
                     if (!skip) {
                         int vb = tri * 3;
@@ -977,9 +1005,18 @@ public bundle Agents {
                         if (this.isFoam(tri)) {
                             sh = 1.0;                // foam keeps its exact colour: the shader keys the
                         }                            // water animation off it
-                        float r = cast<float>(this.terr.cr[tri]) / 255.0 * sh;
-                        float g = cast<float>(this.terr.cg[tri]) / 255.0 * sh;
-                        float b = cast<float>(this.terr.cb[tri]) / 255.0 * sh;
+                        // A coarse block reads as ONE biome, so its top face is painted the biome's
+                        // own top colour rather than the patch the authored cell happened to carry
+                        // there. Left alone, the light/dark speckle of a single cell is stretched to
+                        // eight cells and becomes a giant khaki cross lying on the grassland, or a
+                        // white slab on the mountains -- shapes with no meaning at that size.
+                        mutable int cix = tri;
+                        if (dropExtras && triMin > top - 0.0001 && triMax < top + 0.0001) {
+                            cix = t0 + 8;
+                        }
+                        float r = cast<float>(this.terr.cr[cix]) / 255.0 * sh;
+                        float g = cast<float>(this.terr.cg[cix]) / 255.0 * sh;
+                        float b = cast<float>(this.terr.cb[cix]) / 255.0 * sh;
                         mutable int k = 0;
                         while (k < 3) {
                             int vi = vb + k;

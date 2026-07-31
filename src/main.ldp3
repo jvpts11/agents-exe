@@ -47,6 +47,10 @@ public bundle Agents {
                         Main.audit();
                         return;
                     }
+                    if (args[0].equals("cliffshot")) {
+                        Main.cliffShot();
+                        return;
+                    }
                     if (args[0].equals("probe")) {
                         Main.probeSeam();
                         return;
@@ -410,6 +414,79 @@ public bundle Agents {
             // cliff means some generator wrote a step, while a smooth field crossing a threshold
             // means the coast is exactly where the water level says and nothing is wrong with the
             // generation at all. Arguing about it from a screenshot got this wrong twice.
+            // Aim the camera at a volcanic plateau's edge, where the LOD complaint lives, instead of
+            // at whatever the river finder happens to hit.
+            private static method cliffShot() returns void {
+                int w = 2560;
+                int h = 1440;
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(w, h);
+                mutable int found = 0 - 1;
+                mutable int y = 8;
+                while (y < h - 8 && found < 0) {
+                    mutable int x = 8;
+                    while (x < w - 8 && found < 0) {
+                        if (g.biomeAt(x, y) == 36) {
+                            int e0 = g.elevAt(x, y);
+                            mutable int dx = 1;
+                            while (dx <= 6 && found < 0) {
+                                int o = g.biomeAt(x + dx, y);
+                                if (o >= 8 && o != 36 && e0 - g.elevAt(x + dx, y) > 900) {
+                                    found = y * w + x;
+                                }
+                                dx = dx + 1;
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                if (found < 0) {
+                    System.IO.Console.println("cliffshot: no volcanic edge found.");
+                    delete g;
+                    return;
+                }
+                int fx = found % w;
+                int fy = found / w;
+                System.IO.Console.println($"cliffshot: volcanic edge at {fx},{fy}");
+                String root = Main.assetRoot();
+                GlWindow* win = new GlWindow() on heap;
+                if (root.length() == 0 || win.open("cliff", 1100, 700, 3, 3) == 0) {
+                    System.IO.Console.println("cliffshot: no GL window.");
+                    delete win;
+                    delete g;
+                    return;
+                }
+                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
+                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
+                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
+                r.setup(g, terr, props, rivers, 8, 1.1);
+                r.aimAt(fx, fy);
+                r.setView(35.0, 28.0, 90.0);
+                int cw = win.width();
+                int ch = win.height();
+                r.render(cw, ch);
+                byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
+                Main.writePpmFlipped(px, cw, ch, "cliff.ppm");
+                delete px;
+                // and again from far and low, which is the only place the COARSE layer is on screen
+                r.setView(35.0, 11.0, 520.0);
+                r.render(cw, ch);
+                byte[] px2 = win.gl.readPixelsRgb(0, 0, cw, ch);
+                Main.writePpmFlipped(px2, cw, ch, "cliff_far.ppm");
+                delete px2;
+                delete r;
+                delete rivers;
+                delete props;
+                delete terr;
+                delete g;
+                delete win;
+                System.IO.Console.println("cliffshot: wrote cliff.ppm");
+                return;
+            }
+
             private static method probeSeam() returns void {
                 int w = 2560;
                 int h = 1440;
