@@ -5,6 +5,7 @@ import opengl.glsl.Shader;
 import opengl.glm.GlMat4;
 import Agents.World.Grid;
 import Agents.World.Nodes;
+import Agents.World.NodeField;
 import Agents.World.NodeAtlas;
 import System.Memory;
 
@@ -75,7 +76,8 @@ public bundle Agents {
             private mutable int bkPhase;        // 0 = counting, 1 = emitting
             private mutable int[] dRiverC;      // detail bake scratch: river variant per cell, or -1
             private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
-            private mutable int[] dNodeC;       // detail bake scratch: NodeKind per cell, or 0
+            private mutable int[] dNodeA;       // detail bake scratch: first node instance of each row
+            private mutable int[] dNodeB;       // detail bake scratch: one past the last
             private mutable int[] btally;       // per-biome cell count inside one coarse block
             private mutable int[] connOrd;      // connection mask -> tile ordinal
             private mutable int[] fallOrd;      // outflow direction -> waterfall tile ordinal
@@ -109,6 +111,10 @@ public bundle Agents {
             // and the LOD threshold: detail is on exactly while the camera's ground footprint fits
             // inside a window this big, which is what makes "detail is on" mean "all of it".
             private mutable int detailCap;
+            // Decorative clutter drawn per tile. Ground cover is not one item per square either --
+            // that is what made a meadow read as a grid -- but unlike the resource nodes it carries
+            // no state, so the renderer scatters it from a hash and stores nothing.
+            public static int CLUTTER = 3;
             // framing + inspection camera (elevation gimbal-locked between horizon and top-down)
             private mutable float cx;
             private mutable float cy;
@@ -165,7 +171,8 @@ public bundle Agents {
                 this.bkPhase = 0;
                 this.dRiverC = new int[1]();
                 this.dPropC = new int[1]();
-                this.dNodeC = new int[1]();
+                this.dNodeA = new int[1]();
+                this.dNodeB = new int[1]();
                 this.nModel = new int[1]();
                 this.nInProps = new boolean[1]();
                 this.nScale = new float[1]();
@@ -218,7 +225,8 @@ public bundle Agents {
                 delete this.sScale;
                 delete this.dRiverC;
                 delete this.dPropC;
-                delete this.dNodeC;
+                delete this.dNodeA;
+                delete this.dNodeB;
                 delete this.nModel;
                 delete this.nInProps;
                 delete this.nScale;
@@ -1428,10 +1436,14 @@ public bundle Agents {
                 if (this.dRiverC.length() != dn) {
                     delete this.dRiverC;
                     delete this.dPropC;
-                    delete this.dNodeC;
                     this.dRiverC = new int[dn]();
                     this.dPropC = new int[dn]();
-                    this.dNodeC = new int[dn]();
+                }
+                if (this.dNodeA.length() != this.detH) {
+                    delete this.dNodeA;
+                    delete this.dNodeB;
+                    this.dNodeA = new int[this.detH]();
+                    this.dNodeB = new int[this.detH]();
                 }
                 this.bkTris = 0;
                 this.bkW = 0;
@@ -1475,24 +1487,36 @@ public bundle Agents {
                             this.dRiverC[slot] = 0 - 1;
                             tris = tris + this.countTile(ord, false, this.thinDecor(ord, gx, gy)) + 8;
                         }
-                        // A cell holds ONE thing. A resource node the world placed outranks the
-                        // biome's decorative scatter, which exists only to give an empty cell some
-                        // texture.
-                        int nk = this.grid.nodeAt(gx, gy);
-                        this.dNodeC[slot] = nk;
-                        if (nk != 0 && this.nModel[nk] >= 0) {
-                            this.dPropC[slot] = 0 - 1;
-                            tris = tris + this.nodeTris(nk) * 2;         // node + its projected shadow
-                        } else {
-                            this.dNodeC[slot] = 0;
-                            int p = this.detailPropAt(gx, gy, ord);
-                            this.dPropC[slot] = p;
-                            if (p >= 0) {
-                                tris = tris + this.props.triCount[p] * 2;
-                            }
+                        // Decorative clutter only: the resource nodes are instances with their own
+                        // positions and are counted per ROW, below.
+                        int p = this.detailPropAt(gx, gy, ord);
+                        this.dPropC[slot] = p;
+                        if (p >= 0) {
+                            tris = tris + this.props.triCount[p] * 2 * GlWorld3D.CLUTTER;
                         }
                         x = x + 1;
                     }
+                    // The node instances whose cell falls in this row and inside the window. They
+                    // are stored in cell order, so one walk of the row finds the span.
+                    NodeField* nf = this.grid.surface();
+                    mutable int a = nf.rowFirst(oy + y);
+                    int e = nf.rowEnd(oy + y);
+                    while (a < e && nf.cellXAt(a) < ox) {
+                        a = a + 1;
+                    }
+                    mutable int b = a;
+                    while (b < e && nf.cellXAt(b) < ox + this.detW) {
+                        int nk = nf.kindAt(b);
+                        if (nk != 0 && this.nModel[nk] >= 0) {
+                            tris = tris + this.nodeTris(nk);
+                            if (Nodes.castsShadow(nk)) {
+                                tris = tris + this.nodeTris(nk);
+                            }
+                        }
+                        b = b + 1;
+                    }
+                    this.dNodeA[y] = a;
+                    this.dNodeB[y] = b;
                     y = y + 1;
                 }
                 this.bkTris = tris;
@@ -1555,28 +1579,63 @@ public bundle Agents {
                                               this.thinDecor(ord, gx, gy), shade);
                         }
                         int p = this.dPropC[slot];
-                        int nk = this.dNodeC[slot];
-                        if (p >= 0 || nk != 0) {
-                            float jx = (this.hash01(gx * 3 + 1, gy * 5 + 2) - 0.5) * 1.2;
-                            float jy = (this.hash01(gx * 5 + 4, gy * 3 + 7) - 0.5) * 1.2;
+                        if (p >= 0) {
                             float topZ = this.tileTop[ord] + zOff;
                             int ut = this.terr.triStart[ord] + 8;
                             float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
                             float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
-                            mutable MeshAtlas* at = this.props;
-                            mutable int mord = p;
-                            mutable float msc = this.sScale[ord];
-                            if (nk != 0) {
-                                at = this.nodeAtlasOf(nk);
-                                mord = this.nModel[nk];
-                                msc = this.nScale[nk];
+                            // Ground clutter is scattered the same way the plants are: several to a
+                            // tile, each in its own stratified patch of it. One tuft per square with
+                            // a fixed jitter reads as a grid however far the jitter goes.
+                            mutable int c = 0;
+                            while (c < GlWorld3D.CLUTTER) {
+                                float ox2 = (cast<float>(c % 2) + 0.15
+                                             + this.hash01(gx * 8 + c, gy * 8 + 1) * 0.70) * 1.0;
+                                float oy2 = (cast<float>(c / 2) + 0.15
+                                             + this.hash01(gx * 8 + 4, gy * 8 + c) * 0.70) * 1.0;
+                                float px2 = cast<float>(gx * 2) + ox2;
+                                float py2 = cast<float>(gy * 2) + oy2;
+                                w = this.emitMeshShadow(this.props, buf, w, p, px2, py2,
+                                                        topZ + 0.012, this.sScale[ord],
+                                                        gr, gg, gb, true);
+                                w = this.emitMesh(this.props, buf, w, p, px2, py2, topZ,
+                                                  this.sScale[ord], shade);
+                                c = c + 1;
                             }
-                            w = this.emitMeshShadow(at, buf, w, mord, wx + jx, wy + jy, topZ + 0.012,
-                                                    msc, gr, gg, gb, true);
-                            w = this.emitMesh(at, buf, w, mord, wx + jx, wy + jy, topZ, msc, shade);
                         }
                         x = x + 1;
+                    }
+                    // The resource nodes of this row, each at the position the world gave it.
+                    NodeField* nf = this.grid.surface();
+                    mutable int ni = this.dNodeA[y];
+                    int nEnd = this.dNodeB[y];
+                    while (ni < nEnd) {
+                        int nk = nf.kindAt(ni);
+                        if (nk != 0 && this.nModel[nk] >= 0) {
+                            int cx2 = nf.cellXAt(ni);
+                            int cy2 = nf.cellYAt(ni);
+                            int nord = this.grid.biomeAt(cx2, cy2);
+                            int nlvl = this.stackLvl(nord, cx2, cy2);
+                            float nzOff = cast<float>(nlvl) * this.stepH + this.zAdj[nord] + 0.8;
+                            float nshade = this.shadeAt(cx2, cy2, 1, nlvl);
+                            float topZ = this.tileTop[nord] + nzOff;
+                            int ut = this.terr.triStart[nord] + 8;
+                            float gr = cast<float>(this.terr.cr[ut]) / 255.0 * nshade * 0.55;
+                            float gg = cast<float>(this.terr.cg[ut]) / 255.0 * nshade * 0.55;
+                            float gb = cast<float>(this.terr.cb[ut]) / 255.0 * nshade * 0.55;
+                            MeshAtlas* at = this.nodeAtlasOf(nk);
+                            int mord = this.nModel[nk];
+                            float msc = this.nScale[nk];
+                            float px2 = nf.xAt(ni) * 2.0;
+                            float py2 = nf.yAt(ni) * 2.0;
+                            if (Nodes.castsShadow(nk)) {
+                                w = this.emitMeshShadow(at, buf, w, mord, px2, py2, topZ + 0.012,
+                                                        msc, gr, gg, gb, true);
+                            }
+                            w = this.emitMesh(at, buf, w, mord, px2, py2, topZ, msc, nshade);
+                        }
+                        ni = ni + 1;
                     }
                     y = y + 1;
                 }
@@ -1612,6 +1671,7 @@ public bundle Agents {
                     this.stepBake();
                     guard = guard + 1;
                 }
+                System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.dnverts / 3} triangles");
                 return;
             }
 

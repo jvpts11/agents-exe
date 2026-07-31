@@ -69,6 +69,7 @@ public bundle Agents {
             private mutable int massesCounted;
             private mutable boolean[] compLivable;
             private mutable int[] ranked;      // component ids of the biggest landmasses, in order
+            private mutable byte[] treeCells;  // trees standing on each cell, from the node field
 
             public constructor WorldAudit(Grid* grid) {
                 this.g = grid;
@@ -114,6 +115,7 @@ public bundle Agents {
                 this.massesCounted = 0;
                 this.compLivable = new boolean[this.capacity]();
                 this.ranked = new int[32]();
+                this.treeCells = new byte[this.w * this.h]();
             }
 
             public destructor ~WorldAudit() returns void {
@@ -133,6 +135,7 @@ public bundle Agents {
                 delete this.biomeTrees;
                 delete this.compLivable;
                 delete this.ranked;
+                delete this.treeCells;
             }
 
             private method isLand(int x, int y) returns boolean {
@@ -661,6 +664,18 @@ public bundle Agents {
                 this.subCells = 0;
                 this.prospected = 0;
                 this.knownSub = 0;
+                NodeField* nf = this.g.surface();
+                nf.cellCounts(this.treeCells, true);
+                // Surface nodes are INSTANCES, so they are counted one by one -- a tile may hold
+                // three of them, and the old per-tile sweep would have seen one.
+                for (int i in 0..nf.size()) {
+                    int k = nf.kindAt(i);
+                    if (k == 0) {
+                        continue;
+                    }
+                    this.nodeCount[k] = this.nodeCount[k] + 1;
+                    this.nodeCells = this.nodeCells + 1;
+                }
                 // Per landmass, the three things an agent cannot start without. Sized to the
                 // component table, so an unranked island is judged on the same terms as a continent.
                 int lim = this.compLimit();
@@ -670,16 +685,13 @@ public bundle Agents {
                 boolean[] seen = new boolean[lim + 1]();
                 for (int y in 0..this.h) {
                     for (int x in 0..this.w) {
+                        int i = y * this.w + x;
                         int ord = this.g.biomeAt(x, y);
                         boolean land = ord >= 8;
+                        boolean hasTree = (cast<int>(this.treeCells[i]) & 255) > 0;
                         if (land) {
                             this.biomeCells[ord] = this.biomeCells[ord] + 1;
-                        }
-                        int kind = this.g.nodeAt(x, y);
-                        if (kind != 0) {
-                            this.nodeCount[kind] = this.nodeCount[kind] + 1;
-                            this.nodeCells = this.nodeCells + 1;
-                            if (land && Nodes.isTree(kind)) {
+                            if (hasTree) {
                                 this.biomeTrees[ord] = this.biomeTrees[ord] + 1;
                             }
                         }
@@ -695,19 +707,25 @@ public bundle Agents {
                             }
                         }
                         if (land) {
-                            int c = this.comp[y * this.w + x];
+                            int c = this.comp[i];
                             if (c >= 0 && c < lim) {
                                 seen[c] = true;
-                                if (Nodes.isTree(kind)) {
+                                if (hasTree) {
                                     wood[c] = true;
-                                }
-                                if (this.isStoneSource(kind)) {
-                                    stone[c] = true;
                                 }
                                 if (!water[c] && this.waterNear(x, y)) {
                                     water[c] = true;
                                 }
                             }
+                        }
+                    }
+                }
+                // Stone is a node kind, so it is read off the instances rather than the tiles.
+                for (int i in 0..nf.size()) {
+                    if (this.isStoneSource(nf.kindAt(i))) {
+                        int c = this.comp[this.clampIdx(nf.cellXAt(i), nf.cellYAt(i))];
+                        if (c >= 0 && c < lim) {
+                            stone[c] = true;
                         }
                     }
                 }
@@ -746,7 +764,7 @@ public bundle Agents {
                 for (int sy in 0..this.h) {
                     for (int sx in 0..this.w) {
                         int s0 = sy * this.w + sx;
-                        if (mark[s0] == 0 && Nodes.isTree(this.g.nodeAt(sx, sy))) {
+                        if (mark[s0] == 0 && (cast<int>(this.treeCells[s0]) & 255) > 0) {
                             mutable int sp = 0;
                             this.stack[sp] = s0;
                             sp = sp + 1;
@@ -766,7 +784,7 @@ public bundle Agents {
                                         int ny = cy + dy;
                                         if (nx >= 0 && ny >= 0 && nx < this.w && ny < this.h) {
                                             int j = ny * this.w + nx;
-                                            if (mark[j] == 0 && Nodes.isTree(this.g.nodeAt(nx, ny))) {
+                                            if (mark[j] == 0 && (cast<int>(this.treeCells[j]) & 255) > 0) {
                                                 mark[j] = 1;
                                                 this.stack[sp] = j;
                                                 sp = sp + 1;

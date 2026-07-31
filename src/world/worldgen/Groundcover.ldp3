@@ -30,6 +30,7 @@ public bundle Agents {
             private mutable int[] bcov;
             private mutable int[] dFresh;   // rings to river or lake
             private mutable int[] dLand;    // rings to land, for the fishing spots
+            private mutable byte[] trees;   // trees per cell, from the field Flora just filled
 
             public constructor Groundcover(int seed) {
                 this.seed = seed;
@@ -42,6 +43,7 @@ public bundle Agents {
                 this.bcov = new int[Biomes.COUNT]();
                 this.dFresh = new int[1]();
                 this.dLand = new int[1]();
+                this.trees = new byte[1]();
                 this.buildTables();
             }
 
@@ -53,6 +55,7 @@ public bundle Agents {
                 delete this.bcov;
                 delete this.dFresh;
                 delete this.dLand;
+                delete this.trees;
             }
 
             public override method name() returns String {
@@ -190,7 +193,12 @@ public bundle Agents {
                 for (int i in 0..n) {
                     int x = i % this.w;
                     int y = i / this.w;
-                    boolean fresh = g.hasFlag(x, y, Grid.FLAG_RIVER) || g.hasFlag(x, y, Grid.FLAG_LAKE);
+                    // A SaltFlat is a lake that dried up -- classify turns a basin in a bone-dry
+                    // climate into one -- and it keeps the lake flag. Reading the flag alone put
+                    // reed beds all over the salt pans, which is where reeds most obviously cannot
+                    // grow. The biome has the last word on whether there is any water left.
+                    boolean fresh = (g.hasFlag(x, y, Grid.FLAG_RIVER) || g.hasFlag(x, y, Grid.FLAG_LAKE))
+                                    && g.biomeAt(x, y) != 38;
                     if (fresh) {
                         this.dFresh[i] = 0;
                     } else {
@@ -207,18 +215,16 @@ public bundle Agents {
                 return;
             }
 
-            // How many of the surrounding cells hold a tree, sampled over a 5x5. Zero means open
-            // country; a high count means closed canopy; in between is the forest edge and the rim
-            // of a clearing, which is where almost everything that is not a tree actually grows.
-            private method treesNear(Grid* g, int x, int y) returns int {
+            // How many trees stand in the surrounding tiles, read off a count built once. Zero
+            // means open country; a high count means closed canopy; in between is the forest edge
+            // and the rim of a clearing, which is where almost everything that is not a tree grows.
+            private method treesNear(int x, int y) returns int {
                 mutable int c = 0;
                 mutable int dy = 0 - 2;
                 while (dy <= 2) {
                     mutable int dx = 0 - 2;
                     while (dx <= 2) {
-                        if (Nodes.isTree(g.nodeAt(x + dx, y + dy))) {
-                            c = c + 1;
-                        }
+                        c = c + (cast<int>(this.trees[this.idx(x + dx, y + dy)]) & 255);
                         dx = dx + 1;
                     }
                     dy = dy + 1;
@@ -226,10 +232,36 @@ public bundle Agents {
                 return c;
             }
 
-            private method placeAt(Grid* g, int x, int y, int kind, float vary) returns void {
-                int qty = Nodes.baseQty(kind) * (70 + cast<int>(vary * 60.0)) / 100;
-                g.setNode(x, y, kind, qty);
-                return;
+            // Scatter `ipc` plants of one kind through a tile, stratified so they keep apart. The
+            // same reasoning as the trees: what a tile holds is a consequence of the spacing, never
+            // a cap of one.
+            private method scatter(NodeField* field, int x, int y, int kind, float ipc,
+                                   int salt) returns int {
+                mutable int k = 1;
+                while (k * k < ipc && k < 3) {
+                    k = k + 1;
+                }
+                float p = ipc / cast<float>(k * k);
+                float span = 1.0 / cast<float>(k);
+                mutable int made = 0;
+                for (int sy in 0..k) {
+                    for (int sx in 0..k) {
+                        int hx = x * 4 + sx;
+                        int hy = y * 4 + sy;
+                        if (LandMath.hash01(this.seed ^ salt, hx, hy) >= p) {
+                            continue;
+                        }
+                        float jx = LandMath.hash01(this.seed ^ 0x2AB1, hx, hy);
+                        float jy = LandMath.hash01(this.seed ^ 0x5CD3, hx, hy);
+                        float fx = cast<float>(x) + (cast<float>(sx) + 0.15 + jx * 0.70) * span;
+                        float fy = cast<float>(y) + (cast<float>(sy) + 0.15 + jy * 0.70) * span;
+                        float vary = LandMath.hash01(this.seed ^ 0x1E93, hx, hy);
+                        int qty = Nodes.baseQty(kind) * (70 + cast<int>(vary * 60.0)) / 100;
+                        field.add(fx, fy, kind, qty);
+                        made = made + 1;
+                    }
+                }
+                return made;
             }
 
             public override method apply(Grid* g, WorldField* f) returns void {
@@ -241,6 +273,10 @@ public bundle Agents {
                 this.dFresh = new int[n]();
                 this.dLand = new int[n]();
                 this.distanceFields(g);
+                NodeField* field = g.surface();
+                delete this.trees;
+                this.trees = new byte[n]();
+                field.cellCounts(this.trees, true);
                 int reeds = cast<int>(NodeKind.Reeds);
                 int boulder = cast<int>(NodeKind.Boulder);
                 int fishing = cast<int>(NodeKind.FishingSpot);
@@ -252,66 +288,58 @@ public bundle Agents {
                     float ny = cast<float>(y) / cast<float>(this.h);
                     for (int x in 0..this.w) {
                         int i = y * this.w + x;
-                        if (g.hasNode(x, y)) {
-                            continue;                       // a cell holds one thing
-                        }
                         int biome = g.biomeAt(x, y);
                         float nx = cast<float>(x) / cast<float>(this.w);
                         // One shared patchiness field for everything here, so a berry thicket, a
                         // reed bed and a boulder field are all PATCHES rather than an even sprinkle
                         // -- the same reason the trees needed a field, at a smaller scale.
                         float patch = LandMath.fbm(this.seed ^ 0x9A17, nx, ny, 60, 3);
-                        float draw = LandMath.hash01(this.seed ^ 0x4C0F, x * 7 + 5, y * 13 + 11);
-                        float vary = LandMath.hash01(this.seed ^ 0x1E93, x * 11 + 2, y * 3 + 9);
                         if (biome < 8) {
                             // OPEN WATER: fishing spots, in the shallows within reach of a shore.
                             // A spot no boat can be launched to is not a resource.
                             if (biome == 3 || biome == 4 || biome == 6) {
-                                if (this.dLand[i] <= 4 && patch > 0.52 && draw < 0.030) {
-                                    this.placeAt(g, x, y, fishing, vary);
-                                    nFish = nFish + 1;
+                                if (this.dLand[i] <= 4 && patch > 0.52) {
+                                    nFish = nFish + this.scatter(field, x, y, fishing, 0.030, 0x4C0F);
                                 }
                             }
                             continue;
                         }
                         // REEDS first: the margin of fresh water beats whatever else the biome grows
                         // there, which is what a reed bed looks like from the bank.
-                        if (this.dFresh[i] <= 1 && Biomes.walkable(biome)) {
-                            if (draw < 0.42 * (0.4 + patch)) {
-                                this.placeAt(g, x, y, reeds, vary);
-                                nReed = nReed + 1;
-                                continue;
-                            }
+                        // ... and a salt pan beside a real lake is still a salt pan.
+                        if (this.dFresh[i] <= 1 && Biomes.walkable(biome) && biome != 38) {
+                            nReed = nReed + this.scatter(field, x, y, reeds,
+                                                         0.62 * (0.4 + patch), 0x7701);
+                            continue;
                         }
                         // LOOSE STONE, wherever rock reaches the surface.
                         int bc = this.bcov[biome];
                         if (bc > 0) {
                             float bd = cast<float>(bc) / 1000.0 * (0.35 + 1.3 * patch);
-                            if (draw < bd) {
-                                this.placeAt(g, x, y, boulder, vary);
-                                nStone = nStone + 1;
-                                continue;
-                            }
+                            nStone = nStone + this.scatter(field, x, y, boulder, bd, 0x3355);
                         }
-                        // UNDERGROWTH: three times likelier beside trees than out in the open, and
-                        // the cell is tree-free by the test at the top -- so what is left is the
-                        // edge and the clearing.
+                        // UNDERGROWTH. It is likeliest at the forest EDGE: a couple of trees nearby
+                        // is a clearing rim, a tile packed with them is closed canopy where little
+                        // reaches the floor, and none at all is open country. The tile no longer
+                        // has to be empty for any of this -- a fern under a tree is exactly where a
+                        // fern belongs, and refusing it was an artefact of one slot per tile.
                         int uc2 = this.ucov[biome];
                         if (uc2 == 0) {
                             continue;
                         }
+                        int near = this.treesNear(x, y);
                         mutable float shade = 0.55;
-                        int near = this.treesNear(g, x, y);
                         if (near > 0) {
-                            shade = 1.8;
+                            shade = 1.9;
+                        }
+                        if (near > 14) {
+                            shade = 0.9;                    // closed canopy: the floor goes quiet
                         }
                         float ud = cast<float>(uc2) / 1000.0 * (0.30 + 1.4 * patch) * shade;
-                        if (draw >= ud) {
-                            continue;
-                        }
                         float zone = LandMath.fbm(this.seed ^ 0x71D3, nx, ny, 14, 3);
+                        float pick = LandMath.hash01(this.seed ^ 0x1E93, x * 11 + 2, y * 3 + 9);
                         mutable int kind = this.ua[biome];
-                        if (vary > 0.88 && this.uc[biome] != 0) {
+                        if (pick > 0.88 && this.uc[biome] != 0) {
                             kind = this.uc[biome];
                         } else if (zone > 0.50 && this.ub[biome] != 0) {
                             kind = this.ub[biome];
@@ -319,8 +347,7 @@ public bundle Agents {
                         if (kind == 0) {
                             continue;
                         }
-                        this.placeAt(g, x, y, kind, vary);
-                        nUnder = nUnder + 1;
+                        nUnder = nUnder + this.scatter(field, x, y, kind, ud, 0x4C0F);
                     }
                 }
                 System.IO.Console.println($"groundcover: {nUnder} undergrowth, {nReed} reeds, {nStone} stone, {nFish} fishing");

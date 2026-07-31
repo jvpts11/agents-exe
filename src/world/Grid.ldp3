@@ -29,15 +29,13 @@ public bundle Agents {
             private mutable byte[] biome;         // Biome ordinal
             private mutable byte[] flags;         // bitset (FLAG_*)
             private mutable byte[] flow;          // downstream direction code: 0=none, else 1 + (dx+1) + (dy+1)*3
-            // Resources, in the same Structure-of-Arrays style. Two layers: what STANDS on the cell
-            // and what LIES UNDER it. The quantity lives with the node rather than with whatever
-            // harvests it, because that is what makes a node run out -- a resource without a
-            // quantity is decoration with a better name, and every chain in ECONOMY.md assumes
-            // deposits are finite.
-            private mutable byte[] node;          // surface NodeKind ordinal, 0 = none
-            private mutable short[] nodeQty;      // units left in the surface node
+            // What lies UNDER the cell. This layer really is per-tile -- an ore body occupies the
+            // ground beneath a square, and nothing about it has a position finer than that. What
+            // STANDS on the ground does not: it lives in `surf` as instances with real positions,
+            // because plants are spaced by distance and not by the grid.
             private mutable byte[] sub;           // buried NodeKind ordinal, 0 = none
             private mutable short[] subQty;       // units left in the buried deposit
+            private mutable NodeField* surf;
 
             public constructor Grid(int w, int h) {
                 this.w = w;
@@ -49,10 +47,9 @@ public bundle Agents {
                 this.biome = new byte[n]();
                 this.flags = new byte[n]();
                 this.flow = new byte[n]();
-                this.node = new byte[n]();
-                this.nodeQty = new short[n]();
                 this.sub = new byte[n]();
                 this.subQty = new short[n]();
+                this.surf = new NodeField(w, h) on heap;
             }
 
             public destructor ~Grid() returns void {
@@ -62,10 +59,9 @@ public bundle Agents {
                 delete this.biome;
                 delete this.flags;
                 delete this.flow;
-                delete this.node;
-                delete this.nodeQty;
                 delete this.sub;
                 delete this.subQty;
+                delete this.surf;
             }
 
             public method width() returns int {
@@ -148,33 +144,9 @@ public bundle Agents {
 
             // ---- resources: what stands on the cell, and what lies under it ----
 
-            public method nodeAt(int x, int y) returns int {
-                return cast<int>(this.node[this.idx(x, y)]) & 255;
-            }
-
-            public method nodeQtyAt(int x, int y) returns int {
-                return cast<int>(this.nodeQty[this.idx(x, y)]);
-            }
-
-            public method hasNode(int x, int y) returns boolean {
-                return this.nodeAt(x, y) != 0;
-            }
-
-            public method setNode(int x, int y, int kind, int qty) returns void
-                requires kind >= 0
-                requires kind < Nodes.count()
-                requires qty >= 0
-                requires qty <= 32767
-            {
-                int i = this.idx(x, y);
-                this.node[i] = cast<byte>(kind);
-                this.nodeQty[i] = cast<short>(qty);
-            }
-
-            public method clearNode(int x, int y) returns void {
-                int i = this.idx(x, y);
-                this.node[i] = cast<byte>(0);
-                this.nodeQty[i] = cast<short>(0);
+            // Everything standing on the ground: trees, undergrowth, reeds, boulders, outcrops.
+            public method surface() returns NodeField* {
+                return this.surf;
             }
 
             public method subAt(int x, int y) returns int {
@@ -243,30 +215,6 @@ public bundle Agents {
                     y = y + 1;
                 }
                 return revealed;
-            }
-
-            // Take up to `amount` from the surface node here, and clear the cell when it runs out.
-            // Returns what was actually taken. This is what makes the quantity mean anything: a
-            // resource that never runs out is decoration with a better name, and every chain in
-            // ECONOMY.md is written as though deposits are finite.
-            public method harvest(int x, int y, int amount) returns int
-                requires amount >= 0
-            {
-                int i = this.idx(x, y);
-                mutable int have = cast<int>(this.nodeQty[i]);
-                if (have <= 0 || cast<int>(this.node[i]) == 0) {
-                    return 0;
-                }
-                mutable int take = amount;
-                if (take > have) {
-                    take = have;
-                }
-                have = have - take;
-                this.nodeQty[i] = cast<short>(have);
-                if (have == 0) {
-                    this.node[i] = cast<byte>(0);
-                }
-                return take;
             }
 
             // Downstream flow direction as a per-cell code (0 = no flow). dx/dy are each in {-1,0,1}.

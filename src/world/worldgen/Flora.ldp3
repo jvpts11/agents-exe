@@ -43,6 +43,11 @@ public bundle Agents {
         }
 
         public class Flora implements WorldPass {
+            // Trees per tile where the density field reads 1.0. Held down deliberately: the detail
+            // window already bakes six million triangles over a forest, and the budget -- not the
+            // botany -- is what caps how thick a wood may be until the props get an LOD of their own.
+            public static float CANOPY = 2.0;
+
             private mutable int seed;
             private mutable int w;
             private mutable int h;
@@ -271,6 +276,7 @@ public bundle Agents {
                 this.dEdge = new int[n]();
                 this.dWat = new int[n]();
                 this.distanceFields(g);
+                NodeField* field = g.surface();
                 mutable int placed = 0;
                 for (int y in 0..this.h) {
                     float ny = cast<float>(y) / cast<float>(this.h);
@@ -355,22 +361,54 @@ public bundle Agents {
                         if (d <= 0.0) {
                             continue;
                         }
-                        if (LandMath.hash01(this.seed ^ 0x5EED, x, y) >= d) {
-                            continue;
+                        // From cover to SPACING. A tile is the wrong unit for a plant: asking each
+                        // one whether it holds a tree caps a wood at one trunk per square and lays
+                        // them out on the grid, which is what a forest looked like from the ground.
+                        // The density becomes a count of trees per tile instead, and the tile is
+                        // stratified into as many sub-cells as that count needs, so a thicket puts
+                        // two or three trunks in one square while a steppe puts one every several --
+                        // and no two of them land on top of each other, because each owns its own
+                        // patch of ground to be jittered inside.
+                        // Linear where the ground is open and quadratic where it is not: squaring
+                        // it outright concentrated the whole world into its forests and left the
+                        // savanna on half the acacias it had, which is not what "closer together in
+                        // a wood" means -- a wood gets denser, a savanna stays a savanna.
+                        float ipc = d * (0.35 + 0.65 * d) * Flora.CANOPY;
+                        mutable int k = 1;
+                        while (k * k < ipc && k < 4) {
+                            k = k + 1;
                         }
-                        // SPECIES: a broad field, so neighbouring trees agree and a wood reads as
-                        // one wood, with a minority species salted through it.
+                        float p = ipc / cast<float>(k * k);
+                        float span = 1.0 / cast<float>(k);
                         float zone = LandMath.fbm(this.seed ^ 0x2C17, nx, ny, 9, 3);
-                        float salt = LandMath.hash01(this.seed ^ 0x3B41, x * 3 + 1, y * 7 + 2);
                         Palette pal = new Palette(this.pa[biome], this.pb[biome], this.pc[biome], cov);
-                        int kind = pal.pick(zone, salt);
-                        if (kind == 0) {
-                            continue;
+                        for (int sy in 0..k) {
+                            for (int sx in 0..k) {
+                                int hx = x * 4 + sx;
+                                int hy = y * 4 + sy;
+                                if (LandMath.hash01(this.seed ^ 0x5EED, hx, hy) >= p) {
+                                    continue;
+                                }
+                                // SPECIES: chosen from a broad field, so a wood reads as one wood,
+                                // with a minority salted through it -- drawn per PLANT now, so two
+                                // trunks in one tile need not be the same tree.
+                                float salt = LandMath.hash01(this.seed ^ 0x3B41, hx, hy);
+                                int kind = pal.pick(zone, salt);
+                                if (kind == 0) {
+                                    continue;
+                                }
+                                float jx = LandMath.hash01(this.seed ^ 0x11B7, hx, hy);
+                                float jy = LandMath.hash01(this.seed ^ 0x33C5, hx, hy);
+                                // 0.15..0.85 of the sub-cell: a plant stays clear of the edge, so
+                                // two in neighbouring sub-cells keep some ground between them.
+                                float fx = cast<float>(x) + (cast<float>(sx) + 0.15 + jx * 0.70) * span;
+                                float fy = cast<float>(y) + (cast<float>(sy) + 0.15 + jy * 0.70) * span;
+                                float vary = LandMath.hash01(this.seed ^ 0x6D2B, hx, hy);
+                                int qty = Nodes.baseQty(kind) * (75 + cast<int>(vary * 50.0)) / 100;
+                                field.add(fx, fy, kind, qty);
+                                placed = placed + 1;
+                            }
                         }
-                        float vary = LandMath.hash01(this.seed ^ 0x6D2B, x * 5 + 3, y * 11 + 7);
-                        int qty = Nodes.baseQty(kind) * (75 + cast<int>(vary * 50.0)) / 100;
-                        g.setNode(x, y, kind, qty);
-                        placed = placed + 1;
                     }
                 }
                 System.IO.Console.println($"flora: {placed} trees");

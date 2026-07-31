@@ -1,0 +1,271 @@
+import System.IO.Console;
+
+// Every resource node in the world, as INSTANCES with real positions -- not one slot per tile.
+//
+// The tile was the wrong unit. A tile either held a tree or it did not, so a wood came out as a
+// lattice with one trunk per square and a fixed jitter, which is exactly what it looked like from
+// the ground. Nature does not space plants by the grid; it spaces them by DISTANCE, and the distance
+// closes up in a forest and opens out on a steppe. So a node carries a fractional position and a
+// tile carries however many happen to fall in it -- three in a thicket, none in the clearing beside
+// it.
+//
+// Storage is a flat structure-of-arrays sorted by cell, with one index per ROW. That is all the
+// renderer needs, because it bakes its window row by row and can walk each row's instances in step
+// with its own x loop; and a random per-tile question is a binary search inside one row rather than
+// an eleven-megabyte index nobody else would ever read.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public class NodeField {
+            private mutable int w;
+            private mutable int h;
+            private mutable int n;
+            private mutable int cap;
+            private mutable float[] px;      // position in CELL units, fractional
+            private mutable float[] py;
+            private mutable byte[] kind;
+            private mutable short[] qty;
+            private mutable int[] rowStart;  // h + 1 entries, valid once sorted
+            private mutable boolean ordered;
+
+            public constructor NodeField(int w, int h) {
+                this.w = w;
+                this.h = h;
+                this.n = 0;
+                this.cap = 1024;
+                this.px = new float[this.cap]();
+                this.py = new float[this.cap]();
+                this.kind = new byte[this.cap]();
+                this.qty = new short[this.cap]();
+                this.rowStart = new int[h + 1]();
+                this.ordered = false;
+            }
+
+            public destructor ~NodeField() returns void {
+                delete this.px;
+                delete this.py;
+                delete this.kind;
+                delete this.qty;
+                delete this.rowStart;
+            }
+
+            public method size() returns int {
+                return this.n;
+            }
+
+            private method grow() returns void {
+                int nc = this.cap * 2;
+                float[] nx = new float[nc]();
+                float[] ny = new float[nc]();
+                byte[] nk = new byte[nc]();
+                short[] nq = new short[nc]();
+                mutable int i = 0;
+                while (i < this.n) {
+                    nx[i] = this.px[i];
+                    ny[i] = this.py[i];
+                    nk[i] = this.kind[i];
+                    nq[i] = this.qty[i];
+                    i = i + 1;
+                }
+                delete this.px;
+                delete this.py;
+                delete this.kind;
+                delete this.qty;
+                this.px = nx;
+                this.py = ny;
+                this.kind = nk;
+                this.qty = nq;
+                this.cap = nc;
+                return;
+            }
+
+            public method add(float fx, float fy, int k, int q) returns void
+                requires k > 0
+                requires k < Nodes.count()
+                requires q >= 0
+                requires q <= 32767
+            {
+                if (fx < 0.0 || fy < 0.0) {
+                    return;
+                }
+                if (fx >= cast<float>(this.w) || fy >= cast<float>(this.h)) {
+                    return;
+                }
+                if (this.n >= this.cap) {
+                    this.grow();
+                }
+                this.px[this.n] = fx;
+                this.py[this.n] = fy;
+                this.kind[this.n] = cast<byte>(k);
+                this.qty[this.n] = cast<short>(q);
+                this.n = this.n + 1;
+                this.ordered = false;
+                return;
+            }
+
+            // Sort into cell order (row-major, then x within the row) with a counting sort, and
+            // build the per-row index. Passes append in whatever order suits them; this is called
+            // once when they are all done.
+            public method finish() returns void {
+                int nc = this.w * this.h;
+                int[] start = new int[nc + 1]();
+                mutable int i = 0;
+                while (i < this.n) {
+                    int c = this.cellOf(i);
+                    start[c + 1] = start[c + 1] + 1;
+                    i = i + 1;
+                }
+                mutable int run = 0;
+                mutable int c2 = 0;
+                while (c2 <= nc) {
+                    run = run + start[c2];
+                    start[c2] = run;
+                    c2 = c2 + 1;
+                }
+                // start[c] is now where bucket c BEGINS. Read the row index off it before the fill
+                // below turns it into a moving cursor -- start[y*w] is the first instance of row y,
+                // and start[nc] is the total, which is exactly the end of the last row.
+                mutable int y = 0;
+                while (y <= this.h) {
+                    mutable int cell = y * this.w;
+                    if (cell > nc) {
+                        cell = nc;
+                    }
+                    this.rowStart[y] = start[cell];
+                    y = y + 1;
+                }
+                float[] ox = new float[this.cap]();
+                float[] oy = new float[this.cap]();
+                byte[] ok = new byte[this.cap]();
+                short[] oq = new short[this.cap]();
+                i = 0;
+                while (i < this.n) {
+                    int c = this.cellOf(i);
+                    int dst = start[c];
+                    start[c] = dst + 1;
+                    ox[dst] = this.px[i];
+                    oy[dst] = this.py[i];
+                    ok[dst] = this.kind[i];
+                    oq[dst] = this.qty[i];
+                    i = i + 1;
+                }
+                delete this.px;
+                delete this.py;
+                delete this.kind;
+                delete this.qty;
+                this.px = ox;
+                this.py = oy;
+                this.kind = ok;
+                this.qty = oq;
+                delete start;
+                this.ordered = true;
+                return;
+            }
+
+            private method cellOf(int i) returns int {
+                mutable int cx = cast<int>(this.px[i]);
+                mutable int cy = cast<int>(this.py[i]);
+                if (cx < 0) {
+                    cx = 0;
+                }
+                if (cx >= this.w) {
+                    cx = this.w - 1;
+                }
+                if (cy < 0) {
+                    cy = 0;
+                }
+                if (cy >= this.h) {
+                    cy = this.h - 1;
+                }
+                return cy * this.w + cx;
+            }
+
+            public method xAt(int i) returns float {
+                return this.px[i];
+            }
+
+            public method yAt(int i) returns float {
+                return this.py[i];
+            }
+
+            public method kindAt(int i) returns int {
+                return cast<int>(this.kind[i]) & 255;
+            }
+
+            public method qtyAt(int i) returns int {
+                return cast<int>(this.qty[i]);
+            }
+
+            public method cellXAt(int i) returns int {
+                return cast<int>(this.px[i]);
+            }
+
+            public method cellYAt(int i) returns int {
+                return cast<int>(this.py[i]);
+            }
+
+            // Instances of row y are [rowFirst(y), rowEnd(y)), in ascending x.
+            public method rowFirst(int y) returns int {
+                if (y < 0) {
+                    return 0;
+                }
+                if (y > this.h) {
+                    return this.n;
+                }
+                return this.rowStart[y];
+            }
+
+            public method rowEnd(int y) returns int {
+                return this.rowFirst(y + 1);
+            }
+
+            // Take up to `amount` from one instance, and empty it when it runs out. This is what
+            // makes a quantity mean anything -- a resource that never runs out is decoration with a
+            // better name, and every chain in ECONOMY.md is written as though nodes are finite.
+            public method harvest(int i, int amount) returns int
+                requires amount >= 0
+            {
+                mutable int have = cast<int>(this.qty[i]);
+                if (have <= 0 || cast<int>(this.kind[i]) == 0) {
+                    return 0;
+                }
+                mutable int take = amount;
+                if (take > have) {
+                    take = have;
+                }
+                have = have - take;
+                this.qty[i] = cast<short>(have);
+                if (have == 0) {
+                    this.kind[i] = cast<byte>(0);
+                }
+                return take;
+            }
+
+            // Per-cell counts, so a consumer that asks "how many trees are around here" thousands of
+            // times reads an array instead of searching this one. Counts saturate at 255.
+            public method cellCounts(byte[] out, boolean treesOnly) returns void {
+                int nc = this.w * this.h;
+                for (int i in 0..nc) {
+                    out[i] = cast<byte>(0);
+                }
+                for (int i in 0..this.n) {
+                    int k = cast<int>(this.kind[i]) & 255;
+                    if (k == 0) {
+                        continue;
+                    }
+                    if (treesOnly && !Nodes.isTree(k)) {
+                        continue;
+                    }
+                    int c = this.cellOf(i);
+                    int had = cast<int>(out[c]) & 255;
+                    if (had < 255) {
+                        out[c] = cast<byte>(had + 1);
+                    }
+                }
+                return;
+            }
+        }
+    }
+}
