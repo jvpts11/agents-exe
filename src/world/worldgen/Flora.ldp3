@@ -1,0 +1,381 @@
+import System.IO.Console;
+
+// Where the trees are. Every tree in the world is a resource node, so this is a WORLDGEN pass that
+// writes into the Grid, not a decision the renderer takes while drawing -- the audit counts them and
+// agents will fell them whether a window is open or not.
+//
+// It is a DENSITY FIELD, and that is the whole point. What was here before hashed each cell against
+// a per-biome number, and a decision taken one cell at a time cannot produce a structure bigger than
+// one cell: it makes uniform dust, at exactly the right average, which is why the totals looked
+// right and the picture never did. The same mistake sank three worldgen attempts before it was named.
+//
+// The field has four terms, and each one is a shape you can point at on a map:
+//   body      low-frequency noise -- a wood has a dense core, thin margins and real clearings, and
+//             the clearings are the field going low rather than holes punched afterwards
+//   edge      density falls approaching the edge of the tree-bearing region, because a forest does
+//             not end on a line
+//   water     density rises along rivers and lakes: gallery forest is the single most recognisable
+//             natural forest shape, and it survives even where the body noise says clearing
+//   slope     density falls on steep ground and dies at the treeline
+//
+// Species is chosen from a separate, broader noise field, so a wood reads as one wood with a
+// minority salted through it instead of a random mix cell by cell.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        // What a biome grows: up to three species and the peak share of its cells that carry a tree,
+        // in per mille. The value the field multiplies, not the share that comes out -- clearings
+        // take a bite out of it, which is what the audit measures.
+        public record Palette(int a, int b, int c, int cover) {
+            // `zone` is the broad species field, `salt` a per-cell draw. The third species is the
+            // minority, and a palette that has not named one falls back to the first.
+            public method pick(float zone, float salt) returns int {
+                if (salt > 0.90 && this.c != 0) {
+                    return this.c;
+                }
+                if (zone > 0.52 && this.b != 0) {
+                    return this.b;
+                }
+                return this.a;
+            }
+        }
+
+        public class Flora implements WorldPass {
+            private mutable int seed;
+            private mutable int w;
+            private mutable int h;
+            // per-biome palette, as parallel arrays like every other table in this codebase
+            private mutable int[] pa;
+            private mutable int[] pb;
+            private mutable int[] pc;
+            private mutable int[] pcov;
+            // scratch, allocated per run
+            private mutable int[] dEdge;    // rings to the edge of the tree-bearing region
+            private mutable int[] dWat;     // rings to the nearest water
+
+            public constructor Flora(int seed) {
+                this.seed = seed;
+                this.w = 1;
+                this.h = 1;
+                this.pa = new int[Biomes.COUNT]();
+                this.pb = new int[Biomes.COUNT]();
+                this.pc = new int[Biomes.COUNT]();
+                this.pcov = new int[Biomes.COUNT]();
+                this.dEdge = new int[1]();
+                this.dWat = new int[1]();
+                this.buildPalettes();
+            }
+
+            public destructor ~Flora() returns void {
+                delete this.pa;
+                delete this.pb;
+                delete this.pc;
+                delete this.pcov;
+                delete this.dEdge;
+                delete this.dWat;
+            }
+
+            public override method name() returns String {
+                return "flora";
+            }
+
+            private method setPalette(int biome, int a, int b, int c, int cov) returns void
+                requires biome >= 0
+                requires biome < Biomes.COUNT
+                requires cov >= 0
+                requires cov <= 1000
+            {
+                this.pa[biome] = a;
+                this.pb[biome] = b;
+                this.pc[biome] = c;
+                this.pcov[biome] = cov;
+            }
+
+            // Ten species instead of three, because the promoted prop meshes joined the node set.
+            // A biome absent from this table grows nothing, which is how deserts, ice and open water
+            // are expressed -- there is no separate "is this forest" test anywhere.
+            private method buildPalettes() returns void {
+                int broadleaf = cast<int>(NodeKind.Broadleaf);
+                int pine = cast<int>(NodeKind.Pine);
+                int palm = cast<int>(NodeKind.Palm);
+                int acacia = cast<int>(NodeKind.Acacia);
+                int swamp = cast<int>(NodeKind.SwampTree);
+                int mangrove = cast<int>(NodeKind.Mangrove);
+                int laurel = cast<int>(NodeKind.Laurel);
+                int oak = cast<int>(NodeKind.OakTree);
+                int pineT = cast<int>(NodeKind.PineTree);
+                int birch = cast<int>(NodeKind.BirchTree);
+                int none = 0;
+                this.setPalette(8, palm, palm, none, 40);            // Beach
+                this.setPalette(11, swamp, swamp, none, 700);        // Swamp
+                this.setPalette(13, mangrove, mangrove, none, 1000); // Mangrove: a thicket, and a narrow one
+                this.setPalette(14, broadleaf, laurel, palm, 900);   // TropicalRainforest
+                this.setPalette(15, broadleaf, palm, laurel, 620);   // TropSeasonalForest
+                this.setPalette(16, acacia, acacia, none, 90);       // Savanna: isolated, not forest
+                this.setPalette(19, laurel, oak, none, 150);         // MedShrubland
+                this.setPalette(20, broadleaf, acacia, none, 80);    // WarmGrassland
+                this.setPalette(21, laurel, birch, broadleaf, 950);  // LaurelForest
+                this.setPalette(22, oak, birch, broadleaf, 860);     // DeciduousForest
+                this.setPalette(23, pineT, pine, birch, 900);        // TemperateRainforest
+                this.setPalette(24, oak, oak, none, 50);             // Prairie
+                this.setPalette(25, oak, pine, none, 30);            // Steppe
+                this.setPalette(27, pineT, pine, birch, 950);        // Taiga: boreal forest is dense
+                this.setPalette(32, oak, pineT, birch, 420);         // Hills
+                this.setPalette(34, pineT, pine, none, 320);         // AlpineMeadow
+                this.setPalette(39, palm, palm, none, 500);          // Oasis
+                return;
+            }
+
+            private method idx(int x, int y) returns int {
+                mutable int xx = x;
+                if (xx < 0) {
+                    xx = 0;
+                }
+                if (xx >= this.w) {
+                    xx = this.w - 1;
+                }
+                mutable int yy = y;
+                if (yy < 0) {
+                    yy = 0;
+                }
+                if (yy >= this.h) {
+                    yy = this.h - 1;
+                }
+                return yy * this.w + xx;
+            }
+
+            // Ring distance by repeated 4-neighbour dilation, capped at `rings`. The same shape the
+            // climate pass uses for its coastal moisture, and enough for a field that only cares
+            // about the first handful of cells.
+            private method dilate(int[] d, int rings) returns void {
+                mutable int p = 0;
+                while (p < rings) {
+                    mutable int y = 0;
+                    while (y < this.h) {
+                        mutable int x = 0;
+                        while (x < this.w) {
+                            int i = y * this.w + x;
+                            mutable int m = d[i];
+                            int a = d[this.idx(x - 1, y)] + 1;
+                            int b = d[this.idx(x + 1, y)] + 1;
+                            int c = d[this.idx(x, y - 1)] + 1;
+                            int e = d[this.idx(x, y + 1)] + 1;
+                            if (a < m) {
+                                m = a;
+                            }
+                            if (b < m) {
+                                m = b;
+                            }
+                            if (c < m) {
+                                m = c;
+                            }
+                            if (e < m) {
+                                m = e;
+                            }
+                            d[i] = m;
+                            x = x + 1;
+                        }
+                        y = y + 1;
+                    }
+                    p = p + 1;
+                }
+                return;
+            }
+
+            private method isWater(Grid* g, int x, int y) returns boolean {
+                if (g.biomeAt(x, y) < 8) {
+                    return true;
+                }
+                if (g.hasFlag(x, y, Grid.FLAG_RIVER)) {
+                    return true;
+                }
+                if (g.hasFlag(x, y, Grid.FLAG_LAKE)) {
+                    return true;
+                }
+                return false;
+            }
+
+            private method distanceFields(Grid* g) returns void {
+                int n = this.w * this.h;
+                for (int i in 0..n) {
+                    int x = i % this.w;
+                    int y = i / this.w;
+                    // FRESH water only. Gallery forest is a riparian thing: seeding this from the
+                    // sea as well made every beach in the world a palm grove, because a beach is by
+                    // definition next to water and the lift then overrode the palette that had
+                    // deliberately made it sparse. A coast gets its trees from its biome's own
+                    // cover; a river gets them from the river.
+                    if (g.hasFlag(x, y, Grid.FLAG_RIVER) || g.hasFlag(x, y, Grid.FLAG_LAKE)) {
+                        this.dWat[i] = 0;
+                    } else {
+                        this.dWat[i] = 9999;
+                    }
+                    // Outside the tree-bearing region: open water, or a biome whose palette grows
+                    // nothing. Measuring the edge this way means the transition into a savanna is
+                    // NOT an edge -- the savanna simply has a low cover of its own, which is what a
+                    // forest margin actually looks like.
+                    if (this.pcov[g.biomeAt(x, y)] == 0) {
+                        this.dEdge[i] = 0;
+                    } else {
+                        this.dEdge[i] = 9999;
+                    }
+                }
+                this.dilate(this.dWat, 8);
+                this.dilate(this.dEdge, 6);
+                return;
+            }
+
+            // Steepest one-cell elevation difference around a cell, in 0..1 height units.
+            private method slopeAt(Grid* g, int x, int y) returns float {
+                int e0 = g.elevAt(x, y);
+                mutable int worst = 0;
+                mutable int d = e0 - g.elevAt(x - 1, y);
+                if (d < 0) {
+                    d = 0 - d;
+                }
+                if (d > worst) {
+                    worst = d;
+                }
+                d = e0 - g.elevAt(x + 1, y);
+                if (d < 0) {
+                    d = 0 - d;
+                }
+                if (d > worst) {
+                    worst = d;
+                }
+                d = e0 - g.elevAt(x, y - 1);
+                if (d < 0) {
+                    d = 0 - d;
+                }
+                if (d > worst) {
+                    worst = d;
+                }
+                d = e0 - g.elevAt(x, y + 1);
+                if (d < 0) {
+                    d = 0 - d;
+                }
+                if (d > worst) {
+                    worst = d;
+                }
+                return cast<float>(worst) / 10000.0;
+            }
+
+            public override method apply(Grid* g, WorldField* f) returns void {
+                this.w = g.width();
+                this.h = g.height();
+                int n = this.w * this.h;
+                delete this.dEdge;
+                delete this.dWat;
+                this.dEdge = new int[n]();
+                this.dWat = new int[n]();
+                this.distanceFields(g);
+                mutable int placed = 0;
+                for (int y in 0..this.h) {
+                    float ny = cast<float>(y) / cast<float>(this.h);
+                    for (int x in 0..this.w) {
+                        int i = y * this.w + x;
+                        int biome = g.biomeAt(x, y);
+                        int cov = this.pcov[biome];
+                        if (cov == 0) {
+                            continue;                       // nothing this biome grows
+                        }
+                        if (this.isWater(g, x, y)) {
+                            continue;                       // the channel stays clear
+                        }
+                        float nx = cast<float>(x) / cast<float>(this.w);
+                        // BODY: the wood itself, with its clearings. Below the threshold the field
+                        // is flat zero, and that flat zero IS the clearing -- not a hole cut later.
+                        float body = LandMath.fbm(this.seed ^ 0x1F05, nx, ny, 22, 4);
+                        // Averaging octaves of value noise piles the result up around 0.5 -- it
+                        // almost never leaves [0.35, 0.65] -- so a threshold cut straight across it
+                        // separates almost nothing, and the field comes out as a uniform haze at
+                        // whatever the mean happens to be. Stretching the contrast first is what
+                        // gives a wood a solid core AND real clearings; the climate pass had to
+                        // learn the same thing about its moisture blend.
+                        float bw = 0.5 + (body - 0.5) * 2.4;
+                        mutable float shape = (bw - 0.26) / 0.30;
+                        if (shape < 0.0) {
+                            shape = 0.0;
+                        }
+                        if (shape > 1.0) {
+                            shape = 1.0;
+                        }
+                        // texture inside the wood, so the core is not a solid block either
+                        float tex = LandMath.fbm(this.seed ^ 0x77A3, nx, ny, 90, 3);
+                        shape = shape * (0.85 + 0.3 * tex);
+                        // EDGE: thin over the last few cells of the region, without emptying them
+                        mutable float edge = 0.35 + cast<float>(this.dEdge[i]) * 0.26;
+                        if (edge > 1.0) {
+                            edge = 1.0;
+                        }
+                        shape = shape * edge;
+                        // WATER: gallery forest, and it has to override BOTH the other terms to be
+                        // the thing it is. Applying it to the shape alone was wrong in the one case
+                        // that matters: shape is multiplied by the biome's own cover, so along a
+                        // river through savanna -- 90 per mille -- the strongest possible gallery
+                        // term still produced almost no trees, in exactly the landscape where a
+                        // wooded ribbon is the most recognisable shape there is. So water pulls the
+                        // COVER up toward a forest's, and separately puts a floor under the body
+                        // noise, so a clearing cannot cut the ribbon either.
+                        mutable float gall = 0.0;
+                        float dw = cast<float>(this.dWat[i]);
+                        if (dw < 6.0) {
+                            gall = (6.0 - dw) / 6.0;
+                        }
+                        shape = shape + (0.60 + shape * 0.40 - shape) * gall;
+                        mutable float useCov = cast<float>(cov) / 1000.0;
+                        if (gall > 0.0 && useCov < 0.60) {
+                            useCov = useCov + (0.60 - useCov) * gall;
+                        }
+                        // SLOPE and the TREELINE. 0.63 is the contract line where highland begins,
+                        // and trees thin out above it rather than stopping at it.
+                        // 0.060 is roughly the gradient of real hill ground here. At 0.030 the
+                        // term was costing a quarter of the cover on terrain that is barely tilted,
+                        // which is not what "trees thin on steep ground" means.
+                        mutable float sf = 1.0 - this.slopeAt(g, x, y) / 0.060;
+                        if (sf < 0.15) {
+                            sf = 0.15;
+                        }
+                        if (sf > 1.0) {
+                            sf = 1.0;
+                        }
+                        float e = cast<float>(g.elevAt(x, y)) / 10000.0;
+                        mutable float tl = 1.0;
+                        if (e >= 0.74) {
+                            tl = 0.0;
+                        } else if (e > 0.66) {
+                            tl = (0.74 - e) / 0.08;
+                        }
+                        mutable float d = useCov * shape * sf * tl;
+                        if (d > 0.95) {
+                            d = 0.95;
+                        }
+                        if (d <= 0.0) {
+                            continue;
+                        }
+                        if (LandMath.hash01(this.seed ^ 0x5EED, x, y) >= d) {
+                            continue;
+                        }
+                        // SPECIES: a broad field, so neighbouring trees agree and a wood reads as
+                        // one wood, with a minority species salted through it.
+                        float zone = LandMath.fbm(this.seed ^ 0x2C17, nx, ny, 9, 3);
+                        float salt = LandMath.hash01(this.seed ^ 0x3B41, x * 3 + 1, y * 7 + 2);
+                        Palette pal = new Palette(this.pa[biome], this.pb[biome], this.pc[biome], cov);
+                        int kind = pal.pick(zone, salt);
+                        if (kind == 0) {
+                            continue;
+                        }
+                        float vary = LandMath.hash01(this.seed ^ 0x6D2B, x * 5 + 3, y * 11 + 7);
+                        int qty = Nodes.baseQty(kind) * (75 + cast<int>(vary * 50.0)) / 100;
+                        g.setNode(x, y, kind, qty);
+                        placed = placed + 1;
+                    }
+                }
+                System.IO.Console.println($"flora: {placed} trees");
+                return;
+            }
+        }
+    }
+}

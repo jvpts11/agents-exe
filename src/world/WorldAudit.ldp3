@@ -59,6 +59,7 @@ public bundle Agents {
             private mutable int forestPatches;
             private mutable int forestCells;
             private mutable int forestBiggest;
+            private mutable int forestClumped;  // tree cells living in a patch of CLUMP or more
             private mutable int massesLivable;  // landmasses with wood AND stone AND water
             private mutable int massesCounted;
 
@@ -98,6 +99,7 @@ public bundle Agents {
                 this.forestPatches = 0;
                 this.forestCells = 0;
                 this.forestBiggest = 0;
+                this.forestClumped = 0;
                 this.massesLivable = 0;
                 this.massesCounted = 0;
             }
@@ -720,6 +722,7 @@ public bundle Agents {
                 mutable int patches = 0;
                 mutable int cells = 0;
                 mutable int biggest = 0;
+                mutable int clumped = 0;
                 for (int sy in 0..this.h) {
                     for (int sx in 0..this.w) {
                         int s0 = sy * this.w + sx;
@@ -756,6 +759,9 @@ public bundle Agents {
                             }
                             patches = patches + 1;
                             cells = cells + size;
+                            if (size >= WorldAudit.CLUMP) {
+                                clumped = clumped + size;
+                            }
                             if (size > biggest) {
                                 biggest = size;
                             }
@@ -765,6 +771,7 @@ public bundle Agents {
                 delete mark;
                 this.forestCells = cells;
                 this.forestBiggest = biggest;
+                this.forestClumped = clumped;
                 return patches;
             }
 
@@ -794,6 +801,20 @@ public bundle Agents {
 
             public method largestPatch() returns int {
                 return this.forestBiggest;
+            }
+
+            // A patch this big is a WOOD; anything smaller is a copse or a stray tree.
+            public static int CLUMP = 64;
+
+            // Per mille of all tree cells that live in a patch of CLUMP or more. This is the number
+            // that tells dust from forest, and it does it independently of how dense the trees are:
+            // a per-cell hash scores near zero at ANY density, because its trees never touch in
+            // runs; a density field scores high even when the field itself is thin.
+            public method clumpShare() returns int {
+                if (this.forestCells == 0) {
+                    return 0;
+                }
+                return this.forestClumped * 1000 / this.forestCells;
             }
 
             // Per mille of a biome's cells that carry a tree.
@@ -845,12 +866,28 @@ public bundle Agents {
                 fp.appendInt(this.meanPatch());
                 fp.append(" cells, biggest ");
                 fp.appendInt(this.forestBiggest);
-                fp.append(" | landmasses with wood+stone+water ");
+                fp.append(" | in woods (64+) ");
+                fp.appendInt(this.clumpShare());
+                fp.append("/1000 | landmasses with wood+stone+water ");
                 fp.appendInt(this.massesLivable);
                 fp.append("/");
                 fp.appendInt(this.massesCounted);
                 System.IO.Console.println(fp.toString());
                 delete fp;
+                // Tree cover per biome, which is where a palette that is too thin or too thick
+                // actually shows -- the world total hides it behind the biomes that grow nothing.
+                StringBuilder tc = new StringBuilder() on heap;
+                tc.append("  tree cover /1000:");
+                for (int b in 0..Biomes.COUNT) {
+                    if (this.biomeTrees[b] > 0) {
+                        tc.append(" ");
+                        tc.append(Biomes.name(b));
+                        tc.append("=");
+                        tc.appendInt(this.treeCover(b));
+                    }
+                }
+                System.IO.Console.println(tc.toString());
+                delete tc;
                 // Per-kind tally, only for kinds that exist, so the line stays readable.
                 StringBuilder kc = new StringBuilder() on heap;
                 kc.append("  by kind:");

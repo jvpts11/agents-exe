@@ -60,6 +60,10 @@ public bundle Agents {
                         Main.nodeShot();
                         return;
                     }
+                    if (args[0].equals("forestshot")) {
+                        Main.forestShot();
+                        return;
+                    }
                     if (args[0].equals("probe")) {
                         Main.probeSeam();
                         return;
@@ -608,6 +612,97 @@ public bundle Agents {
                 delete g;
                 delete win;
                 System.IO.Console.println("nodeshot: wrote nodes_a.ppm");
+                return;
+            }
+
+            // The thickest wood in the world, from three heights. Judging a forest generator off a
+            // capture aimed at wherever the default camera happens to point is how you conclude the
+            // trees are sparse when the shot simply landed on a prairie -- so this finds the densest
+            // 32-cell window first and looks at THAT.
+            private static method forestShot() returns void {
+                int w = 2560;
+                int h = 1440;
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(w, h);
+                int win2 = 32;
+                mutable int best = 0;
+                mutable int fx = w / 2;
+                mutable int fy = h / 2;
+                mutable int sy = 0;
+                while (sy < h - win2) {
+                    mutable int sx = 0;
+                    while (sx < w - win2) {
+                        mutable int cnt = 0;
+                        mutable int cy = 0;
+                        while (cy < win2) {
+                            mutable int cx = 0;
+                            while (cx < win2) {
+                                if (Nodes.isTree(g.nodeAt(sx + cx, sy + cy))) {
+                                    cnt = cnt + 1;
+                                }
+                                cx = cx + 2;
+                            }
+                            cy = cy + 2;
+                        }
+                        if (cnt > best) {
+                            best = cnt;
+                            fx = sx + win2 / 2;
+                            fy = sy + win2 / 2;
+                        }
+                        sx = sx + win2;
+                    }
+                    sy = sy + win2;
+                }
+                int biome = g.biomeAt(fx, fy);
+                System.IO.Console.println($"forestshot: densest wood at {fx},{fy} in {Biomes.name(biome)}, {best} trees per 256 sampled cells");
+                String root = Main.assetRoot();
+                GlWindow* win = new GlWindow() on heap;
+                if (root.length() == 0 || win.open("forest", 1200, 750, 3, 3) == 0) {
+                    System.IO.Console.println("forestshot: no GL window.");
+                    delete win;
+                    delete g;
+                    return;
+                }
+                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
+                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
+                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
+                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
+                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
+                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
+                r.aimAt(fx, fy);
+                int cw = win.width();
+                int ch = win.height();
+                mutable int k = 0;
+                while (k < 3) {
+                    if (k == 0) {
+                        r.setView(20.0, 26.0, 55.0);        // in among the trees
+                    } else if (k == 1) {
+                        r.setView(20.0, 45.0, 150.0);       // the wood and its clearings
+                    } else {
+                        r.setView(20.0, 60.0, 420.0);       // where the wood ends
+                    }
+                    r.flushDetail();
+                    r.render(cw, ch);
+                    byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
+                    if (k == 0) {
+                        Main.writePpmFlipped(px, cw, ch, "forest_a.ppm");
+                    } else if (k == 1) {
+                        Main.writePpmFlipped(px, cw, ch, "forest_b.ppm");
+                    } else {
+                        Main.writePpmFlipped(px, cw, ch, "forest_c.ppm");
+                    }
+                    delete px;
+                    k = k + 1;
+                }
+                delete r;
+                delete rivers;
+                delete nodeMesh;
+                delete props;
+                delete terr;
+                delete g;
+                delete win;
+                System.IO.Console.println("forestshot: wrote forest_a.ppm, forest_b.ppm, forest_c.ppm");
                 return;
             }
 
