@@ -1020,6 +1020,55 @@ public bundle Agents {
                     i = i + 1;
                 }
 
+                // How much of an island plate a cell is, as a SMOOTH field. The inset below used to
+                // be switched on plate membership, cell by cell: the moment you left the island
+                // plate the crust jumped by half a unit, so the flood contour stopped following a
+                // contour and started following the PLATE EDGE -- and a small island came out with
+                // its coast cut dead straight down one side. Blurring the membership over a few
+                // coarse cells makes the crust continuous again, and the coast goes back to being
+                // decided by the water level rather than by which plate a cell happens to be in.
+                i = 0;
+                while (i < pn) {
+                    if (this.pkind[this.owner[i]] == Landmass.KIND_ISLAND) {
+                        this.dt[i] = 1.0;
+                    } else {
+                        this.dt[i] = 0.0;
+                    }
+                    i = i + 1;
+                }
+                mutable int blur = 0;
+                while (blur < 3) {
+                    mutable int y = 0;
+                    while (y < this.ph) {
+                        mutable int x = 0;
+                        while (x < this.pw) {
+                            int c = y * this.pw + x;
+                            mutable float acc = this.dt[c];
+                            mutable float cnt = 1.0;
+                            if (x > 0) {
+                                acc = acc + this.dt[c - 1];
+                                cnt = cnt + 1.0;
+                            }
+                            if (x + 1 < this.pw) {
+                                acc = acc + this.dt[c + 1];
+                                cnt = cnt + 1.0;
+                            }
+                            if (y > 0) {
+                                acc = acc + this.dt[c - this.pw];
+                                cnt = cnt + 1.0;
+                            }
+                            if (y + 1 < this.ph) {
+                                acc = acc + this.dt[c + this.pw];
+                                cnt = cnt + 1.0;
+                            }
+                            this.dt[c] = acc / cnt;
+                            x = x + 1;
+                        }
+                        y = y + 1;
+                    }
+                    blur = blur + 1;
+                }
+
                 float margin = 0.055 * cast<float>(this.ph);
                 i = 0;
                 while (i < pn) {
@@ -1028,12 +1077,14 @@ public bundle Agents {
                     float nx = cast<float>(x) / cast<float>(this.pw);
                     float ny = cast<float>(y) / cast<float>(this.ph);
                     mutable float s = this.sdf[i] / margin;
-                    if (this.pkind[this.owner[i]] == Landmass.KIND_ISLAND) {
-                        // Only the deep interior of an island plate clears the water, and low. The
-                        // inset is in MARGINS, so it has to stay well under half a plate's width or
-                        // the island vanishes entirely -- at 1.55 margins the smaller plates came
-                        // out at a few hundred cells, under the audit's noise floor.
-                        s = (s - 0.90) * 0.60;
+                    // Only the deep interior of an island plate clears the water, and low. The
+                    // inset is in MARGINS, so it has to stay well under half a plate's width or the
+                    // island vanishes entirely. It is BLENDED by the smoothed membership above, not
+                    // switched, so no cell boundary can become a coastline.
+                    float iw = this.dt[i];
+                    if (iw > 0.001) {
+                        float inset = (s - 0.90) * 0.60;
+                        s = s * (1.0 - iw) + inset * iw;
                     }
                     // Shift the CONTOUR, never the sampled position. Warping the position is what
                     // welded neighbouring landmasses together in the earlier rewrites; moving the

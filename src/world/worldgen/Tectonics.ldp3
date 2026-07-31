@@ -45,6 +45,16 @@ public bundle Agents {
             private mutable byte[] arcMask;     // full res: 1 on an island arc, which MAY breach
             private mutable float mountainShare;
 
+            // The physics is evaluated on the COARSE grid, where every discrete decision -- which
+            // boundary, which plate, which side of it -- is exact for the cell that owns it. Only
+            // these smooth scalars are carried up to full resolution.
+            private mutable float[] cdef;       // deformation
+            private mutable float[] carc;       // volcanic-arc strength
+            private mutable float[] cisl;       // 1 on the overriding side of an island arc
+            private mutable float sDef;         // sampleAt results
+            private mutable float sArc;
+            private mutable float sIsl;
+
             public constructor Tectonics(int seed) {
                 this.seed = seed;
                 this.pw = 1;
@@ -60,6 +70,12 @@ public bundle Agents {
                 this.bover = new int[1]();
                 this.def = new float[1]();
                 this.arcMask = new byte[1]();
+                this.cdef = new float[1]();
+                this.carc = new float[1]();
+                this.cisl = new float[1]();
+                this.sDef = 0.0;
+                this.sArc = 0.0;
+                this.sIsl = 0.0;
             }
 
             public destructor ~Tectonics() returns void {
@@ -72,6 +88,9 @@ public bundle Agents {
                 delete this.bover;
                 delete this.def;
                 delete this.arcMask;
+                delete this.cdef;
+                delete this.carc;
+                delete this.cisl;
             }
 
             public override method name() returns String {
@@ -100,6 +119,9 @@ public bundle Agents {
                 delete this.bover;
                 delete this.def;
                 delete this.arcMask;
+                delete this.cdef;
+                delete this.carc;
+                delete this.cisl;
                 this.bdist = new float[pn]();
                 this.bpair = new int[pn]();
                 this.pcx = new float[this.nPlates]();
@@ -110,10 +132,14 @@ public bundle Agents {
                 this.bover = new int[np2]();
                 this.def = new float[f.w * f.h]();
                 this.arcMask = new byte[f.w * f.h]();
+                this.cdef = new float[pn]();
+                this.carc = new float[pn]();
+                this.cisl = new float[pn]();
 
                 this.centroids(f);
                 this.findBoundaries(f);
                 this.classifyBoundaries(f);
+                this.buildCoarseDeformation(f);
                 this.buildDeformation(f);
                 this.fitAndApply(f);
                 return;
@@ -345,83 +371,151 @@ public bundle Agents {
                 return ab + (cd - ab) * ty;
             }
 
+            // The physics, evaluated ONCE PER COARSE CELL. Every discrete decision lives here --
+            // which boundary, which plate, which side of it -- because here the cell owns them
+            // exactly. Reading those decisions at full resolution by NEAREST NEIGHBOUR is what put
+            // perfectly straight, axis-aligned edges all over the world: a volcanic arc, an island
+            // and a mountain belt each ended dead on a coarse-cell edge instead of on its own
+            // contour. Nothing discrete crosses to full resolution now -- only smooth scalars do.
+            private method buildCoarseDeformation(WorldField* f) returns void {
+                int pn = this.pw * this.ph;
+                mutable int i = 0;
+                while (i < pn) {
+                    this.cdef[i] = 0.0;
+                    this.carc[i] = 0.0;
+                    this.cisl[i] = 0.0;
+                    int pair = this.bpair[i];
+                    if (pair >= 0) {
+                        int kind = this.bkind[pair];
+                        if (kind != Tectonics.B_NONE) {
+                            float nx = cast<float>(i % this.pw) / cast<float>(this.pw);
+                            float ny = cast<float>(i / this.pw) / cast<float>(this.ph);
+                            // Noise on the DISTANCE: it makes a range wander, fork and vary in
+                            // height along its length instead of tracing the boundary like a drawn
+                            // line, and it cannot pull the range off the boundary the way warping
+                            // the sampled position would.
+                            float wob = LandMath.fbm(this.seed ^ 0x39A1, nx, ny, 17, 4) - 0.5;
+                            float d = this.bdist[i] + wob * 3.4;
+                            int self = f.plate[i];
+                            float str = this.bstr[pair];
+                            mutable float v = 0.0;
+                            mutable float arc = 0.0;
+                            if (kind == Tectonics.B_COLLISION) {
+                                // two continents pile into each other: one broad high belt
+                                // straddling the suture, no trench and no volcanoes
+                                v = str * this.crest(d, 0.0, 6.5);
+                            } else if (kind == Tectonics.B_SUBDUCTION) {
+                                if (self == this.bover[pair]) {
+                                    // overriding continent: coastal range, then the volcanic arc
+                                    // further inland -- the Andes and their volcanoes
+                                    v = str * (this.crest(d, 2.0, 3.2) * 0.95);
+                                    arc = str * this.crest(d, 8.5, 2.4);
+                                    v = v + arc * 0.70;
+                                } else {
+                                    // the descending slab drags the sea floor down
+                                    v = 0.0 - str * this.crest(d, 3.0, 2.2);
+                                }
+                            } else if (kind == Tectonics.B_ISLANDARC) {
+                                if (self == this.bover[pair]) {
+                                    // BEADS, not a crest. An arc that breaches along its whole
+                                    // length is a causeway: it reaches a continent at each end and
+                                    // welds them, and the biggest landmass went from 24% to 38% of
+                                    // all land. Real arcs are a line of separate cones.
+                                    float bead = LandMath.fbm(this.seed ^ 0x5E4D, nx, ny, 44, 3);
+                                    v = str * this.crest(d, 3.5, 1.9) * (0.0 - 0.15 + 1.55 * bead);
+                                    arc = v;
+                                    this.cisl[i] = 1.0;
+                                } else {
+                                    v = 0.0 - str * this.crest(d, 3.0, 2.0);
+                                }
+                            } else if (kind == Tectonics.B_RIFT) {
+                                // the floor drops between two raised shoulders
+                                v = str * this.crest(d, 5.0, 2.2) * 0.55
+                                    - str * this.crest(d, 0.0, 2.0) * 0.70;
+                            } else {
+                                v = str * this.crest(d, 0.0, 4.5) * 0.55;
+                            }
+                            this.cdef[i] = v;
+                            this.carc[i] = arc;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            // Bilinear read of the three coarse fields at one position, weights computed once.
+            private method sampleAt(float nx, float ny) returns void {
+                mutable float gx = nx * cast<float>(this.pw) - 0.5;
+                mutable float gy = ny * cast<float>(this.ph) - 0.5;
+                if (gx < 0.0) {
+                    gx = 0.0;
+                }
+                if (gy < 0.0) {
+                    gy = 0.0;
+                }
+                mutable int x0 = cast<int>(gx);
+                mutable int y0 = cast<int>(gy);
+                if (x0 > this.pw - 2) {
+                    x0 = this.pw - 2;
+                }
+                if (y0 > this.ph - 2) {
+                    y0 = this.ph - 2;
+                }
+                if (x0 < 0) {
+                    x0 = 0;
+                }
+                if (y0 < 0) {
+                    y0 = 0;
+                }
+                float tx = gx - cast<float>(x0);
+                float ty = gy - cast<float>(y0);
+                int c = y0 * this.pw + x0;
+                int c2 = c + this.pw;
+                float a0 = this.cdef[c] + (this.cdef[c + 1] - this.cdef[c]) * tx;
+                float a1 = this.cdef[c2] + (this.cdef[c2 + 1] - this.cdef[c2]) * tx;
+                this.sDef = a0 + (a1 - a0) * ty;
+                float b0 = this.carc[c] + (this.carc[c + 1] - this.carc[c]) * tx;
+                float b1 = this.carc[c2] + (this.carc[c2 + 1] - this.carc[c2]) * tx;
+                this.sArc = b0 + (b1 - b0) * ty;
+                float e0 = this.cisl[c] + (this.cisl[c + 1] - this.cisl[c]) * tx;
+                float e1 = this.cisl[c2] + (this.cisl[c2 + 1] - this.cisl[c2]) * tx;
+                this.sIsl = e0 + (e1 - e0) * ty;
+                return;
+            }
+
             private method buildDeformation(WorldField* f) returns void {
                 mutable int y = 0;
                 while (y < f.h) {
                     float ny = cast<float>(y) / cast<float>(f.h);
-                    int gy = y * this.ph / f.h;
                     mutable int x = 0;
                     while (x < f.w) {
                         int cell = y * f.w + x;
                         float nx = cast<float>(x) / cast<float>(f.w);
-                        int gx = x * this.pw / f.w;
-                        int gi = gy * this.pw + gx;
-                        int pair = this.bpair[gi];
-                        if (pair >= 0) {
-                            int kind = this.bkind[pair];
-                            if (kind != Tectonics.B_NONE) {
-                                // Noise on the DISTANCE again: it makes a range wander, fork and
-                                // vary in height along its length instead of tracing the boundary
-                                // like a drawn line, and it cannot pull the range off the boundary
-                                // the way warping the sampled position would.
-                                float wob = LandMath.fbm(this.seed ^ 0x39A1, nx, ny, 17, 4) - 0.5;
-                                float d = this.distAt(nx, ny) + wob * 3.4;
-                                int self = f.plate[gi];
-                                float str = this.bstr[pair];
-                                mutable float v = 0.0;
-                                mutable float arc = 0.0;
-                                if (kind == Tectonics.B_COLLISION) {
-                                    // two continents pile into each other: one broad high belt
-                                    // straddling the suture, no trench and no volcanoes
-                                    v = str * this.crest(d, 0.0, 6.5);
-                                } else if (kind == Tectonics.B_SUBDUCTION) {
-                                    if (self == this.bover[pair]) {
-                                        // overriding continent: coastal range, then the volcanic
-                                        // arc further inland -- the Andes and their volcanoes
-                                        v = str * (this.crest(d, 2.0, 3.2) * 0.95);
-                                        arc = str * this.crest(d, 8.5, 2.4);
-                                        v = v + arc * 0.70;
-                                    } else {
-                                        // the descending slab drags the sea floor down
-                                        v = 0.0 - str * this.crest(d, 3.0, 2.2);
-                                    }
-                                } else if (kind == Tectonics.B_ISLANDARC) {
-                                    if (self == this.bover[pair]) {
-                                        // BEADS, not a crest. An arc that breaches along its whole
-                                        // length is a causeway: it reached a continent on each end
-                                        // and welded them, and the biggest landmass jumped from 24%
-                                        // to 38% of all land. Real arcs are a line of separate
-                                        // volcanic cones, so a high-frequency modulation drops the
-                                        // ridge back under water between them.
-                                        float bead = LandMath.fbm(this.seed ^ 0x5E4D, nx, ny, 44, 3);
-                                        v = str * this.crest(d, 3.5, 1.9) * (0.0 - 0.15 + 1.55 * bead);
-                                        arc = v;
-                                        this.arcMask[cell] = cast<byte>(1);
-                                    } else {
-                                        v = 0.0 - str * this.crest(d, 3.0, 2.0);
-                                    }
-                                } else if (kind == Tectonics.B_RIFT) {
-                                    // the floor drops between two raised shoulders
-                                    v = str * this.crest(d, 5.0, 2.2) * 0.55
-                                        - str * this.crest(d, 0.0, 2.0) * 0.70;
-                                } else {
-                                    v = str * this.crest(d, 0.0, 4.5) * 0.55;
-                                }
-                                // Sharpen the uplift: the crest keeps its value while the flanks
-                                // shrink. Coverage and peak height are two different questions --
-                                // the fit loop below sets the amplitude from the SHARE of land in
-                                // the band, so a profile with fat flanks reaches its share while the
-                                // amplitude is still small and the highest summit stops at 0.86,
-                                // below the snow line, with no SnowPeak anywhere in the world.
-                                // Thinning the flanks forces a larger amplitude for the same share.
-                                if (v > 0.0) {
-                                    v = 0.68 * v + 0.32 * v * v * v;
-                                }
-                                this.def[cell] = v;
-                                if (arc > 0.55) {
-                                    f.vent[cell] = cast<byte>(1);
-                                }
+                        this.sampleAt(nx, ny);
+                        mutable float v = this.sDef;
+                        if (v != 0.0) {
+                            // Full-resolution grain, MULTIPLIED in so it vanishes wherever the
+                            // deformation does. Added in, it would put relief where the physics
+                            // says there is none, and draw edges of its own.
+                            float grain = LandMath.fbm(this.seed ^ 0x11C3, nx, ny, 60, 3);
+                            v = v * (0.86 + 0.28 * grain);
+                            // Sharpen the uplift: the crest keeps its value while the flanks shrink.
+                            // Coverage and peak height are different questions -- the fit loop sets
+                            // the amplitude from the SHARE of land in the band, so a profile with fat
+                            // flanks reaches its share while the amplitude is still small and the
+                            // highest summit stops at 0.86, below the snow line, with no SnowPeak
+                            // anywhere. Thinning the flanks forces a larger amplitude for the share.
+                            if (v > 0.0) {
+                                v = 0.68 * v + 0.32 * v * v * v;
                             }
+                            this.def[cell] = v;
+                        }
+                        if (this.sIsl > 0.5) {
+                            this.arcMask[cell] = cast<byte>(1);
+                        }
+                        if (this.sArc > 0.55) {
+                            f.vent[cell] = cast<byte>(1);
                         }
                         x = x + 1;
                     }
