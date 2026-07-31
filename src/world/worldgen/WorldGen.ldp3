@@ -1178,10 +1178,14 @@ public bundle Agents {
                     if (m >= 0.45) { return cast<int>(Biome.AlpineMeadow); }
                     return cast<int>(Biome.Mountain);
                 }
-                if (e >= 0.58) {
+                // 0.63 is THE contract line, shared by three places that must agree: Landmass caps
+                // ordinary land below it, the renderer's stackLvl starts stacking at it, and the
+                // highland biomes begin here. When this said 0.58 the flat plateau interiors landed
+                // in the mountain band and half the world came out as hills and badlands.
+                if (e >= 0.63) {
                     // cold high ground ices over -- glacier tongues wherever the seed actually put
                     // its poleward ranges, whatever the lapse/latitude tuning does
-                    if (e >= 0.66 && t < 0.22) { return cast<int>(Biome.Glacier); }
+                    if (e >= 0.70 && t < 0.22) { return cast<int>(Biome.Glacier); }
                     if (t < 0.10) { return cast<int>(Biome.Glacier); }
                     if (m < 0.26) { return cast<int>(Biome.Badlands); }
                     if (t < 0.28) { return cast<int>(Biome.Mountain); }   // truly cold highland (glacier rims) = rock
@@ -1284,15 +1288,31 @@ public bundle Agents {
                 this.pdy = new float[this.nPlates]();
                 this.crad = new float[this.nPlates]();
 
-                this.buildPlates(g);
-                this.applyWorldShape();
-                this.addDetail();
+                // Elevation is built by the passes, through the interface: Landmass decides WHERE
+                // land is and leaves it flat, then (from the next slice) Tectonics deforms it.
+                WorldField* wf = new WorldField(w, h, this.seed) on heap;
+                wf.worldType = this.worldType;
+                wf.nContinents = this.nContinents;
+                wf.landRatio = this.landRatio;
+                Landmass* landPass = new Landmass(this.seed) on heap;
+                ElevationPass* pass = landPass;
+                pass.apply(wf);
+                mutable int ci = 0;
+                while (ci < n) {
+                    this.eb[ci] = wf.eb[ci];
+                    ci = ci + 1;
+                }
                 this.erode(3);
                 mutable float land = this.landRatio;
                 if (land < 0.0) {
                     land = this.defaultLand(this.worldType);
                 }
-                this.sea = this.computeSeaLevel(land);
+                // FIXED sea level, not a percentile. Landmass now decides the coastline directly
+                // (its fit loop targets the land area), so the shoreline is the 0.43 contour by
+                // construction. The percentile made the two fight each other: with most of the sea
+                // floor at one value the percentile snapped to it, and everything above -- the
+                // whole shelf -- came back as land.
+                this.sea = 0.43;
                 this.climate(g);
                 this.hydrology(g);
                 // hydrology reused wtr as its visited flag -- rebuild the distance-to-water field
@@ -1300,6 +1320,8 @@ public bundle Agents {
                 this.distToWater(24);
                 this.classifyAll(g);
 
+                delete landPass;
+                delete wf;
                 delete this.eb;
                 delete this.wtr;
                 delete this.dn;
