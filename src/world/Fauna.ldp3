@@ -1,0 +1,229 @@
+import System.IO.Console;
+
+// The animals, and what each one is. Seventeen species, all of them modelled and exported.
+//
+// Fauna is NOT people with different art, and it does not share their table or their pool. An agent
+// has a trade, a home, a store to carry things to and a community that decides things for it; a
+// beast has a herd, a range and a diet. Everything they appear to have in common -- a position, an
+// age, a death -- is common to everything alive, and copying the agent table to get it would have
+// dragged twenty-five fields of village life along with it.
+//
+// What a species IS, here, is: where it can live, what it eats, how it herds and what comes off it
+// when it is killed. That is enough for a hunter to have something to hunt and for the hunting to
+// be able to go too far, which is the point of the slice: a real population that can be wiped out.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public enum Species {
+            NoBeast,
+            // grazers and browsers -- what a hunter is after
+            Deer, Boar, Rabbit, Bison, Reindeer, Ibex, Camel, Antelope, Mammoth,
+            Sheep, Cattle, Horse, Seal,
+            // and what is after them
+            Wolf, Bear, Lion, Crocodile
+        }
+
+        public enum Diet {
+            NoDiet,
+            Grazer,          // lives on the grass; competes with nothing the people want
+            Browser,         // woods and scrub
+            Predator,        // eats the two above
+            Marine           // fish and shore
+        }
+
+        public class Beasts {
+            private static mutable String[] NAME;
+            private static mutable int[] DIET;
+            private static mutable int[] HERD;      // how many run together
+            private static mutable int[] MEAT;
+            private static mutable int[] HIDE;
+            private static mutable float[] PACE;    // cells a second
+            private static mutable float[] LIFE;    // seconds
+            private static mutable float[] SHY;     // cells at which it runs from a person
+            private static mutable int[] BAND;      // habitat band, tested by `livesIn`
+
+            // The habitat bands. A species belongs to one, and the band is a rule over biomes
+            // rather than a list per species: it is the same fact stated once, and adding a
+            // species is then choosing a band rather than re-deciding what tundra means.
+            public static fixed int B_TEMPERATE = 1;   // deciduous, laurel, rainforest, prairie, hills
+            public static fixed int B_GRASSLAND = 2;   // prairie, steppe, warm grass, savanna
+            public static fixed int B_COLD = 3;        // taiga, tundra, snowfield, glacier edge
+            public static fixed int B_MOUNTAIN = 4;    // hills, mountain, alpine meadow
+            public static fixed int B_DESERT = 5;      // hot desert, thorn scrub, badlands, oasis
+            public static fixed int B_TROPICAL = 6;    // tropical forests, mangrove
+            public static fixed int B_WETLAND = 7;     // marsh, swamp, bog, mangrove, river bank
+            public static fixed int B_SHORE = 8;       // beach, rocky shore, sea ice
+
+            onClassLoad {
+                int n = Species.count();
+                Beasts.NAME = new String[n]();
+                Beasts.DIET = new int[n]();
+                Beasts.HERD = new int[n]();
+                Beasts.MEAT = new int[n]();
+                Beasts.HIDE = new int[n]();
+                Beasts.PACE = new float[n]();
+                Beasts.LIFE = new float[n]();
+                Beasts.SHY = new float[n]();
+                Beasts.BAND = new int[n]();
+                mutable int i = 0;
+                while (i < n) {
+                    Beasts.NAME[i] = "NoBeast";
+                    Beasts.DIET[i] = cast<int>(Diet.NoDiet);
+                    i = i + 1;
+                }
+                int graze = cast<int>(Diet.Grazer);
+                int browse = cast<int>(Diet.Browser);
+                int hunt = cast<int>(Diet.Predator);
+                int sea = cast<int>(Diet.Marine);
+
+                // species, name, diet, herd, meat, hide, pace, life, shyness, band
+                Beasts.put(cast<int>(Species.Deer), "Deer", browse, 8, 30, 8, 2.2, 300.0, 14.0,
+                           Beasts.B_TEMPERATE);
+                Beasts.put(cast<int>(Species.Boar), "Boar", browse, 5, 26, 6, 1.9, 260.0, 9.0,
+                           Beasts.B_TEMPERATE);
+                Beasts.put(cast<int>(Species.Rabbit), "Rabbit", graze, 3, 5, 1, 2.6, 120.0, 8.0,
+                           Beasts.B_TEMPERATE);
+                Beasts.put(cast<int>(Species.Bison), "Bison", graze, 14, 70, 20, 1.7, 380.0, 12.0,
+                           Beasts.B_GRASSLAND);
+                Beasts.put(cast<int>(Species.Reindeer), "Reindeer", browse, 16, 34, 10, 2.1, 300.0, 15.0,
+                           Beasts.B_COLD);
+                Beasts.put(cast<int>(Species.Ibex), "Ibex", browse, 6, 22, 6, 2.3, 280.0, 16.0,
+                           Beasts.B_MOUNTAIN);
+                Beasts.put(cast<int>(Species.Camel), "Camel", browse, 5, 44, 14, 1.6, 420.0, 11.0,
+                           Beasts.B_DESERT);
+                Beasts.put(cast<int>(Species.Antelope), "Antelope", graze, 12, 24, 7, 2.8, 260.0, 18.0,
+                           Beasts.B_GRASSLAND);
+                Beasts.put(cast<int>(Species.Mammoth), "Mammoth", browse, 6, 160, 40, 1.3, 600.0, 10.0,
+                           Beasts.B_COLD);
+                Beasts.put(cast<int>(Species.Sheep), "Sheep", graze, 10, 18, 5, 1.5, 240.0, 10.0,
+                           Beasts.B_MOUNTAIN);
+                Beasts.put(cast<int>(Species.Cattle), "Cattle", graze, 10, 60, 18, 1.4, 340.0, 9.0,
+                           Beasts.B_GRASSLAND);
+                Beasts.put(cast<int>(Species.Horse), "Horse", graze, 8, 50, 15, 3.0, 380.0, 13.0,
+                           Beasts.B_GRASSLAND);
+                Beasts.put(cast<int>(Species.Seal), "Seal", sea, 9, 30, 9, 1.2, 280.0, 8.0,
+                           Beasts.B_SHORE);
+
+                Beasts.put(cast<int>(Species.Wolf), "Wolf", hunt, 6, 16, 6, 2.7, 280.0, 4.0,
+                           Beasts.B_COLD);
+                Beasts.put(cast<int>(Species.Bear), "Bear", hunt, 1, 60, 18, 2.0, 360.0, 3.0,
+                           Beasts.B_TEMPERATE);
+                Beasts.put(cast<int>(Species.Lion), "Lion", hunt, 4, 40, 12, 2.9, 300.0, 3.0,
+                           Beasts.B_GRASSLAND);
+                Beasts.put(cast<int>(Species.Crocodile), "Crocodile", hunt, 2, 46, 16, 1.1, 460.0, 3.0,
+                           Beasts.B_WETLAND);
+            }
+
+            private static method put(int ord, String name, int diet, int herd, int meat, int hide,
+                                      float pace, float life, float shy, int band) returns void {
+                Beasts.NAME[ord] = name;
+                Beasts.DIET[ord] = diet;
+                Beasts.HERD[ord] = herd;
+                Beasts.MEAT[ord] = meat;
+                Beasts.HIDE[ord] = hide;
+                Beasts.PACE[ord] = pace;
+                Beasts.LIFE[ord] = life;
+                Beasts.SHY[ord] = shy;
+                Beasts.BAND[ord] = band;
+            }
+
+            public static method count() returns int {
+                return Species.count();
+            }
+
+            public static method name(int ord) returns String {
+                return Beasts.NAME[ord];
+            }
+
+            public static method diet(int ord) returns int {
+                return Beasts.DIET[ord];
+            }
+
+            public static method herd(int ord) returns int {
+                return Beasts.HERD[ord];
+            }
+
+            public static method meat(int ord) returns int {
+                return Beasts.MEAT[ord];
+            }
+
+            public static method hide(int ord) returns int {
+                return Beasts.HIDE[ord];
+            }
+
+            public static method pace(int ord) returns float {
+                return Beasts.PACE[ord];
+            }
+
+            public static method life(int ord) returns float {
+                return Beasts.LIFE[ord];
+            }
+
+            public static method shy(int ord) returns float {
+                return Beasts.SHY[ord];
+            }
+
+            public static method isPrey(int ord) returns boolean {
+                return Beasts.DIET[ord] != cast<int>(Diet.Predator)
+                    && Beasts.DIET[ord] != cast<int>(Diet.NoDiet);
+            }
+
+            // Whether this species can live on this ground. Stated per BAND, so the seventeen
+            // species are seventeen choices of band rather than seventeen opinions about what
+            // counts as tundra.
+            public static method livesIn(int ord, int biome) returns boolean {
+                int band = Beasts.BAND[ord];
+                if (band == Beasts.B_TEMPERATE) {
+                    return biome == cast<int>(Biome.DeciduousForest)
+                        || biome == cast<int>(Biome.LaurelForest)
+                        || biome == cast<int>(Biome.TemperateRainforest)
+                        || biome == cast<int>(Biome.MedShrubland)
+                        || biome == cast<int>(Biome.Prairie)
+                        || biome == cast<int>(Biome.Hills);
+                }
+                if (band == Beasts.B_GRASSLAND) {
+                    return biome == cast<int>(Biome.Prairie)
+                        || biome == cast<int>(Biome.Steppe)
+                        || biome == cast<int>(Biome.WarmGrassland)
+                        || biome == cast<int>(Biome.Savanna);
+                }
+                if (band == Beasts.B_COLD) {
+                    return biome == cast<int>(Biome.Taiga)
+                        || biome == cast<int>(Biome.Tundra)
+                        || biome == cast<int>(Biome.Snowfield)
+                        || biome == cast<int>(Biome.ColdDesert);
+                }
+                if (band == Beasts.B_MOUNTAIN) {
+                    return biome == cast<int>(Biome.Hills)
+                        || biome == cast<int>(Biome.Mountain)
+                        || biome == cast<int>(Biome.AlpineMeadow);
+                }
+                if (band == Beasts.B_DESERT) {
+                    return biome == cast<int>(Biome.HotDesert)
+                        || biome == cast<int>(Biome.ThornScrub)
+                        || biome == cast<int>(Biome.Badlands)
+                        || biome == cast<int>(Biome.Oasis);
+                }
+                if (band == Beasts.B_TROPICAL) {
+                    return biome == cast<int>(Biome.TropicalRainforest)
+                        || biome == cast<int>(Biome.TropSeasonalForest)
+                        || biome == cast<int>(Biome.Mangrove);
+                }
+                if (band == Beasts.B_WETLAND) {
+                    return biome == cast<int>(Biome.Marsh)
+                        || biome == cast<int>(Biome.Swamp)
+                        || biome == cast<int>(Biome.Bog)
+                        || biome == cast<int>(Biome.Mangrove);
+                }
+                if (band == Beasts.B_SHORE) {
+                    return biome == cast<int>(Biome.Beach)
+                        || biome == cast<int>(Biome.RockyShore)
+                        || biome == cast<int>(Biome.SeaIce);
+                }
+                return false;
+            }
+        }
+    }
+}

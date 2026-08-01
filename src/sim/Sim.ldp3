@@ -10,6 +10,8 @@ import Agents.World.Goods;
 import Agents.World.BuildingKind;
 import Agents.World.Craft;
 import Agents.World.Builds;
+import Agents.World.Species;
+import Agents.World.Beasts;
 import System.Math.Math;
 import Agents.People.AgentTable;
 import Agents.People.Act;
@@ -81,6 +83,9 @@ public bundle Agents {
             private mutable int[] ctrade;
             // Everything standing or going up anywhere in the world.
             private mutable Buildings* town;
+            // And everything alive that is not a person.
+            private mutable Wildlife* wild;
+            private mutable long hunted;
             // Who claims each 16-cell block, or -1. Territory has no rule of its own yet -- that is
             // its own slice -- but it has an honest meaning already: a community's land is what its
             // people can reach and work, so the claim is a disk around where they actually are, and
@@ -223,6 +228,9 @@ public bundle Agents {
                 this.rate = 1.0;
                 this.owed = 0.0;
                 this.halted = false;
+                this.wild = new Wildlife(grid, 60000, worldSeed) on heap;
+                this.wild.seed(6);
+                this.hunted = 0;
                 this.crafted = 0;
                 this.stalled = 0;
                 this.raised = 0;
@@ -256,6 +264,11 @@ public bundle Agents {
                 delete this.ctrade;
                 delete this.town;
                 delete this.claim;
+                delete this.wild;
+            }
+
+            public method fauna() returns Wildlife* {
+                return this.wild;
             }
 
             // How far a community's claim reaches, in cells. Not a number picked to look right: it
@@ -308,6 +321,15 @@ public bundle Agents {
                     }
                 }
                 this.claimAge = this.claimAge + 1;
+                // Wildlife is told the same thing, once, and treats settled ground as no longer
+                // habitat. Fourteen thousand writes a second against a billion and a half distance
+                // tests a frame is the whole reason it is done this way round.
+                for (int by in 0..this.claimH) {
+                    for (int bx in 0..this.claimW) {
+                        this.wild.setSettled(bx, by, this.claim[by * this.claimW + bx] >= 0);
+                    }
+                }
+                this.wild.reindex();
                 return;
             }
 
@@ -475,6 +497,8 @@ public bundle Agents {
                         int jb = this.folk.jobOf(i);
                         if (jb == cast<int>(Job.Builder)) {
                             this.workBuild(i);
+                        } else if (jb == cast<int>(Job.Hunter)) {
+                            this.workHunt(i);
                         } else if (this.craftOfJob(jb) != cast<int>(Craft.NoCraft)) {
                             this.workCraft(i);
                         } else {
@@ -553,6 +577,15 @@ public bundle Agents {
                         this.workTicks = this.workTicks + 1;
                         if (this.folk.timerOf(i) >= this.workTime(this.harvestOf(this.folk.jobOf(i)))) {
                             this.chop(i);
+                        }
+                        i = i + 1;
+                        continue;
+                    }
+                    if (this.folk.actOf(i) == cast<int>(Act.Hunt)) {
+                        this.folk.addTimer(i, dt);
+                        this.workTicks = this.workTicks + 1;
+                        if (this.folk.timerOf(i) >= Simulation.STALK) {
+                            this.killDone(i);
                         }
                         i = i + 1;
                         continue;
@@ -951,7 +984,8 @@ public bundle Agents {
                 // measurement had a sixth of each village foraging while the larder was empty seventy
                 // million times over, and the world died out in nineteen generations with woodcutters
                 // still dutifully cutting wood.
-                if (job == cast<int>(Job.Forager) || job == cast<int>(Job.Fisher)) {
+                if (job == cast<int>(Job.Forager) || job == cast<int>(Job.Fisher)
+                    || job == cast<int>(Job.Hunter)) {
                     if (this.stores.foodOf(c) < this.cpop[c] * Simulation.LARDER) {
                         q = adults / 2;
                     }
@@ -1232,6 +1266,41 @@ public bundle Agents {
                         best = jb;
                     }
                 }
+                // Hunting is not a Harvest class -- its resource walks -- so it is asked for on its
+                // own terms: is there game within a hunter's range of where this village is.
+                int hb = cast<int>(Job.Hunter);
+                if (this.ctrade[h * nj + hb] < this.quotaFor(h, hb)) {
+                    int cbx = cast<int>(this.ccx[h]) / 16;
+                    int cby = cast<int>(this.ccy[h]) / 16;
+                    mutable boolean game = false;
+                    mutable int gy = 0 - Simulation.GAME_BLOCKS;
+                    while (gy <= Simulation.GAME_BLOCKS) {
+                        mutable int gx = 0 - Simulation.GAME_BLOCKS;
+                        while (gx <= Simulation.GAME_BLOCKS) {
+                            if (this.wild.preyInBlock(cbx + gx, cby + gy) > 0) {
+                                game = true;
+                                gx = Simulation.GAME_BLOCKS;
+                            }
+                            gx = gx + 1;
+                        }
+                        gy = gy + 1;
+                    }
+                    if (game) {
+                        // Meat is food, so a hungry village wants a hunter as badly as a forager.
+                        mutable int want = 12;
+                        int need = 10 + 40 * (this.cpop[h] + 1) / (this.stores.foodOf(h) + 1);
+                        if (need > want) {
+                            want = need;
+                        }
+                        if (want > 100) {
+                            want = 100;
+                        }
+                        if (want > bestScore) {
+                            bestScore = want;
+                            best = hb;
+                        }
+                    }
+                }
                 // A workshop with an empty bench beats going out to the field: it is nearer, the
                 // work is worth more, and somebody has already decided the village needs it.
                 for (int cr in 1..Craft.count()) {
@@ -1301,6 +1370,110 @@ public bundle Agents {
             private method busy(int i) returns boolean {
                 int a = this.folk.actOf(i);
                 return a != cast<int>(Act.Idle) && a != cast<int>(Act.Wander);
+            }
+
+            // Hunting. It is the one trade whose resource RUNS AWAY, and that is the whole difference
+            // from the five that stand still: a hunter walks to where the herds are, and the herds
+            // have already moved off settled ground, so he works the edge of his own community's
+            // land rather than the middle of it.
+            //
+            // He does not chase. A kill is a stalk that takes as long as felling a tree, and if the
+            // animal has wandered off in the meantime he has lost it -- which is exactly the shape
+            // the woodcutter has with a tree somebody else emptied.
+            public static float STALK = 20.0;            // seconds to bring one down
+            public static int GAME_BLOCKS = 5;           // 16-cell blocks a hunter will range over
+
+            private method workHunt(int i) returns void {
+                int h = this.folk.homeOf(i);
+                if (this.folk.carryAmtOf(i) > 0) {
+                    if (this.busy(i)) {
+                        return;
+                    }
+                    float hx = this.ccx[h];
+                    float hy = this.ccy[h];
+                    float dx = hx - this.folk.xAt(i);
+                    float dy = hy - this.folk.yAt(i);
+                    if (dx * dx + dy * dy < 4.0) {
+                        int amt = this.folk.carryAmtOf(i);
+                        this.stores.add(h, this.folk.carryKindOf(i), amt);
+                        this.carried = this.carried + cast<long>(amt);
+                        this.folk.setCarry(i, 0, 0);
+                    } else {
+                        this.folk.setTarget(i, cast<int>(hx), cast<int>(hy));
+                        this.folk.setAct(i, cast<int>(Act.WalkTo));
+                        return;
+                    }
+                }
+                if (this.busy(i)) {
+                    return;
+                }
+                // Something within arm's reach: stalk it.
+                int q = this.wild.preyNear(this.folk.xAt(i), this.folk.yAt(i), 3.0);
+                if (q >= 0) {
+                    this.folk.setTargetNode(i, q);
+                    this.folk.setAct(i, cast<int>(Act.Hunt));
+                    return;
+                }
+                // Otherwise walk toward the nearest block the census says holds game.
+                int cbx = cast<int>(this.folk.xAt(i)) / 16;
+                int cby = cast<int>(this.folk.yAt(i)) / 16;
+                mutable int r = 0;
+                while (r <= Simulation.GAME_BLOCKS) {
+                    mutable int dy = 0 - r;
+                    while (dy <= r) {
+                        mutable int dx = 0 - r;
+                        while (dx <= r) {
+                            if (dx * dx + dy * dy > r * r || (r > 0 && dx * dx + dy * dy < (r - 1) * (r - 1))) {
+                                dx = dx + 1;
+                                continue;
+                            }
+                            if (this.wild.preyInBlock(cbx + dx, cby + dy) > 0) {
+                                int tx = (cbx + dx) * 16 + 8;
+                                int ty = (cby + dy) * 16 + 8;
+                                if (this.walkable(tx, ty)) {
+                                    this.folk.setTarget(i, tx, ty);
+                                    this.folk.setAct(i, cast<int>(Act.WalkTo));
+                                    return;
+                                }
+                            }
+                            dx = dx + 1;
+                        }
+                        dy = dy + 1;
+                    }
+                    r = r + 1;
+                }
+                this.noWork = this.noWork + 1;
+                this.folk.setJob(i, cast<int>(Job.Idle));
+                this.folk.setThinkAt(i, this.tick + 30);
+                return;
+            }
+
+            // The stalk paid off, or it did not. `take` says which species it was, so the meat and
+            // the hide come off the animal's own table rather than out of a number here.
+            private method killDone(int i) returns void {
+                int q = this.folk.targetNodeOf(i);
+                this.folk.setTargetNode(i, 0 - 1);
+                this.folk.setAct(i, cast<int>(Act.Idle));
+                if (q < 0 || !this.wild.aliveAt(q)) {
+                    return;                               // it wandered off; that is hunting
+                }
+                float dx = this.wild.xAt(q) - this.folk.xAt(i);
+                float dy = this.wild.yAt(q) - this.folk.yAt(i);
+                if (dx * dx + dy * dy > 36.0) {
+                    return;                               // out of reach by the time it mattered
+                }
+                int sp = this.wild.take(q);
+                if (sp <= 0) {
+                    return;
+                }
+                int h = this.folk.homeOf(i);
+                // A carrier holds one good, so the meat goes home on his back and the hide is put
+                // straight into the store where he stands -- he is at the kill, not at the village,
+                // but a skin is light and a carcass is not.
+                this.stores.add(h, cast<int>(Good.Hide), Beasts.hide(sp));
+                this.folk.setCarry(i, cast<int>(Good.RawMeat), Beasts.meat(sp));
+                this.hunted = this.hunted + 1;
+                return;
             }
 
             // Raising a building. The builder walks to the site and works; when the last hour goes in
@@ -1521,6 +1694,8 @@ public bundle Agents {
                     this.censusDue = this.clock + 1.0;
                 }
                 this.g.surface().regrow(dt);
+                this.wild.step(dt);
+                this.wild.prowl(dt);
                 this.live(dt);
                 this.think();
                 this.move(dt);
@@ -1600,7 +1775,7 @@ public bundle Agents {
                     }
                     k = k + 1;
                 }
-                System.IO.Console.println($"  out of doors: wood {byTrade[cast<int>(Job.Woodcutter)]} | forage {byTrade[cast<int>(Job.Forager)]} | quarry {byTrade[cast<int>(Job.Quarrier)]} | mine {byTrade[cast<int>(Job.Miner)]} | fish {byTrade[cast<int>(Job.Fisher)]}");
+                System.IO.Console.println($"  out of doors: wood {byTrade[cast<int>(Job.Woodcutter)]} | forage {byTrade[cast<int>(Job.Forager)]} | quarry {byTrade[cast<int>(Job.Quarrier)]} | mine {byTrade[cast<int>(Job.Miner)]} | fish {byTrade[cast<int>(Job.Fisher)]} | hunt {byTrade[cast<int>(Job.Hunter)]}");
                 System.IO.Console.println($"  indoors: sawyer {byTrade[cast<int>(Job.Sawyer)]} | smith {byTrade[cast<int>(Job.Smith)]} | baker {byTrade[cast<int>(Job.Baker)]} | weaver {byTrade[cast<int>(Job.Weaver)]} | builder {byTrade[cast<int>(Job.Builder)]} | idle {byTrade[cast<int>(Job.Idle)]}");
                 delete byTrade;
                 // What the villages built, and whether the workshops in them ever run. A building
@@ -1618,6 +1793,8 @@ public bundle Agents {
                 // goes down is being liquidated, and this is where that shows.
                 NodeField* nf = this.g.surface();
                 System.IO.Console.println($"  left standing: timber {nf.totalOf(1)} | forage {nf.totalOf(2)} | quarry {nf.totalOf(3)} | ore {nf.totalOf(4)} | fishing {nf.totalOf(5)}");
+                System.IO.Console.println($"  hunt: {this.hunted} animals brought down by people");
+                this.wild.report();
                 return;
             }
         }

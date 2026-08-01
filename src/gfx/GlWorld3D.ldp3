@@ -12,6 +12,9 @@ import Agents.World.BuildingKind;
 import Agents.World.Builds;
 import Agents.Sim.Buildings;
 import Agents.Sim.Simulation;
+import Agents.Sim.Wildlife;
+import Agents.World.Species;
+import Agents.World.Beasts;
 import System.Memory;
 
 // True-3D GL renderer for the world, two-level LOD:
@@ -46,6 +49,16 @@ public bundle Agents {
             private mutable address obuf;
             private mutable Simulation* sim;
             private mutable boolean haveSim;
+            // Animals get the agents' treatment, not the buildings': they move, so their buffer is
+            // rebuilt every frame. They are NOT tinted -- a deer belongs to nobody.
+            private mutable int fvao;
+            private mutable int fvbo;
+            private mutable int fnverts;
+            private mutable int fcap;
+            private mutable address fbuf;
+            private mutable MeshAtlas* beastArt;
+            private mutable int[] speciesModel;
+            private mutable boolean haveFauna;
             private mutable boolean showTerritory;
             private mutable int bakedClaim;
             private mutable int uFog;
@@ -225,6 +238,14 @@ public bundle Agents {
                 this.haveSim = false;
                 this.showTerritory = true;
                 this.bakedClaim = 0 - 1;
+                this.fvao = gl.genVertexArray();
+                this.fvbo = gl.genBuffer();
+                this.setupVao(this.fvao, this.fvbo);
+                this.fnverts = 0;
+                this.fcap = 0;
+                this.fbuf = cast<address>(0);
+                this.speciesModel = new int[Species.count()]();
+                this.haveFauna = false;
                 this.projM = new GlMat4() on heap;
                 this.viewM = new GlMat4() on heap;
                 this.tileTop = new float[1]();
@@ -1991,6 +2012,99 @@ public bundle Agents {
                 return;
             }
 
+            // Bind the animals. Same contract as the buildings: a species whose mesh the atlas
+            // cannot resolve is caught here, by name, and not as an invisible herd.
+            public method setFauna(MeshAtlas* art) returns void {
+                this.beastArt = art;
+                for (int s in 0..Species.count()) {
+                    this.speciesModel[s] = 0 - 1;
+                }
+                for (int s in 1..Species.count()) {
+                    int ord = art.ordOf(Beasts.name(s));
+                    this.speciesModel[s] = ord;
+                    if (ord < 0) {
+                        System.IO.Console.println($"GlWorld3D: no mesh for {Beasts.name(s)}");
+                    }
+                }
+                this.haveFauna = true;
+                return;
+            }
+
+            // Rebuild the animal buffer: everything inside the detail window. Per frame, like the
+            // people, because a herd moves. Nothing is tinted -- a deer belongs to nobody.
+            private method bakeFauna() returns void {
+                this.fnverts = 0;
+                if (!this.haveFauna || !this.haveSim) {
+                    return;
+                }
+                if (!this.detailOn || !this.haveDetail) {
+                    return;
+                }
+                Wildlife* w = this.sim.fauna();
+                int x0 = this.detX0;
+                int y0 = this.detY0;
+                int x1 = x0 + this.detW;
+                int y1 = y0 + this.detH;
+                int n = w.limit();
+                mutable int tris = 0;
+                for (int i in 0..n) {
+                    if (!w.aliveAt(i)) {
+                        continue;
+                    }
+                    int ax = cast<int>(w.xAt(i));
+                    int ay = cast<int>(w.yAt(i));
+                    if (ax < x0 || ay < y0 || ax >= x1 || ay >= y1) {
+                        continue;
+                    }
+                    int m = this.speciesModel[w.kindOf(i)];
+                    if (m >= 0) {
+                        tris = tris + this.beastArt.triCount[m];
+                    }
+                }
+                if (tris == 0) {
+                    return;
+                }
+                if (tris > this.fcap) {
+                    if (this.fcap > 0) {
+                        Memory.free(this.fbuf);
+                    }
+                    this.fcap = tris * 2;
+                    this.fbuf = Memory.alloc(cast<long>(this.fcap * 27 * 4 + 4));
+                }
+                mutable int wr = 0;
+                for (int i in 0..n) {
+                    if (!w.aliveAt(i)) {
+                        continue;
+                    }
+                    float fx = w.xAt(i);
+                    float fy = w.yAt(i);
+                    int ax = cast<int>(fx);
+                    int ay = cast<int>(fy);
+                    if (ax < x0 || ay < y0 || ax >= x1 || ay >= y1) {
+                        continue;
+                    }
+                    int m = this.speciesModel[w.kindOf(i)];
+                    if (m < 0) {
+                        continue;
+                    }
+                    int ord = this.grid.biomeAt(ax, ay);
+                    int lvl = this.stackLvl(ord, ax, ay);
+                    float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
+                    float topZ = this.tileTop[ord] + zOff;
+                    wr = this.emitTinted(this.beastArt, this.fbuf, wr, m,
+                                         fx * 2.0, fy * 2.0, topZ, 0.34,
+                                         1.0, 1.0, 1.0,
+                                         this.shadeAt(ax, ay, 1, lvl));
+                }
+                this.gl.bindVertexArray(this.fvao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.fvbo);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4),
+                                   cast<long>(this.fbuf), GL.DYNAMIC_DRAW);
+                this.gl.bindVertexArray(0);
+                this.fnverts = tris * 3;
+                return;
+            }
+
             // Hand over the simulation, which is what knows who holds what ground.
             public method setSim(Simulation* s) returns void {
                 this.sim = s;
@@ -2222,13 +2336,14 @@ public bundle Agents {
                     guard = guard + 1;
                 }
                 this.bakeAgents();
+                this.bakeFauna();
                 if (this.haveTown && this.bakedTown != this.town.count()) {
                     this.bakeTown();
                 }
                 if (this.haveSim && this.bakedClaim != this.sim.claimVersion()) {
                     this.bakeOverlay();
                 }
-                System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.dnverts / 3} terrain tris, {this.anverts / 3} agent tris, {this.bnverts / 3} building tris");
+                System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.dnverts / 3} terrain tris, {this.anverts / 3} agent tris, {this.bnverts / 3} building tris, {this.fnverts / 3} animal tris");
                 return;
             }
 
@@ -2425,6 +2540,7 @@ public bundle Agents {
                     this.stepBake();
                 }
                 this.bakeAgents();
+                this.bakeFauna();
                 if (this.haveTown && this.bakedTown != this.town.count()) {
                     this.bakeTown();
                 }
@@ -2483,6 +2599,10 @@ public bundle Agents {
                     this.gl.bindVertexArray(this.bvao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.bnverts);
                 }
+                if (this.fnverts > 0) {
+                    this.gl.bindVertexArray(this.fvao);
+                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.fnverts);
+                }
                 if (this.anverts > 0) {
                     this.gl.bindVertexArray(this.avao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.anverts);
@@ -2496,7 +2616,7 @@ public bundle Agents {
                     Wgl.glDepthMask(cast<byte>(0));
                     this.gl.uniform1f(this.uFlat, 1.0);
                     this.gl.bindVertexArray(this.ovao);
-                    this.gl.uniform1f(this.uAlpha, 0.28);
+                    this.gl.uniform1f(this.uAlpha, 0.15);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.oedge);
                     this.gl.uniform1f(this.uAlpha, 0.85);
                     Wgl.glDrawArrays(GL.TRIANGLES, this.oedge, this.onverts - this.oedge);

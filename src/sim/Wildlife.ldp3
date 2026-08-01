@@ -1,0 +1,663 @@
+import System.IO.Console;
+import Agents.World.Grid;
+import Agents.World.Biome;
+import Agents.World.Biomes;
+import Agents.World.Species;
+import Agents.World.Beasts;
+import Agents.World.Diet;
+import Agents.World.LandMath;
+import System.Math.Math;
+
+// Every animal alive, in its own table with its own pool.
+//
+// The design decided this: fauna does not share the agents' table, because a beast is not a person
+// with different art. It has no trade, no home community, no store to carry to and nothing anybody
+// decides for it -- and it does have a herd, a range and a diet, which no agent has. What they share
+// is a position and a death, which everything alive shares.
+//
+// The population is REAL and can be wiped out. Nothing respawns from nowhere: a species breeds from
+// the animals that are alive, against a ceiling set by how much of its own habitat the world has, so
+// hunting one out is permanent and hunting one hard is felt.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        public enum Wild {
+            Graze,           // standing about, eating, drifting with the herd
+            Roam,            // moving to a new patch
+            Flee,            // a person got too close
+            Stalk            // a predator closing on prey
+        }
+
+        public class Wildlife {
+            private mutable Grid* g;
+            private mutable int seed;
+            private mutable int cap;
+            private mutable int n;             // rows in use (high-water mark)
+            private mutable int live;
+            private mutable float[] px;
+            private mutable float[] py;
+            private mutable float[] hx;        // the middle of its range
+            private mutable float[] hy;
+            private mutable float[] tx;        // where it is going
+            private mutable float[] ty;
+            private mutable byte[] kind;
+            private mutable byte[] state;
+            private mutable byte[] dir;
+            private mutable float[] age;
+            private mutable float[] span;
+            private mutable float[] timer;
+            private mutable boolean[] alive;
+            private mutable int[] freeSlot;
+            private mutable int freeTop;
+            // Where the animals are, coarsely: a count per 16-cell block per species-group, so a
+            // hunter asks "is there anything to hunt near here" with a lookup. Rebuilt on the slow
+            // clock, like everything else that is a question about a PLACE rather than a person.
+            private mutable int[] blockPrey;
+            private mutable int bw;
+            private mutable int bh;
+            // Which blocks people have taken. Wildlife does not flee individuals -- thirty thousand
+            // animals against fifty thousand people is a billion and a half distance tests a frame,
+            // and no amount of cleverness makes that a good idea. What it does instead is truer and
+            // costs ONE lookup: settled ground stops being habitat. Game thins out where villages
+            // spread and stays thick beyond them, so a hunter walks to the edge of his own land --
+            // which is what hunting is.
+            private mutable boolean[] settled;
+            private mutable int[] bstart;      // bw*bh+1: where each block's prey begin in `order`
+            private mutable int[] bucket;      // the counting sort's working cursor
+            private mutable int[] order;       // prey row indices, in block order
+            // How many of each species are alive, and the ceiling its habitat sets. Both are what
+            // makes a population a population instead of a spawner.
+            private mutable int[] headcount;
+            private mutable int[] ceiling;
+            private mutable long[] born;
+            private mutable long[] eaten;      // taken by predators
+            private mutable long[] killed;     // taken by people
+            private mutable long[] aged;
+            private mutable int cursor;
+            private mutable int budget;
+
+            public constructor Wildlife(Grid* grid, int capacity, int worldSeed) {
+                this.g = grid;
+                this.seed = worldSeed;
+                this.cap = capacity;
+                this.n = 0;
+                this.live = 0;
+                this.px = new float[capacity]();
+                this.py = new float[capacity]();
+                this.hx = new float[capacity]();
+                this.hy = new float[capacity]();
+                this.tx = new float[capacity]();
+                this.ty = new float[capacity]();
+                this.kind = new byte[capacity]();
+                this.state = new byte[capacity]();
+                this.dir = new byte[capacity]();
+                this.age = new float[capacity]();
+                this.span = new float[capacity]();
+                this.timer = new float[capacity]();
+                this.alive = new boolean[capacity]();
+                this.freeSlot = new int[capacity]();
+                this.freeTop = 0;
+                this.bw = (grid.width() + 15) / 16;
+                this.bh = (grid.height() + 15) / 16;
+                this.blockPrey = new int[this.bw * this.bh]();
+                this.settled = new boolean[this.bw * this.bh]();
+                this.bstart = new int[this.bw * this.bh + 1]();
+                this.bucket = new int[this.bw * this.bh + 1]();
+                this.order = new int[capacity]();
+                this.headcount = new int[Species.count()]();
+                this.ceiling = new int[Species.count()]();
+                this.born = new long[Species.count()]();
+                this.eaten = new long[Species.count()]();
+                this.killed = new long[Species.count()]();
+                this.aged = new long[Species.count()]();
+                this.cursor = 0;
+                this.budget = 1500;
+            }
+
+            public destructor ~Wildlife() returns void {
+                delete this.px;
+                delete this.py;
+                delete this.hx;
+                delete this.hy;
+                delete this.tx;
+                delete this.ty;
+                delete this.kind;
+                delete this.state;
+                delete this.dir;
+                delete this.age;
+                delete this.span;
+                delete this.timer;
+                delete this.alive;
+                delete this.freeSlot;
+                delete this.blockPrey;
+                delete this.settled;
+                delete this.bstart;
+                delete this.bucket;
+                delete this.order;
+                delete this.headcount;
+                delete this.ceiling;
+                delete this.born;
+                delete this.eaten;
+                delete this.killed;
+                delete this.aged;
+            }
+
+            public method count() returns int {
+                return this.live;
+            }
+
+            public method limit() returns int {
+                return this.n;
+            }
+
+            public method aliveAt(int i) returns boolean {
+                return this.alive[i];
+            }
+
+            public method xAt(int i) returns float {
+                return this.px[i];
+            }
+
+            public method yAt(int i) returns float {
+                return this.py[i];
+            }
+
+            public method kindOf(int i) returns int {
+                return cast<int>(this.kind[i]) & 255;
+            }
+
+            public method dirOf(int i) returns int {
+                return cast<int>(this.dir[i]) & 255;
+            }
+
+            public method headOf(int sp) returns int {
+                return this.headcount[sp];
+            }
+
+            public method ceilingOf(int sp) returns int {
+                return this.ceiling[sp];
+            }
+
+            public method bornOf(int sp) returns long {
+                return this.born[sp];
+            }
+
+            public method killedOf(int sp) returns long {
+                return this.killed[sp];
+            }
+
+            public method eatenOf(int sp) returns long {
+                return this.eaten[sp];
+            }
+
+            public method agedOf(int sp) returns long {
+                return this.aged[sp];
+            }
+
+            private method spawn(float x, float y, int sp, int salt) returns int {
+                mutable int i = 0 - 1;
+                if (this.freeTop > 0) {
+                    this.freeTop = this.freeTop - 1;
+                    i = this.freeSlot[this.freeTop];
+                } else {
+                    if (this.n >= this.cap) {
+                        return 0 - 1;
+                    }
+                    i = this.n;
+                    this.n = this.n + 1;
+                }
+                this.px[i] = x;
+                this.py[i] = y;
+                this.hx[i] = x;
+                this.hy[i] = y;
+                this.tx[i] = x;
+                this.ty[i] = y;
+                this.kind[i] = cast<byte>(sp);
+                this.state[i] = cast<byte>(cast<int>(Wild.Graze));
+                this.dir[i] = cast<byte>(cast<int>(LandMath.hash01(this.seed ^ 0x2AD1, salt, 3) * 4.0));
+                this.age[i] = 0.0;
+                float v = LandMath.hash01(this.seed ^ 0x77C5, salt, 7);
+                this.span[i] = Beasts.life(sp) * (0.75 + v * 0.5);
+                this.timer[i] = 0.0;
+                this.alive[i] = true;
+                this.live = this.live + 1;
+                this.headcount[sp] = this.headcount[sp] + 1;
+                return i;
+            }
+
+            public method kill(int i) returns void {
+                if (!this.alive[i]) {
+                    return;
+                }
+                this.alive[i] = false;
+                this.live = this.live - 1;
+                int sp = this.kindOf(i);
+                this.headcount[sp] = this.headcount[sp] - 1;
+                this.freeSlot[this.freeTop] = i;
+                this.freeTop = this.freeTop + 1;
+                return;
+            }
+
+            // ---- seeding ----
+
+            // Count the ground each species can live on, then put animals on it in herds. The count
+            // is what the ceiling is FOR: a species with a sliver of habitat has a small population
+            // it cannot exceed and can lose, and one with a continent has a large one. That is the
+            // whole difference between a population and a spawn table.
+            public method seed(int perThousandCells) returns int {
+                int w = this.g.width();
+                int h = this.g.height();
+                int ns = Species.count();
+                for (int sp in 0..ns) {
+                    this.ceiling[sp] = 0;
+                }
+                // Sample every eighth cell in each direction -- a sixty-fourth of the world, which
+                // for a habitat count is plenty and is sixty-four times cheaper.
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        int b = this.g.biomeAt(x, y);
+                        for (int sp in 1..ns) {
+                            if (Beasts.livesIn(sp, b)) {
+                                this.ceiling[sp] = this.ceiling[sp] + 64;
+                            }
+                        }
+                        x = x + 8;
+                    }
+                    y = y + 8;
+                }
+                for (int sp in 1..ns) {
+                    mutable int c = this.ceiling[sp] * perThousandCells / 1000;
+                    // A predator lives off the herds, so there are far fewer of it than the ground
+                    // alone would allow. Wolves outnumbering deer is not a food chain.
+                    if (Beasts.diet(sp) == cast<int>(Diet.Predator)) {
+                        c = c / 12;
+                    }
+                    if (c > this.cap / 6) {
+                        c = this.cap / 6;
+                    }
+                    // A species with a sliver of habitat still gets a viable founding population.
+                    // The first run gave the crocodile a ceiling of six, which meant three animals
+                    // wanted, eighty-eight darts thrown at a world one per cent of which is marsh,
+                    // and a species that read "0 of 6" in the census -- extinct without ever having
+                    // existed. Being absent from a world is a legitimate result; being declared
+                    // extinct at birth by the arithmetic is not.
+                    if (c > 0 && c < 24) {
+                        c = 24;
+                    }
+                    this.ceiling[sp] = c;
+                }
+                // Scatter herds: find a cell the species can live on, then drop a herd around it.
+                mutable int made = 0;
+                mutable int salt = 0;
+                for (int sp in 1..ns) {
+                    int want = this.ceiling[sp] / 2;          // start at half the ceiling, and grow
+                    mutable int placed = 0;
+                    mutable int tries = 0;
+                    // Enough darts that a rare habitat is actually found. A thousand tries at a
+                    // world one per cent of which is marsh is a near certainty; eighty-eight was a
+                    // coin toss, and the coin came up crocodile-less.
+                    while (placed < want && tries < want * 40 + 2000) {
+                        tries = tries + 1;
+                        salt = salt + 1;
+                        int cx = cast<int>(LandMath.hash01(this.seed ^ 0x51F3, salt, 11) * cast<float>(w - 2)) + 1;
+                        int cy = cast<int>(LandMath.hash01(this.seed ^ 0x6B21, salt, 13) * cast<float>(h - 2)) + 1;
+                        if (!Beasts.livesIn(sp, this.g.biomeAt(cx, cy))) {
+                            continue;
+                        }
+                        int herd = Beasts.herd(sp);
+                        mutable int k = 0;
+                        while (k < herd && placed < want) {
+                            salt = salt + 1;
+                            float a = LandMath.hash01(this.seed ^ 0x1C77, salt, 17) * 6.2831853;
+                            float d = LandMath.hash01(this.seed ^ 0x3E19, salt, 19) * 6.0;
+                            int ax = cx + cast<int>(LandMath.cos(a) * d);
+                            int ay = cy + cast<int>(LandMath.sin(a) * d);
+                            if (ax < 1 || ay < 1 || ax >= w - 1 || ay >= h - 1) {
+                                k = k + 1;
+                                continue;
+                            }
+                            if (!Beasts.livesIn(sp, this.g.biomeAt(ax, ay))) {
+                                k = k + 1;
+                                continue;
+                            }
+                            int b = this.spawn(cast<float>(ax) + 0.5, cast<float>(ay) + 0.5, sp, salt);
+                            if (b >= 0) {
+                                this.age[b] = LandMath.hash01(this.seed ^ 0x4A05, salt, 23) * this.span[b];
+                                placed = placed + 1;
+                                made = made + 1;
+                            }
+                            k = k + 1;
+                        }
+                    }
+                }
+                this.reindex();
+                return made;
+            }
+
+            // ---- the coarse map, for anybody asking about a PLACE ----
+
+            // Prey, bucketed by block, with a counting sort -- the same shape NodeField uses and for
+            // the same reason. The count alone was not enough: it told a hunter there was game
+            // nearby and then made him find it by walking the whole table, and a predator doing that
+            // fifteen hundred times a step is ninety million reads for one frame of wolves eating.
+            //
+            // After the prefix sum `start[b]` is the BEGINNING of bucket b, so the row index is read
+            // off before the fill turns it into a cursor. That is the mistake the node field made
+            // once already and it is written down here so it is not made a third time.
+            public method reindex() returns void {
+                int nb = this.bw * this.bh;
+                for (int b in 0..nb) {
+                    this.blockPrey[b] = 0;
+                }
+                for (int b in 0..nb + 1) {
+                    this.bucket[b] = 0;
+                }
+                for (int i in 0..this.n) {
+                    if (!this.alive[i] || !Beasts.isPrey(this.kindOf(i))) {
+                        continue;
+                    }
+                    int at = this.blockOf(i);
+                    if (at < 0) {
+                        continue;
+                    }
+                    this.blockPrey[at] = this.blockPrey[at] + 1;
+                    this.bucket[at + 1] = this.bucket[at + 1] + 1;
+                }
+                mutable int run = 0;
+                for (int b in 0..nb + 1) {
+                    run = run + this.bucket[b];
+                    this.bucket[b] = run;
+                }
+                for (int b in 0..nb) {
+                    this.bstart[b] = this.bucket[b];
+                }
+                this.bstart[nb] = run;
+                for (int i in 0..this.n) {
+                    if (!this.alive[i] || !Beasts.isPrey(this.kindOf(i))) {
+                        continue;
+                    }
+                    int at = this.blockOf(i);
+                    if (at < 0) {
+                        continue;
+                    }
+                    this.order[this.bucket[at]] = i;
+                    this.bucket[at] = this.bucket[at] + 1;
+                }
+                return;
+            }
+
+            private method blockOf(int i) returns int {
+                int bx = cast<int>(this.px[i]) / 16;
+                int by = cast<int>(this.py[i]) / 16;
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return 0 - 1;
+                }
+                return by * this.bw + bx;
+            }
+
+            public method setSettled(int bx, int by, boolean taken) returns void {
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return;
+                }
+                this.settled[by * this.bw + bx] = taken;
+                return;
+            }
+
+            // Ground this species will stand on: its own habitat, and nobody's village.
+            private method habitat(int sp, int x, int y) returns boolean {
+                if (x < 1 || y < 1 || x >= this.g.width() - 1 || y >= this.g.height() - 1) {
+                    return false;
+                }
+                if (!Beasts.livesIn(sp, this.g.biomeAt(x, y))) {
+                    return false;
+                }
+                return !this.settled[(y / 16) * this.bw + (x / 16)];
+            }
+
+            public method preyInBlock(int bx, int by) returns int {
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return 0;
+                }
+                return this.blockPrey[by * this.bw + bx];
+            }
+
+            public method blockCols() returns int {
+                return this.bw;
+            }
+
+            public method blockRows() returns int {
+                return this.bh;
+            }
+
+            // The nearest thing worth killing within `reach` cells of (x, y), or -1. Only the blocks
+            // the search circle touches are walked, plus one block of margin because the index is
+            // rebuilt once a second and animals keep moving in between -- and the real distance is
+            // checked anyway, so a stale bucket costs a test and never a wrong answer.
+            public method preyNear(float x, float y, float reach) returns int {
+                int b0x = cast<int>(x - reach) / 16 - 1;
+                int b1x = cast<int>(x + reach) / 16 + 1;
+                int b0y = cast<int>(y - reach) / 16 - 1;
+                int b1y = cast<int>(y + reach) / 16 + 1;
+                mutable int best = 0 - 1;
+                mutable float bestD = reach * reach;
+                mutable int by = b0y;
+                while (by <= b1y) {
+                    if (by < 0 || by >= this.bh) {
+                        by = by + 1;
+                        continue;
+                    }
+                    mutable int bx = b0x;
+                    while (bx <= b1x) {
+                        if (bx < 0 || bx >= this.bw) {
+                            bx = bx + 1;
+                            continue;
+                        }
+                        int at = by * this.bw + bx;
+                        mutable int k = this.bstart[at];
+                        int end = this.bstart[at + 1];
+                        while (k < end) {
+                            int i = this.order[k];
+                            k = k + 1;
+                            if (!this.alive[i]) {
+                                continue;
+                            }
+                            float dx = this.px[i] - x;
+                            float dy = this.py[i] - y;
+                            float d = dx * dx + dy * dy;
+                            if (d < bestD) {
+                                bestD = d;
+                                best = i;
+                            }
+                        }
+                        bx = bx + 1;
+                    }
+                    by = by + 1;
+                }
+                return best;
+            }
+
+            // Somebody killed it. Says what came off it, so the caller can put meat and hide in a
+            // store without knowing what a Deer is.
+            public method take(int i) returns int {
+                if (!this.alive[i]) {
+                    return 0;
+                }
+                int sp = this.kindOf(i);
+                this.killed[sp] = this.killed[sp] + 1;
+                this.kill(i);
+                return sp;
+            }
+
+            // ---- the clock ----
+
+            public method step(float dt) returns void {
+                this.live(dt);
+                this.move(dt);
+                return;
+            }
+
+            // Ageing, dying and breeding. Unbudgeted, like the people's: a beast off screen must age
+            // at exactly the rate of one on it or it stops being one world.
+            private method live(float dt) returns void {
+                for (int i in 0..this.n) {
+                    if (!this.alive[i]) {
+                        continue;
+                    }
+                    this.age[i] = this.age[i] + dt;
+                    int sp = this.kindOf(i);
+                    if (this.age[i] >= this.span[i]) {
+                        this.aged[sp] = this.aged[sp] + 1;
+                        this.kill(i);
+                        continue;
+                    }
+                    // Breeding, as a logistic against the habitat's ceiling: the emptier the range,
+                    // the faster it fills, and at the ceiling it stops. A species hunted to nothing
+                    // has nothing left to breed FROM, which is what makes extinction possible.
+                    if (this.age[i] < this.span[i] * 0.25) {
+                        continue;
+                    }
+                    int cap = this.ceiling[sp];
+                    if (cap <= 0 || this.headcount[sp] >= cap) {
+                        continue;
+                    }
+                    float room = 1.0 - cast<float>(this.headcount[sp]) / cast<float>(cap);
+                    float p = Wildlife.FERTILITY * dt * room;
+                    if (LandMath.hash01(this.seed ^ 0x5D3B, i, cast<int>(this.age[i] * 20.0)) < p) {
+                        int c = this.spawn(this.px[i], this.py[i], sp, i + this.headcount[sp]);
+                        if (c >= 0) {
+                            this.born[sp] = this.born[sp] + 1;
+                        }
+                    }
+                }
+                return;
+            }
+
+            public static float FERTILITY = 0.02;      // chance a second in an empty range
+            public static float ROAM = 14.0;           // how far it drifts from the middle of its range
+
+            private method move(float dt) returns void {
+                for (int i in 0..this.n) {
+                    if (!this.alive[i]) {
+                        continue;
+                    }
+                    int sp = this.kindOf(i);
+                    mutable float pace = Beasts.pace(sp);
+                    // Standing on ground somebody has settled: leave, at a run. This is the whole
+                    // of the flee behaviour and it costs one array read, where fleeing individual
+                    // people would have cost a billion distance tests a frame.
+                    if (this.settled[(cast<int>(this.py[i]) / 16) * this.bw + (cast<int>(this.px[i]) / 16)]) {
+                        this.state[i] = cast<byte>(cast<int>(Wild.Flee));
+                        pace = pace * 1.6;
+                        if (this.habitat(sp, cast<int>(this.hx[i]), cast<int>(this.hy[i]))) {
+                            this.tx[i] = this.hx[i];
+                            this.ty[i] = this.hy[i];
+                        } else {
+                            // Its range has been taken too. Pick a new middle further out and take
+                            // the herd with it -- which is how game recedes ahead of settlement.
+                            int t = cast<int>(this.age[i] * 2.0);
+                            float a = LandMath.hash01(this.seed ^ 0x18C3, i, t) * 6.2831853;
+                            this.hx[i] = this.px[i] + LandMath.cos(a) * 40.0;
+                            this.hy[i] = this.py[i] + LandMath.sin(a) * 40.0;
+                            this.tx[i] = this.hx[i];
+                            this.ty[i] = this.hy[i];
+                        }
+                    }
+                    float dx = this.tx[i] - this.px[i];
+                    float dy = this.ty[i] - this.py[i];
+                    float d2 = dx * dx + dy * dy;
+                    if (d2 < 0.25) {
+                        // Arrived. Pick somewhere else inside the range, or drift the range itself
+                        // a little so a herd is never pinned to the spot it was born on.
+                        this.state[i] = cast<byte>(cast<int>(Wild.Graze));
+                        this.timer[i] = this.timer[i] + dt;
+                        int t = cast<int>(this.timer[i] * 4.0);
+                        float a = LandMath.hash01(this.seed ^ 0x2B8D, i, t) * 6.2831853;
+                        float d = 2.0 + LandMath.hash01(this.seed ^ 0x64C1, i, t) * Wildlife.ROAM;
+                        mutable float nx = this.hx[i] + LandMath.cos(a) * d;
+                        mutable float ny = this.hy[i] + LandMath.sin(a) * d;
+                        if (!this.habitat(sp, cast<int>(nx), cast<int>(ny))) {
+                            nx = this.hx[i];
+                            ny = this.hy[i];
+                        }
+                        this.tx[i] = nx;
+                        this.ty[i] = ny;
+                        continue;
+                    }
+                    float dist = cast<float>(Math.sqrt(cast<double>(d2)));
+                    float ux = dx / dist;
+                    float uy = dy / dist;
+                    float nx = this.px[i] + ux * pace * dt;
+                    float ny = this.py[i] + uy * pace * dt;
+                    // An animal stays on ground it can live on, which does the job the agents' walk
+                    // test does and also keeps a herd inside its own biome without a fence.
+                    if (!this.habitat(sp, cast<int>(nx), cast<int>(ny))) {
+                        this.tx[i] = this.hx[i];
+                        this.ty[i] = this.hy[i];
+                        continue;
+                    }
+                    this.px[i] = nx;
+                    this.py[i] = ny;
+                    if (ux >= 0.0 && uy >= 0.0) {
+                        this.dir[i] = cast<byte>(1);
+                    } else if (ux >= 0.0) {
+                        this.dir[i] = cast<byte>(2);
+                    } else if (uy >= 0.0) {
+                        this.dir[i] = cast<byte>(0);
+                    } else {
+                        this.dir[i] = cast<byte>(3);
+                    }
+                }
+                return;
+            }
+
+            // Predators eat. Budgeted, because it IS a search and there is no reason every wolf in
+            // the world should look every frame: a pack that eats a little later is a pack that ate.
+            public method prowl(float dt) returns void {
+                if (this.n == 0) {
+                    return;
+                }
+                mutable int scanned = 0;
+                mutable int did = 0;
+                while (scanned < this.n && did < this.budget) {
+                    int i = this.cursor;
+                    this.cursor = this.cursor + 1;
+                    if (this.cursor >= this.n) {
+                        this.cursor = 0;
+                    }
+                    scanned = scanned + 1;
+                    if (!this.alive[i]) {
+                        continue;
+                    }
+                    int sp = this.kindOf(i);
+                    if (Beasts.diet(sp) != cast<int>(Diet.Predator)) {
+                        continue;
+                    }
+                    did = did + 1;
+                    int q = this.preyNear(this.px[i], this.py[i], 3.0);
+                    if (q < 0) {
+                        continue;
+                    }
+                    int qs = this.kindOf(q);
+                    this.eaten[qs] = this.eaten[qs] + 1;
+                    this.kill(q);
+                }
+                return;
+            }
+
+            public method report() returns void {
+                System.IO.Console.println($"fauna: {this.live} alive of {this.n} rows");
+                for (int sp in 1..Species.count()) {
+                    if (this.ceiling[sp] == 0 && this.headcount[sp] == 0) {
+                        continue;
+                    }
+                    System.IO.Console.println($"  {Beasts.name(sp)}: {this.headcount[sp]} of {this.ceiling[sp]} | {this.born[sp]} born, {this.killed[sp]} hunted, {this.eaten[sp]} eaten, {this.aged[sp]} of old age");
+                }
+                return;
+            }
+        }
+    }
+}
