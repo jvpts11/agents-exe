@@ -106,6 +106,14 @@ public bundle Agents {
             // fifty generations ago should not still be a mining people.
             private mutable int[] culture;
             private mutable int[] deeds;
+            // What a community KNOWS. Surplus buys slack, slack and curiosity buy discovery, and
+            // discovery moves the place up the eras of docs/ECONOMY.md -- so one village can be
+            // firing bricks while the one over the hill is still only gathering, and the asymmetry
+            // is what makes contact between them worth anything.
+            private mutable int[] lore;
+            private mutable int[] era;
+            private mutable long invented;     // eras reached by a community's own work
+            private mutable long learned;      // and by looking over the fence at a neighbour
             // Who claims each 16-cell block, or -1. Territory has no rule of its own yet -- that is
             // its own slice -- but it has an honest meaning already: a community's land is what its
             // people can reach and work, so the claim is a disk around where they actually are, and
@@ -267,6 +275,13 @@ public bundle Agents {
                 for (int s in 0..this.ncomm * 5) {
                     this.culture[s] = 50 * Simulation.CFIX;   // every place starts with no character
                 }
+                this.lore = new int[this.ncomm]();
+                this.era = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    this.era[c] = 1;                          // everybody begins in the tribal age
+                }
+                this.invented = 0;
+                this.learned = 0;
                 this.crafted = 0;
                 this.stalled = 0;
                 this.raised = 0;
@@ -306,6 +321,101 @@ public bundle Agents {
                 delete this.lean;
                 delete this.culture;
                 delete this.deeds;
+                delete this.lore;
+                delete this.era;
+            }
+
+            // What an era costs to reach.
+            //
+            // Guessed at ten thousand on the reasoning that a village accrues "about forty a
+            // second". It accrues about a hundred, and the ladder was climbed in five minutes:
+            // seventy-six of eighty-one places ended in the MODERN era, which leaves no asymmetry
+            // for contact to act on and makes the whole era system decoration. Read off that run,
+            // an era at two hundred and fifty thousand is about forty minutes of prosperity -- so a
+            // world arc carries a village two rungs, three if it is rich and curious, and the
+            // fourth is genuinely rare.
+            public static int ERA_COST = 250000;
+            public static int LAST_ERA = 4;
+
+            public method eraOf(int comm) returns int {
+                return this.era[comm];
+            }
+
+            // Surplus buys slack time; slack time and curiosity buy discovery. A village living hand
+            // to mouth learns nothing, however clever its people -- which is the whole reason the
+            // economy had to exist before this slice could.
+            //
+            // And a neighbour is worth more than a genius. Being next to somebody who already knows
+            // multiplies what an hour of thinking is worth, because copying is easier than
+            // inventing; isolation is not a penalty here, it is simply the absence of that.
+            private method discover() returns void {
+                // Who touches whom, in ONE sweep of the claim map rather than one sweep per
+                // community. The first version asked "who are MY neighbours" a hundred times over a
+                // fourteen-thousand block map; this asks "who is next to whom" once. It is the same
+                // correction the woodcutter needed and the wolves needed, and it is cheaper to make
+                // it while writing the loop than after measuring it.
+                mutable int[] ahead = new int[this.ncomm]();
+                for (int by in 0..this.claimH) {
+                    for (int bx in 0..this.claimW) {
+                        int me = this.claim[by * this.claimW + bx];
+                        if (me < 0) {
+                            continue;
+                        }
+                        if (bx + 1 < this.claimW) {
+                            int o = this.claim[by * this.claimW + bx + 1];
+                            if (o >= 0 && o != me) {
+                                ahead[me] = this.higher(ahead[me], this.era[o]);
+                                ahead[o] = this.higher(ahead[o], this.era[me]);
+                            }
+                        }
+                        if (by + 1 < this.claimH) {
+                            int o = this.claim[(by + 1) * this.claimW + bx];
+                            if (o >= 0 && o != me) {
+                                ahead[me] = this.higher(ahead[me], this.era[o]);
+                                ahead[o] = this.higher(ahead[o], this.era[me]);
+                            }
+                        }
+                    }
+                }
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0 || this.era[c] >= Simulation.LAST_ERA) {
+                        continue;
+                    }
+                    int need = this.cpop[c] * Simulation.LARDER;
+                    int have = this.stores.foodOf(c);
+                    if (have <= need) {
+                        continue;                            // hand to mouth: no slack, no thinking
+                    }
+                    mutable int slack = (have - need) / (this.cpop[c] + 1);
+                    if (slack > 40) {
+                        slack = 40;                          // a place can only think so hard
+                    }
+                    mutable int gain = slack * (this.cultureOf(c, Simulation.C_CURIOUS) + 10) / 20;
+                    mutable boolean taught = false;
+                    if (ahead[c] > this.era[c]) {
+                        gain = gain * 4;
+                        taught = true;
+                    }
+                    this.lore[c] = this.lore[c] + gain;
+                    if (this.lore[c] >= Simulation.ERA_COST) {
+                        this.lore[c] = 0;
+                        this.era[c] = this.era[c] + 1;
+                        if (taught) {
+                            this.learned = this.learned + 1;
+                        } else {
+                            this.invented = this.invented + 1;
+                        }
+                    }
+                }
+                delete ahead;
+                return;
+            }
+
+            private method higher(int a, int b) returns int {
+                if (b > a) {
+                    return b;
+                }
+                return a;
             }
 
             // The five things a community can be, in the same order as an agent's temperament, so a
@@ -1059,6 +1169,7 @@ public bundle Agents {
                 this.restake();
                 this.hearWho();
                 this.steep();
+                this.discover();
                 return;
             }
 
@@ -1176,6 +1287,9 @@ public bundle Agents {
                 for (int k in 1..BuildingKind.count()) {
                     if (!Builds.produces(k)) {
                         continue;
+                    }
+                    if (Builds.era(k) > this.era[c]) {
+                        continue;                    // nobody here knows how yet
                     }
                     if (this.town.find(c, k) >= 0) {
                         continue;                    // it already has one
@@ -2153,6 +2267,17 @@ public bundle Agents {
                         sum[a] = sum[a] + v;
                     }
                 }
+                // Where the world got to, and how. A world in one era learned nothing; a world all
+                // in the last one has an era ladder too short to matter. The asymmetry between
+                // neighbours is what the slice exists for.
+                mutable int[] byEra = new int[Simulation.LAST_ERA + 1]();
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] > 0) {
+                        byEra[this.era[c]] = byEra[this.era[c]] + 1;
+                    }
+                }
+                System.IO.Console.println($"  eras: tribal {byEra[1]} | medieval {byEra[2]} | industrial {byEra[3]} | modern {byEra[4]} || {this.invented} invented, {this.learned} learned from a neighbour");
+                delete byEra;
                 if (places > 0) {
                     System.IO.Console.println($"  culture over {places} places (all began at 50):");
                     System.IO.Console.println($"    bold {lo[0]}..{hi[0]} mean {sum[0] / places} | social {lo[1]}..{hi[1]} mean {sum[1] / places} | greed {lo[2]}..{hi[2]} mean {sum[2] / places}");
