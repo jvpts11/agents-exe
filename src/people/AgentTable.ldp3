@@ -106,6 +106,7 @@ public bundle Agents {
             private mutable int[] spouse;
             private mutable int[] mother;
             private mutable int[] father;
+            private mutable float[] gest;      // seconds of pregnancy left, 0 = not
             // scheduling
             private mutable int[] nextThink;
 
@@ -145,6 +146,7 @@ public bundle Agents {
                 this.spouse = new int[cap]();
                 this.mother = new int[cap]();
                 this.father = new int[cap]();
+                this.gest = new float[cap]();
                 this.nextThink = new int[cap]();
             }
 
@@ -180,6 +182,7 @@ public bundle Agents {
                 delete this.spouse;
                 delete this.mother;
                 delete this.father;
+                delete this.gest;
                 delete this.nextThink;
             }
 
@@ -240,6 +243,7 @@ public bundle Agents {
                 this.spouse[i] = 0 - 1;
                 this.mother[i] = 0 - 1;
                 this.father[i] = 0 - 1;
+                this.gest[i] = 0.0;
                 this.nextThink[i] = 0;
                 this.live = this.live + 1;
                 return i;
@@ -440,6 +444,121 @@ public bundle Agents {
             public method setThinkAt(int i, int t) returns void {
                 this.nextThink[i] = t;
                 return;
+            }
+
+            // ---- needs, which rise on their own ----
+
+            public method hungerOf(int i) returns int {
+                return cast<int>(this.hunger[i]) & 255;
+            }
+
+            public method setHunger(int i, int v) returns void {
+                mutable int c = v;
+                if (c < 0) {
+                    c = 0;
+                }
+                if (c > 100) {
+                    c = 100;
+                }
+                this.hunger[i] = cast<byte>(c);
+                return;
+            }
+
+            public method tiredOf(int i) returns int {
+                return cast<int>(this.tired[i]) & 255;
+            }
+
+            public method setTired(int i, int v) returns void {
+                mutable int c = v;
+                if (c < 0) {
+                    c = 0;
+                }
+                if (c > 100) {
+                    c = 100;
+                }
+                this.tired[i] = cast<byte>(c);
+                return;
+            }
+
+            // ---- life ----
+
+            public method isFemale(int i) returns boolean {
+                return (cast<int>(this.flags[i]) & AgentTable.F_FEMALE) != 0;
+            }
+
+            public method isAdult(int i) returns boolean {
+                return (cast<int>(this.flags[i]) & AgentTable.F_ADULT) != 0;
+            }
+
+            public method makeAdult(int i) returns void {
+                this.flags[i] = cast<byte>(cast<int>(this.flags[i]) | AgentTable.F_ADULT);
+                return;
+            }
+
+            public method isPregnant(int i) returns boolean {
+                return this.gest[i] > 0.0;
+            }
+
+            public method conceive(int i, float term) returns void
+                requires term > 0.0
+            {
+                this.gest[i] = term;
+                this.flags[i] = cast<byte>(cast<int>(this.flags[i]) | AgentTable.F_PREGNANT);
+                return;
+            }
+
+            // Count the pregnancy down; true on the tick the child is due.
+            public method gestate(int i, float dt) returns boolean {
+                if (this.gest[i] <= 0.0) {
+                    return false;
+                }
+                this.gest[i] = this.gest[i] - dt;
+                if (this.gest[i] > 0.0) {
+                    return false;
+                }
+                this.gest[i] = 0.0;
+                this.flags[i] = cast<byte>(cast<int>(this.flags[i]) & ~AgentTable.F_PREGNANT);
+                return true;
+            }
+
+            public method motherOf(int i) returns int {
+                return this.mother[i];
+            }
+
+            // A child of this mother: born where she stands, into her community, carrying her
+            // temperament with a little drift -- which is the only way culture has of getting from
+            // one generation to the next when nobody lives longer than six minutes.
+            public method bear(int mum, int worldSeed, int n) returns int {
+                int i = this.spawn(this.px[mum], this.py[mum], this.homeOf(mum));
+                if (i < 0) {
+                    return 0 - 1;
+                }
+                int s = worldSeed ^ 0x4B1E;
+                this.setTemperament(i,
+                                    this.drift(this.boldnessOf(mum), s, n, 1),
+                                    this.drift(this.sociabilityOf(mum), s, n, 2),
+                                    this.drift(this.greedOf(mum), s, n, 3),
+                                    this.drift(this.curiosityOf(mum), s, n, 4),
+                                    this.drift(this.ambitionOf(mum), s, n, 5));
+                float lv = LandMath.hash01(s, n * 7 + 6, 17);
+                boolean female = LandMath.hash01(s, n * 7 + 7, 19) < 0.5;
+                this.setLife(i, 300.0 + lv * 120.0, female, false);
+                this.age[i] = 0.0;
+                this.mother[i] = mum;
+                return i;
+            }
+
+            // Inherit, but not exactly: without the drift every community converges on one person
+            // repeated, and there is nothing left for selection or culture to act on.
+            private method drift(int base, int s, int n, int k) returns int {
+                mutable int v = base + cast<int>((LandMath.hash01(s, n * 11 + k, 31) - 0.5) * 30.0);
+                if (v < 0) {
+                    v = 0;
+                }
+                if (v > 100) {
+                    v = 100;
+                }
+                return v;
             }
 
             // ---- seeding a starting world ----

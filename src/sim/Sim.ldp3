@@ -49,6 +49,17 @@ public bundle Agents {
             private mutable int stuckTotal;
             private mutable int arrivals;
             private mutable long thoughtTotal;
+            // Per community: how many live there, and how many are grown men and women. Rebuilt on
+            // a slow clock -- one sweep of the table a second is nothing -- so every question about
+            // whether a place can father or support anybody is a lookup.
+            private mutable int[] cpop;
+            private mutable int[] cadults;
+            private mutable int[] cmales;
+            private mutable int ncomm;
+            private mutable float censusDue;
+            private mutable long births;
+            private mutable long deathsOld;
+            private mutable long deathsHunger;
             private mutable int frames;
 
             public static float SPEED = 1.25;       // cells a second
@@ -71,7 +82,21 @@ public bundle Agents {
                 this.stuckTotal = 0;
                 this.arrivals = 0;
                 this.thoughtTotal = 0;
+                this.ncomm = 256;
+                this.cpop = new int[this.ncomm]();
+                this.cadults = new int[this.ncomm]();
+                this.cmales = new int[this.ncomm]();
+                this.censusDue = 0.0;
+                this.births = 0;
+                this.deathsOld = 0;
+                this.deathsHunger = 0;
                 this.frames = 0;
+            }
+
+            public destructor ~Simulation() returns void {
+                delete this.cpop;
+                delete this.cadults;
+                delete this.cmales;
             }
 
             public method setBudget(int b) returns void
@@ -184,6 +209,9 @@ public bundle Agents {
                     if (this.folk.thinkAtOf(i) > this.tick) {
                         continue;
                     }
+                    if (this.mayConceive(i)) {
+                        this.folk.conceive(i, Simulation.TERM);
+                    }
                     if (this.folk.actOf(i) == cast<int>(Act.Idle)) {
                         this.chooseTarget(i);
                     }
@@ -292,10 +320,164 @@ public bundle Agents {
                 return;
             }
 
+            // Everything that happens to a body whether it wants it or not. This runs for EVERYBODY
+            // every step and is not on the think budget: ageing and hunger are not decisions, and
+            // somebody off screen must age at exactly the rate of somebody on it or it stops being
+            // one world. It is a handful of byte updates a head, cheaper than deciding to skip them.
+            public static float ADULT_AT = 60.0;
+            public static float HUNGER_EVERY = 7.0;      // one point of hunger per this many seconds
+            public static float TIRED_EVERY = 12.0;
+            public static float TERM = 45.0;             // a pregnancy
+            public static float FERTILE_TO = 0.85;       // of a lifespan
+            // The logistic pair. CARRY is where a community stops growing outright; the population
+            // settles WELL BELOW it, at whatever size makes the birth rate equal the death rate.
+            // Both numbers stand in for the real limit -- how much food there is -- and are replaced
+            // by it, not tuned around it, when the economy arrives.
+            public static int CARRY = 700;
+            public static float FERTILITY = 0.12;        // chance per decision when a place is empty
+
+            private method live(float dt) returns void {
+                float t = this.clock;
+                boolean hungrier = cast<int>(t / Simulation.HUNGER_EVERY) > cast<int>((t - dt) / Simulation.HUNGER_EVERY);
+                boolean wearier = cast<int>(t / Simulation.TIRED_EVERY) > cast<int>((t - dt) / Simulation.TIRED_EVERY);
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (!this.folk.alive(i)) {
+                        i = i + 1;
+                        continue;
+                    }
+                    this.folk.addAge(i, dt);
+                    if (this.folk.ageOf(i) >= this.folk.lifespanOf(i)) {
+                        this.folk.kill(i);
+                        this.deathsOld = this.deathsOld + 1;
+                        i = i + 1;
+                        continue;
+                    }
+                    if (!this.folk.isAdult(i) && this.folk.ageOf(i) >= Simulation.ADULT_AT) {
+                        this.folk.makeAdult(i);
+                    }
+                    // Needs are whole points in a byte, so they are only touched on the step where a
+                    // whole point has actually accrued. Rounding a fraction up every frame would
+                    // starve the world in seconds.
+                    if (hungrier) {
+                        this.folk.setHunger(i, this.folk.hungerOf(i) + 1);
+                    }
+                    if (wearier) {
+                        this.folk.setTired(i, this.folk.tiredOf(i) + 1);
+                    }
+                    if (this.folk.hungerOf(i) >= 100) {
+                        this.folk.kill(i);
+                        this.deathsHunger = this.deathsHunger + 1;
+                        i = i + 1;
+                        continue;
+                    }
+                    // Food is free in this slice, so nobody starves. The mechanism is whole and in
+                    // place; what is missing is the COST, and that arrives with the woodcutter.
+                    if (this.folk.hungerOf(i) >= 30 && this.folk.isAdult(i)) {
+                        this.folk.setHunger(i, 0);
+                    }
+                    if (this.folk.tiredOf(i) >= 70) {
+                        this.folk.setTired(i, 0);
+                    }
+                    if (this.folk.gestate(i, dt)) {
+                        int child = this.folk.bear(i, this.seed, cast<int>(this.births));
+                        if (child >= 0) {
+                            this.births = this.births + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            private method census() returns void {
+                mutable int c = 0;
+                while (c < this.ncomm) {
+                    this.cpop[c] = 0;
+                    this.cadults[c] = 0;
+                    this.cmales[c] = 0;
+                    c = c + 1;
+                }
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i)) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm) {
+                            this.cpop[h] = this.cpop[h] + 1;
+                            if (this.folk.isAdult(i)) {
+                                this.cadults[h] = this.cadults[h] + 1;
+                                if (!this.folk.isFemale(i)) {
+                                    this.cmales[h] = this.cmales[h] + 1;
+                                }
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            // Whether a grown woman conceives now, as a logistic: the chance falls as her community
+            // fills, so the population finds its own level rather than running away or dying out.
+            //
+            // The first attempt died out inside fifteen generations, and the arithmetic says exactly
+            // why -- worth keeping written down, because it is the same shape of mistake every time.
+            // A woman must bear TWO children to replace herself and a man. Her fertile window runs
+            // from sixty seconds to FERTILE_TO of a life, about two hundred and fifty seconds. Each
+            // child costs TERM in gestation plus the time to conceive, which at chance `p` per
+            // decision and a decision every three seconds is 3/p. Two children must fit inside the
+            // window, so 6/p + 2*TERM <= 250, and p can never be under about 0.04. It was 0.030 --
+            // and then multiplied AGAIN by how empty the place was, which started at 0.19. The real
+            // chance was 0.0057: one conception per five hundred seconds, inside a fertile window of
+            // two hundred and fifty. Most women never conceived at all.
+            //
+            // The shape underneath was wrong too. With `p = base * emptiness`, the only point where
+            // births balance deaths is emptiness = 1, which is a population of zero: it was drawn
+            // toward extinction by construction. With FERTILITY set well ABOVE replacement, the
+            // balance lands at a real population instead, and the world finds it rather than me.
+            //
+            // CARRY and FERTILITY both stand in for the real limit -- how much food there is. The
+            // economy replaces them; it does not tune them.
+            private method mayConceive(int i) returns boolean {
+                if (!this.folk.isFemale(i) || !this.folk.isAdult(i) || this.folk.isPregnant(i)) {
+                    return false;
+                }
+                if (this.folk.ageOf(i) > this.folk.lifespanOf(i) * Simulation.FERTILE_TO) {
+                    return false;
+                }
+                int h = this.folk.homeOf(i);
+                if (h < 0 || h >= this.ncomm) {
+                    return false;
+                }
+                if (this.cmales[h] == 0) {
+                    return false;                       // nobody to father a child
+                }
+                float room = 1.0 - cast<float>(this.cpop[h]) / cast<float>(Simulation.CARRY);
+                if (room <= 0.0) {
+                    return false;
+                }
+                return LandMath.hash01(this.seed ^ 0x6C21, i, this.tick) < Simulation.FERTILITY * room;
+            }
+
+            public method livingCount() returns int {
+                return this.folk.count();
+            }
+
+            public method bornCount() returns long {
+                return this.births;
+            }
+
             public method step(float dt) returns void {
                 this.frames = this.frames + 1;
                 this.clock = this.clock + dt;
                 this.tick = cast<int>(this.clock);
+                if (this.clock >= this.censusDue) {
+                    this.census();
+                    this.censusDue = this.clock + 1.0;
+                }
+                this.live(dt);
                 this.think();
                 this.move(dt);
                 return;
@@ -332,6 +514,7 @@ public bundle Agents {
                 System.IO.Console.println($"sim: t={cast<int>(this.clock)}s over {this.frames} frames | arrivals {this.arrivals} | stuck {this.stuckTotal}");
                 System.IO.Console.println($"  think: {perFrame}/frame average, worst {this.worstThink} (budget {this.budget}) | demand {demand}/s vs capacity {capacity}/s");
                 System.IO.Console.println($"  people standing off walkable ground: {this.offLand()}");
+                System.IO.Console.println($"  life: {this.folk.count()} alive | {this.births} born, {this.deathsOld} of old age, {this.deathsHunger} starved");
                 return;
             }
         }
