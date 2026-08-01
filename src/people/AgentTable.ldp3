@@ -1,0 +1,494 @@
+import System.IO.Console;
+import Agents.World.Grid;
+import Agents.World.Biomes;
+import Agents.World.LandMath;
+
+// Everybody alive, as one table. An agent is an INDEX, not a pointer -- the same Structure-of-Arrays
+// shape as Grid and NodeField, and for the same reason: the ceiling is fifty thousand of them, and a
+// loop over `float[]` vectorises where fifty thousand scattered objects never could.
+//
+// The budget that matters is NOT memory. The whole table is about 65 bytes a head, so all fifty
+// thousand fit in 3.3 MB and nothing in this design is shaped by storage. What binds is thinking
+// time per frame and triangles per frame, and both are spent elsewhere -- so this file spends memory
+// freely to keep those two cheap.
+//
+// A dead agent's row is recycled by the next birth through a free list. That is not an optimisation:
+// with a six-minute life and fifty thousand people, the world buries and delivers about a hundred
+// and forty each per SECOND, and replaces its entire population every six minutes.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace People {
+
+        // What an agent does for a living. The set follows docs/ECONOMY.md -- node classes and the
+        // buildings that transform them -- not the original's twelve professions over five
+        // resources, which cannot describe a world with ten distinct metal veins.
+        public enum Job {
+            Idle,
+            Forager, Woodcutter, Hunter, Fisher, Farmer,
+            Quarrier, Miner, Prospector,
+            Sawyer, Smith, Baker, Weaver,
+            Builder, Trader,
+            Raider, General
+        }
+
+        // The verb running right now. Named Act and not Task: Task<T> is the stdlib's async handle, and
+        // a type-name collision across namespaces corrupts symbol resolution and is then reported
+        // against an unrelated file. Closed on purpose: a new verb is a design decision, never
+        // something that appears inside an `if`.
+        public enum Act {
+            Idle, Wander, WalkTo,
+            Gather, Hunt, Carry, Deposit, Refine, Till, Build, Prospect,
+            Eat, Rest, Flee,
+            Court, Raise,
+            Follow, Lead, Discover, Teach,
+            March, Fight
+        }
+
+        // Nobody is appointed. A role comes into being when a community crosses a threshold, and it
+        // outlives whoever fills it -- which it must, because nobody lives longer than six minutes.
+        public enum Role {
+            None, Elder, Chief, Priest, General, TradeChief
+        }
+
+        // Which of the four approved bodies draws this agent. Order matches assets/models/agents.index.
+        public enum Body {
+            Civil, Protagonist, Scout, Soldier
+        }
+
+        public class AgentTable {
+            // flag bits
+            public static fixed int F_ALIVE = 1;
+            public static fixed int F_FEMALE = 2;
+            public static fixed int F_ADULT = 4;
+            public static fixed int F_MARRIED = 8;
+            public static fixed int F_PREGNANT = 16;
+
+            private mutable int cap;
+            private mutable int live;          // how many rows are in use
+            private mutable int high;          // highest row ever handed out
+            private mutable int[] freeSlot;    // recycled rows, a stack
+            private mutable int freeTop;
+
+            // where and who
+            private mutable float[] px;
+            private mutable float[] py;
+            private mutable short[] home;      // community id
+            private mutable byte[] job;
+            private mutable byte[] role;
+            private mutable byte[] flags;
+            private mutable byte[] dir;
+            // what it is doing
+            private mutable byte[] task;
+            private mutable float[] taskTimer;
+            private mutable int[] targetNode;  // index into NodeField, -1 = none
+            private mutable short[] targetX;
+            private mutable short[] targetY;
+            private mutable byte[] carryKind;
+            private mutable short[] carryAmt;
+            // life
+            private mutable float[] age;
+            private mutable float[] lifespan;
+            private mutable byte[] hp;
+            // what it feels: needs rise on their own
+            private mutable byte[] hunger;
+            private mutable byte[] tired;
+            private mutable byte[] fear;
+            private mutable byte[] lonely;
+            // what it is: weights it was born with, inherited with drift
+            private mutable byte[] bold;
+            private mutable byte[] social;
+            private mutable byte[] greed;
+            private mutable byte[] curious;
+            private mutable byte[] ambition;
+            private mutable byte[] influence;
+            // kin
+            private mutable int[] spouse;
+            private mutable int[] mother;
+            private mutable int[] father;
+            // scheduling
+            private mutable int[] nextThink;
+
+            public constructor AgentTable(int cap) {
+                this.cap = cap;
+                this.live = 0;
+                this.high = 0;
+                this.freeTop = 0;
+                this.freeSlot = new int[cap]();
+                this.px = new float[cap]();
+                this.py = new float[cap]();
+                this.home = new short[cap]();
+                this.job = new byte[cap]();
+                this.role = new byte[cap]();
+                this.flags = new byte[cap]();
+                this.dir = new byte[cap]();
+                this.task = new byte[cap]();
+                this.taskTimer = new float[cap]();
+                this.targetNode = new int[cap]();
+                this.targetX = new short[cap]();
+                this.targetY = new short[cap]();
+                this.carryKind = new byte[cap]();
+                this.carryAmt = new short[cap]();
+                this.age = new float[cap]();
+                this.lifespan = new float[cap]();
+                this.hp = new byte[cap]();
+                this.hunger = new byte[cap]();
+                this.tired = new byte[cap]();
+                this.fear = new byte[cap]();
+                this.lonely = new byte[cap]();
+                this.bold = new byte[cap]();
+                this.social = new byte[cap]();
+                this.greed = new byte[cap]();
+                this.curious = new byte[cap]();
+                this.ambition = new byte[cap]();
+                this.influence = new byte[cap]();
+                this.spouse = new int[cap]();
+                this.mother = new int[cap]();
+                this.father = new int[cap]();
+                this.nextThink = new int[cap]();
+            }
+
+            public destructor ~AgentTable() returns void {
+                delete this.freeSlot;
+                delete this.px;
+                delete this.py;
+                delete this.home;
+                delete this.job;
+                delete this.role;
+                delete this.flags;
+                delete this.dir;
+                delete this.task;
+                delete this.taskTimer;
+                delete this.targetNode;
+                delete this.targetX;
+                delete this.targetY;
+                delete this.carryKind;
+                delete this.carryAmt;
+                delete this.age;
+                delete this.lifespan;
+                delete this.hp;
+                delete this.hunger;
+                delete this.tired;
+                delete this.fear;
+                delete this.lonely;
+                delete this.bold;
+                delete this.social;
+                delete this.greed;
+                delete this.curious;
+                delete this.ambition;
+                delete this.influence;
+                delete this.spouse;
+                delete this.mother;
+                delete this.father;
+                delete this.nextThink;
+            }
+
+            public method capacity() returns int {
+                return this.cap;
+            }
+
+            public method count() returns int {
+                return this.live;
+            }
+
+            // Rows 0..limit() are the ones ever handed out; a sweep over the table walks these and
+            // skips the dead. It never shrinks, because a hole is a recycled row and not a gap.
+            public method limit() returns int {
+                return this.high;
+            }
+
+            public method alive(int i) returns boolean {
+                return (cast<int>(this.flags[i]) & AgentTable.F_ALIVE) != 0;
+            }
+
+            // Take a row: a recycled one if anybody has died, otherwise the next fresh one. Returns
+            // -1 when the table is full, which the caller must handle rather than ignore -- a silent
+            // failure here is a population that quietly stops growing.
+            public method spawn(float x, float y, int community) returns int {
+                mutable int i = 0 - 1;
+                if (this.freeTop > 0) {
+                    this.freeTop = this.freeTop - 1;
+                    i = this.freeSlot[this.freeTop];
+                } else if (this.high < this.cap) {
+                    i = this.high;
+                    this.high = this.high + 1;
+                } else {
+                    return 0 - 1;
+                }
+                this.px[i] = x;
+                this.py[i] = y;
+                this.home[i] = cast<short>(community);
+                this.job[i] = cast<byte>(cast<int>(Job.Idle));
+                this.role[i] = cast<byte>(cast<int>(Role.None));
+                this.flags[i] = cast<byte>(AgentTable.F_ALIVE);
+                this.dir[i] = cast<byte>(0);
+                this.task[i] = cast<byte>(cast<int>(Act.Idle));
+                this.taskTimer[i] = 0.0;
+                this.targetNode[i] = 0 - 1;
+                this.targetX[i] = cast<short>(0);
+                this.targetY[i] = cast<short>(0);
+                this.carryKind[i] = cast<byte>(0);
+                this.carryAmt[i] = cast<short>(0);
+                this.age[i] = 0.0;
+                this.lifespan[i] = 360.0;
+                this.hp[i] = cast<byte>(100);
+                this.hunger[i] = cast<byte>(0);
+                this.tired[i] = cast<byte>(0);
+                this.fear[i] = cast<byte>(0);
+                this.lonely[i] = cast<byte>(0);
+                this.influence[i] = cast<byte>(0);
+                this.spouse[i] = 0 - 1;
+                this.mother[i] = 0 - 1;
+                this.father[i] = 0 - 1;
+                this.nextThink[i] = 0;
+                this.live = this.live + 1;
+                return i;
+            }
+
+            // Give the row back. The slot is reused by the next birth, which at a hundred and forty
+            // deaths a second is the whole reason there is a free list at all.
+            public method kill(int i) returns void {
+                if (!this.alive(i)) {
+                    return;
+                }
+                this.flags[i] = cast<byte>(0);
+                this.freeSlot[this.freeTop] = i;
+                this.freeTop = this.freeTop + 1;
+                this.live = this.live - 1;
+                return;
+            }
+
+            // ---- what it is ----
+
+            public method setTemperament(int i, int boldness, int sociability, int greediness,
+                                         int curiosity, int drive) returns void
+                requires boldness >= 0
+                requires boldness <= 100
+                requires sociability >= 0
+                requires sociability <= 100
+                requires greediness >= 0
+                requires greediness <= 100
+                requires curiosity >= 0
+                requires curiosity <= 100
+                requires drive >= 0
+                requires drive <= 100
+            {
+                this.bold[i] = cast<byte>(boldness);
+                this.social[i] = cast<byte>(sociability);
+                this.greed[i] = cast<byte>(greediness);
+                this.curious[i] = cast<byte>(curiosity);
+                this.ambition[i] = cast<byte>(drive);
+                return;
+            }
+
+            public method boldnessOf(int i) returns int {
+                return cast<int>(this.bold[i]) & 255;
+            }
+
+            public method sociabilityOf(int i) returns int {
+                return cast<int>(this.social[i]) & 255;
+            }
+
+            public method greedOf(int i) returns int {
+                return cast<int>(this.greed[i]) & 255;
+            }
+
+            public method curiosityOf(int i) returns int {
+                return cast<int>(this.curious[i]) & 255;
+            }
+
+            public method ambitionOf(int i) returns int {
+                return cast<int>(this.ambition[i]) & 255;
+            }
+
+            public method setLife(int i, float years, boolean female, boolean adult) returns void {
+                this.lifespan[i] = years;
+                mutable int f = AgentTable.F_ALIVE;
+                if (female) {
+                    f = f | AgentTable.F_FEMALE;
+                }
+                if (adult) {
+                    f = f | AgentTable.F_ADULT;
+                }
+                this.flags[i] = cast<byte>(f);
+                return;
+            }
+
+            public method setJob(int i, int j) returns void
+                requires j >= 0
+                requires j < Job.count()
+            {
+                this.job[i] = cast<byte>(j);
+                return;
+            }
+
+            public method jobOf(int i) returns int {
+                return cast<int>(this.job[i]) & 255;
+            }
+
+            public method roleOf(int i) returns int {
+                return cast<int>(this.role[i]) & 255;
+            }
+
+            public method setRole(int i, int r) returns void
+                requires r >= 0
+                requires r < Role.count()
+            {
+                this.role[i] = cast<byte>(r);
+                return;
+            }
+
+            public method xAt(int i) returns float {
+                return this.px[i];
+            }
+
+            public method yAt(int i) returns float {
+                return this.py[i];
+            }
+
+            public method homeOf(int i) returns int {
+                return cast<int>(this.home[i]) & 65535;
+            }
+
+            public method ageOf(int i) returns float {
+                return this.age[i];
+            }
+
+            public method addAge(int i, float dt) returns void {
+                this.age[i] = this.age[i] + dt;
+                return;
+            }
+
+            public method lifespanOf(int i) returns float {
+                return this.lifespan[i];
+            }
+
+            // Which body draws this agent. Only four exist and they are deliberately generic: a
+            // woodcutter and a miner are both a Civil, exactly as the original had one worker body
+            // for every economic trade. A role outranks a job, because a chief reads as a chief.
+            public method bodyOf(int i) returns int {
+                if (this.roleOf(i) != cast<int>(Role.None)) {
+                    return cast<int>(Body.Protagonist);
+                }
+                int j = this.jobOf(i);
+                if (j == cast<int>(Job.Raider) || j == cast<int>(Job.General)) {
+                    return cast<int>(Body.Soldier);
+                }
+                if (j == cast<int>(Job.Prospector)) {
+                    return cast<int>(Body.Scout);   // the one trade that goes out looking
+                }
+                return cast<int>(Body.Civil);
+            }
+
+            // ---- seeding a starting world ----
+
+            // Scatter `total` people over `communities` sites. Sites are found by walking the map on
+            // a coarse lattice and keeping the walkable ones far enough apart -- good enough for a
+            // stress test, and the real founding rules arrive with the community layer.
+            public method seedWorld(Grid* g, int total, int communities, int worldSeed) returns int {
+                int w = g.width();
+                int h = g.height();
+                int[] cx = new int[communities]();
+                int[] cy = new int[communities]();
+                mutable int found = 0;
+                int minGap = 90;
+                mutable int strideY = 24;
+                mutable int y = 40;
+                while (y < h - 40 && found < communities) {
+                    mutable int x = 40;
+                    while (x < w - 40 && found < communities) {
+                        int b = g.biomeAt(x, y);
+                        if (Biomes.walkable(b) && g.elevAt(x, y) < 6300) {
+                            mutable boolean ok = true;
+                            mutable int k = 0;
+                            while (k < found) {
+                                int dx = cx[k] - x;
+                                int dy = cy[k] - y;
+                                if (dx * dx + dy * dy < minGap * minGap) {
+                                    ok = false;
+                                }
+                                k = k + 1;
+                            }
+                            if (ok) {
+                                cx[found] = x;
+                                cy[found] = y;
+                                found = found + 1;
+                            }
+                        }
+                        x = x + 20;
+                    }
+                    y = y + strideY;
+                }
+                if (found == 0) {
+                    delete cx;
+                    delete cy;
+                    return 0;
+                }
+                int per = total / found;
+                mutable int made = 0;
+                mutable int c = 0;
+                while (c < found) {
+                    mutable int n = 0;
+                    mutable int tries = 0;
+                    // A community is a disk: people live and work within a short walk of home, which
+                    // is what keeps travel affordable on a map thirty-two times the original's.
+                    int radius = 26;
+                    while (n < per && tries < per * 12) {
+                        tries = tries + 1;
+                        float a = LandMath.hash01(worldSeed ^ 0x5A1D, c * 977 + tries, 7) * 6.2831853;
+                        float rr = LandMath.hash01(worldSeed ^ 0x2B77, c * 613 + tries, 11);
+                        float dist = LandMath.sqrt(rr) * cast<float>(radius);
+                        int ax = cx[c] + cast<int>(LandMath.cos(a) * dist);
+                        int ay = cy[c] + cast<int>(LandMath.sin(a) * dist);
+                        if (ax < 1 || ay < 1 || ax >= w - 1 || ay >= h - 1) {
+                            continue;
+                        }
+                        if (!Biomes.walkable(g.biomeAt(ax, ay))) {
+                            continue;
+                        }
+                        int i = this.spawn(cast<float>(ax) + 0.5, cast<float>(ay) + 0.5, c);
+                        if (i < 0) {
+                            n = per;
+                            c = found;
+                            continue;
+                        }
+                        this.seedOne(i, worldSeed, made);
+                        n = n + 1;
+                        made = made + 1;
+                    }
+                    c = c + 1;
+                }
+                delete cx;
+                delete cy;
+                return made;
+            }
+
+            // One person: a temperament of their own, a life of their own length, and a trade.
+            // Everything here is a draw from the world seed, so the same seed makes the same people.
+            private method seedOne(int i, int worldSeed, int n) returns void {
+                int s = worldSeed ^ 0x1A2B;
+                this.setTemperament(i,
+                                    cast<int>(LandMath.hash01(s, n * 7 + 1, 3) * 100.0),
+                                    cast<int>(LandMath.hash01(s, n * 7 + 2, 5) * 100.0),
+                                    cast<int>(LandMath.hash01(s, n * 7 + 3, 7) * 100.0),
+                                    cast<int>(LandMath.hash01(s, n * 7 + 4, 11) * 100.0),
+                                    cast<int>(LandMath.hash01(s, n * 7 + 5, 13) * 100.0));
+                float lv = LandMath.hash01(s, n * 7 + 6, 17);
+                boolean female = LandMath.hash01(s, n * 7 + 7, 19) < 0.5;
+                this.setLife(i, 300.0 + lv * 120.0, female, true);
+                // Ages are spread across a whole lifetime at world start, so the first generation
+                // does not die all at once -- a founding population that was born on the same tick
+                // would empty the map in one breath six minutes in.
+                this.age[i] = LandMath.hash01(s, n * 7 + 8, 23) * this.lifespan[i];
+                this.dir[i] = cast<byte>(cast<int>(LandMath.hash01(s, n * 7 + 9, 29) * 4.0));
+                return;
+            }
+
+            public method report() returns void {
+                int bytes = 65;
+                System.IO.Console.println($"agents: {this.live} alive of {this.cap} rows, {this.live * bytes / 1048576} MB of table");
+                return;
+            }
+        }
+    }
+}

@@ -6,6 +6,7 @@ import opengl.glm.GlMat4;
 import Agents.World.Grid;
 import Agents.World.Nodes;
 import Agents.World.NodeField;
+import Agents.People.AgentTable;
 import Agents.World.NodeAtlas;
 import System.Memory;
 
@@ -41,6 +42,18 @@ public bundle Agents {
             private mutable int hvao;           // far-view forest hint trees (hidden when the detail is up)
             private mutable int hvbo;
             private mutable int hnverts;
+            // People get a buffer of their own, rebuilt every frame. They move, and the terrain bake
+            // is sliced across frames precisely because it is too big to redo -- so the two cannot
+            // share one. Only the agents inside the detail window are ever emitted.
+            private mutable int avao;
+            private mutable int avbo;
+            private mutable int anverts;
+            private mutable int acap;           // triangles the agent buffer can hold
+            private mutable address abuf;
+            private mutable AgentTable* folk;
+            private mutable MeshAtlas* people;
+            private mutable int[] bodyModel;    // Body ordinal -> model index in the people atlas
+            private mutable boolean havePeople;
             // world + sources
             private mutable Grid* grid;
             private mutable MeshAtlas* terr;
@@ -153,6 +166,14 @@ public bundle Agents {
                 this.hvbo = gl.genBuffer();
                 this.setupVao(this.hvao, this.hvbo);
                 this.hnverts = 0;
+                this.avao = gl.genVertexArray();
+                this.avbo = gl.genBuffer();
+                this.setupVao(this.avao, this.avbo);
+                this.anverts = 0;
+                this.acap = 0;
+                this.abuf = cast<address>(0);
+                this.bodyModel = new int[4]();
+                this.havePeople = false;
                 this.projM = new GlMat4() on heap;
                 this.viewM = new GlMat4() on heap;
                 this.tileTop = new float[1]();
@@ -227,6 +248,10 @@ public bundle Agents {
                 delete this.dPropC;
                 delete this.dNodeA;
                 delete this.dNodeB;
+                delete this.bodyModel;
+                if (this.acap > 0) {
+                    Memory.free(this.abuf);
+                }
                 delete this.nModel;
                 delete this.nInProps;
                 delete this.nScale;
@@ -1661,6 +1686,192 @@ public bundle Agents {
             // orbit distance -- at a grazing angle you are near the ground even when the look-at target
             // is far. And the window is centred just AHEAD OF THE CAMERA on the ground, so the
             // foreground -- the terrain closest to the player -- is always the part in full detail.
+            // The people, and the art that draws them. A separate call rather than more arguments on
+            // setup(): the world can be rendered with nobody in it, and every capture path would
+            // otherwise have to know about a population it does not use.
+            public method setPeople(AgentTable* who, MeshAtlas* art) returns void {
+                this.folk = who;
+                this.people = art;
+                this.bodyModel[0] = art.ordOf("Civil");
+                this.bodyModel[1] = art.ordOf("Protagonist");
+                this.bodyModel[2] = art.ordOf("Scout");
+                this.bodyModel[3] = art.ordOf("Soldier");
+                mutable int b = 0;
+                while (b < 4) {
+                    if (this.bodyModel[b] < 0) {
+                        System.IO.Console.println($"GlWorld3D: agent body {b} has no mesh");
+                    }
+                    b = b + 1;
+                }
+                this.havePeople = true;
+                return;
+            }
+
+            // A community's colour, six hues walked by id. An authored palette reads better than
+            // anything generated per id -- the original learned that with its nation colours.
+            private method communityTint(int c, int channel) returns float {
+                int k = c % 6;
+                if (k == 0) {
+                    if (channel == 0) {
+                        return 0.85;
+                    }
+                    return 0.20;
+                }
+                if (k == 1) {
+                    if (channel == 0) {
+                        return 0.20;
+                    }
+                    if (channel == 1) {
+                        return 0.45;
+                    }
+                    return 0.85;
+                }
+                if (k == 2) {
+                    if (channel == 0) {
+                        return 0.30;
+                    }
+                    if (channel == 1) {
+                        return 0.75;
+                    }
+                    return 0.30;
+                }
+                if (k == 3) {
+                    if (channel == 0) {
+                        return 0.95;
+                    }
+                    if (channel == 1) {
+                        return 0.85;
+                    }
+                    return 0.25;
+                }
+                if (k == 4) {
+                    if (channel == 0) {
+                        return 0.65;
+                    }
+                    if (channel == 1) {
+                        return 0.30;
+                    }
+                    return 0.75;
+                }
+                if (channel == 0) {
+                    return 0.95;
+                }
+                if (channel == 1) {
+                    return 0.55;
+                }
+                return 0.20;
+            }
+
+            // Emit one agent. Faces the exporter marked TINTABLE -- group id past 1000, baked white
+            // -- take the community's colour; every other face keeps the art it was drawn with,
+            // which is how a blue visor survives on a red body.
+            private method emitAgent(address buf, int w, int mord, float wx, float wy, float wz,
+                                     float scale, float cr, float cg, float cb,
+                                     float shade) returns int {
+                int t0 = this.people.triStart[mord];
+                int tn = this.people.triCount[mord];
+                mutable int p = w;
+                mutable int t = 0;
+                while (t < tn) {
+                    int tri = t0 + t;
+                    int vb = tri * 3;
+                    mutable float r = cast<float>(this.people.cr[tri]) / 255.0;
+                    mutable float g = cast<float>(this.people.cg[tri]) / 255.0;
+                    mutable float b = cast<float>(this.people.cb[tri]) / 255.0;
+                    if (this.people.grp[tri] >= 1000) {
+                        r = r * cr;
+                        g = g * cg;
+                        b = b * cb;
+                    }
+                    r = r * shade;
+                    g = g * shade;
+                    b = b * shade;
+                    mutable int k = 0;
+                    while (k < 3) {
+                        int vi = vb + k;
+                        p = this.wr(buf, p, this.people.px[vi] * scale + wx,
+                                    this.people.py[vi] * scale + wy,
+                                    this.people.pz[vi] * scale + wz,
+                                    this.people.nx[vi], this.people.ny[vi], this.people.nz[vi],
+                                    r, g, b);
+                        k = k + 1;
+                    }
+                    t = t + 1;
+                }
+                return p;
+            }
+
+            // Rebuild the agent buffer for this frame: everybody standing inside the detail window.
+            // The whole table is swept, because fifty thousand bounds tests cost nothing next to one
+            // triangle; only those in view cost a triangle.
+            private method bakeAgents() returns void {
+                this.anverts = 0;
+                if (!this.havePeople) {
+                    return;
+                }
+                if (!this.detailOn || !this.haveDetail) {
+                    return;                                    // far out, a person is under a pixel
+                }
+                int x0 = this.detX0;
+                int y0 = this.detY0;
+                int x1 = x0 + this.detW;
+                int y1 = y0 + this.detH;
+                int n = this.folk.limit();
+                mutable int tris = 0;
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i)) {
+                        int ax = cast<int>(this.folk.xAt(i));
+                        int ay = cast<int>(this.folk.yAt(i));
+                        if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
+                            tris = tris + this.people.triCount[this.bodyModel[this.folk.bodyOf(i)]];
+                        }
+                    }
+                    i = i + 1;
+                }
+                if (tris == 0) {
+                    return;
+                }
+                if (tris > this.acap) {
+                    if (this.acap > 0) {
+                        Memory.free(this.abuf);
+                    }
+                    this.acap = tris * 2;                      // headroom: a crowd must not realloc every frame
+                    this.abuf = Memory.alloc(cast<long>(this.acap * 27 * 4 + 4));
+                }
+                mutable int w = 0;
+                i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i)) {
+                        float fx = this.folk.xAt(i);
+                        float fy = this.folk.yAt(i);
+                        int ax = cast<int>(fx);
+                        int ay = cast<int>(fy);
+                        if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
+                            int ord = this.grid.biomeAt(ax, ay);
+                            int lvl = this.stackLvl(ord, ax, ay);
+                            float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
+                            float topZ = this.tileTop[ord] + zOff;
+                            int c = this.folk.homeOf(i);
+                            w = this.emitAgent(this.abuf, w,
+                                               this.bodyModel[this.folk.bodyOf(i)],
+                                               fx * 2.0, fy * 2.0, topZ, 0.30,
+                                               this.communityTint(c, 0), this.communityTint(c, 1),
+                                               this.communityTint(c, 2),
+                                               this.shadeAt(ax, ay, 1, lvl));
+                        }
+                    }
+                    i = i + 1;
+                }
+                this.gl.bindVertexArray(this.avao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.avbo);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4),
+                                   cast<long>(this.abuf), GL.DYNAMIC_DRAW);
+                this.gl.bindVertexArray(0);
+                this.anverts = tris * 3;
+                return;
+            }
+
             // Run a bake to completion right now. A single-frame capture has no later frames to
             // finish it in, and the very first bake has nothing on screen to show meanwhile, so
             // both want the whole thing at once.
@@ -1671,7 +1882,8 @@ public bundle Agents {
                     this.stepBake();
                     guard = guard + 1;
                 }
-                System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.dnverts / 3} triangles");
+                this.bakeAgents();
+                System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.dnverts / 3} terrain tris, {this.anverts / 3} agent tris");
                 return;
             }
 
@@ -1867,6 +2079,7 @@ public bundle Agents {
                 } else {
                     this.stepBake();
                 }
+                this.bakeAgents();
                 if (this.pixelate) {
                     if (this.fbo == 0) {
                         this.initPost(640, 400);
@@ -1912,6 +2125,10 @@ public bundle Agents {
                 } else {
                     this.gl.bindVertexArray(this.hvao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.hnverts);
+                }
+                if (this.anverts > 0) {
+                    this.gl.bindVertexArray(this.avao);
+                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.anverts);
                 }
                 this.gl.bindVertexArray(0);
 
