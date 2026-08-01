@@ -96,6 +96,16 @@ public bundle Agents {
             private mutable long passed;       // and were handed on when the holder died
             private mutable long followed;     // decisions swayed by a chief
             private mutable long resisted;
+            // What a community IS, as five weights, and it is not a table of anybody's opinions --
+            // it is an aggregate of what its people actually DID. A village that hunts becomes a
+            // hunting village, because its children are born a little bolder than their mothers
+            // were, choose to hunt a little more often, and hand that on again.
+            //
+            // Two arrays: the deeds done since the last census, and the slow weight they move. The
+            // window is what makes it CULTURE rather than history -- a place that stopped mining
+            // fifty generations ago should not still be a mining people.
+            private mutable int[] culture;
+            private mutable int[] deeds;
             // Who claims each 16-cell block, or -1. Territory has no rule of its own yet -- that is
             // its own slice -- but it has an honest meaning already: a community's land is what its
             // people can reach and work, so the claim is a disk around where they actually are, and
@@ -252,6 +262,11 @@ public bundle Agents {
                 this.passed = 0;
                 this.followed = 0;
                 this.resisted = 0;
+                this.culture = new int[this.ncomm * 5]();
+                this.deeds = new int[this.ncomm * 5]();
+                for (int s in 0..this.ncomm * 5) {
+                    this.culture[s] = 50 * Simulation.CFIX;   // every place starts with no character
+                }
                 this.crafted = 0;
                 this.stalled = 0;
                 this.raised = 0;
@@ -289,6 +304,94 @@ public bundle Agents {
                 delete this.meter;
                 delete this.chief;
                 delete this.lean;
+                delete this.culture;
+                delete this.deeds;
+            }
+
+            // The five things a community can be, in the same order as an agent's temperament, so a
+            // culture weight and the trait it shapes are the same index.
+            public static fixed int C_BOLD = 0;
+            public static fixed int C_SOCIAL = 1;
+            public static fixed int C_GREED = 2;
+            public static fixed int C_CURIOUS = 3;
+            public static fixed int C_AMBITION = 4;
+
+            // How far toward its birthplace a child is pulled, out of a hundred. A fifth: enough
+            // that a village becomes recognisable over a handful of generations, little enough that
+            // a person is still mostly their mother -- which is what keeps temperament worth
+            // inheriting at all.
+            public static int STEEP = 20;
+
+            // Which of the five a trade speaks for. Culture is read off WHAT PEOPLE SPEND THEIR
+            // LIVES DOING, and not off how many acts each kind of work happens to produce -- the
+            // first attempt counted deeds, and since a forager fills a basket a thousand times for
+            // every workshop anybody raises, it read "bold 0..2, ambition 0..0" across every village
+            // in the world. A village with a third of its people out hunting is a hunting village
+            // however few kills that comes to.
+            private method axisOf(int job) returns int {
+                if (job == cast<int>(Job.Hunter)) {
+                    return Simulation.C_BOLD;
+                }
+                if (job == cast<int>(Job.Miner) || job == cast<int>(Job.Quarrier)) {
+                    return Simulation.C_GREED;
+                }
+                if (job == cast<int>(Job.Forager) || job == cast<int>(Job.Fisher)) {
+                    return Simulation.C_CURIOUS;
+                }
+                if (job == cast<int>(Job.Builder)) {
+                    return Simulation.C_AMBITION;
+                }
+                if (job == cast<int>(Job.Idle)) {
+                    return 0 - 1;                        // idleness says nothing about a place
+                }
+                return Simulation.C_SOCIAL;              // wood and every trade worked alongside others
+            }
+
+            // Culture is held in fixed point, and that is not tidiness -- it is a bug fix. Stored as
+            // whole numbers and stepped a thirty-second of the way, the step TRUNCATED to zero the
+            // moment the gap fell under thirty-two, so every axis nobody fed froze at exactly 31 and
+            // the first measurement read "bold 31..31, greed 31..31" across all eighty villages.
+            // That is not a world where nothing happened; it is integer division quantising the
+            // whole scale into one value. A thousand and twenty-four to the unit leaves the residual
+            // error at three hundredths of a point.
+            public static fixed int CFIX = 1024;
+
+            public method cultureOf(int comm, int axis) returns int {
+                return this.culture[comm * 5 + axis] / Simulation.CFIX;
+            }
+
+            // Fold this second's mix of trades into what the place IS. A thirty-second of the way
+            // each time, so a village turns over across about half a lifetime -- fast enough to see
+            // inside an arc, slow enough that one bad season is not a change of national character.
+            //
+            // The census has just counted everybody by trade, so this costs a loop over a hundred
+            // communities and nothing else.
+            private method steep() returns void {
+                int nj = Job.count();
+                for (int c in 0..this.ncomm) {
+                    for (int a in 0..5) {
+                        this.deeds[c * 5 + a] = 0;
+                    }
+                    mutable int total = 0;
+                    for (int jb in 0..nj) {
+                        int a = this.axisOf(jb);
+                        if (a < 0) {
+                            continue;
+                        }
+                        int held = this.ctrade[c * nj + jb];
+                        this.deeds[c * 5 + a] = this.deeds[c * 5 + a] + held;
+                        total = total + held;
+                    }
+                    if (total < 4) {
+                        continue;                        // too few at work to read anything from
+                    }
+                    for (int a in 0..5) {
+                        int at = c * 5 + a;
+                        int want = this.deeds[at] * 100 * Simulation.CFIX / total;
+                        this.culture[at] = this.culture[at] + (want - this.culture[at]) / 32;
+                    }
+                }
+                return;
             }
 
             // A village is where somebody starts being listened to. Below it a band simply defers to
@@ -587,8 +690,9 @@ public bundle Agents {
                 // What comes off it is decided by the NODE and not by the worker: the table in
                 // docs/ECONOMY.md section 1 says an oak gives Wood and a salt deposit gives Salt,
                 // and reading it here is what stops the trades and the world drifting apart.
+                int hc = this.harvestOf(this.folk.jobOf(i));
                 int good = Nodes.gives(nf.kindAt(t));
-                int got = nf.harvest(t, this.loadFor(this.harvestOf(this.folk.jobOf(i))));
+                int got = nf.harvest(t, this.loadFor(hc));
                 if (got <= 0) {
                     this.folk.setTargetNode(i, 0 - 1);
                     this.folk.setAct(i, cast<int>(Act.Idle));
@@ -851,6 +955,16 @@ public bundle Agents {
                         int child = this.folk.bear(i, this.seed, cast<int>(this.births));
                         if (child >= 0) {
                             this.births = this.births + 1;
+                            int hb = this.folk.homeOf(child);
+                            if (hb >= 0 && hb < this.ncomm) {
+                                this.folk.steepIn(child,
+                                                  this.cultureOf(hb, Simulation.C_BOLD),
+                                                  this.cultureOf(hb, Simulation.C_SOCIAL),
+                                                  this.cultureOf(hb, Simulation.C_GREED),
+                                                  this.cultureOf(hb, Simulation.C_CURIOUS),
+                                                  this.cultureOf(hb, Simulation.C_AMBITION),
+                                                  Simulation.STEEP);
+                            }
                         }
                     }
                     // Conceiving belongs HERE and not among the decisions. It used to ride on the
@@ -944,6 +1058,7 @@ public bundle Agents {
                 }
                 this.restake();
                 this.hearWho();
+                this.steep();
                 return;
             }
 
@@ -2010,6 +2125,42 @@ public bundle Agents {
                     heed = cast<int>(this.followed * cast<long>(1000) / said);
                 }
                 System.IO.Console.println($"  chiefs: {seated} seated | {this.risen} rose, {this.passed} handed on | {heed}/1000 of those spoken to went along ({this.followed} of {said})");
+                // THE number of the culture slice. Every community started at fifty on every axis,
+                // so the spread at the end is entirely the work its people did coming back at them
+                // through their children. A world where this stays near zero has a feedback loop
+                // that is wired up and does nothing.
+                mutable int[] lo = new int[5]();
+                mutable int[] hi = new int[5]();
+                mutable int[] sum = new int[5]();
+                mutable int places = 0;
+                for (int a in 0..5) {
+                    lo[a] = 1000;
+                    hi[a] = 0 - 1000;
+                }
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    places = places + 1;
+                    for (int a in 0..5) {
+                        int v = this.cultureOf(c, a);
+                        if (v < lo[a]) {
+                            lo[a] = v;
+                        }
+                        if (v > hi[a]) {
+                            hi[a] = v;
+                        }
+                        sum[a] = sum[a] + v;
+                    }
+                }
+                if (places > 0) {
+                    System.IO.Console.println($"  culture over {places} places (all began at 50):");
+                    System.IO.Console.println($"    bold {lo[0]}..{hi[0]} mean {sum[0] / places} | social {lo[1]}..{hi[1]} mean {sum[1] / places} | greed {lo[2]}..{hi[2]} mean {sum[2] / places}");
+                    System.IO.Console.println($"    curious {lo[3]}..{hi[3]} mean {sum[3] / places} | ambition {lo[4]}..{hi[4]} mean {sum[4] / places}");
+                }
+                delete lo;
+                delete hi;
+                delete sum;
                 this.wild.report();
                 this.meter.report("clock");
                 return;
