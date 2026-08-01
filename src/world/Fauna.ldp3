@@ -43,6 +43,12 @@ public bundle Agents {
             private static mutable float[] LIFE;    // seconds
             private static mutable float[] SHY;     // cells at which it runs from a person
             private static mutable int[] BAND;      // habitat band, tested by `livesIn`
+            // The same fact as BAND, as one bit per biome. `livesIn` is asked twice per animal per
+            // tick -- fifteen thousand animals at twenty ticks is six hundred thousand questions a
+            // second -- and answering it by walking eight bands of six comparisons is most of why an
+            // animal cost two and a half times what a person costs to move. Forty biomes fit inside
+            // a long, so the same answer becomes a shift and an and.
+            private static mutable long[] LIVES;
 
             // The habitat bands. A species belongs to one, and the band is a rule over biomes
             // rather than a list per species: it is the same fact stated once, and adding a
@@ -67,6 +73,7 @@ public bundle Agents {
                 Beasts.LIFE = new float[n]();
                 Beasts.SHY = new float[n]();
                 Beasts.BAND = new int[n]();
+                Beasts.LIVES = new long[n]();
                 mutable int i = 0;
                 while (i < n) {
                     Beasts.NAME[i] = "NoBeast";
@@ -114,6 +121,18 @@ public bundle Agents {
                            Beasts.B_GRASSLAND);
                 Beasts.put(cast<int>(Species.Crocodile), "Crocodile", hunt, 2, 46, 16, 1.1, 460.0, 3.0,
                            Beasts.B_WETLAND);
+
+                // Bake the bands into bit masks, once. Seventeen species times forty biomes is under
+                // seven hundred questions at startup, against six hundred thousand a second at run.
+                for (int sp in 0..n) {
+                    mutable long m = 0;
+                    for (int b in 0..Biomes.COUNT) {
+                        if (Beasts.bandHas(sp, b)) {
+                            m = m | (cast<long>(1) << b);
+                        }
+                    }
+                    Beasts.LIVES[sp] = m;
+                }
             }
 
             private static method put(int ord, String name, int diet, int herd, int meat, int hide,
@@ -170,10 +189,16 @@ public bundle Agents {
                     && Beasts.DIET[ord] != cast<int>(Diet.NoDiet);
             }
 
-            // Whether this species can live on this ground. Stated per BAND, so the seventeen
-            // species are seventeen choices of band rather than seventeen opinions about what
-            // counts as tundra.
+            // Whether this species can live on this ground: one bit out of the mask built at class
+            // load from the band rules below.
             public static method livesIn(int ord, int biome) returns boolean {
+                return ((Beasts.LIVES[ord] >> biome) & cast<long>(1)) != 0;
+            }
+
+            // The band rules themselves, asked exactly once per species at startup. Stated per BAND
+            // so the seventeen species are seventeen choices of band rather than seventeen opinions
+            // about what counts as tundra.
+            private static method bandHas(int ord, int biome) returns boolean {
                 int band = Beasts.BAND[ord];
                 if (band == Beasts.B_TEMPERATE) {
                     return biome == cast<int>(Biome.DeciduousForest)
