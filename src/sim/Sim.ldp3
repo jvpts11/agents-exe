@@ -95,6 +95,24 @@ public bundle Agents {
             private mutable int[] cbusy;
             private mutable int[] copen;
             private mutable int[] cseat;
+            // Splitting and leaving. `cfar` is the person a community's far end has gathered around,
+            // `cparty` how many would go with them, `cchild` the number the daughter got; `cflee` is
+            // where a starving person goes, decided once for the whole place and not once per empty
+            // stomach.
+            private mutable int[] cfar;
+            private mutable float[] cfarD;
+            private mutable int[] cparty;
+            private mutable int[] cfarAge;     // censuses that cluster has held together
+            private mutable int[] cchild;
+            private mutable int[] cjoin;       // and which bigger place this one has grown into
+            private mutable int[] cflee;
+            private mutable int[] cleave;      // how many more may go before the next census
+            private mutable int[] cfood;       // food a head, so the pair loop is arithmetic
+            private mutable long hived;        // villages founded by a place outgrowing its ground
+            private mutable long hivedFolk;    // and how many walked out in those parties
+            private mutable long fled;         // people who left a place that could not feed them
+            private mutable long joined;       // villages that grew into a bigger neighbour
+            private mutable long joinedFolk;
             // And everything alive that is not a person.
             private mutable Wildlife* wild;
             private mutable long hunted;
@@ -126,13 +144,14 @@ public bundle Agents {
             private mutable int[] era;
             private mutable long invented;     // eras reached by a community's own work
             private mutable long learned;      // and by looking over the fence at a neighbour
-            // Who claims each 16-cell block, or -1. Territory has no rule of its own yet -- that is
-            // its own slice -- but it has an honest meaning already: a community's land is what its
-            // people can reach and work, so the claim is a disk around where they actually are, and
-            // where two disks overlap the nearer village wins. Stamped per community rather than
-            // tested per block: a hundred villages times a six-block box is three thousand writes a
-            // second, against a million and a half the other way round.
+            // Who claims each 16-cell block, or -1. A community's land is the ground its people
+            // stand on, spread outward by how far they go to work -- so the shape of a country is
+            // read off fifty thousand positions rather than drawn as a disk of a size somebody
+            // chose. `claimHold` is the running majority vote that settles a contested block and
+            // `claimEdge` is the previous ring, so the spread cannot race across the map in one pass.
             private mutable int[] claim;
+            private mutable int[] claimHold;
+            private mutable int[] claimEdge;
             private mutable int claimW;
             private mutable int claimH;
             private mutable int claimAge;      // bumped on every rebuild, so the renderer can notice
@@ -249,7 +268,13 @@ public bundle Agents {
                 this.stuckTotal = 0;
                 this.arrivals = 0;
                 this.thoughtTotal = 0;
-                this.ncomm = 256;
+                // Room for the world to fill up. Two hundred and fifty-six was the number of places
+                // SEEDED, which was also the number available while nothing new could ever be
+                // founded; the first run with splitting used every one of them inside two minutes
+                // and then the world could only get bigger, never wider. Fifty thousand people at a
+                // hundred and twenty to a village is four hundred places if they all held together,
+                // and they do not.
+                this.ncomm = 512;
                 this.cpop = new int[this.ncomm]();
                 this.cadults = new int[this.ncomm]();
                 this.cmales = new int[this.ncomm]();
@@ -275,18 +300,37 @@ public bundle Agents {
                 this.cbusy = new int[this.ncomm]();
                 this.copen = new int[this.ncomm * Craft.count()]();
                 this.cseat = new int[this.ncomm]();
+                this.cfar = new int[this.ncomm]();
+                this.cfarD = new float[this.ncomm]();
+                this.cparty = new int[this.ncomm]();
+                this.cfarAge = new int[this.ncomm]();
+                this.cchild = new int[this.ncomm]();
+                this.cjoin = new int[this.ncomm]();
+                this.cflee = new int[this.ncomm]();
+                this.cleave = new int[this.ncomm]();
+                this.cfood = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
                     this.cworst[c] = 0 - 1;
                     this.cdead[c] = 0 - 1;
                     this.cbusy[c] = 0 - 1;
                     this.cseat[c] = 0 - 1;
+                    this.cfar[c] = 0 - 1;
+                    this.cchild[c] = 0 - 1;
+                    this.cflee[c] = 0 - 1;
                 }
+                this.hived = 0;
+                this.hivedFolk = 0;
+                this.fled = 0;
+                this.joined = 0;
+                this.joinedFolk = 0;
                 for (int s in 0..this.ncomm * Craft.count()) {
                     this.copen[s] = 0 - 1;
                 }
                 this.claimW = (grid.width() + 15) / 16;
                 this.claimH = (grid.height() + 15) / 16;
                 this.claim = new int[this.claimW * this.claimH]();
+                this.claimHold = new int[this.claimW * this.claimH]();
+                this.claimEdge = new int[this.claimW * this.claimH]();
                 for (int b in 0..this.claimW * this.claimH) {
                     this.claim[b] = 0 - 1;
                 }
@@ -362,7 +406,18 @@ public bundle Agents {
                 delete this.cbusy;
                 delete this.copen;
                 delete this.cseat;
+                delete this.cfar;
+                delete this.cfarD;
+                delete this.cparty;
+                delete this.cfarAge;
+                delete this.cchild;
+                delete this.cjoin;
+                delete this.cflee;
+                delete this.cleave;
+                delete this.cfood;
                 delete this.claim;
+                delete this.claimHold;
+                delete this.claimEdge;
                 delete this.wild;
                 delete this.meter;
                 delete this.chief;
@@ -574,53 +629,79 @@ public bundle Agents {
                 return this.wild;
             }
 
-            // How far a community's claim reaches, in cells. Not a number picked to look right: it
-            // is WORK_BLOCKS of sixteen cells, the same distance the community searches for work,
-            // because what a village holds is what its people can get to and back from.
+            // How far a community can be spread out and still be ONE community, in cells. It is
+            // WORK_BLOCKS of sixteen -- the distance the place searches for work -- because a
+            // hamlet whose people are further out than that is not an edge of the village any
+            // more, it is somewhere else that has not admitted it yet.
             public static int REIGN = 48;
 
+            // What a community holds is the ground its people are standing on, widened by how far
+            // they go to work.
+            //
+            // It used to be a disk of REIGN cells around the mean position, which made every place
+            // in the world exactly the same size and shape no matter whether fifty people or eight
+            // hundred lived there. That is a dial wearing a rule's clothes. Territory is now READ
+            // OFF the population the same way the centre already was: whoever has the most people
+            // standing in a block holds it, and the claim then spreads outward by the distance a
+            // worker covers. A village strung along a river holds the river; a city holds a wide
+            // irregular country; a hamlet holds a blob. Nothing had to be tuned for that -- it falls
+            // out of where fifty thousand people actually are.
             private method restake() returns void {
-                for (int b in 0..this.claimW * this.claimH) {
+                int nb = this.claimW * this.claimH;
+                for (int b in 0..nb) {
                     this.claim[b] = 0 - 1;
+                    this.claimHold[b] = 0;
                 }
-                int r = (Simulation.REIGN + 15) / 16;
-                for (int c in 0..this.ncomm) {
-                    if (this.cpop[c] <= 0) {
-                        continue;
-                    }
-                    int cbx = cast<int>(this.ccx[c]) / 16;
-                    int cby = cast<int>(this.ccy[c]) / 16;
-                    mutable int dy = 0 - r;
-                    while (dy <= r) {
-                        mutable int dx = 0 - r;
-                        while (dx <= r) {
-                            int bx = cbx + dx;
-                            int by = cby + dy;
-                            if (bx < 0 || by < 0 || bx >= this.claimW || by >= this.claimH) {
-                                dx = dx + 1;
-                                continue;
-                            }
-                            if (dx * dx + dy * dy > r * r) {
-                                dx = dx + 1;
-                                continue;
-                            }
-                            int at = by * this.claimW + bx;
-                            int held = this.claim[at];
-                            if (held < 0) {
-                                this.claim[at] = c;
-                            } else {
-                                // Two villages reach the same ground: the nearer one holds it.
-                                float ax = this.ccx[c] - cast<float>(bx * 16 + 8);
-                                float ay = this.ccy[c] - cast<float>(by * 16 + 8);
-                                float bxd = this.ccx[held] - cast<float>(bx * 16 + 8);
-                                float byd = this.ccy[held] - cast<float>(by * 16 + 8);
-                                if (ax * ax + ay * ay < bxd * bxd + byd * byd) {
-                                    this.claim[at] = c;
+                // Who is standing where, settled by majority. A running vote rather than a count per
+                // community per block: a tally would be a quarter of a million cells wide and this
+                // is one int, because the only question asked of it is who has the most.
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i)) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm) {
+                            int bx = cast<int>(this.folk.xAt(i)) / 16;
+                            int by = cast<int>(this.folk.yAt(i)) / 16;
+                            if (bx >= 0 && by >= 0 && bx < this.claimW && by < this.claimH) {
+                                int at = by * this.claimW + bx;
+                                if (this.claim[at] == h) {
+                                    this.claimHold[at] = this.claimHold[at] + 1;
+                                } else if (this.claimHold[at] == 0) {
+                                    this.claim[at] = h;
+                                    this.claimHold[at] = 1;
+                                } else {
+                                    this.claimHold[at] = this.claimHold[at] - 1;
                                 }
                             }
-                            dx = dx + 1;
                         }
-                        dy = dy + 1;
+                    }
+                    i = i + 1;
+                }
+                // And then it spreads to the ground they work but do not sleep on. One ring a pass,
+                // read from the last pass so a claim cannot race across the map in a single census.
+                for (int pass in 0..Simulation.WORK_BLOCKS) {
+                    for (int b in 0..nb) {
+                        this.claimEdge[b] = this.claim[b];
+                    }
+                    for (int by in 0..this.claimH) {
+                        for (int bx in 0..this.claimW) {
+                            int at = by * this.claimW + bx;
+                            if (this.claimEdge[at] >= 0) {
+                                continue;
+                            }
+                            mutable int take = 0 - 1;
+                            if (bx > 0 && this.claimEdge[at - 1] >= 0) {
+                                take = this.claimEdge[at - 1];
+                            } else if (bx + 1 < this.claimW && this.claimEdge[at + 1] >= 0) {
+                                take = this.claimEdge[at + 1];
+                            } else if (by > 0 && this.claimEdge[at - this.claimW] >= 0) {
+                                take = this.claimEdge[at - this.claimW];
+                            } else if (by + 1 < this.claimH && this.claimEdge[at + this.claimW] >= 0) {
+                                take = this.claimEdge[at + this.claimW];
+                            }
+                            this.claim[at] = take;
+                        }
                     }
                 }
                 this.claimAge = this.claimAge + 1;
@@ -636,9 +717,7 @@ public bundle Agents {
                 return;
             }
 
-            // Who holds this cell, or -1. The block says which community is near, and the cell-level
-            // range test rounds the block grid off into a disk -- so a border reads as the edge of
-            // how far people go, not as the sixteen-cell squares the index happens to use.
+            // Who holds this cell, or -1.
             public method ownerAt(int x, int y) returns int {
                 if (x < 0 || y < 0) {
                     return 0 - 1;
@@ -650,11 +729,6 @@ public bundle Agents {
                 }
                 int c = this.claim[by * this.claimW + bx];
                 if (c < 0) {
-                    return 0 - 1;
-                }
-                float dx = this.ccx[c] - (cast<float>(x) + 0.5);
-                float dy = this.ccy[c] - (cast<float>(y) + 0.5);
-                if (dx * dx + dy * dy > cast<float>(Simulation.REIGN * Simulation.REIGN)) {
                     return 0 - 1;
                 }
                 // Nobody holds the sea, and nobody holds a cliff face. A claim is over ground its
@@ -794,6 +868,11 @@ public bundle Agents {
                     // ninety-one per cent of the world's trees in one arc. What stops that is not a
                     // cap on cutting: it is that there are five other things worth doing.
                     if (this.folk.isAdult(i)) {
+                        if (this.leaving(i)) {
+                            this.folk.setThinkAt(i, this.tick + 5);
+                            this.thoughtThisFrame = this.thoughtThisFrame + 1;
+                            continue;               // gone; whatever they were is somebody else's
+                        }
                         if (this.folk.jobOf(i) == cast<int>(Job.Idle)) {
                             this.chooseJob(i);
                         }
@@ -1199,7 +1278,7 @@ public bundle Agents {
                 }
                 // Everything the table has to say about every community, in one read of each row.
                 // It has to come after the hands are counted and before anybody decides anything.
-                this.town.sweep(this.croom, this.cworst, this.cworstRoom, this.cdead,
+                this.town.sweep(this.cpop, this.croom, this.cworst, this.cworstRoom, this.cdead,
                                 this.cbusy, this.copen, this.cseat,
                                 this.ncomm, Craft.count(), cast<int>(BuildingKind.TownHall));
                 // Where a community IS, taken as where its people are. Nobody planted a flag: the
@@ -1229,6 +1308,402 @@ public bundle Agents {
                 this.hearWho();
                 this.steep();
                 this.discover();
+                this.hive();
+                this.absorb();
+                this.wayOut();
+                return;
+            }
+
+            // Two places that have grown into each other are one place.
+            //
+            // This is the half that was missing, and its absence was not a detail -- it was the
+            // reason the world could only ever get more fragmented. Splitting adds communities and
+            // nothing but total extinction ever took one away, so every run ended with every
+            // community number in the world used up and an average country of thirteen blocks, no
+            // matter how the split rule was tightened. Three attempts were spent tightening it.
+            //
+            // The test is the split's read the other way -- but at HALF the distance, and that gap
+            // is the whole difference between a world and a machine that hums. With both thresholds
+            // at REIGN, a daughter would drift back inside its mother's reach, merge, outgrow it and
+            // split again: ten thousand foundings and ten thousand joinings in one arc, every one of
+            // them wiping the trades of everybody involved. A place has to travel to leave and stay
+            // gone, so leaving is measured at a working day and returning at half of one.
+            //
+            // The smaller joins the larger and brings everything it built, which is how a town comes
+            // to have two sawmills and a hundred and forty houses -- and therefore how the upper
+            // rungs of the housing catalogue ever get used at all.
+            private method absorb() returns void {
+                for (int c in 0..this.ncomm) {
+                    this.cjoin[c] = 0 - 1;
+                }
+                for (int a in 0..this.ncomm) {
+                    if (this.cpop[a] <= 0) {
+                        continue;
+                    }
+                    mutable int into = 0 - 1;
+                    mutable int biggest = this.cpop[a];
+                    for (int b in 0..this.ncomm) {
+                        if (b == a || this.cpop[b] <= biggest) {
+                            continue;                // only ever join something bigger, so no cycles
+                        }
+                        float dx = this.ccx[b] - this.ccx[a];
+                        float dy = this.ccy[b] - this.ccy[a];
+                        int near = Simulation.REIGN / 2;
+                        if (dx * dx + dy * dy > cast<float>(near * near)) {
+                            continue;
+                        }
+                        biggest = this.cpop[b];
+                        into = b;
+                    }
+                    this.cjoin[a] = into;
+                }
+                // One hop only. A joins B and B joins C in the same census would leave A's people
+                // pointing at a number nobody lives in; C is bigger than B is bigger than A, so
+                // letting A wait a second and follow B into C next time is both simpler and true.
+                for (int a in 0..this.ncomm) {
+                    if (this.cjoin[a] >= 0 && this.cjoin[this.cjoin[a]] >= 0) {
+                        this.cjoin[a] = 0 - 1;
+                    }
+                }
+                mutable boolean any = false;
+                for (int a in 0..this.ncomm) {
+                    int into = this.cjoin[a];
+                    if (into < 0) {
+                        continue;
+                    }
+                    any = true;
+                    for (int g in 1..Goods.count()) {
+                        this.stores.add(into, g, this.stores.amountOf(a, g));
+                    }
+                    this.stores.clear(a);
+                    this.town.reown(a, into, cast<int>(BuildingKind.TownHall));
+                    // Knowledge joins up; it is not averaged and it is not lost. Two villages that
+                    // become a town know everything either of them knew.
+                    if (this.lore[a] > this.lore[into]) {
+                        this.lore[into] = this.lore[a];
+                    }
+                    if (this.era[a] > this.era[into]) {
+                        this.era[into] = this.era[a];
+                    }
+                    this.joined = this.joined + 1;
+                    this.joinedFolk = this.joinedFolk + cast<long>(this.cpop[a]);
+                    this.cpop[into] = this.cpop[into] + this.cpop[a];
+                    this.cpop[a] = 0;
+                    this.chief[a] = 0 - 1;
+                }
+                if (!any) {
+                    return;
+                }
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i)) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm && this.cjoin[h] >= 0) {
+                            this.folk.setHome(i, this.cjoin[h]);
+                        }
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            // Does any place hold together, and if not, where does the far end of it go?
+            //
+            // A community is a single number for everybody who belongs to it -- one store, one
+            // chief, one set of workshops -- and that is only honest while the people can all get to
+            // it. Once a village has smeared itself across more ground than a working day covers,
+            // the far end is not the edge of that village any more; it is somewhere else that has
+            // not admitted it yet, sharing a granary it cannot walk to.
+            //
+            // So the far end is given its own number. Nobody marches anywhere: the split is a
+            // RENAMING of people who had already drifted out there, which is how an outlying cluster
+            // becomes its own place in fact long before it becomes one in name.
+            // Three passes over the people for the whole world, not one per community: the same rule
+            // this codebase keeps having to relearn, and the reason a split costs a hundred and fifty
+            // thousand reads a second instead of twelve million.
+            private method hive() returns void {
+                int n = this.folk.limit();
+                for (int c in 0..this.ncomm) {
+                    this.cfar[c] = 0 - 1;
+                    this.cfarD[c] = cast<float>(Simulation.REIGN * Simulation.REIGN);
+                    this.cparty[c] = 0;
+                    this.cchild[c] = 0 - 1;
+                    if (this.cpop[c] < Simulation.VILLAGE) {
+                        this.cfarAge[c] = 0;
+                    }
+                }
+                // Who is furthest out. The answer is a PERSON and not a direction, because a new
+                // village forms around somebody who is already living there.
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i)) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm && this.cpop[h] >= Simulation.VILLAGE) {
+                            float dx = this.folk.xAt(i) - this.ccx[h];
+                            float dy = this.folk.yAt(i) - this.ccy[h];
+                            float d = dx * dx + dy * dy;
+                            if (d > this.cfarD[h]) {
+                                this.cfarD[h] = d;
+                                this.cfar[h] = i;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                // How many are nearer to that person than to the old centre. Counted before anything
+                // changes, because both ends have to be left able to stand on their own -- a split
+                // that leaves a rump of eight is not a new village, it is two dying ones.
+                i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i)) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm && this.cfar[h] >= 0 && this.withFar(i, h)) {
+                            this.cparty[h] = this.cparty[h] + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                for (int c in 0..this.ncomm) {
+                    if (this.cfar[c] < 0) {
+                        continue;
+                    }
+                    if (this.cparty[c] < Simulation.HAMLET
+                        || this.cpop[c] - this.cparty[c] < Simulation.HAMLET) {
+                        this.cfar[c] = 0 - 1;
+                        this.cfarAge[c] = 0;
+                        continue;
+                    }
+                    // How long that cluster has been out there. Without this the split fires on the
+                    // first census a group of thirty is beyond the work radius -- and a group of
+                    // thirty beyond the work radius is what a village that sends people to a distant
+                    // forest LOOKS like every single day. Four and a half thousand villages were
+                    // founded in one arc that way, every one of them a work party mistaken for a
+                    // town. A settlement is a cluster that is still there tomorrow.
+                    this.cfarAge[c] = this.cfarAge[c] + 1;
+                    if (this.cfarAge[c] < Simulation.SETTLED) {
+                        this.cfar[c] = 0 - 1;
+                        continue;
+                    }
+                    int d = this.freeCommunity();
+                    if (d < 0) {
+                        this.cfar[c] = 0 - 1;        // the world is out of names
+                        continue;
+                    }
+                    this.found(d, c, this.folk.xAt(this.cfar[c]), this.folk.yAt(this.cfar[c]));
+                    this.cchild[c] = d;
+                    this.cfarAge[c] = 0;
+                    this.cpop[d] = this.cparty[c];   // claims the slot against the next `found`
+                    this.cpop[c] = this.cpop[c] - this.cparty[c];
+                    this.hived = this.hived + 1;
+                    this.hivedFolk = this.hivedFolk + cast<long>(this.cparty[c]);
+                }
+                i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i)) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm && this.cchild[h] >= 0 && this.withFar(i, h)) {
+                            this.folk.setHome(i, this.cchild[h]);
+                        }
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            // Is this person part of the outlying settlement rather than of the village?
+            //
+            // Two tests and both are needed. Near the outlier: they are part of that cluster.
+            // Beyond the parent's reach: they are not merely on the far side of the village green.
+            //
+            // The first version asked only the first half -- whoever is nearer to the outlier than
+            // to the centre -- which is the perpendicular bisector, and that always takes about HALF
+            // the village. So every place that reached a hundred and twenty split on the spot, into
+            // two sixties that grew back and split again: fifteen hundred and fifty-eight foundings
+            // in one arc, every community slot in the world used, and an average country of thirteen
+            // blocks. A split has to mean a satellite that has genuinely become its own place, not a
+            // line drawn through a crowd.
+            private method withFar(int i, int c) returns boolean {
+                int f = this.cfar[c];
+                float reach = cast<float>(Simulation.REIGN * Simulation.REIGN);
+                float ax = this.folk.xAt(i) - this.folk.xAt(f);
+                float ay = this.folk.yAt(i) - this.folk.yAt(f);
+                if (ax * ax + ay * ay >= reach) {
+                    return false;
+                }
+                float bx = this.folk.xAt(i) - this.ccx[c];
+                float by = this.folk.yAt(i) - this.ccy[c];
+                return bx * bx + by * by > reach;
+            }
+
+            // The smallest group that is a place rather than a party of wanderers: a quarter of
+            // VILLAGE, which is 120.
+            //
+            // Written out as 30 and NOT as `Simulation.VILLAGE / 4`, which is what it said first and
+            // which compiles to zero. A static field initialised from another static field is
+            // silently emitted as `i32 0` by ldp3c today -- no diagnostic, no warning -- so every
+            // founding party of one person passed the minimum, and thirteen thousand villages were
+            // founded in an arc. Four separate rules were tightened chasing that before the IR was
+            // read. Toolchain task #334.
+            public static int HAMLET = 30;
+
+            // Censuses an outlying cluster must hold together before it counts as a place of its
+            // own. A minute is a sixth of a life: somebody who has spent a sixth of their life out
+            // there does not commute, they live there.
+            //
+            // This was added while chasing the HAMLET bug above, so it was checked afterwards
+            // rather than trusted. Same seed, same arc, only this number changed: at 1 the world
+            // founds 413 villages and absorbs 380; at 60 it founds 67 and absorbs 59. Six times the
+            // churn, and the difference is entirely work parties being mistaken for towns.
+            public static int SETTLED = 60;
+
+            // A community number nobody is using. Slots are recycled, so everything the last
+            // occupant left in one has to be cleared by `found` -- an inherited granary or an
+            // inherited chief would be a village remembering a life it never had.
+            private method freeCommunity() returns int {
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0 && this.cseat[c] < 0) {
+                        return c;
+                    }
+                }
+                return 0 - 1;
+            }
+
+            // Set a daughter village up. It carries its mother's TEMPERAMENT and its mother's
+            // KNOWLEDGE -- the people who walked out are the same people, and they did not forget how
+            // to fire clay on the way -- but nothing else: no chief, no deeds, no grain. A new place
+            // starts hungry and unled, which is what makes founding one cost something.
+            private method found(int d, int mother, float fx, float fy) returns void {
+                this.ccx[d] = fx;
+                this.ccy[d] = fy;
+                this.cadults[d] = 0;
+                this.cmales[d] = 0;
+                for (int jb in 0..Job.count()) {
+                    this.ctrade[d * Job.count() + jb] = 0;
+                }
+                for (int hc in 0..Harvest.count()) {
+                    this.cworkX[d * Harvest.count() + hc] = 0 - 1;
+                }
+                this.stores.clear(d);
+                this.chief[d] = 0 - 1;
+                this.lean[d] = cast<int>(Job.Idle);
+                for (int a in 0..5) {
+                    this.culture[d * 5 + a] = this.culture[mother * 5 + a];
+                    this.deeds[d * 5 + a] = 0;
+                }
+                this.lore[d] = this.lore[mother];
+                this.era[d] = this.era[mother];
+                this.croom[d] = 0;
+                this.cworst[d] = 0 - 1;
+                this.cworstRoom[d] = 0;
+                this.cdead[d] = 0 - 1;
+                this.cbusy[d] = 0 - 1;
+                this.cseat[d] = 0 - 1;
+                for (int cr in 0..Craft.count()) {
+                    this.copen[d * Craft.count() + cr] = 0 - 1;
+                }
+                this.cflee[d] = 0 - 1;
+                this.cleave[d] = 0;
+                this.cfar[d] = 0 - 1;
+                this.cchild[d] = 0 - 1;
+                this.cjoin[d] = 0 - 1;
+                this.cparty[d] = 0;
+                this.cfarAge[d] = 0;
+                return;
+            }
+
+            // Does this person walk away from where they were born?
+            //
+            // Two things have to be true and neither of them is an opinion: they are hungry, and the
+            // place has nothing to feed them with. Hunger alone is not enough -- somebody on their
+            // way home with a basket is hungry too -- and an empty granary alone is not enough,
+            // because a village between harvests is not a village anybody flees.
+            //
+            // Where they go was decided for the whole community a moment ago. A starving person does
+            // not survey the world; they go where word says there is bread, and word travels between
+            // villages rather than between individuals.
+            private method leaving(int i) returns boolean {
+                int h = this.folk.homeOf(i);
+                if (h < 0 || h >= this.ncomm) {
+                    return false;
+                }
+                if (this.cleave[h] <= 0) {
+                    return false;                    // this place has let go of enough for one day
+                }
+                // Halfway to dying of it, not merely hungry. The first version asked for HUNGRY_AT,
+                // which is the point where somebody starts wanting lunch -- so at the first empty
+                // granary anywhere the entire world got up and walked, a hundred and thirty thousand
+                // departures out of fifty thousand people, and nothing was ever gathered again
+                // because nobody stayed anywhere long enough to gather it. Everyone saw the same
+                // signal on the same tick and acted on it at once.
+                if (this.folk.hungerOf(i) * 2 < Simulation.STARVE_AT) {
+                    return false;
+                }
+                if (this.stores.foodOf(h) > 0) {
+                    return false;
+                }
+                int to = this.cflee[h];
+                if (to < 0) {
+                    return false;                    // nowhere better; they stay and take their chances
+                }
+                this.cleave[h] = this.cleave[h] - 1;
+                this.folk.setHome(i, to);
+                this.folk.setTarget(i, cast<int>(this.ccx[to]), cast<int>(this.ccy[to]));
+                this.folk.setAct(i, cast<int>(Act.WalkTo));
+                this.fled = this.fled + 1;
+                return true;
+            }
+
+            // Where somebody goes when the place they were born cannot feed them.
+            //
+            // Asked per COMMUNITY per second, as everything of this shape is: the nearest other
+            // place with more food a head than this one. A starving person does not survey the
+            // world -- they go where word says there is bread, and word travels between villages,
+            // not between individuals.
+            private method wayOut() returns void {
+                // Food a head, once per community. Read inside the pair loop it was a sweep of every
+                // good in the catalogue five hundred times five hundred times a second -- fifteen
+                // million reads to answer five hundred questions.
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] > 0) {
+                        this.cfood[c] = this.stores.foodOf(c) / (this.cpop[c] + 1);
+                    } else {
+                        this.cfood[c] = 0;
+                    }
+                }
+                mutable int c = 0;
+                while (c < this.ncomm) {
+                    this.cflee[c] = 0 - 1;
+                    // How many a place may lose before the next census. Departure is a trickle and
+                    // never a stampede -- a sixteenth of a village a second empties it in a couple
+                    // of minutes if the famine holds, and lets it recover if it does not. The budget
+                    // rule again: constant cost per second, more seconds when there is more to do.
+                    this.cleave[c] = this.cpop[c] / 16 + 1;
+                    if (this.cpop[c] <= 0) {
+                        c = c + 1;
+                        continue;
+                    }
+                    int mine = this.cfood[c];
+                    mutable int best = 0 - 1;
+                    mutable float bestD = 0.0;
+                    for (int o in 0..this.ncomm) {
+                        if (o == c || this.cpop[o] <= 0) {
+                            continue;
+                        }
+                        if (this.cfood[o] <= mine + Simulation.LARDER) {
+                            continue;                // no better off than here, so not worth the road
+                        }
+                        float dx = this.ccx[o] - this.ccx[c];
+                        float dy = this.ccy[o] - this.ccy[c];
+                        float d = dx * dx + dy * dy;
+                        if (best < 0 || d < bestD) {
+                            best = o;
+                            bestD = d;
+                        }
+                    }
+                    this.cflee[c] = best;
+                    c = c + 1;
+                }
                 return;
             }
 
@@ -2389,6 +2864,41 @@ public bundle Agents {
                 }
                 System.IO.Console.println($"  shelter: {roofs} homes standing | {roofed} of {souls} under a roof ({sheltered} per cent) | {this.housed} plots marked out, {this.rebuilt} rebuilt bigger, {this.pulled} workshops pulled down");
                 System.IO.Console.println(homes);
+                // The map of the world as its people drew it. `held` is how much ground anybody
+                // claims at all, and the biggest and smallest countries say whether territory came
+                // out as a shape or as a stamped disk -- if every place holds the same number of
+                // blocks, the claim is not being read off the population, it is being drawn.
+                mutable int[] land = new int[this.ncomm]();
+                mutable int held = 0;
+                for (int b in 0..this.claimW * this.claimH) {
+                    int who = this.claim[b];
+                    if (who >= 0) {
+                        land[who] = land[who] + 1;
+                        held = held + 1;
+                    }
+                }
+                mutable int widest = 0;
+                mutable int narrow = 0;
+                mutable int countries = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    countries = countries + 1;
+                    if (land[c] > widest) {
+                        widest = land[c];
+                    }
+                    if (narrow == 0 || land[c] < narrow) {
+                        narrow = land[c];
+                    }
+                }
+                delete land;
+                mutable int mean = 0;
+                if (countries > 0) {
+                    mean = held / countries;
+                }
+                System.IO.Console.println($"  land: {countries} places holding {held} blocks of {this.claimW * this.claimH} | widest {widest}, mean {mean}, narrowest {narrow}");
+                System.IO.Console.println($"  spread: {this.hived} villages founded by splitting ({this.hivedFolk} folk walked out) | {this.joined} grew into a bigger neighbour ({this.joinedFolk} folk) | {this.fled} left a place that could not feed them");
                 // What is left standing, against what the world started with. A resource that only
                 // goes down is being liquidated, and this is where that shows.
                 NodeField* nf = this.g.surface();
