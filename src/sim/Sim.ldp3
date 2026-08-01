@@ -119,6 +119,71 @@ public bundle Agents {
 
             public static float SPEED = 1.25;       // cells a second
 
+            // ---- the clock ----
+            //
+            // The step is FIXED and the RATE is what moves. Everything in this file is written
+            // against dt -- hunger accrues per second, a walk covers SPEED cells a second, a batch
+            // takes so many seconds -- and all of it stays true only while the step stays small.
+            // Running the world faster by handing `step` a bigger dt would let a walker cross a
+            // river in one frame and a woodcutter finish a tree he never reached; running it faster
+            // by taking MORE steps changes nothing at all except how long the wall clock waits.
+            //
+            // So `advance` takes real seconds, multiplies by the rate, and spends the result in
+            // whole ticks -- carrying the remainder, so no time is lost to rounding at any rate.
+            public static float TICK = 0.05;
+            public static int CATCHUP = 240;        // ticks one call may spend before it gives up
+
+            private mutable float rate;
+            private mutable float owed;
+            private mutable boolean halted;
+
+            public method setRate(float r) returns void {
+                if (r < 0.0) {
+                    return;
+                }
+                this.rate = r;
+                this.owed = 0.0;
+                return;
+            }
+
+            public method rateOf() returns float {
+                return this.rate;
+            }
+
+            public method setHalted(boolean h) returns void {
+                this.halted = h;
+                this.owed = 0.0;
+                return;
+            }
+
+            public method isHalted() returns boolean {
+                return this.halted;
+            }
+
+            // Advance by `real` seconds of wall clock. Returns the ticks actually spent, which is
+            // what a caller wants for a frame counter and also what tells it the machine could not
+            // keep up: at a high rate the answer stops rising, and the world simply runs at whatever
+            // the hardware can do instead of falling further behind on every frame.
+            public method advance(float real) returns int {
+                if (this.halted || this.rate <= 0.0) {
+                    return 0;
+                }
+                this.owed = this.owed + real * this.rate;
+                mutable int n = 0;
+                while (this.owed >= Simulation.TICK && n < Simulation.CATCHUP) {
+                    this.step(Simulation.TICK);
+                    this.owed = this.owed - Simulation.TICK;
+                    n = n + 1;
+                }
+                if (n >= Simulation.CATCHUP) {
+                    // Whatever is still owed is time the machine never had. Dropping it is the only
+                    // way out: carrying it forward means every frame owes more than the last, which
+                    // is how a simulation stops responding altogether.
+                    this.owed = 0.0;
+                }
+                return n;
+            }
+
             public constructor Simulation(Grid* grid, AgentTable* people, int worldSeed) {
                 this.g = grid;
                 this.folk = people;
@@ -155,6 +220,9 @@ public bundle Agents {
                     this.claim[b] = 0 - 1;
                 }
                 this.claimAge = 0;
+                this.rate = 1.0;
+                this.owed = 0.0;
+                this.halted = false;
                 this.crafted = 0;
                 this.stalled = 0;
                 this.raised = 0;
