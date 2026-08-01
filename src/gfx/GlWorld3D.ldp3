@@ -11,6 +11,7 @@ import Agents.World.NodeAtlas;
 import Agents.World.BuildingKind;
 import Agents.World.Builds;
 import Agents.Sim.Buildings;
+import Agents.Sim.Simulation;
 import System.Memory;
 
 // True-3D GL renderer for the world, two-level LOD:
@@ -33,6 +34,20 @@ public bundle Agents {
             private mutable int uProj;
             private mutable int uView;
             private mutable int uTime;
+            private mutable int uAlpha;
+            private mutable int uFlat;
+            // The map overlay: where each community's land is, washed in its colour with a hard
+            // edge where it meets somebody else's. Its own buffer, rebuilt when the claim changes.
+            private mutable int ovao;
+            private mutable int ovbo;
+            private mutable int onverts;      // fill triangles
+            private mutable int oedge;        // where the border triangles start, in vertices
+            private mutable int ocap;
+            private mutable address obuf;
+            private mutable Simulation* sim;
+            private mutable boolean haveSim;
+            private mutable boolean showTerritory;
+            private mutable int bakedClaim;
             private mutable int uFog;
             private mutable float timeSec;
             // coarse (whole world) and detail (near window) batches
@@ -200,6 +215,16 @@ public bundle Agents {
                 this.kindModel = new int[BuildingKind.count()]();
                 this.haveTown = false;
                 this.bakedTown = 0 - 1;
+                this.ovao = gl.genVertexArray();
+                this.ovbo = gl.genBuffer();
+                this.setupVao(this.ovao, this.ovbo);
+                this.onverts = 0;
+                this.oedge = 0;
+                this.ocap = 0;
+                this.obuf = cast<address>(0);
+                this.haveSim = false;
+                this.showTerritory = true;
+                this.bakedClaim = 0 - 1;
                 this.projM = new GlMat4() on heap;
                 this.viewM = new GlMat4() on heap;
                 this.tileTop = new float[1]();
@@ -229,6 +254,8 @@ public bundle Agents {
                 this.uProj = gl.getUniformLocation(this.prog, "uProj");
                 this.uView = gl.getUniformLocation(this.prog, "uView");
                 this.uTime = gl.getUniformLocation(this.prog, "uTime");
+                this.uAlpha = gl.getUniformLocation(this.prog, "uAlpha");
+                this.uFlat = gl.getUniformLocation(this.prog, "uFlat");
                 this.uFog = gl.getUniformLocation(this.prog, "uFog");
                 this.timeSec = 0.0;
                 this.nverts = 0;
@@ -1703,6 +1730,7 @@ public bundle Agents {
                 Memory.free(buf);
                 // The window moved, so whatever was baked for the old one is the wrong set.
                 this.bakedTown = 0 - 1;
+                this.bakedClaim = 0 - 1;
                 this.detX0 = ox;
                 this.detY0 = oy;
                 this.haveDetail = true;
@@ -1963,6 +1991,149 @@ public bundle Agents {
                 return;
             }
 
+            // Hand over the simulation, which is what knows who holds what ground.
+            public method setSim(Simulation* s) returns void {
+                this.sim = s;
+                this.haveSim = true;
+                this.bakedClaim = 0 - 1;
+                return;
+            }
+
+            public method setTerritory(boolean shown) returns void {
+                this.showTerritory = shown;
+                this.bakedClaim = 0 - 1;
+                return;
+            }
+
+            public method territoryOn() returns boolean {
+                return this.showTerritory;
+            }
+
+            // One flat quad laid over a cell, a hair above whatever is on it.
+            private method ovQuad(int w, float cx, float cy, float z,
+                                  float hx, float hy, float r, float g, float b) returns int {
+                mutable int p = w;
+                p = this.wr(this.obuf, p, cx - hx, cy - hy, z, 0.0, 0.0, 1.0, r, g, b);
+                p = this.wr(this.obuf, p, cx + hx, cy - hy, z, 0.0, 0.0, 1.0, r, g, b);
+                p = this.wr(this.obuf, p, cx + hx, cy + hy, z, 0.0, 0.0, 1.0, r, g, b);
+                p = this.wr(this.obuf, p, cx - hx, cy - hy, z, 0.0, 0.0, 1.0, r, g, b);
+                p = this.wr(this.obuf, p, cx + hx, cy + hy, z, 0.0, 0.0, 1.0, r, g, b);
+                p = this.wr(this.obuf, p, cx - hx, cy + hy, z, 0.0, 0.0, 1.0, r, g, b);
+                return p;
+            }
+
+            // The territory overlay. Every held cell in the window gets a wash of its community's
+            // colour; every cell whose neighbour is held by SOMEBODY ELSE (or by nobody) gets a
+            // strip of solid colour along that side, which is the border.
+            //
+            // Fills first and borders after, in one buffer with the split remembered, so the two
+            // can be drawn at different opacities without two buffers or a fourth vertex channel.
+            private method bakeOverlay() returns void {
+                this.onverts = 0;
+                this.oedge = 0;
+                if (!this.haveSim || !this.showTerritory) {
+                    return;
+                }
+                if (!this.detailOn || !this.haveDetail) {
+                    return;
+                }
+                int x0 = this.detX0;
+                int y0 = this.detY0;
+                int x1 = x0 + this.detW;
+                int y1 = y0 + this.detH;
+                mutable int held = 0;
+                mutable int edges = 0;
+                for (int y in y0..y1) {
+                    for (int x in x0..x1) {
+                        if (this.sim.ownerAt(x, y) < 0) {
+                            continue;
+                        }
+                        held = held + 1;
+                        int o = this.sim.ownerAt(x, y);
+                        if (this.sim.ownerAt(x - 1, y) != o) {
+                            edges = edges + 1;
+                        }
+                        if (this.sim.ownerAt(x + 1, y) != o) {
+                            edges = edges + 1;
+                        }
+                        if (this.sim.ownerAt(x, y - 1) != o) {
+                            edges = edges + 1;
+                        }
+                        if (this.sim.ownerAt(x, y + 1) != o) {
+                            edges = edges + 1;
+                        }
+                    }
+                }
+                if (held == 0) {
+                    return;
+                }
+                int tris = held * 2 + edges * 2;
+                if (tris > this.ocap) {
+                    if (this.ocap > 0) {
+                        Memory.free(this.obuf);
+                    }
+                    this.ocap = tris * 2;
+                    this.obuf = Memory.alloc(cast<long>(this.ocap * 27 * 4 + 4));
+                }
+                mutable int w = 0;
+                for (int y in y0..y1) {
+                    for (int x in x0..x1) {
+                        int o = this.sim.ownerAt(x, y);
+                        if (o < 0) {
+                            continue;
+                        }
+                        int ord = this.grid.biomeAt(x, y);
+                        int lvl = this.stackLvl(ord, x, y);
+                        float z = this.tileTop[ord] + cast<float>(lvl) * this.stepH
+                                + this.zAdj[ord] + 0.86;
+                        w = this.ovQuad(w, cast<float>(x) * 2.0 + 1.0, cast<float>(y) * 2.0 + 1.0,
+                                        z, 1.0, 1.0,
+                                        this.communityTint(o, 0), this.communityTint(o, 1),
+                                        this.communityTint(o, 2));
+                    }
+                }
+                this.oedge = w / 9;                            // vertices written so far
+                float br = 0.16;                               // how wide the border strip sits
+                for (int y in y0..y1) {
+                    for (int x in x0..x1) {
+                        int o = this.sim.ownerAt(x, y);
+                        if (o < 0) {
+                            continue;
+                        }
+                        int ord = this.grid.biomeAt(x, y);
+                        int lvl = this.stackLvl(ord, x, y);
+                        float z = this.tileTop[ord] + cast<float>(lvl) * this.stepH
+                                + this.zAdj[ord] + 0.90;
+                        float cx = cast<float>(x) * 2.0 + 1.0;
+                        float cy = cast<float>(y) * 2.0 + 1.0;
+                        // Brighter than the wash so the line reads as a line and not as thicker paint.
+                        float r = 0.35 + 0.65 * this.communityTint(o, 0);
+                        float g = 0.35 + 0.65 * this.communityTint(o, 1);
+                        float b = 0.35 + 0.65 * this.communityTint(o, 2);
+                        if (this.sim.ownerAt(x - 1, y) != o) {
+                            w = this.ovQuad(w, cx - 1.0 + br, cy, z, br, 1.0, r, g, b);
+                        }
+                        if (this.sim.ownerAt(x + 1, y) != o) {
+                            w = this.ovQuad(w, cx + 1.0 - br, cy, z, br, 1.0, r, g, b);
+                        }
+                        if (this.sim.ownerAt(x, y - 1) != o) {
+                            w = this.ovQuad(w, cx, cy - 1.0 + br, z, 1.0, br, r, g, b);
+                        }
+                        if (this.sim.ownerAt(x, y + 1) != o) {
+                            w = this.ovQuad(w, cx, cy + 1.0 - br, z, 1.0, br, r, g, b);
+                        }
+                    }
+                }
+                this.gl.bindVertexArray(this.ovao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.ovbo);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4),
+                                   cast<long>(this.obuf), GL.DYNAMIC_DRAW);
+                this.gl.bindVertexArray(0);
+                this.onverts = tris * 3;
+                this.bakedClaim = this.sim.claimVersion();
+                return;
+            }
+
             // Rebuild the building buffer: everything inside the detail window. Unlike the agents
             // this is NOT redone every frame -- a building does not move -- so it only runs when the
             // window moved or somebody finished raising something.
@@ -2053,6 +2224,9 @@ public bundle Agents {
                 this.bakeAgents();
                 if (this.haveTown && this.bakedTown != this.town.count()) {
                     this.bakeTown();
+                }
+                if (this.haveSim && this.bakedClaim != this.sim.claimVersion()) {
+                    this.bakeOverlay();
                 }
                 System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.dnverts / 3} terrain tris, {this.anverts / 3} agent tris, {this.bnverts / 3} building tris");
                 return;
@@ -2254,6 +2428,9 @@ public bundle Agents {
                 if (this.haveTown && this.bakedTown != this.town.count()) {
                     this.bakeTown();
                 }
+                if (this.haveSim && this.bakedClaim != this.sim.claimVersion()) {
+                    this.bakeOverlay();
+                }
                 if (this.pixelate) {
                     if (this.fbo == 0) {
                         this.initPost(640, 400);
@@ -2291,6 +2468,8 @@ public bundle Agents {
                 this.gl.uniformMatrix4fv(this.uProj, 1, cast<byte>(0), this.projM.ptr());
                 this.gl.uniformMatrix4fv(this.uView, 1, cast<byte>(0), this.viewM.ptr());
                 this.gl.uniform1f(this.uTime, this.timeSec);
+                this.gl.uniform1f(this.uAlpha, 1.0);
+                this.gl.uniform1f(this.uFlat, 0.0);
                 this.gl.bindVertexArray(this.vao);
                 Wgl.glDrawArrays(GL.TRIANGLES, 0, this.nverts);
                 if (this.detailOn && this.haveDetail) {
@@ -2307,6 +2486,24 @@ public bundle Agents {
                 if (this.anverts > 0) {
                     this.gl.bindVertexArray(this.avao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.anverts);
+                }
+                // The map overlay goes on LAST and see-through, over everything including the
+                // people, because it is a thing drawn on a map rather than a thing in the world.
+                // Depth writes are off for it so one wash cannot punch a hole in the next.
+                if (this.onverts > 0) {
+                    Wgl.glEnable(GL.BLEND);
+                    Wgl.glBlendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA);
+                    Wgl.glDepthMask(cast<byte>(0));
+                    this.gl.uniform1f(this.uFlat, 1.0);
+                    this.gl.bindVertexArray(this.ovao);
+                    this.gl.uniform1f(this.uAlpha, 0.28);
+                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.oedge);
+                    this.gl.uniform1f(this.uAlpha, 0.85);
+                    Wgl.glDrawArrays(GL.TRIANGLES, this.oedge, this.onverts - this.oedge);
+                    this.gl.uniform1f(this.uAlpha, 1.0);
+                    this.gl.uniform1f(this.uFlat, 0.0);
+                    Wgl.glDepthMask(cast<byte>(1));
+                    Wgl.glDisable(GL.BLEND);
                 }
                 this.gl.bindVertexArray(0);
 
@@ -2517,7 +2714,13 @@ public bundle Agents {
 
             // The approved cel contrast (no fog: it darkened the horizon).
             private static method fragSrc() returns String {
-                return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nout vec4 FragColor;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.60 + 0.42*ndl);\n  FragColor = vec4(vCol*sh, 1.0);\n}\n";
+                // uAlpha is 1.0 for everything solid and comes down for the map overlay, which is
+                // the whole reason it exists: a territory wash has to let the ground show through,
+                // and putting the alpha in a uniform means the overlay needs no fourth channel in
+                // the vertex format that every other triangle in the world would then have to carry.
+                // uFlat kills the lighting for the same pass -- a border painted on the map is not a
+                // surface and must not pick up a highlight from the sun.
+                return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nout vec4 FragColor;\nuniform float uAlpha;\nuniform float uFlat;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.60 + 0.42*ndl);\n  sh = mix(sh, 1.0, uFlat);\n  FragColor = vec4(vCol*sh, uAlpha);\n}\n";
             }
 
             private static method postVert() returns String {

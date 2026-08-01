@@ -81,6 +81,16 @@ public bundle Agents {
             private mutable int[] ctrade;
             // Everything standing or going up anywhere in the world.
             private mutable Buildings* town;
+            // Who claims each 16-cell block, or -1. Territory has no rule of its own yet -- that is
+            // its own slice -- but it has an honest meaning already: a community's land is what its
+            // people can reach and work, so the claim is a disk around where they actually are, and
+            // where two disks overlap the nearer village wins. Stamped per community rather than
+            // tested per block: a hundred villages times a six-block box is three thousand writes a
+            // second, against a million and a half the other way round.
+            private mutable int[] claim;
+            private mutable int claimW;
+            private mutable int claimH;
+            private mutable int claimAge;      // bumped on every rebuild, so the renderer can notice
             private mutable long crafted;      // batches finished
             private mutable long stalled;      // batches that could not start for want of an input
             private mutable long raised;       // buildings finished
@@ -138,6 +148,13 @@ public bundle Agents {
                 this.cworkY = new int[this.ncomm * nh]();
                 this.ctrade = new int[this.ncomm * Job.count()]();
                 this.town = new Buildings(this.ncomm * 16) on heap;
+                this.claimW = (grid.width() + 15) / 16;
+                this.claimH = (grid.height() + 15) / 16;
+                this.claim = new int[this.claimW * this.claimH]();
+                for (int b in 0..this.claimW * this.claimH) {
+                    this.claim[b] = 0 - 1;
+                }
+                this.claimAge = 0;
                 this.crafted = 0;
                 this.stalled = 0;
                 this.raised = 0;
@@ -170,6 +187,94 @@ public bundle Agents {
                 delete this.cworkY;
                 delete this.ctrade;
                 delete this.town;
+                delete this.claim;
+            }
+
+            // How far a community's claim reaches, in cells. Not a number picked to look right: it
+            // is WORK_BLOCKS of sixteen cells, the same distance the community searches for work,
+            // because what a village holds is what its people can get to and back from.
+            public static int REIGN = 48;
+
+            private method restake() returns void {
+                for (int b in 0..this.claimW * this.claimH) {
+                    this.claim[b] = 0 - 1;
+                }
+                int r = (Simulation.REIGN + 15) / 16;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    int cbx = cast<int>(this.ccx[c]) / 16;
+                    int cby = cast<int>(this.ccy[c]) / 16;
+                    mutable int dy = 0 - r;
+                    while (dy <= r) {
+                        mutable int dx = 0 - r;
+                        while (dx <= r) {
+                            int bx = cbx + dx;
+                            int by = cby + dy;
+                            if (bx < 0 || by < 0 || bx >= this.claimW || by >= this.claimH) {
+                                dx = dx + 1;
+                                continue;
+                            }
+                            if (dx * dx + dy * dy > r * r) {
+                                dx = dx + 1;
+                                continue;
+                            }
+                            int at = by * this.claimW + bx;
+                            int held = this.claim[at];
+                            if (held < 0) {
+                                this.claim[at] = c;
+                            } else {
+                                // Two villages reach the same ground: the nearer one holds it.
+                                float ax = this.ccx[c] - cast<float>(bx * 16 + 8);
+                                float ay = this.ccy[c] - cast<float>(by * 16 + 8);
+                                float bxd = this.ccx[held] - cast<float>(bx * 16 + 8);
+                                float byd = this.ccy[held] - cast<float>(by * 16 + 8);
+                                if (ax * ax + ay * ay < bxd * bxd + byd * byd) {
+                                    this.claim[at] = c;
+                                }
+                            }
+                            dx = dx + 1;
+                        }
+                        dy = dy + 1;
+                    }
+                }
+                this.claimAge = this.claimAge + 1;
+                return;
+            }
+
+            // Who holds this cell, or -1. The block says which community is near, and the cell-level
+            // range test rounds the block grid off into a disk -- so a border reads as the edge of
+            // how far people go, not as the sixteen-cell squares the index happens to use.
+            public method ownerAt(int x, int y) returns int {
+                if (x < 0 || y < 0) {
+                    return 0 - 1;
+                }
+                int bx = x / 16;
+                int by = y / 16;
+                if (bx >= this.claimW || by >= this.claimH) {
+                    return 0 - 1;
+                }
+                int c = this.claim[by * this.claimW + bx];
+                if (c < 0) {
+                    return 0 - 1;
+                }
+                float dx = this.ccx[c] - (cast<float>(x) + 0.5);
+                float dy = this.ccy[c] - (cast<float>(y) + 0.5);
+                if (dx * dx + dy * dy > cast<float>(Simulation.REIGN * Simulation.REIGN)) {
+                    return 0 - 1;
+                }
+                // Nobody holds the sea, and nobody holds a cliff face. A claim is over ground its
+                // people can walk on and work -- which is also what stops a coastal village looking
+                // like a naval power on the map.
+                if (!this.walkable(x, y)) {
+                    return 0 - 1;
+                }
+                return c;
+            }
+
+            public method claimVersion() returns int {
+                return this.claimAge;
             }
 
             public method store() returns Stores* {
@@ -685,6 +790,7 @@ public bundle Agents {
                     }
                     c = c + 1;
                 }
+                this.restake();
                 return;
             }
 
