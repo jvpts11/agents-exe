@@ -1,0 +1,339 @@
+import System.IO.Console;
+import Agents.World.Grid;
+import Agents.World.Biomes;
+import Agents.World.LandMath;
+import System.Math.Math;
+import Agents.People.AgentTable;
+import Agents.People.Act;
+
+// The clock. Named Simulation and not World or Sim: `World` is a NAMESPACE here and `Sim`
+// is this one, and a type sharing either name corrupts symbol resolution -- which the compiler
+// then reports against some unrelated file.
+//
+// Everything that changes over time is advanced from here, and it is split in two on
+// purpose, because the two halves scale completely differently.
+//
+// THINKING is budgeted. A fixed number of agents decide per frame and no more, exactly as the
+// terrain bake slices by cells rather than by rows -- the fix that killed the render stutter. An
+// agent carries the tick it is next due, the queue is walked in order, and a bigger population means
+// each person decides LESS OFTEN, never that more deciding happens in one frame. Constant cost per
+// frame; more frames when there is more to do.
+//
+// MOVING is not budgeted, because it is a multiply-add: fifty thousand of them is nothing, and
+// slicing it would only make positions stale for no gain. What the levels of detail actually save is
+// the EXPENSIVE part of moving -- testing the ground and turning to face -- which only matters where
+// somebody can see it. The rule from the design holds: you may fake what does not change an
+// outcome, and travel TIME is an outcome while the trajectory is not, so everyone advances at the
+// same speed and only those on screen walk around things.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        public class Simulation {
+            private mutable Grid* g;
+            private mutable AgentTable* folk;
+            private mutable int seed;
+            private mutable float clock;        // seconds since the world began
+            private mutable int tick;           // whole seconds
+            private mutable int cursor;         // where the think queue resumes
+            private mutable int budget;         // agents allowed to decide in one frame
+            // the near window, handed over by the renderer so a person on screen walks properly
+            private mutable int nearX0;
+            private mutable int nearY0;
+            private mutable int nearX1;
+            private mutable int nearY1;
+            // instruments
+            private mutable int thoughtThisFrame;
+            private mutable int worstThink;
+            private mutable int stuckTotal;
+            private mutable int arrivals;
+            private mutable long thoughtTotal;
+            private mutable int frames;
+
+            public static float SPEED = 1.25;       // cells a second
+            public static float GIVE_UP = 30.0;     // seconds on one walk before it is called stuck
+
+            public constructor Simulation(Grid* grid, AgentTable* people, int worldSeed) {
+                this.g = grid;
+                this.folk = people;
+                this.seed = worldSeed;
+                this.clock = 0.0;
+                this.tick = 0;
+                this.cursor = 0;
+                this.budget = 2000;
+                this.nearX0 = 0;
+                this.nearY0 = 0;
+                this.nearX1 = 0;
+                this.nearY1 = 0;
+                this.thoughtThisFrame = 0;
+                this.worstThink = 0;
+                this.stuckTotal = 0;
+                this.arrivals = 0;
+                this.thoughtTotal = 0;
+                this.frames = 0;
+            }
+
+            public method setBudget(int b) returns void
+                requires b > 0
+            {
+                this.budget = b;
+                return;
+            }
+
+            // The renderer knows which cells are on screen at full detail; the simulation needs the
+            // same rectangle to know who is worth walking properly.
+            public method setNearWindow(int x0, int y0, int x1, int y1) returns void {
+                this.nearX0 = x0;
+                this.nearY0 = y0;
+                this.nearX1 = x1;
+                this.nearY1 = y1;
+                return;
+            }
+
+            public method seconds() returns float {
+                return this.clock;
+            }
+
+            public method thoughtLastFrame() returns int {
+                return this.thoughtThisFrame;
+            }
+
+            public method worstFrame() returns int {
+                return this.worstThink;
+            }
+
+            public method stuck() returns int {
+                return this.stuckTotal;
+            }
+
+            public method arrived() returns int {
+                return this.arrivals;
+            }
+
+            private method walkable(int x, int y) returns boolean {
+                if (x < 0 || y < 0 || x >= this.g.width() || y >= this.g.height()) {
+                    return false;
+                }
+                return Biomes.walkable(this.g.biomeAt(x, y));
+            }
+
+            // Can this be walked to in a straight line? Six samples along the way, which is all a
+            // person needs to see that the far bank is across water. Without it an agent sets off
+            // toward somewhere it can plainly see it cannot reach, slides along the shore for thirty
+            // seconds and gives up -- and half the abandoned journeys were exactly that.
+            private method clearLine(float x0, float y0, int tx, int ty) returns boolean {
+                float dx = cast<float>(tx) + 0.5 - x0;
+                float dy = cast<float>(ty) + 0.5 - y0;
+                mutable int k = 1;
+                while (k <= 6) {
+                    float f = cast<float>(k) / 7.0;
+                    if (!this.walkable(cast<int>(x0 + dx * f), cast<int>(y0 + dy * f))) {
+                        return false;
+                    }
+                    k = k + 1;
+                }
+                return true;
+            }
+
+            // Pick somewhere to go. For now that is a spot near where the agent already is, which is
+            // not a placeholder: a community lives and works within a short walk of home, and that
+            // is exactly what keeps travel affordable on a map thirty-two times the original's.
+            // Journeys BETWEEN communities are a different verb and get the region graph with them.
+            private method chooseTarget(int i) returns void {
+                float here_x = this.folk.xAt(i);
+                float here_y = this.folk.yAt(i);
+                mutable int k = 0;
+                while (k < 8) {
+                    float a = LandMath.hash01(this.seed ^ 0x77E1, i * 31 + k, this.tick) * 6.2831853;
+                    float d = 3.0 + LandMath.hash01(this.seed ^ 0x1C4B, i * 17 + k, this.tick) * 20.0;
+                    int tx = cast<int>(here_x + LandMath.cos(a) * d);
+                    int ty = cast<int>(here_y + LandMath.sin(a) * d);
+                    if (this.walkable(tx, ty) && this.clearLine(here_x, here_y, tx, ty)) {
+                        this.folk.setTarget(i, tx, ty);
+                        this.folk.setAct(i, cast<int>(Act.WalkTo));
+                        return;
+                    }
+                    k = k + 1;
+                }
+                // Nowhere to go from here: stand still rather than walk into the sea.
+                this.folk.setAct(i, cast<int>(Act.Idle));
+                return;
+            }
+
+            // The budgeted half. Walk the queue from where it stopped, decide for those who are due,
+            // and stop at the budget -- the queue keeps its place, so nobody is ever skipped, they
+            // simply wait their turn.
+            private method think() returns void {
+                this.thoughtThisFrame = 0;
+                int n = this.folk.limit();
+                if (n == 0) {
+                    return;
+                }
+                mutable int scanned = 0;
+                while (scanned < n && this.thoughtThisFrame < this.budget) {
+                    mutable int i = this.cursor;
+                    this.cursor = this.cursor + 1;
+                    if (this.cursor >= n) {
+                        this.cursor = 0;
+                    }
+                    scanned = scanned + 1;
+                    if (!this.folk.alive(i)) {
+                        continue;
+                    }
+                    if (this.folk.thinkAtOf(i) > this.tick) {
+                        continue;
+                    }
+                    if (this.folk.actOf(i) == cast<int>(Act.Idle)) {
+                        this.chooseTarget(i);
+                    }
+                    // Re-decide in two to four seconds, spread so a cohort born together does not
+                    // come due on the same tick for the rest of their lives.
+                    int jitter = cast<int>(LandMath.hash01(this.seed ^ 0x3F09, i, this.tick) * 3.0);
+                    this.folk.setThinkAt(i, this.tick + 2 + jitter);
+                    this.thoughtThisFrame = this.thoughtThisFrame + 1;
+                }
+                if (this.thoughtThisFrame > this.worstThink) {
+                    this.worstThink = this.thoughtThisFrame;
+                }
+                this.thoughtTotal = this.thoughtTotal + cast<long>(this.thoughtThisFrame);
+                return;
+            }
+
+            private method nearby(int x, int y) returns boolean {
+                return x >= this.nearX0 && y >= this.nearY0 && x < this.nearX1 && y < this.nearY1;
+            }
+
+            // The unbudgeted half. Everyone advances at the same speed, so travel time is honest
+            // everywhere; only the people on screen pay for testing the ground and turning to face.
+            private method move(float dt) returns void {
+                float span = Simulation.SPEED * dt;
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (!this.folk.alive(i) || this.folk.actOf(i) != cast<int>(Act.WalkTo)) {
+                        i = i + 1;
+                        continue;
+                    }
+                    float x = this.folk.xAt(i);
+                    float y = this.folk.yAt(i);
+                    float tx = cast<float>(this.folk.targetXOf(i)) + 0.5;
+                    float ty = cast<float>(this.folk.targetYOf(i)) + 0.5;
+                    float dx = tx - x;
+                    float dy = ty - y;
+                    // Squared distance for the arrival test: there is no reason to take a root just
+                    // to compare against a constant, and this runs fifty thousand times a frame.
+                    float d2 = dx * dx + dy * dy;
+                    if (d2 < 0.2025) {
+                        this.folk.setAct(i, cast<int>(Act.Idle));
+                        this.arrivals = this.arrivals + 1;
+                        i = i + 1;
+                        continue;
+                    }
+                    this.folk.addTimer(i, dt);
+                    if (this.folk.timerOf(i) > Simulation.GIVE_UP) {
+                        // It has been walking half a minute at one destination. Something is in the
+                        // way that this agent cannot get around, so it gives up and picks again --
+                        // and it is COUNTED, because a world where this is common has broken routing.
+                        this.stuckTotal = this.stuckTotal + 1;
+                        this.folk.setAct(i, cast<int>(Act.Idle));
+                        i = i + 1;
+                        continue;
+                    }
+                    // Math.sqrt is one machine instruction. LandMath.sqrt -- which the worldgen and
+                    // the renderer both use -- is a sixteen-iteration Newton loop, sixteen DIVISIONS
+                    // per call, and at fifty thousand calls a frame that is the whole cost of moving.
+                    float dist = cast<float>(Math.sqrt(cast<double>(d2)));
+                    float ux = dx / dist;
+                    float uy = dy / dist;
+                    mutable float nx = x + ux * span;
+                    mutable float ny = y + uy * span;
+                    int cx = cast<int>(x);
+                    int cy = cast<int>(y);
+                    // THE GROUND TEST IS NOT OPTIONAL, at any level of detail. It was, and a sweep
+                    // found three hundred and ninety-four people standing in the sea and on bare
+                    // cliffs -- while `stuck` read zero, because somebody who walks THROUGH a cliff
+                    // never gets stuck and never complains. Ending up somewhere you could never be
+                    // is an outcome, and the rule only ever allowed faking what is not one.
+                    //
+                    // Sliding is not optional either, and that was a second mistake on the same
+                    // axis: whether you slide along a rock or stop dead at it decides whether you
+                    // ARRIVE, and arriving is an outcome. Restricting it to the near tier left
+                    // three thousand journeys a minute abandoned off screen and none on it.
+                    //
+                    // What a level of detail may actually skip is turning to face the way you walk,
+                    // which nobody can see from outside the window and which changes nothing.
+                    if (!this.walkable(cast<int>(nx), cast<int>(ny))) {
+                        if (this.walkable(cast<int>(nx), cy)) {
+                            ny = y;
+                        } else if (this.walkable(cx, cast<int>(ny))) {
+                            nx = x;
+                        } else {
+                            nx = x;
+                            ny = y;
+                        }
+                    }
+                    if (this.nearby(cx, cy)) {
+                        mutable int d = 0;
+                        if (ux >= 0.0 && uy >= 0.0) {
+                            d = 1;
+                        } else if (ux >= 0.0) {
+                            d = 2;
+                        } else if (uy >= 0.0) {
+                            d = 0;
+                        } else {
+                            d = 3;
+                        }
+                        this.folk.setDir(i, d);
+                    }
+                    this.folk.setPos(i, nx, ny);
+                    i = i + 1;
+                }
+                return;
+            }
+
+            public method step(float dt) returns void {
+                this.frames = this.frames + 1;
+                this.clock = this.clock + dt;
+                this.tick = cast<int>(this.clock);
+                this.think();
+                this.move(dt);
+                return;
+            }
+
+            // How many people are standing where they could not possibly stand. The strongest
+            // correctness check movement has: `stuck` counts those who gave up, but somebody who
+            // walked THROUGH a cliff never gets stuck and never complains -- they simply end up in
+            // the sea, and only a sweep finds them.
+            public method offLand() returns int {
+                mutable int bad = 0;
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i)) {
+                        if (!this.walkable(cast<int>(this.folk.xAt(i)), cast<int>(this.folk.yAt(i)))) {
+                            bad = bad + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return bad;
+            }
+
+            public method report() returns void {
+                // The worst frame is the budget by construction, so it says nothing on its own.
+                // What matters is DEMAND against CAPACITY: how many decisions a second the population
+                // actually wants, versus how many the budget can serve. Headroom is the real answer,
+                // and a saturated worst frame at startup only means the queue absorbed the whole
+                // population coming due on tick zero -- which is what it is for.
+                int perFrame = cast<int>(this.thoughtTotal / cast<long>(this.frames));
+                int capacity = this.budget * 60;
+                int demand = this.folk.count() / 3;
+                System.IO.Console.println($"sim: t={cast<int>(this.clock)}s over {this.frames} frames | arrivals {this.arrivals} | stuck {this.stuckTotal}");
+                System.IO.Console.println($"  think: {perFrame}/frame average, worst {this.worstThink} (budget {this.budget}) | demand {demand}/s vs capacity {capacity}/s");
+                System.IO.Console.println($"  people standing off walkable ground: {this.offLand()}");
+                return;
+            }
+        }
+    }
+}

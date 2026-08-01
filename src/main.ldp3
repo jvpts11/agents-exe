@@ -9,6 +9,8 @@ import Agents.World.WorldGen;
 import Agents.World.Biomes;
 import Agents.World.Nodes;
 import Agents.People.AgentTable;
+import Agents.Sim.Simulation;
+import System.Time.Stopwatch;
 import Agents.World.WorldAudit;
 import Agents.World.Landmass;
 import Agents.Gfx.SoftPainter;
@@ -67,6 +69,10 @@ public bundle Agents {
                     }
                     if (args[0].equals("folkshot")) {
                         Main.folkShot();
+                        return;
+                    }
+                    if (args[0].equals("simrun")) {
+                        Main.simRun();
                         return;
                     }
                     if (args[0].equals("probe")) {
@@ -242,6 +248,7 @@ public bundle Agents {
                 folk.seedWorld(g, 50000, 100, 42);
                 folk.report();
                 r.setPeople(folk, peopleMesh);
+                Simulation* sim = new Simulation(g, folk, 42) on heap;
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 mutable int lastX = win.cursorX();
                 mutable int lastY = win.cursorY();
@@ -283,6 +290,10 @@ public bundle Agents {
                     if (win.keyDown(0x44)) { r.pan(0.0, pan); }
                     int cw = win.width();
                     int ch = win.height();
+                    // The simulation is told which cells are on screen at full detail, so the people
+                    // there walk around obstacles while everyone else simply advances.
+                    sim.setNearWindow(r.detailX0(), r.detailY0(), r.detailX1(), r.detailY1());
+                    sim.step(0.016);
                     r.render(cw, ch);
                     hud.begin(cw, ch, 0);
                     r.drawCompass(hud, cw, ch);
@@ -290,6 +301,7 @@ public bundle Agents {
                     win.swap();
                 }
                 delete hud;
+                delete sim;
                 delete r;
                 delete rivers;
                 delete nodeMesh;
@@ -749,6 +761,38 @@ public bundle Agents {
                 return;
             }
 
+            // Run the clock headless and print what the movement slice is judged on: how many people
+            // decided in the worst frame -- which must NOT grow with the population -- and how many
+            // gave up on a destination, which must be nobody.
+            private static method simRun() returns void {
+                int w = 2560;
+                int h = 1440;
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(w, h);
+                AgentTable* folk = new AgentTable(50000) on heap;
+                folk.seedWorld(g, 50000, 100, 42);
+                folk.report();
+                Simulation* sim = new Simulation(g, folk, 42) on heap;
+                // Nobody is on screen, so everybody takes the cheap path -- the honest measurement
+                // of what fifty thousand people cost when the camera is not helping.
+                sim.setNearWindow(0, 0, 0, 0);
+                Stopwatch watch = new Stopwatch() on stack;
+                watch.start();
+                mutable int frame = 0;
+                while (frame < 3600) {                          // a minute of world time at 60 fps
+                    sim.step(0.016);
+                    frame = frame + 1;
+                }
+                long ms = watch.elapsedMillis();
+                sim.report();
+                System.IO.Console.println($"simrun: 3600 frames in {ms} ms");
+                delete sim;
+                delete folk;
+                delete g;
+                return;
+            }
+
             // The most crowded place in the world, from three heights. Same reason forestshot exists:
             // judging people from a capture aimed wherever the default camera points is how you
             // conclude there is nobody about when the shot landed on an empty steppe.
@@ -811,6 +855,18 @@ public bundle Agents {
                 r.aimAt(fx, fy);
                 int cw = win.width();
                 int ch = win.height();
+                // Let them walk for half a minute before the shutter opens: a still of everybody
+                // standing on the tick they were born says nothing about movement.
+                r.setView(20.0, 28.0, 40.0);
+                r.flushDetail();
+                Simulation* sim = new Simulation(g, folk, 42) on heap;
+                mutable int f = 0;
+                while (f < 1800) {
+                    sim.setNearWindow(r.detailX0(), r.detailY0(), r.detailX1(), r.detailY1());
+                    sim.step(0.016);
+                    f = f + 1;
+                }
+                sim.report();
                 mutable int k = 0;
                 while (k < 3) {
                     if (k == 0) {
@@ -842,6 +898,7 @@ public bundle Agents {
                 delete folk;
                 delete g;
                 delete win;
+                delete sim;
                 System.IO.Console.println("folkshot: wrote folk_a.ppm, folk_b.ppm, folk_c.ppm");
                 return;
             }
