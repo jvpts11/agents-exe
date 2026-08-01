@@ -13,6 +13,8 @@ import Agents.World.Builds;
 import Agents.Sim.Buildings;
 import Agents.Sim.Simulation;
 import Agents.Sim.Wildlife;
+import Agents.Sim.Meter;
+import Agents.Sim.Phase;
 import Agents.World.Species;
 import Agents.World.Beasts;
 import System.Memory;
@@ -59,6 +61,10 @@ public bundle Agents {
             private mutable MeshAtlas* beastArt;
             private mutable int[] speciesModel;
             private mutable boolean haveFauna;
+            // What the frame costs, by part. The renderer keeps its own rather than sharing the
+            // simulation's, because it has to work in the shot modes where there is no simulation
+            // at all -- and because "the frame is slow" and "the tick is slow" are two questions.
+            private mutable Meter* gauge;
             private mutable boolean showTerritory;
             private mutable int bakedClaim;
             private mutable int uFog;
@@ -246,6 +252,7 @@ public bundle Agents {
                 this.fbuf = cast<address>(0);
                 this.speciesModel = new int[Species.count()]();
                 this.haveFauna = false;
+                this.gauge = new Meter() on heap;
                 this.projM = new GlMat4() on heap;
                 this.viewM = new GlMat4() on heap;
                 this.tileTop = new float[1]();
@@ -2113,6 +2120,10 @@ public bundle Agents {
                 return;
             }
 
+            public method frameMeter() returns Meter* {
+                return this.gauge;
+            }
+
             public method setTerritory(boolean shown) returns void {
                 this.showTerritory = shown;
                 this.bakedClaim = 0 - 1;
@@ -2528,6 +2539,7 @@ public bundle Agents {
 
             // ---- frame ----
             public method render(int fbW, int fbH) returns void {
+                this.gauge.begin();
                 this.ensureDetail();
                 if (this.baking && !this.haveDetail) {
                     // nothing on screen to cover the wait: finish the first one outright
@@ -2539,14 +2551,19 @@ public bundle Agents {
                 } else {
                     this.stepBake();
                 }
+                this.gauge.lap(cast<int>(Phase.Terrain));
                 this.bakeAgents();
+                this.gauge.lap(cast<int>(Phase.People));
                 this.bakeFauna();
+                this.gauge.lap(cast<int>(Phase.Fauna));
                 if (this.haveTown && this.bakedTown != this.town.count()) {
                     this.bakeTown();
                 }
+                this.gauge.lap(cast<int>(Phase.Town));
                 if (this.haveSim && this.bakedClaim != this.sim.claimVersion()) {
                     this.bakeOverlay();
                 }
+                this.gauge.lap(cast<int>(Phase.Borders));
                 if (this.pixelate) {
                     if (this.fbo == 0) {
                         this.initPost(640, 400);
@@ -2626,6 +2643,8 @@ public bundle Agents {
                     Wgl.glDisable(GL.BLEND);
                 }
                 this.gl.bindVertexArray(0);
+                this.gauge.lap(cast<int>(Phase.Draw));
+                this.gauge.frame();
 
                 if (!this.pixelate) {
                     // raw render went straight to the screen; just drop depth so the HUD draws on top

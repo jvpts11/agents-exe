@@ -77,6 +77,7 @@ public bundle Agents {
             private mutable long[] aged;
             private mutable int cursor;
             private mutable int budget;
+            private mutable int beat;      // ticks, for spreading the once-a-second work
 
             public constructor Wildlife(Grid* grid, int capacity, int worldSeed) {
                 this.g = grid;
@@ -114,6 +115,7 @@ public bundle Agents {
                 this.aged = new long[Species.count()]();
                 this.cursor = 0;
                 this.budget = 1500;
+                this.beat = 0;
             }
 
             public destructor ~Wildlife() returns void {
@@ -503,6 +505,7 @@ public bundle Agents {
             // Ageing, dying and breeding. Unbudgeted, like the people's: a beast off screen must age
             // at exactly the rate of one on it or it stops being one world.
             private method live(float dt) returns void {
+                this.beat = this.beat + 1;
                 for (int i in 0..this.n) {
                     if (!this.alive[i]) {
                         continue;
@@ -512,6 +515,13 @@ public bundle Agents {
                     if (this.age[i] >= this.span[i]) {
                         this.aged[sp] = this.aged[sp] + 1;
                         this.kill(i);
+                        continue;
+                    }
+                    // The breeding roll happens once a second, spread across the herd, not twenty
+                    // times a second for every animal alive. Same population, one twentieth of the
+                    // arithmetic -- and the profile said this loop and its twin in the people cost
+                    // more than half the clock between them.
+                    if ((i + this.beat) % 20 != 0) {
                         continue;
                     }
                     // Breeding, as a logistic against the habitat's ceiling: the emptier the range,
@@ -525,7 +535,7 @@ public bundle Agents {
                         continue;
                     }
                     float room = 1.0 - cast<float>(this.headcount[sp]) / cast<float>(cap);
-                    float p = Wildlife.FERTILITY * dt * room;
+                    float p = Wildlife.FERTILITY * dt * 20.0 * room;
                     if (LandMath.hash01(this.seed ^ 0x5D3B, i, cast<int>(this.age[i] * 20.0)) < p) {
                         int c = this.spawn(this.px[i], this.py[i], sp, i + this.headcount[sp]);
                         if (c >= 0) {

@@ -1,0 +1,207 @@
+import System.IO.Console;
+import System.Time.Time;
+
+// Where the time actually goes.
+//
+// Up to now the only performance number was "the sweep took 357 seconds", which says a slice got
+// slower and nothing about WHICH part -- and every time something got slow the answer was found by
+// reasoning rather than measuring. Twice that reasoning was wrong: the eighteen million failed
+// searches looked like a world-size problem and were a where-the-question-lives problem, and the
+// wolves looked like a fauna problem and were a missing-index problem.
+//
+// So the clock is stamped at each phase boundary and the shares are printed. One nanosecond read
+// per boundary, seven boundaries a tick: a million reads across a full sweep, about thirty
+// milliseconds of the three hundred and fifty seconds it measures.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        public enum Phase {
+            // the simulation
+            Census, Regrow, Beasts, Prowl, Living, Thinking, Moving,
+            // the renderer
+            Terrain, People, Fauna, Town, Borders, Draw
+        }
+
+        public class Meter {
+            private mutable long[] ns;
+            private mutable long[] hits;
+            private mutable long mark;
+            private mutable long ticks;
+            private mutable long frames;
+            private mutable long since;      // when the last per-second window opened
+            private mutable int winTicks;
+            private mutable int winFrames;
+            private mutable int lastTps;
+            private mutable int lastFps;
+
+            public constructor Meter() {
+                this.ns = new long[Phase.count()]();
+                this.hits = new long[Phase.count()]();
+                this.mark = Time.nanos();
+                this.ticks = 0;
+                this.frames = 0;
+                this.since = Time.nanos();
+                this.winTicks = 0;
+                this.winFrames = 0;
+                this.lastTps = 0;
+                this.lastFps = 0;
+            }
+
+            public destructor ~Meter() returns void {
+                delete this.ns;
+                delete this.hits;
+            }
+
+            // Start a stretch. Call once before the first `lap` of a group.
+            public method begin() returns void {
+                this.mark = Time.nanos();
+                return;
+            }
+
+            // Close the stretch that just ran and open the next one.
+            public method lap(int phase) returns void {
+                long now = Time.nanos();
+                this.ns[phase] = this.ns[phase] + (now - this.mark);
+                this.hits[phase] = this.hits[phase] + 1;
+                this.mark = now;
+                return;
+            }
+
+            public method tick() returns void {
+                this.ticks = this.ticks + 1;
+                this.winTicks = this.winTicks + 1;
+                return;
+            }
+
+            public method frame() returns void {
+                this.frames = this.frames + 1;
+                this.winFrames = this.winFrames + 1;
+                return;
+            }
+
+            // Roll the one-second window over if it is due. Returns true on the tick it rolled, so
+            // a caller can refresh a title or a HUD exactly when the numbers changed.
+            public method roll() returns boolean {
+                long now = Time.nanos();
+                long span = now - this.since;
+                if (span < 1000000000) {
+                    return false;
+                }
+                // Against the REAL elapsed span rather than assuming it was a second: a frame that
+                // took four hundred milliseconds would otherwise be reported as a rate it never had.
+                this.lastFps = cast<int>(cast<long>(this.winFrames) * 1000000000 / span);
+                this.lastTps = cast<int>(cast<long>(this.winTicks) * 1000000000 / span);
+                this.winFrames = 0;
+                this.winTicks = 0;
+                this.since = now;
+                return true;
+            }
+
+            public method fps() returns int {
+                return this.lastFps;
+            }
+
+            public method tps() returns int {
+                return this.lastTps;
+            }
+
+            public method tickCount() returns long {
+                return this.ticks;
+            }
+
+            public method frameCount() returns long {
+                return this.frames;
+            }
+
+            public method millisOf(int phase) returns long {
+                return this.ns[phase] / 1000000;
+            }
+
+            private method label(int p) returns String {
+                if (p == cast<int>(Phase.Census)) {
+                    return "census";
+                }
+                if (p == cast<int>(Phase.Regrow)) {
+                    return "regrow";
+                }
+                if (p == cast<int>(Phase.Beasts)) {
+                    return "beasts";
+                }
+                if (p == cast<int>(Phase.Prowl)) {
+                    return "prowl";
+                }
+                if (p == cast<int>(Phase.Living)) {
+                    return "living";
+                }
+                if (p == cast<int>(Phase.Thinking)) {
+                    return "thinking";
+                }
+                if (p == cast<int>(Phase.Moving)) {
+                    return "moving";
+                }
+                if (p == cast<int>(Phase.Terrain)) {
+                    return "terrain";
+                }
+                if (p == cast<int>(Phase.People)) {
+                    return "people";
+                }
+                if (p == cast<int>(Phase.Fauna)) {
+                    return "fauna";
+                }
+                if (p == cast<int>(Phase.Town)) {
+                    return "town";
+                }
+                if (p == cast<int>(Phase.Borders)) {
+                    return "borders";
+                }
+                return "draw";
+            }
+
+            // Everything measured, worst first, with each phase's share of the measured total. The
+            // ORDER is the point: a list sorted by cost is a list of what to look at next, and a
+            // list in declaration order is a list nobody reads.
+            public method report(String what) returns void {
+                mutable long total = 0;
+                for (int p in 0..Phase.count()) {
+                    total = total + this.ns[p];
+                }
+                if (total == 0) {
+                    return;
+                }
+                mutable int shown = 0;
+                mutable long floor = 0 - 1;
+                System.IO.Console.println($"{what}: {total / 1000000} ms measured over {this.ticks} ticks, {this.frames} frames");
+                while (shown < Phase.count()) {
+                    mutable int best = 0 - 1;
+                    mutable long bestNs = 0 - 1;
+                    for (int p in 0..Phase.count()) {
+                        if (this.ns[p] <= 0) {
+                            continue;
+                        }
+                        if (floor >= 0 && this.ns[p] >= floor) {
+                            continue;
+                        }
+                        if (this.ns[p] > bestNs) {
+                            bestNs = this.ns[p];
+                            best = p;
+                        }
+                    }
+                    if (best < 0) {
+                        return;
+                    }
+                    floor = bestNs;
+                    shown = shown + 1;
+                    int share = cast<int>(bestNs * 1000 / total);
+                    mutable long per = 0;
+                    if (this.hits[best] > 0) {
+                        per = bestNs / this.hits[best] / 1000;      // microseconds a call
+                    }
+                    System.IO.Console.println($"  {this.label(best)}: {bestNs / 1000000} ms ({share}/1000) | {per} us a call over {this.hits[best]} calls");
+                }
+                return;
+            }
+        }
+    }
+}

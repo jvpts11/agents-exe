@@ -10,6 +10,7 @@ import Agents.World.Biomes;
 import Agents.World.Nodes;
 import Agents.People.AgentTable;
 import Agents.Sim.Simulation;
+import Agents.Sim.Meter;
 import System.Time.Stopwatch;
 import Agents.World.WorldAudit;
 import Agents.World.Landmass;
@@ -338,18 +339,28 @@ public bundle Agents {
                     // there walk around obstacles while everyone else simply advances.
                     sim.setNearWindow(r.detailX0(), r.detailY0(), r.detailX1(), r.detailY1());
                     sim.advance(0.016);
-                    // The title carries the clock, because a speed control you cannot read is a
-                    // speed control you do not trust.
-                    if (sim.rateOf() != shownRate || sim.isHalted() != shownHalt) {
+                    r.render(cw, ch);
+                    // The title carries the clock AND the two rates. A speed control you cannot read
+                    // is a speed control you do not trust, and a frame rate you only notice once it
+                    // is already bad is a frame rate nobody was watching: this is the number that
+                    // says which slice made the game heavier, on the day that slice was written.
+                    //
+                    // The two are separate on purpose. They come apart the moment the gears are used
+                    // -- paused is sixty frames and no ticks, x300 is few frames and many -- and
+                    // which of the two fell is most of the diagnosis.
+                    Meter* fm = r.frameMeter();
+                    if (fm.roll() || sim.rateOf() != shownRate || sim.isHalted() != shownHalt) {
+                        sim.clockMeter().roll();
                         shownRate = sim.rateOf();
                         shownHalt = sim.isHalted();
+                        int fps = fm.fps();
+                        int tps = sim.clockMeter().tps();
                         if (shownHalt) {
-                            win.setTitle("agents.exe -- PAUSED  [space run | 1-6 speed | T borders | P pixels | ESC]");
+                            win.setTitle($"agents.exe -- PAUSED | {fps} fps  [space run | 1-6 speed | T borders | P pixels | ESC]");
                         } else {
-                            win.setTitle($"agents.exe -- x{cast<int>(shownRate)}  [space pause | 1-6 speed | T borders | P pixels | ESC]");
+                            win.setTitle($"agents.exe -- x{cast<int>(shownRate)} | {fps} fps, {tps} tps  [space pause | 1-6 speed | T borders | P pixels | ESC]");
                         }
                     }
-                    r.render(cw, ch);
                     hud.begin(cw, ch, 0);
                     r.drawCompass(hud, cw, ch);
                     hud.flush();
@@ -856,7 +867,14 @@ public bundle Agents {
                 }
                 long ms = watch.elapsedMillis();
                 sim.report();
-                System.IO.Console.println($"simrun: {stepsPerGen * 20} steps in {ms} ms");
+                // Ticks a second is the honest headline for a headless sweep: "so many steps in so
+                // many milliseconds" is the same fact stated in a way nobody can compare against the
+                // last run without a calculator.
+                mutable long tps = 0;
+                if (ms > 0) {
+                    tps = cast<long>(stepsPerGen) * 20 * 1000 / ms;
+                }
+                System.IO.Console.println($"simrun: {stepsPerGen * 20} steps in {ms} ms | {tps} ticks a second");
                 delete sim;
                 delete folk;
                 delete g;
