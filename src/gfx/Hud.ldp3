@@ -1,0 +1,97 @@
+import System.IO.Console;
+import opengl.gl.Gl;
+import opengl.gltext.FontAtlas;
+import opengl.gltext.GdiFont;
+import opengl.gltex.Texture;
+import Agents.Sim.Meter;
+import Agents.Sim.Phase;
+
+// Text on the screen, and the first thing written with it: the two rates.
+//
+// Everything the game knew about its own speed was in the window title, which is fine for a number
+// you glance at and useless for one you are trying to OPTIMISE against -- a title bar does not sit
+// next to the thing that is slow, does not show a breakdown, and cannot be read from a screenshot.
+// So the HUD gets a font, and the font gets used for the counter first because that is what is
+// needed to judge the next slice.
+//
+// The atlas is monospaced ASCII rasterised once at startup, uploaded once, and drawn as one quad a
+// character out of the batch that already exists. Nothing here is per-frame work beyond the quads.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Gfx {
+
+        public class Hud {
+            private mutable FontAtlas font;
+            private mutable int tex;
+            private mutable boolean ready;
+            private mutable int cw;
+            private mutable int ch;
+
+            public constructor Hud(Gl gl, int px) {
+                this.font = GdiFont.rasterizeAscii("Consolas", px);
+                this.tex = Texture.upload2DRGBA(gl, this.font.pixels, this.font.atlasW, this.font.atlasH);
+                this.cw = this.font.cellW;
+                this.ch = this.font.cellH;
+                this.ready = this.tex != 0;
+                if (!this.ready) {
+                    System.IO.Console.println("hud: no font texture; text is off");
+                }
+            }
+
+            public method cellW() returns int {
+                return this.cw;
+            }
+
+            public method cellH() returns int {
+                return this.ch;
+            }
+
+            public method texture() returns int {
+                return this.tex;
+            }
+
+            // Draw a string. The caller owns the batch, so text and panels go in one flush.
+            public method text(Batch2D* b, String s, int x, int y,
+                               float r, float g, float bl, float a) returns int {
+                if (!this.ready) {
+                    return x;
+                }
+                b.setTexture(this.tex);
+                mutable int px = x;
+                for (int i in 0..s.length()) {
+                    char c = s.charAt(i);
+                    float[] uv = this.font.uv(c);
+                    b.glyph(px, y, this.cw, this.ch, uv[0], uv[1], uv[2], uv[3], r, g, bl, a);
+                    delete uv;
+                    px = px + this.cw;
+                }
+                return px;
+            }
+
+            // The counter, bottom left, on a panel dark enough to read over snow and over ocean.
+            // Two rates and the heaviest phase of each side, because "it is slow" and "the terrain
+            // bake is slow" are answers of very different use.
+            public method rates(Batch2D* b, Meter* frame, Meter* clock, int screenH) returns void {
+                if (!this.ready) {
+                    return;
+                }
+                int lines = 3;
+                int w = this.cw * 34 + 12;
+                int h = this.ch * lines + 10;
+                int x = 8;
+                int y = screenH - h - 8;
+                b.rect(x, y, w, h, 0.04, 0.05, 0.07, 0.66);
+                mutable int ty = y + 5;
+                this.text(b, $"{frame.fps()} fps   {clock.tps()} tps", x + 6, ty, 0.95, 0.95, 0.98, 1.0);
+                ty = ty + this.ch;
+                this.text(b, $"frame {frame.worstName()} {frame.worstShare()}/1000", x + 6, ty,
+                          0.72, 0.80, 0.92, 1.0);
+                ty = ty + this.ch;
+                this.text(b, $"clock {clock.worstName()} {clock.worstShare()}/1000", x + 6, ty,
+                          0.72, 0.80, 0.92, 1.0);
+                return;
+            }
+        }
+    }
+}

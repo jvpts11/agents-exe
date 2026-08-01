@@ -87,6 +87,15 @@ public bundle Agents {
             private mutable Wildlife* wild;
             private mutable long hunted;
             private mutable Meter* meter;
+            // Who each community listens to, or -1, and what that person leans toward. A ROLE, not a
+            // person: it outlives whoever fills it, because nobody lives longer than six minutes and
+            // a leadership that died with its leader would never be seen at all.
+            private mutable int[] chief;
+            private mutable int[] lean;        // the Job the chief's temperament pushes toward
+            private mutable long risen;        // roles that came into being
+            private mutable long passed;       // and were handed on when the holder died
+            private mutable long followed;     // decisions swayed by a chief
+            private mutable long resisted;
             // Who claims each 16-cell block, or -1. Territory has no rule of its own yet -- that is
             // its own slice -- but it has an honest meaning already: a community's land is what its
             // people can reach and work, so the claim is a disk around where they actually are, and
@@ -233,6 +242,16 @@ public bundle Agents {
                 this.wild.seed(6);
                 this.hunted = 0;
                 this.meter = new Meter() on heap;
+                this.chief = new int[this.ncomm]();
+                this.lean = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    this.chief[c] = 0 - 1;
+                    this.lean[c] = cast<int>(Job.Idle);
+                }
+                this.risen = 0;
+                this.passed = 0;
+                this.followed = 0;
+                this.resisted = 0;
                 this.crafted = 0;
                 this.stalled = 0;
                 this.raised = 0;
@@ -268,7 +287,27 @@ public bundle Agents {
                 delete this.claim;
                 delete this.wild;
                 delete this.meter;
+                delete this.chief;
+                delete this.lean;
             }
+
+            // A village is where somebody starts being listened to. Below it a band simply defers to
+            // whoever is oldest and nothing is decided; above it there is a role, and the role stays
+            // when its holder dies.
+            public static int VILLAGE = 120;
+
+            // The standing at which somebody counts as properly established.
+            //
+            // Guessed twice and wrong both times, which is worth writing down. First against the
+            // byte's range, 255: two people in a hundred went along. Then against "a few dozen
+            // deeds", 45: five in a hundred. Then the run was asked instead of estimated -- a
+            // village chief carries about eight, because an adult life is roughly two hundred and
+            // fifty seconds and a load comes home every thirty. So this is fifteen: reachable by a
+            // long and busy life, and a chief who has it sways two villagers in five.
+            //
+            // The lesson is the one this project keeps relearning: a constant that is supposed to
+            // mean "what a life reaches" must be READ OFF a life, never reasoned toward.
+            public static int NOTABLE = 15;
 
             public method fauna() returns Wildlife* {
                 return this.wild;
@@ -618,6 +657,8 @@ public bundle Agents {
                             this.stores.take(own, cast<int>(Good.Wood), Builds.woodCost(k));
                             this.stores.take(own, cast<int>(Good.Stone), Builds.stoneCost(k));
                             this.raised = this.raised + 1;
+                            // Raising a building is the biggest single thing anybody does alone.
+                            this.folk.earn(i, 12);
                             this.folk.setAct(i, cast<int>(Act.Idle));
                             this.folk.setJob(i, cast<int>(Job.Idle));
                             this.folk.setWorkplace(i, 0 - 1);
@@ -902,7 +943,95 @@ public bundle Agents {
                     c = c + 1;
                 }
                 this.restake();
+                this.hearWho();
                 return;
+            }
+
+            // Who each community listens to. Nobody is appointed: the census already walks everybody,
+            // so it can see who has the most standing and hand the role to them -- and hand it on
+            // again when they die, which at six minutes a life is often. That is what makes a
+            // succession an event rather than a script.
+            private method hearWho() returns void {
+                int n = this.folk.limit();
+                mutable int[] bestI = new int[this.ncomm]();
+                mutable int[] bestV = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    bestI[c] = 0 - 1;
+                    bestV[c] = 0 - 1;
+                }
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.isAdult(i)) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm) {
+                            int v = this.folk.influenceOf(i);
+                            if (v > bestV[h]) {
+                                bestV[h] = v;
+                                bestI[h] = i;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                for (int c in 0..this.ncomm) {
+                    int had = this.chief[c];
+                    boolean vacant = had < 0 || !this.folk.alive(had)
+                                  || this.folk.homeOf(had) != c;
+                    if (this.cpop[c] < Simulation.VILLAGE) {
+                        // A band is too small to need anybody in charge. If it had a chief and has
+                        // shrunk below a village, the role goes away with the reason for it.
+                        if (had >= 0 && this.folk.alive(had)) {
+                            this.folk.setRole(had, cast<int>(Role.None));
+                        }
+                        this.chief[c] = 0 - 1;
+                        this.lean[c] = cast<int>(Job.Idle);
+                        continue;
+                    }
+                    if (!vacant) {
+                        continue;                          // still living, still theirs
+                    }
+                    int heir = bestI[c];
+                    if (heir < 0 || bestV[c] <= 0) {
+                        continue;                          // nobody has done anything worth heeding
+                    }
+                    this.folk.setRole(heir, cast<int>(Role.Chief));
+                    this.chief[c] = heir;
+                    this.lean[c] = this.leaning(heir);
+                    if (had < 0) {
+                        this.risen = this.risen + 1;
+                    } else {
+                        this.passed = this.passed + 1;
+                    }
+                }
+                delete bestI;
+                delete bestV;
+                return;
+            }
+
+            // What a person pushes their village toward, read off the temperament they were born
+            // with and drifted from their mother. It is not a plan and it is not optimal -- a greedy
+            // chief wants the village digging whether or not the village needs stone. That is the
+            // point: it is why two communities on identical ground come out different.
+            private method leaning(int i) returns int {
+                int bold = this.folk.boldnessOf(i);
+                int greed = this.folk.greedOf(i);
+                int social = this.folk.sociabilityOf(i);
+                int curious = this.folk.curiosityOf(i);
+                mutable int best = greed;
+                mutable int pick = cast<int>(Job.Miner);
+                if (bold > best) {
+                    best = bold;
+                    pick = cast<int>(Job.Hunter);
+                }
+                if (social > best) {
+                    best = social;
+                    pick = cast<int>(Job.Builder);
+                }
+                if (curious > best) {
+                    best = curious;
+                    pick = cast<int>(Job.Quarrier);
+                }
+                return pick;
             }
 
             // What this community should put up next, if anything. The rule is docs/ECONOMY.md's own:
@@ -1335,6 +1464,39 @@ public bundle Agents {
                         best = jb;
                     }
                 }
+                // And then somebody speaks. A chief does not ASSIGN work -- there is no such power in
+                // this world and inventing one would make the whole leadership a lie -- they lean,
+                // and whether that lands is decided by the listener, not the speaker. A bold and
+                // ambitious person shrugs it off; a sociable one with nothing to prove goes along.
+                //
+                // The chief's own standing is the weight. Someone who has done nothing sways nobody
+                // even holding the role, which is what stops a new heir inheriting real authority
+                // along with the title.
+                int lead = this.chief[h];
+                if (lead >= 0 && lead != i && this.lean[h] != cast<int>(Job.Idle)) {
+                    int jb = this.lean[h];
+                    if (this.ctrade[h * nj + jb] < this.quotaFor(h, jb)) {
+                        // Sway is measured against what a LIFE can earn, not against what the byte
+                        // can hold. Dividing by 255 said two people in a hundred went along, which
+                        // is not a leadership -- and the reason was arithmetic, not temperament: a
+                        // six-minute life accumulates thirty-odd deeds, so a chief was being judged
+                        // at a tenth of the scale the formula assumed. NOTABLE is the level at which
+                        // somebody is properly established, and past it more renown adds nothing.
+                        mutable int sway = this.folk.influenceOf(lead);
+                        if (sway > Simulation.NOTABLE) {
+                            sway = Simulation.NOTABLE;
+                        }
+                        int mind = this.folk.sociabilityOf(i) + 40
+                                 - this.folk.boldnessOf(i) / 2 - this.folk.ambitionOf(i) / 2;
+                        int odds = sway * mind / Simulation.NOTABLE;
+                        if (cast<int>(LandMath.hash01(this.seed ^ 0x2E77, i, this.tick) * 100.0) < odds) {
+                            this.followed = this.followed + 1;
+                            best = jb;
+                        } else {
+                            this.resisted = this.resisted + 1;
+                        }
+                    }
+                }
                 if (best != cast<int>(Job.Idle)) {
                     this.folk.setJob(i, best);
                     this.ctrade[h * nj + best] = this.ctrade[h * nj + best] + 1;
@@ -1407,6 +1569,10 @@ public bundle Agents {
                         int amt = this.folk.carryAmtOf(i);
                         this.stores.add(h, this.folk.carryKindOf(i), amt);
                         this.carried = this.carried + cast<long>(amt);
+                        // Bringing food and timber home counts, a little at a time. Standing is
+                        // mostly accumulated by ORDINARY work done for years, which is why age and
+                        // deeds end up correlated without age being a term in it.
+                        this.folk.earn(i, 1);
                         this.folk.setCarry(i, 0, 0);
                     } else {
                         this.folk.setTarget(i, cast<int>(hx), cast<int>(hy));
@@ -1483,6 +1649,8 @@ public bundle Agents {
                 this.stores.add(h, cast<int>(Good.Hide), Beasts.hide(sp));
                 this.folk.setCarry(i, cast<int>(Good.RawMeat), Beasts.meat(sp));
                 this.hunted = this.hunted + 1;
+                // A kill is seen, and it is remembered.
+                this.folk.earn(i, 6);
                 return;
             }
 
@@ -1575,6 +1743,7 @@ public bundle Agents {
                 }
                 this.stores.add(h, Builds.out(k), Builds.nout(k));
                 this.crafted = this.crafted + 1;
+                this.folk.earn(i, 1);
                 this.folk.setAct(i, cast<int>(Act.Idle));
                 return;
             }
@@ -1608,6 +1777,10 @@ public bundle Agents {
                         int amt = this.folk.carryAmtOf(i);
                         this.stores.add(h, this.folk.carryKindOf(i), amt);
                         this.carried = this.carried + cast<long>(amt);
+                        // Bringing food and timber home counts, a little at a time. Standing is
+                        // mostly accumulated by ORDINARY work done for years, which is why age and
+                        // deeds end up correlated without age being a term in it.
+                        this.folk.earn(i, 1);
                         this.folk.setCarry(i, 0, 0);
                         // and straight back out. Returning here left the man standing in his own
                         // village with nothing decided, so the next thing that touched him was the
@@ -1817,6 +1990,21 @@ public bundle Agents {
                 NodeField* nf = this.g.surface();
                 System.IO.Console.println($"  left standing: timber {nf.totalOf(1)} | forage {nf.totalOf(2)} | quarry {nf.totalOf(3)} | ore {nf.totalOf(4)} | fishing {nf.totalOf(5)}");
                 System.IO.Console.println($"  hunt: {this.hunted} animals brought down by people");
+                // Who is listened to, and whether being listened to means anything. A world where
+                // everybody follows has no temperament in it; one where nobody does has a leadership
+                // that exists only in this line.
+                mutable int seated = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.chief[c] >= 0) {
+                        seated = seated + 1;
+                    }
+                }
+                long said = this.followed + this.resisted;
+                mutable int heed = 0;
+                if (said > 0) {
+                    heed = cast<int>(this.followed * cast<long>(1000) / said);
+                }
+                System.IO.Console.println($"  chiefs: {seated} seated | {this.risen} rose, {this.passed} handed on | {heed}/1000 of those spoken to went along ({this.followed} of {said})");
                 this.wild.report();
                 this.meter.report("clock");
                 return;
