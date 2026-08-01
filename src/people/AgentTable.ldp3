@@ -1,6 +1,7 @@
 import System.IO.Console;
 import Agents.World.Grid;
 import Agents.World.Biomes;
+import Agents.World.NodeField;
 import Agents.World.LandMath;
 
 // Everybody alive, as one table. An agent is an INDEX, not a pointer -- the same Structure-of-Arrays
@@ -81,6 +82,11 @@ public bundle Agents {
             // what it is doing
             private mutable byte[] task;
             private mutable float[] taskTimer;
+            // How far this walk was when it began. Two hundred kilobytes for fifty thousand people,
+            // and it buys the only honest test for "gave up": the patience for a journey has to be
+            // measured against the journey's OWN length, or the same stopwatch calls a long walk a
+            // failure and lets somebody grinding against a cliff face carry on forever.
+            private mutable float[] journey;
             private mutable int[] targetNode;  // index into NodeField, -1 = none
             private mutable short[] targetX;
             private mutable short[] targetY;
@@ -125,6 +131,7 @@ public bundle Agents {
                 this.dir = new byte[cap]();
                 this.task = new byte[cap]();
                 this.taskTimer = new float[cap]();
+                this.journey = new float[cap]();
                 this.targetNode = new int[cap]();
                 this.targetX = new short[cap]();
                 this.targetY = new short[cap]();
@@ -161,6 +168,7 @@ public bundle Agents {
                 delete this.dir;
                 delete this.task;
                 delete this.taskTimer;
+                delete this.journey;
                 delete this.targetNode;
                 delete this.targetX;
                 delete this.targetY;
@@ -342,6 +350,34 @@ public bundle Agents {
                 return;
             }
 
+            public method targetNodeOf(int i) returns int {
+                return this.targetNode[i];
+            }
+
+            public method setTargetNode(int i, int node) returns void {
+                this.targetNode[i] = node;
+                return;
+            }
+
+            public method carryAmtOf(int i) returns int {
+                return cast<int>(this.carryAmt[i]);
+            }
+
+            public method carryKindOf(int i) returns int {
+                return cast<int>(this.carryKind[i]) & 255;
+            }
+
+            // One load at a time. Somebody hauling wood cannot also be hauling stone, which is the
+            // whole reason a trip home exists and therefore the whole reason distance costs anything.
+            public method setCarry(int i, int kind, int amount) returns void
+                requires amount >= 0
+                requires amount <= 32767
+            {
+                this.carryKind[i] = cast<byte>(kind);
+                this.carryAmt[i] = cast<short>(amount);
+                return;
+            }
+
             public method xAt(int i) returns float {
                 return this.px[i];
             }
@@ -406,6 +442,15 @@ public bundle Agents {
             public method addTimer(int i, float dt) returns void {
                 this.taskTimer[i] = this.taskTimer[i] + dt;
                 return;
+            }
+
+            public method setJourney(int i, float d) returns void {
+                this.journey[i] = d;
+                return;
+            }
+
+            public method journeyOf(int i) returns float {
+                return this.journey[i];
             }
 
             public method setTarget(int i, int tx, int ty) returns void {
@@ -563,9 +608,17 @@ public bundle Agents {
 
             // ---- seeding a starting world ----
 
-            // Scatter `total` people over `communities` sites. Sites are found by walking the map on
-            // a coarse lattice and keeping the walkable ones far enough apart -- good enough for a
-            // stress test, and the real founding rules arrive with the community layer.
+            // Scatter `total` people over `communities` sites.
+            //
+            // Sites used to be the first walkable points on a lattice that were far enough apart, and
+            // that turned out to be the single most expensive decision in the simulation: people were
+            // founded on any ground at all, so a village could sit on a steppe with no tree within a
+            // third of a lifetime's walk, and the woodcutter measurement came out saying the WORLD was
+            // too big when what was too big was the distance I had put between people and their work.
+            //
+            // Nobody founds a village where there is nothing. Candidates are scored by how much
+            // woodland lies within reach, and the richest ones win -- which is a founding rule, not a
+            // convenience: it is the first thing the community layer will need anyway.
             public method seedWorld(Grid* g, int total, int communities, int worldSeed) returns int {
                 int w = g.width();
                 int h = g.height();
@@ -573,33 +626,78 @@ public bundle Agents {
                 int[] cy = new int[communities]();
                 mutable int found = 0;
                 int minGap = 90;
-                mutable int strideY = 24;
+                NodeField* nf = g.surface();
+                // Every walkable lattice point, with the wood within three blocks of it.
+                int maxCand = ((w / 20) + 1) * ((h / 24) + 1);
+                int[] candX = new int[maxCand]();
+                int[] candY = new int[maxCand]();
+                int[] candScore = new int[maxCand]();
+                mutable int nc = 0;
                 mutable int y = 40;
-                while (y < h - 40 && found < communities) {
+                while (y < h - 40) {
                     mutable int x = 40;
-                    while (x < w - 40 && found < communities) {
+                    while (x < w - 40) {
                         int b = g.biomeAt(x, y);
                         if (Biomes.walkable(b) && g.elevAt(x, y) < 6300) {
+                            int bx = x / 16;
+                            int by = y / 16;
+                            mutable int score = 0;
+                            mutable int oy = 0 - 3;
+                            while (oy <= 3) {
+                                mutable int ox = 0 - 3;
+                                while (ox <= 3) {
+                                    score = score + nf.treesInBlock(bx + ox, by + oy);
+                                    ox = ox + 1;
+                                }
+                                oy = oy + 1;
+                            }
+                            candX[nc] = x;
+                            candY[nc] = y;
+                            candScore[nc] = score;
+                            nc = nc + 1;
+                        }
+                        x = x + 20;
+                    }
+                    y = y + 24;
+                }
+                // Take the richest site that is far enough from the ones already taken, and repeat.
+                // Greedy and not optimal, but a founding is greedy: people settle the best place they
+                // can see, they do not solve a packing problem across a continent.
+                while (found < communities) {
+                    mutable int best = 0 - 1;
+                    mutable int bestScore = 0 - 1;
+                    mutable int j = 0;
+                    while (j < nc) {
+                        if (candScore[j] > bestScore) {
                             mutable boolean ok = true;
                             mutable int k = 0;
                             while (k < found) {
-                                int dx = cx[k] - x;
-                                int dy = cy[k] - y;
+                                int dx = cx[k] - candX[j];
+                                int dy = cy[k] - candY[j];
                                 if (dx * dx + dy * dy < minGap * minGap) {
                                     ok = false;
+                                    k = found;
                                 }
                                 k = k + 1;
                             }
                             if (ok) {
-                                cx[found] = x;
-                                cy[found] = y;
-                                found = found + 1;
+                                best = j;
+                                bestScore = candScore[j];
                             }
                         }
-                        x = x + 20;
+                        j = j + 1;
                     }
-                    y = y + strideY;
+                    if (best < 0) {
+                        break;                       // no room left on this world for another village
+                    }
+                    cx[found] = candX[best];
+                    cy[found] = candY[best];
+                    candScore[best] = 0 - 1;         // taken
+                    found = found + 1;
                 }
+                delete candX;
+                delete candY;
+                delete candScore;
                 if (found == 0) {
                     delete cx;
                     delete cy;

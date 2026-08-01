@@ -55,15 +55,36 @@ public bundle Agents {
             private mutable int[] cpop;
             private mutable int[] cadults;
             private mutable int[] cmales;
+            private mutable float[] ccx;       // where the community actually is, as its mean
+            private mutable float[] ccy;
+            private mutable int[] cwood;       // its store
+            // Where this community knows there is wood, or -1. A community is swept once a second
+            // anyway, so it can afford the wide search that an individual cannot: asking it costs
+            // one search per PLACE per second instead of one per PERSON per decision.
+            private mutable int[] cwoodX;
+            private mutable int[] cwoodY;
             private mutable int ncomm;
             private mutable float censusDue;
             private mutable long births;
             private mutable long deathsOld;
             private mutable long deathsHunger;
+            // The number this slice exists to produce: seconds spent walking against seconds spent
+            // working. On a map thirty-two times the original's it is the one that says whether a
+            // person can make a living within a walk of home, or whether the whole economy has to
+            // become regional.
+            // Only journeys WITH A PURPOSE count here. Wandering is counted apart, because folding it
+            // in flatters nothing and lies about everything: an idle child ambling in circles would
+            // read as a woodcutter with a long commute, and the ratio would say the world is too big
+            // when what it really said is that most people had nothing to do.
+            private mutable long walkTicks;
+            private mutable long wanderTicks;
+            private mutable long workTicks;
+            private mutable long felled;
+            private mutable long woodHome;
+            private mutable long noWood;       // searches that found no tree at all
             private mutable int frames;
 
             public static float SPEED = 1.25;       // cells a second
-            public static float GIVE_UP = 30.0;     // seconds on one walk before it is called stuck
 
             public constructor Simulation(Grid* grid, AgentTable* people, int worldSeed) {
                 this.g = grid;
@@ -86,10 +107,24 @@ public bundle Agents {
                 this.cpop = new int[this.ncomm]();
                 this.cadults = new int[this.ncomm]();
                 this.cmales = new int[this.ncomm]();
+                this.ccx = new float[this.ncomm]();
+                this.ccy = new float[this.ncomm]();
+                this.cwood = new int[this.ncomm]();
+                this.cwoodX = new int[this.ncomm]();
+                this.cwoodY = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    this.cwoodX[c] = 0 - 1;                 // nowhere known yet, and (0,0) is not it
+                }
                 this.censusDue = 0.0;
                 this.births = 0;
                 this.deathsOld = 0;
                 this.deathsHunger = 0;
+                this.walkTicks = 0;
+                this.wanderTicks = 0;
+                this.workTicks = 0;
+                this.felled = 0;
+                this.woodHome = 0;
+                this.noWood = 0;
                 this.frames = 0;
             }
 
@@ -97,6 +132,11 @@ public bundle Agents {
                 delete this.cpop;
                 delete this.cadults;
                 delete this.cmales;
+                delete this.ccx;
+                delete this.ccy;
+                delete this.cwood;
+                delete this.cwoodX;
+                delete this.cwoodY;
             }
 
             public method setBudget(int b) returns void
@@ -176,7 +216,7 @@ public bundle Agents {
                     int ty = cast<int>(here_y + LandMath.sin(a) * d);
                     if (this.walkable(tx, ty) && this.clearLine(here_x, here_y, tx, ty)) {
                         this.folk.setTarget(i, tx, ty);
-                        this.folk.setAct(i, cast<int>(Act.WalkTo));
+                        this.folk.setAct(i, cast<int>(Act.Wander));
                         return;
                     }
                     k = k + 1;
@@ -209,16 +249,31 @@ public bundle Agents {
                     if (this.folk.thinkAtOf(i) > this.tick) {
                         continue;
                     }
-                    if (this.mayConceive(i)) {
-                        this.folk.conceive(i, Simulation.TERM);
+                    // Everybody grown is a woodcutter in this slice. That is not a shortcut for the
+                    // job system -- it is the point of the measurement: fifty thousand people all
+                    // doing the one trade is the harshest possible test of whether a living can be
+                    // made within a walk of home. Capacity rules that stop a place becoming ten
+                    // thousand woodcutters belong with the other twelve trades.
+                    if (this.folk.isAdult(i)) {
+                        if (this.folk.jobOf(i) == cast<int>(Job.Idle)) {
+                            this.folk.setJob(i, cast<int>(Job.Woodcutter));
+                        }
+                        this.workWood(i);
                     }
                     if (this.folk.actOf(i) == cast<int>(Act.Idle)) {
                         this.chooseTarget(i);
                     }
                     // Re-decide in two to four seconds, spread so a cohort born together does not
                     // come due on the same tick for the rest of their lives.
-                    int jitter = cast<int>(LandMath.hash01(this.seed ^ 0x3F09, i, this.tick) * 3.0);
-                    this.folk.setThinkAt(i, this.tick + 2 + jitter);
+                    //
+                    // Only if nothing above asked for longer. This used to be unconditional, which
+                    // quietly cancelled every backing-off a decision made: somebody who had just
+                    // learned there is no wood for miles and asked not to be woken for half a minute
+                    // was woken two seconds later to learn it again.
+                    if (this.folk.thinkAtOf(i) <= this.tick) {
+                        int jitter = cast<int>(LandMath.hash01(this.seed ^ 0x3F09, i, this.tick) * 3.0);
+                        this.folk.setThinkAt(i, this.tick + 2 + jitter);
+                    }
                     this.thoughtThisFrame = this.thoughtThisFrame + 1;
                 }
                 if (this.thoughtThisFrame > this.worstThink) {
@@ -232,6 +287,31 @@ public bundle Agents {
                 return x >= this.nearX0 && y >= this.nearY0 && x < this.nearX1 && y < this.nearY1;
             }
 
+            // A load comes off the tree, and the tree really loses it. `harvest` returns what was
+            // actually there, which is how a resource that runs out differs from one that only says
+            // it does -- the last cutter at a nearly-empty tree gets whatever is left and no more.
+            private method chop(int i) returns void {
+                NodeField* nf = this.g.surface();
+                int t = this.folk.targetNodeOf(i);
+                if (t < 0) {
+                    this.folk.setAct(i, cast<int>(Act.Idle));
+                    return;
+                }
+                int got = nf.harvest(t, Simulation.LOAD);
+                if (got <= 0) {
+                    this.folk.setTargetNode(i, 0 - 1);
+                    this.folk.setAct(i, cast<int>(Act.Idle));
+                    return;
+                }
+                if (nf.qtyAt(t) <= 0) {
+                    this.felled = this.felled + 1;               // that one is gone for good
+                    this.folk.setTargetNode(i, 0 - 1);
+                }
+                this.folk.setCarry(i, cast<int>(NodeKind.Broadleaf), got);
+                this.folk.setAct(i, cast<int>(Act.Idle));
+                return;
+            }
+
             // The unbudgeted half. Everyone advances at the same speed, so travel time is honest
             // everywhere; only the people on screen pay for testing the ground and turning to face.
             private method move(float dt) returns void {
@@ -239,9 +319,28 @@ public bundle Agents {
                 int n = this.folk.limit();
                 mutable int i = 0;
                 while (i < n) {
-                    if (!this.folk.alive(i) || this.folk.actOf(i) != cast<int>(Act.WalkTo)) {
+                    if (!this.folk.alive(i)) {
                         i = i + 1;
                         continue;
+                    }
+                    if (this.folk.actOf(i) == cast<int>(Act.Gather)) {
+                        this.folk.addTimer(i, dt);
+                        this.workTicks = this.workTicks + 1;
+                        if (this.folk.timerOf(i) >= Simulation.CHOP) {
+                            this.chop(i);
+                        }
+                        i = i + 1;
+                        continue;
+                    }
+                    boolean wandering = this.folk.actOf(i) == cast<int>(Act.Wander);
+                    if (this.folk.actOf(i) != cast<int>(Act.WalkTo) && !wandering) {
+                        i = i + 1;
+                        continue;
+                    }
+                    if (wandering) {
+                        this.wanderTicks = this.wanderTicks + 1;
+                    } else {
+                        this.walkTicks = this.walkTicks + 1;
                     }
                     float x = this.folk.xAt(i);
                     float y = this.folk.yAt(i);
@@ -258,20 +357,28 @@ public bundle Agents {
                         i = i + 1;
                         continue;
                     }
+                    // Math.sqrt is one machine instruction. LandMath.sqrt -- which the worldgen and
+                    // the renderer both use -- is a sixteen-iteration Newton loop, sixteen DIVISIONS
+                    // per call, and at fifty thousand calls a frame that is the whole cost of moving.
+                    float dist = cast<float>(Math.sqrt(cast<double>(d2)));
+                    // `setAct` zeroes the timer, so a timer still at zero means this is the first
+                    // step of the walk and the distance in hand is the whole journey.
+                    if (this.folk.timerOf(i) == 0.0) {
+                        this.folk.setJourney(i, dist);
+                    }
                     this.folk.addTimer(i, dt);
-                    if (this.folk.timerOf(i) > Simulation.GIVE_UP) {
-                        // It has been walking half a minute at one destination. Something is in the
-                        // way that this agent cannot get around, so it gives up and picks again --
-                        // and it is COUNTED, because a world where this is common has broken routing.
+                    // Patience is measured against the length of THIS journey, three times what it
+                    // ought to take plus a few seconds of slack for going round things. A flat
+                    // half-minute -- what this was -- called every walk longer than thirty-seven
+                    // cells a failure, so the moment people started going to woodland forty-eight
+                    // cells off, one journey in six was reported as broken routing when the only
+                    // thing broken was the stopwatch.
+                    if (this.folk.timerOf(i) > 5.0 + 3.0 * this.folk.journeyOf(i) / Simulation.SPEED) {
                         this.stuckTotal = this.stuckTotal + 1;
                         this.folk.setAct(i, cast<int>(Act.Idle));
                         i = i + 1;
                         continue;
                     }
-                    // Math.sqrt is one machine instruction. LandMath.sqrt -- which the worldgen and
-                    // the renderer both use -- is a sixteen-iteration Newton loop, sixteen DIVISIONS
-                    // per call, and at fifty thousand calls a frame that is the whole cost of moving.
-                    float dist = cast<float>(Math.sqrt(cast<double>(d2)));
                     float ux = dx / dist;
                     float uy = dy / dist;
                     mutable float nx = x + ux * span;
@@ -333,8 +440,13 @@ public bundle Agents {
             // settles WELL BELOW it, at whatever size makes the birth rate equal the death rate.
             // Both numbers stand in for the real limit -- how much food there is -- and are replaced
             // by it, not tuned around it, when the economy arrives.
-            public static int CARRY = 700;
-            public static float FERTILITY = 0.12;        // chance per decision when a place is empty
+            // Below the fifty thousand rows of the table on purpose. With a hundred communities at
+            // seven hundred each the ceiling was seventy thousand, so the world never reached its own
+            // carrying capacity -- it ran out of TABLE, and the flat population curve across twenty
+            // generations was the pool being full, not an equilibrium. A ceiling the simulation can
+            // actually reach is the only way the logistic means anything.
+            public static int CARRY = 450;
+            public static float FERTILITY = 0.045;       // chance per SECOND when a place is empty
 
             private method live(float dt) returns void {
                 float t = this.clock;
@@ -386,6 +498,15 @@ public bundle Agents {
                             this.births = this.births + 1;
                         }
                     }
+                    // Conceiving belongs HERE and not among the decisions. It used to ride on the
+                    // think queue, which quietly tied the birth rate to how often somebody happened
+                    // to be wondering about firewood: the moment a woodcutter with no wood in reach
+                    // learned to stop asking every two seconds, the women of that community stopped
+                    // conceiving with them, and the world fell from forty-nine thousand to seven.
+                    // A body is not on a budget.
+                    if (this.mayConceive(i, dt)) {
+                        this.folk.conceive(i, Simulation.TERM);
+                    }
                     i = i + 1;
                 }
                 return;
@@ -397,6 +518,8 @@ public bundle Agents {
                     this.cpop[c] = 0;
                     this.cadults[c] = 0;
                     this.cmales[c] = 0;
+                    this.ccx[c] = 0.0;
+                    this.ccy[c] = 0.0;
                     c = c + 1;
                 }
                 int n = this.folk.limit();
@@ -406,6 +529,8 @@ public bundle Agents {
                         int h = this.folk.homeOf(i);
                         if (h >= 0 && h < this.ncomm) {
                             this.cpop[h] = this.cpop[h] + 1;
+                            this.ccx[h] = this.ccx[h] + this.folk.xAt(i);
+                            this.ccy[h] = this.ccy[h] + this.folk.yAt(i);
                             if (this.folk.isAdult(i)) {
                                 this.cadults[h] = this.cadults[h] + 1;
                                 if (!this.folk.isFemale(i)) {
@@ -416,6 +541,77 @@ public bundle Agents {
                     }
                     i = i + 1;
                 }
+                // Where a community IS, taken as where its people are. Nobody planted a flag: the
+                // centre is the average of everybody standing there, so it drifts as they do -- and
+                // when a place empties out, it stops existing rather than leaving a marker behind.
+                c = 0;
+                while (c < this.ncomm) {
+                    if (this.cpop[c] > 0) {
+                        this.ccx[c] = this.ccx[c] / cast<float>(this.cpop[c]);
+                        this.ccy[c] = this.ccy[c] / cast<float>(this.cpop[c]);
+                        // And where its wood is. The wide search happens HERE, once for the whole
+                        // place, instead of once per person per decision -- which was eighteen
+                        // million failed searches in two hours of world time, each sweeping six
+                        // thousand cells, and four fifths of the running time.
+                        this.findWood(c);
+                    } else {
+                        this.cwoodX[c] = 0 - 1;
+                    }
+                    c = c + 1;
+                }
+                return;
+            }
+
+            // The nearest BLOCK of woodland to a community's centre, in blocks of sixteen cells. Not
+            // the nearest tree: a community that knows one tree sends everybody to it, the first
+            // arrival takes it and the rest walk to a stump. A block is an area, so people spread out
+            // inside it by themselves, and it stays true without being re-searched because `harvest`
+            // decrements it as trees come down.
+            //
+            // A place with no woodland within reach records none, and its people stop asking instead
+            // of each of them discovering the same emptiness over and over.
+            private method findWood(int c) returns void {
+                NodeField* nf = this.g.surface();
+                int cbx = cast<int>(this.ccx[c]) / 16;
+                int cby = cast<int>(this.ccy[c]) / 16;
+                if (this.cwoodX[c] >= 0) {
+                    if (nf.treesInBlock(this.cwoodX[c], this.cwoodY[c]) > 0) {
+                        return;                                  // the wood is still standing
+                    }
+                }
+                mutable int r = 0;
+                while (r <= Simulation.WOOD_BLOCKS) {
+                    mutable int dx = 0 - r;
+                    while (dx <= r) {
+                        if (nf.treesInBlock(cbx + dx, cby - r) > 0) {
+                            this.cwoodX[c] = cbx + dx;
+                            this.cwoodY[c] = cby - r;
+                            return;
+                        }
+                        if (nf.treesInBlock(cbx + dx, cby + r) > 0) {
+                            this.cwoodX[c] = cbx + dx;
+                            this.cwoodY[c] = cby + r;
+                            return;
+                        }
+                        dx = dx + 1;
+                    }
+                    mutable int dy = 1 - r;
+                    while (dy <= r - 1) {
+                        if (nf.treesInBlock(cbx - r, cby + dy) > 0) {
+                            this.cwoodX[c] = cbx - r;
+                            this.cwoodY[c] = cby + dy;
+                            return;
+                        }
+                        if (nf.treesInBlock(cbx + r, cby + dy) > 0) {
+                            this.cwoodX[c] = cbx + r;
+                            this.cwoodY[c] = cby + dy;
+                            return;
+                        }
+                        dy = dy + 1;
+                    }
+                    r = r + 1;
+                }
+                this.cwoodX[c] = 0 - 1;
                 return;
             }
 
@@ -426,12 +622,11 @@ public bundle Agents {
             // why -- worth keeping written down, because it is the same shape of mistake every time.
             // A woman must bear TWO children to replace herself and a man. Her fertile window runs
             // from sixty seconds to FERTILE_TO of a life, about two hundred and fifty seconds. Each
-            // child costs TERM in gestation plus the time to conceive, which at chance `p` per
-            // decision and a decision every three seconds is 3/p. Two children must fit inside the
-            // window, so 6/p + 2*TERM <= 250, and p can never be under about 0.04. It was 0.030 --
-            // and then multiplied AGAIN by how empty the place was, which started at 0.19. The real
-            // chance was 0.0057: one conception per five hundred seconds, inside a fertile window of
-            // two hundred and fifty. Most women never conceived at all.
+            // child costs TERM in gestation plus 1/(p*room) waiting to conceive, so
+            // 2*(TERM + 1/(p*room)) <= 250 -- which at p = 0.045 a second puts the balance at about
+            // room = 0.28, a community settling near three quarters of CARRY. The first attempt had
+            // an effective chance of 0.0057 a second inside a window of two hundred and fifty:
+            // most women never conceived at all.
             //
             // The shape underneath was wrong too. With `p = base * emptiness`, the only point where
             // births balance deaths is emptiness = 1, which is a population of zero: it was drawn
@@ -440,7 +635,7 @@ public bundle Agents {
             //
             // CARRY and FERTILITY both stand in for the real limit -- how much food there is. The
             // economy replaces them; it does not tune them.
-            private method mayConceive(int i) returns boolean {
+            private method mayConceive(int i, float dt) returns boolean {
                 if (!this.folk.isFemale(i) || !this.folk.isAdult(i) || this.folk.isPregnant(i)) {
                     return false;
                 }
@@ -458,7 +653,164 @@ public bundle Agents {
                 if (room <= 0.0) {
                     return false;
                 }
-                return LandMath.hash01(this.seed ^ 0x6C21, i, this.tick) < Simulation.FERTILITY * room;
+                // Per SECOND scaled by the step, not per decision -- and drawn on the frame counter,
+                // because `tick` is whole seconds and would hand the same number to all twenty steps
+                // inside one of them.
+                return LandMath.hash01(this.seed ^ 0x6C21, i, this.frames) < Simulation.FERTILITY * dt * room;
+            }
+
+            public static int WOOD_BLOCKS = 3;           // 16-cell blocks a COMMUNITY looks over: 48 cells
+            public static int REACH = 6;                 // cells a person searches where they stand
+            public static float CHOP = 5.0;              // seconds to take a load off a tree
+            public static int LOAD = 10;                 // wood carried in one trip
+
+            // The nearest tree, searched ring by ring outward so the FIRST one found is the closest
+            // and the search stops there. Ring by ring and not square by square: scanning the whole
+            // box at each radius would re-test everything inside it and turn a search into a sweep.
+            //
+            // A PERSON only ever calls this with a small radius, standing where the community said
+            // the wood was. The wide version belongs to the community and runs once a second.
+            private method findTree(int i, int reach) returns int {
+                NodeField* nf = this.g.surface();
+                int cx = cast<int>(this.folk.xAt(i));
+                int cy = cast<int>(this.folk.yAt(i));
+                mutable int here = nf.treeAt(cx, cy);
+                if (here >= 0) {
+                    return here;
+                }
+                mutable int r = 1;
+                while (r <= reach) {
+                    mutable int dx = 0 - r;
+                    while (dx <= r) {
+                        mutable int t = nf.treeAt(cx + dx, cy - r);
+                        if (t >= 0) {
+                            return t;
+                        }
+                        t = nf.treeAt(cx + dx, cy + r);
+                        if (t >= 0) {
+                            return t;
+                        }
+                        dx = dx + 1;
+                    }
+                    mutable int dy = 1 - r;
+                    while (dy <= r - 1) {
+                        mutable int t = nf.treeAt(cx - r, cy + dy);
+                        if (t >= 0) {
+                            return t;
+                        }
+                        t = nf.treeAt(cx + r, cy + dy);
+                        if (t >= 0) {
+                            return t;
+                        }
+                        dy = dy + 1;
+                    }
+                    r = r + 1;
+                }
+                return 0 - 1;
+            }
+
+            // Busy means committed to something. Wandering is NOT: somebody strolling because they had
+            // nothing better to do should drop it the moment there is work, or half the population
+            // spends its life finishing an aimless walk it started three seconds ago.
+            private method busy(int i) returns boolean {
+                int a = this.folk.actOf(i);
+                return a != cast<int>(Act.Idle) && a != cast<int>(Act.Wander);
+            }
+
+            // One trade, whole: find a tree, walk to it, fell a load, carry it home, hand it over.
+            // Everything an economy needs is in this loop -- a resource that runs out, a distance
+            // that costs time, and a store that grows -- which is why it is worth building alone
+            // before the other twelve trades exist.
+            private method workWood(int i) returns void {
+                NodeField* nf = this.g.surface();
+                int h = this.folk.homeOf(i);
+                if (this.folk.carryAmtOf(i) > 0) {
+                    // Carrying: head home if not already going there, hand over on arrival.
+                    if (this.busy(i)) {
+                        return;
+                    }
+                    float hx = this.ccx[h];
+                    float hy = this.ccy[h];
+                    float dx = hx - this.folk.xAt(i);
+                    float dy = hy - this.folk.yAt(i);
+                    if (dx * dx + dy * dy < 4.0) {
+                        this.cwood[h] = this.cwood[h] + this.folk.carryAmtOf(i);
+                        this.woodHome = this.woodHome + cast<long>(this.folk.carryAmtOf(i));
+                        this.folk.setCarry(i, 0, 0);
+                        // and straight back out. Returning here left the man standing in his own
+                        // village with nothing decided, so the next thing that touched him was the
+                        // wander -- which is why a fifth of all the time in the world was being
+                        // spent strolling in circles between one load and the next.
+                    } else {
+                        this.folk.setTarget(i, cast<int>(hx), cast<int>(hy));
+                        this.folk.setAct(i, cast<int>(Act.WalkTo));
+                        return;
+                    }
+                }
+                if (this.busy(i)) {
+                    return;
+                }
+                int t = this.folk.targetNodeOf(i);
+                if (t >= 0) {
+                    // Standing at the tree it set out for -- unless somebody else emptied it first,
+                    // which is exactly what a shared, finite resource does to a plan.
+                    if (nf.qtyAt(t) > 0) {
+                        this.folk.setAct(i, cast<int>(Act.Gather));
+                        return;
+                    }
+                    this.folk.setTargetNode(i, 0 - 1);
+                }
+                // Look around where you stand -- six cells, not forty. If there is nothing, you do not
+                // go looking: you go where your community says the wood is, and only search again
+                // once you are there. A person who does not know the world cannot search it, and a
+                // person who searches it forty cells at a time, thousands of times a second, is a
+                // profiler entry rather than a woodcutter.
+                mutable int found = this.findTree(i, Simulation.REACH);
+                if (found < 0) {
+                    if (h < 0 || h >= this.ncomm || this.cwoodX[h] < 0) {
+                        this.noWood = this.noWood + 1;
+                        this.folk.setThinkAt(i, this.tick + 30);   // this place has no wood at all
+                        return;
+                    }
+                    // A point inside the block, different for each person, so a hundred woodcutters
+                    // fan out across the wood instead of queueing at one corner of it. It has to be
+                    // ground you can stand on: aiming at whatever the jitter lands on sent one walk
+                    // in six into a lake or a cliff face, to be abandoned thirty seconds later --
+                    // `stuck` went from two in a hundred journeys to seventeen.
+                    mutable int wx = this.cwoodX[h] * 16 + 8;
+                    mutable int wy = this.cwoodY[h] * 16 + 8;
+                    mutable int tries = 0;
+                    while (tries < 4) {
+                        int jx = cast<int>(LandMath.hash01(this.seed ^ 0x11B3, i * 5 + tries, this.tick) * 16.0);
+                        int jy = cast<int>(LandMath.hash01(this.seed ^ 0x274D, i * 5 + tries, this.tick) * 16.0);
+                        int tx = this.cwoodX[h] * 16 + jx;
+                        int ty = this.cwoodY[h] * 16 + jy;
+                        if (this.walkable(tx, ty)) {
+                            wx = tx;
+                            wy = ty;
+                            tries = 4;
+                        } else {
+                            tries = tries + 1;
+                        }
+                    }
+                    float ax = cast<float>(wx) - this.folk.xAt(i);
+                    float ay = cast<float>(wy) - this.folk.yAt(i);
+                    if (ax * ax + ay * ay < 4.0) {
+                        // Inside the block, six cells searched, and nothing. The block still counts
+                        // trees, so they are further in than the search reached: wait a moment and
+                        // aim at a different point rather than re-deciding on every tick.
+                        this.noWood = this.noWood + 1;
+                        this.folk.setThinkAt(i, this.tick + 3);
+                        return;
+                    }
+                    this.folk.setTarget(i, wx, wy);
+                    this.folk.setAct(i, cast<int>(Act.WalkTo));
+                    return;
+                }
+                this.folk.setTargetNode(i, found);
+                this.folk.setTarget(i, nf.cellXAt(found), nf.cellYAt(found));
+                this.folk.setAct(i, cast<int>(Act.WalkTo));
+                return;
             }
 
             public method livingCount() returns int {
@@ -515,6 +867,18 @@ public bundle Agents {
                 System.IO.Console.println($"  think: {perFrame}/frame average, worst {this.worstThink} (budget {this.budget}) | demand {demand}/s vs capacity {capacity}/s");
                 System.IO.Console.println($"  people standing off walkable ground: {this.offLand()}");
                 System.IO.Console.println($"  life: {this.folk.count()} alive | {this.births} born, {this.deathsOld} of old age, {this.deathsHunger} starved");
+                // THE number of this slice. Walking is pure cost -- it produces nothing -- so the
+                // share of it says whether the map is a place people can live in or a distance they
+                // spend their lives crossing. Everything about how big a community is, how far a
+                // trade may range and whether the economy can stay local hangs off it.
+                long busy = this.walkTicks + this.workTicks;
+                mutable int share = 0;
+                if (busy > 0) {
+                    share = cast<int>(this.walkTicks * cast<long>(1000) / busy);
+                }
+                System.IO.Console.println($"  travel share: {share}/1000 of busy time spent walking");
+                System.IO.Console.println($"  time: {this.walkTicks} walking to work, {this.workTicks} working, {this.wanderTicks} wandering with nothing to do");
+                System.IO.Console.println($"  wood: {this.woodHome} carried home, {this.felled} trees felled out, {this.noWood} searches found none");
                 return;
             }
         }

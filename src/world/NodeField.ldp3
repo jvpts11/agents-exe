@@ -28,7 +28,22 @@ public bundle Agents {
             private mutable byte[] kind;
             private mutable short[] qty;
             private mutable int[] rowStart;  // h + 1 entries, valid once sorted
+            // First instance standing on each cell, or -1. Eleven megabytes, and the header above
+            // used to argue against paying them because only the renderer read this field and the
+            // renderer walks rows. Agents changed that: a woodcutter asks "is there a tree on this
+            // cell" thousands of times a second, and a row walk to answer it is the difference
+            // between a lookup and a scan. Memory has been free in this project every time it has
+            // been weighed against time, and this is no exception.
+            private mutable int[] cellFirst;
             private mutable boolean ordered;
+            // Standing trees per BLOCK of 16x16 cells -- a coarse map of where the woods are, fifty-
+            // seven kilobytes for the whole world. A single tree is the wrong thing to know about:
+            // tell a community where one tree is and everybody walks to that tree, the first one there
+            // takes it and the rest arrive at a stump. A block is where the WOOD is, and people spread
+            // out inside it on their own. It is kept live by `harvest`, so it never lies.
+            private mutable int[] blockTree;
+            private mutable int bw;
+            private mutable int bh;
 
             public constructor NodeField(int w, int h) {
                 this.w = w;
@@ -40,7 +55,11 @@ public bundle Agents {
                 this.kind = new byte[this.cap]();
                 this.qty = new short[this.cap]();
                 this.rowStart = new int[h + 1]();
+                this.cellFirst = new int[1]();
                 this.ordered = false;
+                this.bw = (w + 15) / 16;
+                this.bh = (h + 15) / 16;
+                this.blockTree = new int[this.bw * this.bh]();
             }
 
             public destructor ~NodeField() returns void {
@@ -49,6 +68,8 @@ public bundle Agents {
                 delete this.kind;
                 delete this.qty;
                 delete this.rowStart;
+                delete this.cellFirst;
+                delete this.blockTree;
             }
 
             public method size() returns int {
@@ -159,9 +180,69 @@ public bundle Agents {
                 this.py = oy;
                 this.kind = ok;
                 this.qty = oq;
+                // start[c] has been walked forward to the END of bucket c by the fill, so the
+                // beginning of c is where c-1 ended -- and a cell nobody stands on gets -1 rather
+                // than an empty range, so a caller tests one integer instead of comparing two.
+                delete this.cellFirst;
+                this.cellFirst = new int[nc]();
+                mutable int prev = 0;
+                mutable int c3 = 0;
+                while (c3 < nc) {
+                    if (start[c3] > prev) {
+                        this.cellFirst[c3] = prev;
+                        prev = start[c3];
+                    } else {
+                        this.cellFirst[c3] = 0 - 1;
+                    }
+                    c3 = c3 + 1;
+                }
                 delete start;
+                // The coarse wood map, counted once here and maintained by `harvest` from now on.
+                for (int b in 0..this.bw * this.bh) {
+                    this.blockTree[b] = 0;
+                }
+                for (int j in 0..this.n) {
+                    int k = cast<int>(this.kind[j]) & 255;
+                    if (k != 0 && Nodes.isTree(k) && cast<int>(this.qty[j]) > 0) {
+                        this.blockTree[this.blockOf(j)] = this.blockTree[this.blockOf(j)] + 1;
+                    }
+                }
                 this.ordered = true;
                 return;
+            }
+
+            private method blockOf(int i) returns int {
+                mutable int bx = cast<int>(this.px[i]) / 16;
+                mutable int by = cast<int>(this.py[i]) / 16;
+                if (bx < 0) {
+                    bx = 0;
+                }
+                if (bx >= this.bw) {
+                    bx = this.bw - 1;
+                }
+                if (by < 0) {
+                    by = 0;
+                }
+                if (by >= this.bh) {
+                    by = this.bh - 1;
+                }
+                return by * this.bw + bx;
+            }
+
+            public method blockCols() returns int {
+                return this.bw;
+            }
+
+            public method blockRows() returns int {
+                return this.bh;
+            }
+
+            // Standing trees in the 16x16 block (bx, by). Zero outside the world.
+            public method treesInBlock(int bx, int by) returns int {
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return 0;
+                }
+                return this.blockTree[by * this.bw + bx];
             }
 
             private method cellOf(int i) returns int {
@@ -221,6 +302,32 @@ public bundle Agents {
                 return this.rowFirst(y + 1);
             }
 
+            // The first thing standing on this cell, or -1. One array read.
+            public method firstAt(int x, int y) returns int {
+                if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
+                    return 0 - 1;
+                }
+                return this.cellFirst[y * this.w + x];
+            }
+
+            // A live node of this kind-group standing on the cell, or -1. Instances of one cell are
+            // contiguous, so this walks the two or three that share it and no further.
+            public method treeAt(int x, int y) returns int {
+                mutable int i = this.firstAt(x, y);
+                if (i < 0) {
+                    return 0 - 1;
+                }
+                int c = y * this.w + x;
+                while (i < this.n && this.cellOf(i) == c) {
+                    int k = cast<int>(this.kind[i]) & 255;
+                    if (k != 0 && Nodes.isTree(k) && cast<int>(this.qty[i]) > 0) {
+                        return i;
+                    }
+                    i = i + 1;
+                }
+                return 0 - 1;
+            }
+
             // Take up to `amount` from one instance, and empty it when it runs out. This is what
             // makes a quantity mean anything -- a resource that never runs out is decoration with a
             // better name, and every chain in ECONOMY.md is written as though nodes are finite.
@@ -238,6 +345,10 @@ public bundle Agents {
                 have = have - take;
                 this.qty[i] = cast<short>(have);
                 if (have == 0) {
+                    if (Nodes.isTree(cast<int>(this.kind[i]) & 255)) {
+                        int b = this.blockOf(i);
+                        this.blockTree[b] = this.blockTree[b] - 1;
+                    }
                     this.kind[i] = cast<byte>(0);
                 }
                 return take;
