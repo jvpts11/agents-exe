@@ -83,6 +83,18 @@ public bundle Agents {
             private mutable int[] ctrade;
             // Everything standing or going up anywhere in the world.
             private mutable Buildings* town;
+            // And what the last census read out of it, per community: how much roof there is, which
+            // roof is the meanest, whether anything is half-built, whether a workshop has gone dead,
+            // and which bench of each craft is free. Same reason as `cworkX` above -- these are
+            // questions about a PLACE, and asking the table once per place per second costs one pass
+            // where asking it per person per decision cost five.
+            private mutable int[] croom;
+            private mutable int[] cworst;
+            private mutable int[] cworstRoom;
+            private mutable int[] cdead;
+            private mutable int[] cbusy;
+            private mutable int[] copen;
+            private mutable int[] cseat;
             // And everything alive that is not a person.
             private mutable Wildlife* wild;
             private mutable long hunted;
@@ -126,6 +138,9 @@ public bundle Agents {
             private mutable int claimAge;      // bumped on every rebuild, so the renderer can notice
             private mutable long crafted;      // batches finished
             private mutable long stalled;      // batches that could not start for want of an input
+            private mutable long housed;       // housing plots marked out
+            private mutable long rebuilt;      // plots torn up and raised again bigger
+            private mutable long pulled;       // workshops nobody needed any more, pulled down
             private mutable long raised;       // buildings finished
             private mutable int ncomm;
             private mutable float censusDue;
@@ -245,7 +260,30 @@ public bundle Agents {
                 this.cworkX = new int[this.ncomm * nh]();
                 this.cworkY = new int[this.ncomm * nh]();
                 this.ctrade = new int[this.ncomm * Job.count()]();
-                this.town = new Buildings(this.ncomm * 16) on heap;
+                // Sixteen rows a community was enough while a village only ever built workshops.
+                // Housing changed the arithmetic: at six to a hut, a place of six hundred needs a
+                // hundred plots on its own, and the first run with shelter filled all four thousand
+                // rows in the world -- after which nothing could be built anywhere, which read in
+                // the report as a hundred workshops for eighty-one thriving places. A row is thirty
+                // bytes; a hundred and twenty-eight of them per community is four megabytes and no
+                // longer the thing that decides what a village can become.
+                this.town = new Buildings(this.ncomm * 128) on heap;
+                this.croom = new int[this.ncomm]();
+                this.cworst = new int[this.ncomm]();
+                this.cworstRoom = new int[this.ncomm]();
+                this.cdead = new int[this.ncomm]();
+                this.cbusy = new int[this.ncomm]();
+                this.copen = new int[this.ncomm * Craft.count()]();
+                this.cseat = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    this.cworst[c] = 0 - 1;
+                    this.cdead[c] = 0 - 1;
+                    this.cbusy[c] = 0 - 1;
+                    this.cseat[c] = 0 - 1;
+                }
+                for (int s in 0..this.ncomm * Craft.count()) {
+                    this.copen[s] = 0 - 1;
+                }
                 this.claimW = (grid.width() + 15) / 16;
                 this.claimH = (grid.height() + 15) / 16;
                 this.claim = new int[this.claimW * this.claimH]();
@@ -284,6 +322,9 @@ public bundle Agents {
                 this.learned = 0;
                 this.crafted = 0;
                 this.stalled = 0;
+                this.housed = 0;
+                this.rebuilt = 0;
+                this.pulled = 0;
                 this.raised = 0;
                 for (int s in 0..this.ncomm * nh) {
                     this.cworkX[s] = 0 - 1;                 // nowhere known yet, and (0,0) is not it
@@ -314,6 +355,13 @@ public bundle Agents {
                 delete this.cworkY;
                 delete this.ctrade;
                 delete this.town;
+                delete this.croom;
+                delete this.cworst;
+                delete this.cworstRoom;
+                delete this.cdead;
+                delete this.cbusy;
+                delete this.copen;
+                delete this.cseat;
                 delete this.claim;
                 delete this.wild;
                 delete this.meter;
@@ -871,6 +919,12 @@ public bundle Agents {
                             this.stores.take(own, cast<int>(Good.Wood), Builds.woodCost(k));
                             this.stores.take(own, cast<int>(Good.Stone), Builds.stoneCost(k));
                             this.raised = this.raised + 1;
+                            if (this.cbusy[own] == wp) {
+                                // It is finished, so the village is free to decide again -- without
+                                // this it stays "busy" until the next census and every builder in
+                                // the place spends a second walking to a building that is done.
+                                this.cbusy[own] = 0 - 1;
+                            }
                             // Raising a building is the biggest single thing anybody does alone.
                             this.folk.earn(i, 12);
                             this.folk.setAct(i, cast<int>(Act.Idle));
@@ -1143,6 +1197,11 @@ public bundle Agents {
                     }
                     i = i + 1;
                 }
+                // Everything the table has to say about every community, in one read of each row.
+                // It has to come after the hands are counted and before anybody decides anything.
+                this.town.sweep(this.croom, this.cworst, this.cworstRoom, this.cdead,
+                                this.cbusy, this.copen, this.cseat,
+                                this.ncomm, Craft.count(), cast<int>(BuildingKind.TownHall));
                 // Where a community IS, taken as where its people are. Nobody planted a flag: the
                 // centre is the average of everybody standing there, so it drifts as they do -- and
                 // when a place empties out, it stops existing rather than leaving a marker behind.
@@ -1270,17 +1329,34 @@ public bundle Agents {
             // and stone come out of the store when the builders have actually raised it, so a plan
             // can never eat a village's winter.
             private method considerBuilding(int c) returns void {
-                if (this.town.find(c, cast<int>(BuildingKind.TownHall)) < 0) {
+                if (this.cseat[c] < 0) {
                     // The seat, free at founding, at the middle of where the people actually are.
                     int b = this.town.mark(cast<int>(this.ccx[c]), cast<int>(this.ccy[c]),
                                            cast<int>(BuildingKind.TownHall), c);
                     if (b >= 0) {
                         this.town.raise(b, Buildings.RAISE);
+                        this.cseat[c] = b;
                     }
                     return;
                 }
-                if (this.town.unfinished(c) >= 0) {
+                if (this.cbusy[c] >= 0) {
                     return;                          // one thing at a time; finish it first
+                }
+                // A workshop nobody has set foot in for five minutes is not a workshop, it is a
+                // ruin. Pulling it down before anything else is decided frees the ground AND the
+                // decision: the same census that clears a dead sawmill can mark out the kiln the
+                // village actually wants.
+                if (this.cdead[c] >= 0) {
+                    this.town.demolish(this.cdead[c]);
+                    this.cdead[c] = 0 - 1;
+                    this.pulled = this.pulled + 1;
+                    return;
+                }
+                // A roof comes before a trade. This is not a preference, it is the order the
+                // catalogue puts them in: a place with more people than beds has one want, and it
+                // is not a brewery.
+                if (this.considerHousing(c)) {
+                    return;
                 }
                 mutable int best = cast<int>(BuildingKind.NoBuilding);
                 mutable int bestScore = 0;
@@ -1317,8 +1393,15 @@ public bundle Agents {
                 if (best == cast<int>(BuildingKind.NoBuilding) || bestScore < Simulation.WANT) {
                     return;
                 }
-                // Somewhere near the middle, on ground you can stand on and not on top of something
-                // already there.
+                this.markNear(c, best);
+                return;
+            }
+
+            // Somewhere near the middle, on ground you can stand on. Returns true if a site was
+            // actually marked out -- a village hemmed in by cliffs and water can want a thing it has
+            // nowhere to put, and that has to read as "did not build" rather than as a silent
+            // success.
+            private method markNear(int c, int k) returns boolean {
                 mutable int tries = 0;
                 while (tries < 10) {
                     float a = LandMath.hash01(this.seed ^ 0x7C3B, c * 31 + tries, this.tick) * 6.2831853;
@@ -1326,12 +1409,61 @@ public bundle Agents {
                     int px = cast<int>(this.ccx[c] + LandMath.cos(a) * d);
                     int py = cast<int>(this.ccy[c] + LandMath.sin(a) * d);
                     if (this.walkable(px, py)) {
-                        this.town.mark(px, py, best, c);
-                        return;
+                        // A full table is a refusal like any other. The first version took `mark`
+                        // on trust and reported three hundred thousand plots marked out against
+                        // four thousand rows -- the counter was measuring how often the world had
+                        // run out of room, and calling it building.
+                        int b = this.town.mark(px, py, k, c);
+                        if (b < 0) {
+                            return false;
+                        }
+                        this.cbusy[c] = b;           // it is the thing being finished now
+                        return true;
                     }
                     tries = tries + 1;
                 }
-                return;
+                return false;
+            }
+
+            // Shelter, and the one place in the catalogue where a building is REPLACED rather than
+            // added to. Two rules and no third:
+            //
+            //   1. Pressure is people without a roof. No pressure, no building -- a village does not
+            //      raise houses on speculation, and one that has emptied out stops.
+            //   2. Rebuild before you sprawl. A hut still standing in a place that has learnt to
+            //      raise houses is the cheapest roof it can gain: the ground is cleared and the plot
+            //      is already where the people are. Only when every plot is the best the era allows
+            //      does the village spread outward.
+            //
+            // That second rule is what makes the map legible from above. A place that is thriving
+            // and a place that is merely large look different -- the first is dense and tall, the
+            // second is a scatter of huts -- and the difference is visible without a single number.
+            private method considerHousing(int c) returns boolean {
+                int best = Builds.bestRoof(this.era[c]);
+                if (best == cast<int>(BuildingKind.NoBuilding)) {
+                    return false;
+                }
+                if (this.croom[c] >= this.cpop[c]) {
+                    return false;
+                }
+                if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(best))) {
+                    return false;
+                }
+                if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(best))) {
+                    return false;
+                }
+                if (this.cworst[c] >= 0 && this.cworstRoom[c] < Builds.roof(best)) {
+                    this.town.recast(this.cworst[c], best);
+                    this.cbusy[c] = this.cworst[c];  // it is a site again until somebody raises it
+                    this.cworst[c] = 0 - 1;
+                    this.rebuilt = this.rebuilt + 1;
+                    return true;
+                }
+                if (this.markNear(c, best)) {
+                    this.housed = this.housed + 1;
+                    return true;
+                }
+                return false;
             }
 
             // Enough of an input piling up to be worth a workshop.
@@ -1672,7 +1804,7 @@ public bundle Agents {
                 // A workshop with an empty bench beats going out to the field: it is nearer, the
                 // work is worth more, and somebody has already decided the village needs it.
                 for (int cr in 1..Craft.count()) {
-                    if (this.town.openFor(h, cr) < 0) {
+                    if (this.copen[h * Craft.count() + cr] < 0) {
                         continue;
                     }
                     int jb = this.jobOfCraft(cr);
@@ -1686,7 +1818,7 @@ public bundle Agents {
                 }
                 // And something half-built beats everything, because until it stands nobody can
                 // work in it and the whole reason it was marked out goes unanswered.
-                if (this.town.unfinished(h) >= 0) {
+                if (this.cbusy[h] >= 0) {
                     int jb = cast<int>(Job.Builder);
                     if (this.ctrade[h * nj + jb] < this.quotaFor(h, jb)) {
                         bestScore = 120;
@@ -1889,8 +2021,8 @@ public bundle Agents {
             // cost nothing but the walking.
             private method workBuild(int i) returns void {
                 int h = this.folk.homeOf(i);
-                int b = this.town.unfinished(h);
-                if (b < 0) {
+                int b = this.cbusy[h];
+                if (b < 0 || this.town.isWorking(b) || this.town.isGone(b)) {
                     this.folk.setJob(i, cast<int>(Job.Idle));
                     return;
                 }
@@ -1920,7 +2052,7 @@ public bundle Agents {
                 mutable int b = this.folk.workplaceOf(i);
                 if (b < 0 || !this.town.isWorking(b) || this.town.ownerOf(b) != h
                     || Builds.craft(this.town.kindOf(b)) != craft) {
-                    b = this.town.openFor(h, craft);
+                    b = this.copen[h * Craft.count() + craft];
                     if (b < 0) {
                         this.folk.setWorkplace(i, 0 - 1);
                         this.folk.setJob(i, cast<int>(Job.Idle));
@@ -2213,12 +2345,50 @@ public bundle Agents {
                 System.IO.Console.println($"  built: {this.town.working()} standing of {this.town.count()} marked out | {this.crafted} batches made, {this.stalled} could not start");
                 mutable String line = "  workshops:";
                 for (int bk in 1..BuildingKind.count()) {
+                    if (Builds.houses(bk)) {
+                        continue;                        // shelter is counted on its own line
+                    }
                     int cnt = this.town.countOfKind(bk);
                     if (cnt > 0) {
                         line = line + $" {Builds.name(bk)}={cnt}";
                     }
                 }
                 System.IO.Console.println(line);
+                // Shelter, and whether the villages are keeping up with themselves. `under a roof`
+                // is the number that matters: a place that is building housing and still falling
+                // behind is one whose people are outrunning its timber, which is a story, and a
+                // place at a hundred per cent has stopped needing to build at all.
+                mutable String homes = "  homes:";
+                mutable int roofs = 0;
+                mutable int roofed = 0;
+                mutable int souls = 0;
+                for (int hc in 0..this.ncomm) {
+                    if (this.cpop[hc] <= 0) {
+                        continue;
+                    }
+                    souls = souls + this.cpop[hc];
+                    mutable int r = this.croom[hc];
+                    if (r > this.cpop[hc]) {
+                        r = this.cpop[hc];
+                    }
+                    roofed = roofed + r;
+                }
+                for (int bk in 1..BuildingKind.count()) {
+                    if (!Builds.houses(bk)) {
+                        continue;
+                    }
+                    int cnt = this.town.countOfKind(bk);
+                    roofs = roofs + cnt;
+                    if (cnt > 0) {
+                        homes = homes + $" {Builds.name(bk)}={cnt}";
+                    }
+                }
+                mutable int sheltered = 0;
+                if (souls > 0) {
+                    sheltered = roofed * 100 / souls;
+                }
+                System.IO.Console.println($"  shelter: {roofs} homes standing | {roofed} of {souls} under a roof ({sheltered} per cent) | {this.housed} plots marked out, {this.rebuilt} rebuilt bigger, {this.pulled} workshops pulled down");
+                System.IO.Console.println(homes);
                 // What is left standing, against what the world started with. A resource that only
                 // goes down is being liquidated, and this is where that shows.
                 NodeField* nf = this.g.surface();

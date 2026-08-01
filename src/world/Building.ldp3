@@ -33,7 +33,15 @@ public bundle Agents {
             Windmill,        // Grain -> Flour
             Bakery,          // Flour -> Bread
             Brewery,         // Grain -> Beer
-            Smokehouse       // Fish -> DriedMeat
+            Smokehouse,      // Fish -> DriedMeat
+            // Housing. It makes nothing and it is the only chain in the catalogue that UPGRADES IN
+            // PLACE: a plot densifies under pressure rather than a second house appearing beside the
+            // first, which is the exception BUILDING_CATALOG.md carved out and the reason a thriving
+            // village looks different from a big one.
+            Hut,             // era I
+            House,           // era II
+            Tenement,        // era III
+            ResidentialTower // era IV
         }
 
         // The trade that works inside. Kept as its own enum in World so the catalogue does not have
@@ -63,6 +71,7 @@ public bundle Agents {
             // Unlocking an era only WIDENS the menu -- nothing is retired and a smithy keeps
             // smelting forever -- so this is a floor and never a window.
             private static mutable int[] ERA;
+            private static mutable int[] ROOF;      // people it houses, 0 for anything that works
 
             onClassLoad {
                 int n = BuildingKind.count();
@@ -79,6 +88,7 @@ public bundle Agents {
                 Builds.NOUT = new int[n]();
                 Builds.SECS = new float[n]();
                 Builds.ERA = new int[n]();
+                Builds.ROOF = new int[n]();
                 mutable int i = 0;
                 while (i < n) {
                     Builds.NAME[i] = "NoBuilding";
@@ -148,6 +158,49 @@ public bundle Agents {
                 Builds.ERA[cast<int>(BuildingKind.Kiln)] = 1;
                 Builds.ERA[cast<int>(BuildingKind.Smokehouse)] = 1;
                 Builds.ERA[cast<int>(BuildingKind.CharcoalKiln)] = 1;
+
+                // Housing: cheap and small at the bottom, dear and dense at the top. Each rung is
+                // an era later and holds about twice the last, which is what makes a plot worth
+                // rebuilding rather than a second one worth clearing.
+                Builds.put(cast<int>(BuildingKind.Hut), "Hut", cast<int>(Craft.NoCraft),
+                           14, 4, 0, none, 0, none, 0, none, 0, 0.0);
+                Builds.put(cast<int>(BuildingKind.House), "House", cast<int>(Craft.NoCraft),
+                           34, 16, 0, none, 0, none, 0, none, 0, 0.0);
+                Builds.put(cast<int>(BuildingKind.Tenement), "Tenement", cast<int>(Craft.NoCraft),
+                           70, 60, 0, none, 0, none, 0, none, 0, 0.0);
+                Builds.put(cast<int>(BuildingKind.ResidentialTower), "ResidentialTower",
+                           cast<int>(Craft.NoCraft),
+                           120, 180, 0, none, 0, none, 0, none, 0, 0.0);
+                Builds.ERA[cast<int>(BuildingKind.Hut)] = 1;
+                Builds.ERA[cast<int>(BuildingKind.House)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Tenement)] = 3;
+                Builds.ERA[cast<int>(BuildingKind.ResidentialTower)] = 4;
+                Builds.ROOF[cast<int>(BuildingKind.Hut)] = 6;
+                Builds.ROOF[cast<int>(BuildingKind.House)] = 14;
+                Builds.ROOF[cast<int>(BuildingKind.Tenement)] = 40;
+                Builds.ROOF[cast<int>(BuildingKind.ResidentialTower)] = 120;
+            }
+
+            public static method roof(int ord) returns int {
+                return Builds.ROOF[ord];
+            }
+
+            public static method houses(int ord) returns boolean {
+                return Builds.ROOF[ord] > 0;
+            }
+
+            // The best housing a community of this era knows how to raise. The catalogue's rule:
+            // unlocking an era widens the menu and retires nothing, so this walks up and stops.
+            public static method bestRoof(int era) returns int {
+                mutable int best = cast<int>(BuildingKind.NoBuilding);
+                for (int k in 1..BuildingKind.count()) {
+                    if (Builds.houses(k) && Builds.ERA[k] <= era) {
+                        if (best < 0 || Builds.ROOF[k] > Builds.ROOF[best]) {
+                            best = k;
+                        }
+                    }
+                }
+                return best;
             }
 
             private static method put(int ord, String name, int craft, int wood, int stone,

@@ -19,7 +19,8 @@ public bundle Agents {
         public enum Standing {
             Site,            // marked out, nothing built
             Raising,         // work going in
-            Working          // finished, in use
+            Working,         // finished, in use
+            Gone             // pulled down; the row is dead and the ground is free again
         }
 
         public class Buildings {
@@ -34,6 +35,12 @@ public bundle Agents {
             private mutable short[] hands;      // people working it right now
             private mutable float[] batch;      // seconds into the current batch
             private mutable long[] made;        // batches finished, per building
+            private mutable int[] idle;         // censuses running with nobody working it
+            // Bumped by anything that changes what the map SHOWS. The renderer used to watch the
+            // count, which was true while buildings only ever appeared; now that one can be pulled
+            // down or rebuilt as something taller without the count moving, the count is a stale
+            // question and this is the honest one.
+            private mutable int stamp;
 
             public constructor Buildings(int capacity) {
                 this.n = 0;
@@ -47,6 +54,8 @@ public bundle Agents {
                 this.hands = new short[capacity]();
                 this.batch = new float[capacity]();
                 this.made = new long[capacity]();
+                this.idle = new int[capacity]();
+                this.stamp = 0;
             }
 
             public destructor ~Buildings() returns void {
@@ -59,6 +68,7 @@ public bundle Agents {
                 delete this.hands;
                 delete this.batch;
                 delete this.made;
+                delete this.idle;
             }
 
             public method count() returns int {
@@ -67,6 +77,10 @@ public bundle Agents {
 
             public method limit() returns int {
                 return this.cap;
+            }
+
+            public method version() returns int {
+                return this.stamp;
             }
 
             // Mark out a site. Nothing is spent yet: the cost comes out of the store when the
@@ -86,6 +100,8 @@ public bundle Agents {
                 this.hands[i] = cast<short>(0);
                 this.batch[i] = 0.0;
                 this.made[i] = 0;
+                this.idle[i] = 0;
+                this.stamp = this.stamp + 1;
                 return i;
             }
 
@@ -116,6 +132,113 @@ public bundle Agents {
             public method madeAt(int i) returns long {
                 return this.made[i];
             }
+
+            public method isGone(int i) returns boolean {
+                return this.stateOf(i) == cast<int>(Standing.Gone);
+            }
+
+            // Pull it down. The row stays -- indices are handed out to agents as workplaces and
+            // reusing one would silently move a craftsman to another village's forge -- but nothing
+            // finds it again and the renderer stops drawing it.
+            public method demolish(int i) returns void {
+                this.state[i] = cast<byte>(cast<int>(Standing.Gone));
+                this.hands[i] = cast<short>(0);
+                this.stamp = this.stamp + 1;
+                return;
+            }
+
+            // Rebuild THIS plot as something bigger. The one in-place upgrade the catalogue allows,
+            // and the reason it is in place rather than a fresh site beside it: a village that
+            // densifies looks different from a village that sprawls, and the difference is the
+            // whole visual read on whether a place is thriving.
+            public method recast(int i, int k) returns void {
+                this.kind[i] = cast<byte>(k);
+                this.state[i] = cast<byte>(cast<int>(Standing.Site));
+                this.effort[i] = 0.0;
+                this.hands[i] = cast<short>(0);
+                this.batch[i] = 0.0;
+                this.idle[i] = 0;
+                this.stamp = this.stamp + 1;
+                return;
+            }
+
+            // Every per-community question the census asks, answered in ONE pass over the table.
+            //
+            // Written the obvious way this was five separate loops -- how much roof, which roof is
+            // meanest, is anything half-built, is any workshop dead, is any bench free -- each run
+            // once per community, and two of them run once per PERSON per decision. That is the
+            // same mistake the woodcutter made and the wolves made: a question asked in the wrong
+            // place. A building has exactly one owner, so one read of each row can answer all five
+            // for all of them, and the cost stops depending on how many places there are.
+            //
+            // The answers are a census old by the time anyone acts on them. That is not a
+            // compromise: `hands` itself is only counted at census, so a live scan was never any
+            // fresher -- it just cost more to be equally stale.
+            public method sweep(int[] room, int[] worst, int[] worstRoom, int[] dead,
+                                int[] busy, int[] open, int[] seat,
+                                int ncomm, int ncraft, int seatKind) returns void {
+                for (int c in 0..ncomm) {
+                    room[c] = 0;
+                    worst[c] = 0 - 1;
+                    worstRoom[c] = 0;
+                    dead[c] = 0 - 1;
+                    busy[c] = 0 - 1;
+                    seat[c] = 0 - 1;
+                }
+                for (int s in 0..(ncomm * ncraft)) {
+                    open[s] = 0 - 1;
+                }
+                for (int i in 0..this.n) {
+                    int c = cast<int>(this.owner[i]);
+                    if (c < 0 || c >= ncomm || this.isGone(i)) {
+                        continue;
+                    }
+                    int k = this.kindOf(i);
+                    // The seat counts from the moment it is marked out, standing or not: a place
+                    // that has decided where its hall goes does not decide again.
+                    if (k == seatKind) {
+                        seat[c] = i;
+                    }
+                    if (!this.isWorking(i)) {
+                        if (busy[c] < 0) {
+                            busy[c] = i;
+                        }
+                        continue;
+                    }
+                    int r = Builds.roof(k);
+                    if (r > 0) {
+                        room[c] = room[c] + r;
+                        if (worst[c] < 0 || r < worstRoom[c]) {
+                            worst[c] = i;
+                            worstRoom[c] = r;
+                        }
+                        continue;
+                    }
+                    if (!Builds.produces(k)) {
+                        continue;                // the seat: nobody's trade, so never idle
+                    }
+                    int cr = Builds.craft(k);
+                    if (cast<int>(this.hands[i]) < Builds.hands(k) && open[c * ncraft + cr] < 0) {
+                        open[c * ncraft + cr] = i;
+                    }
+                    // A workshop nobody has set foot in for a long time. Not decay by age: a
+                    // building that is USED does not fall down, and one nobody needs does.
+                    if (cast<int>(this.hands[i]) == 0) {
+                        this.idle[i] = this.idle[i] + 1;
+                        if (this.idle[i] > Buildings.ABANDON && dead[c] < 0) {
+                            dead[c] = i;
+                        }
+                    } else {
+                        this.idle[i] = 0;
+                    }
+                }
+                return;
+            }
+
+            // Censuses a workshop may stand empty before it is pulled down. Five minutes: long
+            // enough that a bad season does not cost a village its forge, short enough that the
+            // map stops showing buildings for trades nobody practises any more.
+            public static int ABANDON = 300;
 
             // Put an hour of work into raising it. Returns true on the hour it is finished, so the
             // caller can pay for it exactly once.
@@ -170,37 +293,10 @@ public bundle Agents {
                 return false;
             }
 
-            // The first working building of a kind belonging to a community, or -1.
+            // The first building of a kind belonging to a community, standing or going up, or -1.
             public method find(int comm, int k) returns int {
                 for (int i in 0..this.n) {
-                    if (cast<int>(this.owner[i]) == comm && this.kindOf(i) == k) {
-                        return i;
-                    }
-                }
-                return 0 - 1;
-            }
-
-            // A working building of this craft with room for another pair of hands, or -1.
-            public method openFor(int comm, int craft) returns int {
-                for (int i in 0..this.n) {
-                    if (cast<int>(this.owner[i]) != comm || !this.isWorking(i)) {
-                        continue;
-                    }
-                    int k = this.kindOf(i);
-                    if (Builds.craft(k) != craft) {
-                        continue;
-                    }
-                    if (cast<int>(this.hands[i]) < Builds.hands(k)) {
-                        return i;
-                    }
-                }
-                return 0 - 1;
-            }
-
-            // Something belonging to this community that is not finished, or -1.
-            public method unfinished(int comm) returns int {
-                for (int i in 0..this.n) {
-                    if (cast<int>(this.owner[i]) == comm && !this.isWorking(i)) {
+                    if (cast<int>(this.owner[i]) == comm && this.kindOf(i) == k && !this.isGone(i)) {
                         return i;
                     }
                 }
