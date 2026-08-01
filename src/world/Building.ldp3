@@ -1,0 +1,214 @@
+import System.IO.Console;
+
+// What a community can build, and what happens inside it.
+//
+// docs/BUILDING_CATALOG.md holds a hundred and forty-five buildings across four eras and all of them
+// are modelled and exported. What is HERE is the set the world can actually run today: the seat of
+// power, and the Era I-II workshops whose recipes close a chain in docs/ECONOMY.md section 2 and 3
+// out of goods this world actually produces. A Tannery needs Hide and there is no fauna yet; a
+// Glassworks needs Sand and nothing places it. Those arrive with the slice that gives them inputs,
+// and the report says how many meshes are still waiting so the gap is visible rather than quietly
+// forgotten.
+//
+// The rule from the catalogue holds: unlocking an era only WIDENS the menu. Nothing is retired, and
+// a Smithy keeps smelting long after a SteelMill exists.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        // Which mesh, and what the thing is for. The name is the identifier AND the .mesh file, so a
+        // kind that cannot be drawn is caught when the atlas is bound rather than at the first frame
+        // somebody looks at it.
+        public enum BuildingKind {
+            NoBuilding,
+            TownHall,        // the seat, placed free at founding
+            Sawmill,         // Wood -> Plank
+            CharcoalKiln,    // Wood -> Charcoal
+            Kiln,            // Clay -> Brick
+            Pottery,         // Clay -> Pottery
+            Weaver,          // Flax -> Cloth
+            Smithy,          // IronOre + Charcoal -> IronIngot
+            Forge,           // CopperOre -> CopperIngot
+            Windmill,        // Grain -> Flour
+            Bakery,          // Flour -> Bread
+            Brewery,         // Grain -> Beer
+            Smokehouse       // Fish -> DriedMeat
+        }
+
+        // The trade that works inside. Kept as its own enum in World so the catalogue does not have
+        // to reach into People for the Job ordinals; the simulation maps one to the other.
+        public enum Craft {
+            NoCraft,
+            Wright,          // Sawmill, CharcoalKiln, Kiln, Pottery -- wood and earth
+            Smith,           // Smithy, Forge -- metal
+            Victualler,      // Windmill, Bakery, Brewery, Smokehouse -- food
+            Weaving          // Weaver -- fibre
+        }
+
+        public class Builds {
+            private static mutable String[] NAME;
+            private static mutable int[] CRAFT;
+            private static mutable int[] WOOD;      // to put it up
+            private static mutable int[] STONE;
+            private static mutable int[] HANDS;     // people who can work it at once
+            private static mutable int[] IN1;
+            private static mutable int[] N1;
+            private static mutable int[] IN2;
+            private static mutable int[] N2;
+            private static mutable int[] OUT;
+            private static mutable int[] NOUT;
+            private static mutable float[] SECS;    // one batch
+
+            onClassLoad {
+                int n = BuildingKind.count();
+                Builds.NAME = new String[n]();
+                Builds.CRAFT = new int[n]();
+                Builds.WOOD = new int[n]();
+                Builds.STONE = new int[n]();
+                Builds.HANDS = new int[n]();
+                Builds.IN1 = new int[n]();
+                Builds.N1 = new int[n]();
+                Builds.IN2 = new int[n]();
+                Builds.N2 = new int[n]();
+                Builds.OUT = new int[n]();
+                Builds.NOUT = new int[n]();
+                Builds.SECS = new float[n]();
+                mutable int i = 0;
+                while (i < n) {
+                    Builds.NAME[i] = "NoBuilding";
+                    Builds.CRAFT[i] = cast<int>(Craft.NoCraft);
+                    Builds.IN1[i] = cast<int>(Good.Nothing);
+                    Builds.IN2[i] = cast<int>(Good.Nothing);
+                    Builds.OUT[i] = cast<int>(Good.Nothing);
+                    Builds.SECS[i] = 20.0;
+                    i = i + 1;
+                }
+                int wright = cast<int>(Craft.Wright);
+                int smith = cast<int>(Craft.Smith);
+                int vict = cast<int>(Craft.Victualler);
+                int weave = cast<int>(Craft.Weaving);
+                int none = cast<int>(Good.Nothing);
+
+                // kind, mesh name, craft, wood, stone, hands, in1, n1, in2, n2, out, nout, seconds
+                Builds.put(cast<int>(BuildingKind.TownHall), "TownHall", cast<int>(Craft.NoCraft),
+                           0, 0, 0, none, 0, none, 0, none, 0, 0.0);
+
+                Builds.put(cast<int>(BuildingKind.Sawmill), "Sawmill", wright,
+                           60, 20, 5, cast<int>(Good.Wood), 10, none, 0,
+                           cast<int>(Good.Plank), 6, 14.0);
+                Builds.put(cast<int>(BuildingKind.CharcoalKiln), "CharcoalKiln", wright,
+                           30, 40, 3, cast<int>(Good.Wood), 12, none, 0,
+                           cast<int>(Good.Charcoal), 5, 18.0);
+                Builds.put(cast<int>(BuildingKind.Kiln), "Kiln", wright,
+                           25, 45, 3, cast<int>(Good.Clay), 10, none, 0,
+                           cast<int>(Good.Brick), 8, 16.0);
+                Builds.put(cast<int>(BuildingKind.Pottery), "Pottery", wright,
+                           40, 30, 4, cast<int>(Good.Clay), 8, none, 0,
+                           cast<int>(Good.Pottery), 5, 15.0);
+
+                Builds.put(cast<int>(BuildingKind.Weaver), "Weaver", weave,
+                           50, 15, 5, cast<int>(Good.Flax), 10, none, 0,
+                           cast<int>(Good.Cloth), 6, 16.0);
+
+                // The one with two inputs, and the reason it matters: a smithy with iron and no
+                // charcoal STALLS, and a stalled building is what tells a community to go and build
+                // the kiln. That is the whole "grown from need" mechanism in one recipe.
+                Builds.put(cast<int>(BuildingKind.Smithy), "Smithy", smith,
+                           45, 60, 4, cast<int>(Good.IronOre), 6, cast<int>(Good.Charcoal), 4,
+                           cast<int>(Good.IronIngot), 4, 24.0);
+                Builds.put(cast<int>(BuildingKind.Forge), "Forge", smith,
+                           40, 55, 4, cast<int>(Good.CopperOre), 6, none, 0,
+                           cast<int>(Good.CopperIngot), 4, 22.0);
+
+                Builds.put(cast<int>(BuildingKind.Windmill), "Windmill", vict,
+                           70, 25, 3, cast<int>(Good.Grain), 12, none, 0,
+                           cast<int>(Good.Flour), 10, 14.0);
+                Builds.put(cast<int>(BuildingKind.Bakery), "Bakery", vict,
+                           35, 40, 4, cast<int>(Good.Flour), 8, none, 0,
+                           cast<int>(Good.Bread), 12, 12.0);
+                Builds.put(cast<int>(BuildingKind.Brewery), "Brewery", vict,
+                           50, 35, 3, cast<int>(Good.Grain), 10, none, 0,
+                           cast<int>(Good.Beer), 8, 18.0);
+                Builds.put(cast<int>(BuildingKind.Smokehouse), "Smokehouse", vict,
+                           45, 20, 3, cast<int>(Good.Fish), 10, none, 0,
+                           cast<int>(Good.DriedMeat), 9, 16.0);
+            }
+
+            private static method put(int ord, String name, int craft, int wood, int stone,
+                                      int hands, int in1, int n1, int in2, int n2,
+                                      int out, int nout, float secs) returns void {
+                Builds.NAME[ord] = name;
+                Builds.CRAFT[ord] = craft;
+                Builds.WOOD[ord] = wood;
+                Builds.STONE[ord] = stone;
+                Builds.HANDS[ord] = hands;
+                Builds.IN1[ord] = in1;
+                Builds.N1[ord] = n1;
+                Builds.IN2[ord] = in2;
+                Builds.N2[ord] = n2;
+                Builds.OUT[ord] = out;
+                Builds.NOUT[ord] = nout;
+                Builds.SECS[ord] = secs;
+            }
+
+            public static method count() returns int {
+                return BuildingKind.count();
+            }
+
+            public static method name(int ord) returns String {
+                return Builds.NAME[ord];
+            }
+
+            public static method craft(int ord) returns int {
+                return Builds.CRAFT[ord];
+            }
+
+            public static method woodCost(int ord) returns int {
+                return Builds.WOOD[ord];
+            }
+
+            public static method stoneCost(int ord) returns int {
+                return Builds.STONE[ord];
+            }
+
+            public static method hands(int ord) returns int {
+                return Builds.HANDS[ord];
+            }
+
+            public static method in1(int ord) returns int {
+                return Builds.IN1[ord];
+            }
+
+            public static method n1(int ord) returns int {
+                return Builds.N1[ord];
+            }
+
+            public static method in2(int ord) returns int {
+                return Builds.IN2[ord];
+            }
+
+            public static method n2(int ord) returns int {
+                return Builds.N2[ord];
+            }
+
+            public static method out(int ord) returns int {
+                return Builds.OUT[ord];
+            }
+
+            public static method nout(int ord) returns int {
+                return Builds.NOUT[ord];
+            }
+
+            public static method secs(int ord) returns float {
+                return Builds.SECS[ord];
+            }
+
+            // Whether anybody works here at all. The seat of power does not transform anything; it
+            // stands in the middle of the village and says who lives there.
+            public static method produces(int ord) returns boolean {
+                return Builds.OUT[ord] != cast<int>(Good.Nothing);
+            }
+        }
+    }
+}

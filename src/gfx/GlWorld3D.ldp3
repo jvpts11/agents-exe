@@ -8,6 +8,9 @@ import Agents.World.Nodes;
 import Agents.World.NodeField;
 import Agents.People.AgentTable;
 import Agents.World.NodeAtlas;
+import Agents.World.BuildingKind;
+import Agents.World.Builds;
+import Agents.Sim.Buildings;
 import System.Memory;
 
 // True-3D GL renderer for the world, two-level LOD:
@@ -54,6 +57,20 @@ public bundle Agents {
             private mutable MeshAtlas* people;
             private mutable int[] bodyModel;    // Body ordinal -> model index in the people atlas
             private mutable boolean havePeople;
+            // Buildings get their own buffer for the opposite reason to people: they do NOT move, so
+            // it could in principle live with the terrain -- but the terrain bake is sliced across
+            // frames and a village that goes up mid-slice would be half drawn until the sweep came
+            // round again. Its own buffer is rebaked whenever the count changes, which is rarely.
+            private mutable int bvao;
+            private mutable int bvbo;
+            private mutable int bnverts;
+            private mutable int bcap;
+            private mutable address bbuf;
+            private mutable Buildings* town;
+            private mutable MeshAtlas* housing;
+            private mutable int[] kindModel;    // BuildingKind ordinal -> model index
+            private mutable boolean haveTown;
+            private mutable int bakedTown;      // buildings in the last bake, to notice a new one
             // world + sources
             private mutable Grid* grid;
             private mutable MeshAtlas* terr;
@@ -174,6 +191,15 @@ public bundle Agents {
                 this.abuf = cast<address>(0);
                 this.bodyModel = new int[4]();
                 this.havePeople = false;
+                this.bvao = gl.genVertexArray();
+                this.bvbo = gl.genBuffer();
+                this.setupVao(this.bvao, this.bvbo);
+                this.bnverts = 0;
+                this.bcap = 0;
+                this.bbuf = cast<address>(0);
+                this.kindModel = new int[BuildingKind.count()]();
+                this.haveTown = false;
+                this.bakedTown = 0 - 1;
                 this.projM = new GlMat4() on heap;
                 this.viewM = new GlMat4() on heap;
                 this.tileTop = new float[1]();
@@ -1675,6 +1701,8 @@ public bundle Agents {
                 this.gl.bindVertexArray(0);
                 this.dnverts = this.bkTris * 3;
                 Memory.free(buf);
+                // The window moved, so whatever was baked for the old one is the wrong set.
+                this.bakedTown = 0 - 1;
                 this.detX0 = ox;
                 this.detY0 = oy;
                 this.haveDetail = true;
@@ -1738,6 +1766,32 @@ public bundle Agents {
                 return;
             }
 
+            // Bind the buildings. Every kind's name IS its mesh file, so a kind the atlas cannot
+            // resolve is caught here -- at binding, with a name in the message -- rather than as a
+            // hole in the village the first time somebody looks at it.
+            public method setTown(Buildings* t, MeshAtlas* art) returns void {
+                this.town = t;
+                this.housing = art;
+                for (int k in 0..BuildingKind.count()) {
+                    this.kindModel[k] = 0 - 1;
+                }
+                mutable int missing = 0;
+                for (int k in 1..BuildingKind.count()) {
+                    int ord = art.ordOf(Builds.name(k));
+                    this.kindModel[k] = ord;
+                    if (ord < 0) {
+                        System.IO.Console.println($"GlWorld3D: no mesh for building {Builds.name(k)}");
+                        missing = missing + 1;
+                    }
+                }
+                if (missing == 0) {
+                    System.IO.Console.println($"buildings: {BuildingKind.count() - 1} kinds bound, {art.count - BuildingKind.count() + 1} meshes in the atlas still unused");
+                }
+                this.haveTown = true;
+                this.bakedTown = 0 - 1;
+                return;
+            }
+
             // A community's colour, six hues walked by id. An authored palette reads better than
             // anything generated per id -- the original learned that with its nation colours.
             private method communityTint(int c, int channel) returns float {
@@ -1793,23 +1847,29 @@ public bundle Agents {
                 return 0.20;
             }
 
-            // Emit one agent. Faces the exporter marked TINTABLE -- group id past 1000, baked white
-            // -- take the community's colour; every other face keeps the art it was drawn with,
-            // which is how a blue visor survives on a red body.
-            private method emitAgent(address buf, int w, int mord, float wx, float wy, float wz,
-                                     float scale, float cr, float cg, float cb,
-                                     float shade) returns int {
-                int t0 = this.people.triStart[mord];
-                int tn = this.people.triCount[mord];
+            // Emit one tinted model. Faces the exporter marked TINTABLE -- group id past 1000, baked
+            // white -- take the owner's colour; every other face keeps the art it was drawn with,
+            // which is how a blue visor survives on a red body and a stone wall survives under a
+            // nation-coloured roof.
+            //
+            // It takes the atlas rather than reaching for the agents' one, because a building is
+            // exactly the same problem: a mesh, a place to stand it, and a colour that belongs to
+            // whoever owns it.
+            private method emitTinted(MeshAtlas* a, address buf, int w, int mord,
+                                      float wx, float wy, float wz,
+                                      float scale, float cr, float cg, float cb,
+                                      float shade) returns int {
+                int t0 = a.triStart[mord];
+                int tn = a.triCount[mord];
                 mutable int p = w;
                 mutable int t = 0;
                 while (t < tn) {
                     int tri = t0 + t;
                     int vb = tri * 3;
-                    mutable float r = cast<float>(this.people.cr[tri]) / 255.0;
-                    mutable float g = cast<float>(this.people.cg[tri]) / 255.0;
-                    mutable float b = cast<float>(this.people.cb[tri]) / 255.0;
-                    if (this.people.grp[tri] >= 1000) {
+                    mutable float r = cast<float>(a.cr[tri]) / 255.0;
+                    mutable float g = cast<float>(a.cg[tri]) / 255.0;
+                    mutable float b = cast<float>(a.cb[tri]) / 255.0;
+                    if (a.grp[tri] >= 1000) {
                         r = r * cr;
                         g = g * cg;
                         b = b * cb;
@@ -1820,10 +1880,10 @@ public bundle Agents {
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
-                        p = this.wr(buf, p, this.people.px[vi] * scale + wx,
-                                    this.people.py[vi] * scale + wy,
-                                    this.people.pz[vi] * scale + wz,
-                                    this.people.nx[vi], this.people.ny[vi], this.people.nz[vi],
+                        p = this.wr(buf, p, a.px[vi] * scale + wx,
+                                    a.py[vi] * scale + wy,
+                                    a.pz[vi] * scale + wz,
+                                    a.nx[vi], a.ny[vi], a.nz[vi],
                                     r, g, b);
                         k = k + 1;
                     }
@@ -1884,12 +1944,12 @@ public bundle Agents {
                             float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
                             float topZ = this.tileTop[ord] + zOff;
                             int c = this.folk.homeOf(i);
-                            w = this.emitAgent(this.abuf, w,
-                                               this.bodyModel[this.folk.bodyOf(i)],
-                                               fx * 2.0, fy * 2.0, topZ, 0.30,
-                                               this.communityTint(c, 0), this.communityTint(c, 1),
-                                               this.communityTint(c, 2),
-                                               this.shadeAt(ax, ay, 1, lvl));
+                            w = this.emitTinted(this.people, this.abuf, w,
+                                                this.bodyModel[this.folk.bodyOf(i)],
+                                                fx * 2.0, fy * 2.0, topZ, 0.30,
+                                                this.communityTint(c, 0), this.communityTint(c, 1),
+                                                this.communityTint(c, 2),
+                                                this.shadeAt(ax, ay, 1, lvl));
                         }
                     }
                     i = i + 1;
@@ -1900,6 +1960,83 @@ public bundle Agents {
                                    cast<long>(this.abuf), GL.DYNAMIC_DRAW);
                 this.gl.bindVertexArray(0);
                 this.anverts = tris * 3;
+                return;
+            }
+
+            // Rebuild the building buffer: everything inside the detail window. Unlike the agents
+            // this is NOT redone every frame -- a building does not move -- so it only runs when the
+            // window moved or somebody finished raising something.
+            private method bakeTown() returns void {
+                this.bnverts = 0;
+                if (!this.haveTown) {
+                    return;
+                }
+                if (!this.detailOn || !this.haveDetail) {
+                    return;
+                }
+                int x0 = this.detX0;
+                int y0 = this.detY0;
+                int x1 = x0 + this.detW;
+                int y1 = y0 + this.detH;
+                int n = this.town.count();
+                mutable int tris = 0;
+                for (int i in 0..n) {
+                    int bx = this.town.xAt(i);
+                    int by = this.town.yAt(i);
+                    if (bx < x0 || by < y0 || bx >= x1 || by >= y1) {
+                        continue;
+                    }
+                    int m = this.kindModel[this.town.kindOf(i)];
+                    if (m >= 0) {
+                        tris = tris + this.housing.triCount[m];
+                    }
+                }
+                if (tris == 0) {
+                    return;
+                }
+                if (tris > this.bcap) {
+                    if (this.bcap > 0) {
+                        Memory.free(this.bbuf);
+                    }
+                    this.bcap = tris * 2;
+                    this.bbuf = Memory.alloc(cast<long>(this.bcap * 27 * 4 + 4));
+                }
+                mutable int w = 0;
+                for (int i in 0..n) {
+                    int bx = this.town.xAt(i);
+                    int by = this.town.yAt(i);
+                    if (bx < x0 || by < y0 || bx >= x1 || by >= y1) {
+                        continue;
+                    }
+                    int m = this.kindModel[this.town.kindOf(i)];
+                    if (m < 0) {
+                        continue;
+                    }
+                    int ord = this.grid.biomeAt(bx, by);
+                    int lvl = this.stackLvl(ord, bx, by);
+                    float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
+                    float topZ = this.tileTop[ord] + zOff;
+                    // A site that is still going up shows as a low frame, so a village under
+                    // construction reads as one from any distance without a second mesh for it.
+                    mutable float h = 1.0;
+                    if (!this.town.isWorking(i)) {
+                        h = 0.15 + 0.55 * this.town.progressOf(i);
+                    }
+                    int c = this.town.ownerOf(i);
+                    w = this.emitTinted(this.housing, this.bbuf, w, m,
+                                        cast<float>(bx) * 2.0 + 1.0, cast<float>(by) * 2.0 + 1.0,
+                                        topZ, h,
+                                        this.communityTint(c, 0), this.communityTint(c, 1),
+                                        this.communityTint(c, 2),
+                                        this.shadeAt(bx, by, 1, lvl));
+                }
+                this.gl.bindVertexArray(this.bvao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.bvbo);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4),
+                                   cast<long>(this.bbuf), GL.DYNAMIC_DRAW);
+                this.gl.bindVertexArray(0);
+                this.bnverts = tris * 3;
+                this.bakedTown = n;
                 return;
             }
 
@@ -1914,7 +2051,10 @@ public bundle Agents {
                     guard = guard + 1;
                 }
                 this.bakeAgents();
-                System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.dnverts / 3} terrain tris, {this.anverts / 3} agent tris");
+                if (this.haveTown && this.bakedTown != this.town.count()) {
+                    this.bakeTown();
+                }
+                System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.dnverts / 3} terrain tris, {this.anverts / 3} agent tris, {this.bnverts / 3} building tris");
                 return;
             }
 
@@ -2111,6 +2251,9 @@ public bundle Agents {
                     this.stepBake();
                 }
                 this.bakeAgents();
+                if (this.haveTown && this.bakedTown != this.town.count()) {
+                    this.bakeTown();
+                }
                 if (this.pixelate) {
                     if (this.fbo == 0) {
                         this.initPost(640, 400);
@@ -2156,6 +2299,10 @@ public bundle Agents {
                 } else {
                     this.gl.bindVertexArray(this.hvao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.hnverts);
+                }
+                if (this.bnverts > 0) {
+                    this.gl.bindVertexArray(this.bvao);
+                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.bnverts);
                 }
                 if (this.anverts > 0) {
                     this.gl.bindVertexArray(this.avao);

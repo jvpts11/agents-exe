@@ -7,6 +7,9 @@ import Agents.World.Nodes;
 import Agents.World.Harvest;
 import Agents.World.Good;
 import Agents.World.Goods;
+import Agents.World.BuildingKind;
+import Agents.World.Craft;
+import Agents.World.Builds;
 import System.Math.Math;
 import Agents.People.AgentTable;
 import Agents.People.Act;
@@ -73,8 +76,14 @@ public bundle Agents {
             private mutable int[] cworkX;
             private mutable int[] cworkY;
             // How many of its grown people are already in each trade, so a place cannot become a
-            // thousand woodcutters and no fishermen.
+            // thousand woodcutters and no fishermen. Indexed by JOB and not by Harvest class,
+            // because building and crafting are trades too and neither goes out to a resource.
             private mutable int[] ctrade;
+            // Everything standing or going up anywhere in the world.
+            private mutable Buildings* town;
+            private mutable long crafted;      // batches finished
+            private mutable long stalled;      // batches that could not start for want of an input
+            private mutable long raised;       // buildings finished
             private mutable int ncomm;
             private mutable float censusDue;
             private mutable long births;
@@ -127,7 +136,11 @@ public bundle Agents {
                 int nh = Harvest.count();
                 this.cworkX = new int[this.ncomm * nh]();
                 this.cworkY = new int[this.ncomm * nh]();
-                this.ctrade = new int[this.ncomm * nh]();
+                this.ctrade = new int[this.ncomm * Job.count()]();
+                this.town = new Buildings(this.ncomm * 16) on heap;
+                this.crafted = 0;
+                this.stalled = 0;
+                this.raised = 0;
                 for (int s in 0..this.ncomm * nh) {
                     this.cworkX[s] = 0 - 1;                 // nowhere known yet, and (0,0) is not it
                 }
@@ -156,10 +169,15 @@ public bundle Agents {
                 delete this.cworkX;
                 delete this.cworkY;
                 delete this.ctrade;
+                delete this.town;
             }
 
             public method store() returns Stores* {
                 return this.stores;
+            }
+
+            public method buildings() returns Buildings* {
+                return this.town;
             }
 
             public method setBudget(int b) returns void
@@ -281,7 +299,14 @@ public bundle Agents {
                         if (this.folk.jobOf(i) == cast<int>(Job.Idle)) {
                             this.chooseJob(i);
                         }
-                        this.workGather(i);
+                        int jb = this.folk.jobOf(i);
+                        if (jb == cast<int>(Job.Builder)) {
+                            this.workBuild(i);
+                        } else if (this.craftOfJob(jb) != cast<int>(Craft.NoCraft)) {
+                            this.workCraft(i);
+                        } else {
+                            this.workGather(i);
+                        }
                     }
                     if (this.folk.actOf(i) == cast<int>(Act.Idle)) {
                         this.chooseTarget(i);
@@ -355,6 +380,38 @@ public bundle Agents {
                         this.workTicks = this.workTicks + 1;
                         if (this.folk.timerOf(i) >= this.workTime(this.harvestOf(this.folk.jobOf(i)))) {
                             this.chop(i);
+                        }
+                        i = i + 1;
+                        continue;
+                    }
+                    if (this.folk.actOf(i) == cast<int>(Act.Refine)) {
+                        this.folk.addTimer(i, dt);
+                        this.workTicks = this.workTicks + 1;
+                        int wp = this.folk.workplaceOf(i);
+                        if (wp >= 0 && this.folk.timerOf(i) >= Builds.secs(this.town.kindOf(wp))) {
+                            this.batchDone(i);
+                        }
+                        i = i + 1;
+                        continue;
+                    }
+                    if (this.folk.actOf(i) == cast<int>(Act.Build)) {
+                        this.folk.addTimer(i, dt);
+                        this.workTicks = this.workTicks + 1;
+                        int wp = this.folk.workplaceOf(i);
+                        if (wp < 0 || this.town.isWorking(wp)) {
+                            this.folk.setAct(i, cast<int>(Act.Idle));
+                            i = i + 1;
+                            continue;
+                        }
+                        if (this.town.raise(wp, dt)) {
+                            int k = this.town.kindOf(wp);
+                            int own = this.town.ownerOf(wp);
+                            this.stores.take(own, cast<int>(Good.Wood), Builds.woodCost(k));
+                            this.stores.take(own, cast<int>(Good.Stone), Builds.stoneCost(k));
+                            this.raised = this.raised + 1;
+                            this.folk.setAct(i, cast<int>(Act.Idle));
+                            this.folk.setJob(i, cast<int>(Job.Idle));
+                            this.folk.setWorkplace(i, 0 - 1);
                         }
                         i = i + 1;
                         continue;
@@ -562,6 +619,8 @@ public bundle Agents {
 
             private method census() returns void {
                 int nh = Harvest.count();
+                int nj = Job.count();
+                this.town.clearHands();
                 mutable int c = 0;
                 while (c < this.ncomm) {
                     this.cpop[c] = 0;
@@ -569,8 +628,8 @@ public bundle Agents {
                     this.cmales[c] = 0;
                     this.ccx[c] = 0.0;
                     this.ccy[c] = 0.0;
-                    for (int hc in 0..nh) {
-                        this.ctrade[c * nh + hc] = 0;
+                    for (int jb in 0..nj) {
+                        this.ctrade[c * nj + jb] = 0;
                     }
                     c = c + 1;
                 }
@@ -588,12 +647,15 @@ public bundle Agents {
                                 if (!this.folk.isFemale(i)) {
                                     this.cmales[h] = this.cmales[h] + 1;
                                 }
-                                // Who is already doing what. Counted from the people themselves and
-                                // never incrementally, so a death or a change of trade can never
-                                // leave a phantom worker holding a place in a quota.
-                                int hc = this.harvestOf(this.folk.jobOf(i));
-                                if (hc != cast<int>(Harvest.Nothing)) {
-                                    this.ctrade[h * nh + hc] = this.ctrade[h * nh + hc] + 1;
+                                // Who is already doing what, and who is standing in which workshop.
+                                // Counted from the people themselves and never incrementally, so a
+                                // death or a change of trade can never leave a phantom worker
+                                // holding a place in a quota or a bench in a forge.
+                                int jb = this.folk.jobOf(i);
+                                this.ctrade[h * nj + jb] = this.ctrade[h * nj + jb] + 1;
+                                int wp = this.folk.workplaceOf(i);
+                                if (wp >= 0) {
+                                    this.town.addHand(wp);
                                 }
                             }
                         }
@@ -615,6 +677,7 @@ public bundle Agents {
                         for (int hc in 1..Harvest.count()) {
                             this.findWork(c, hc);
                         }
+                        this.considerBuilding(c);
                     } else {
                         for (int hc in 0..Harvest.count()) {
                             this.cworkX[c * Harvest.count() + hc] = 0 - 1;
@@ -625,11 +688,85 @@ public bundle Agents {
                 return;
             }
 
+            // What this community should put up next, if anything. The rule is docs/ECONOMY.md's own:
+            // a building is GROWN FROM NEED, and need is visible as a pile. A village with wood
+            // stacking up and no sawmill wants a sawmill; one with iron and no charcoal does not want
+            // a smithy, it wants a kiln -- and it finds that out because the smithy it would have
+            // built stalls, and a stalled workshop is a want the next census can read.
+            //
+            // Nothing is spent here. Marking out a site costs nothing but the decision; the timber
+            // and stone come out of the store when the builders have actually raised it, so a plan
+            // can never eat a village's winter.
+            private method considerBuilding(int c) returns void {
+                if (this.town.find(c, cast<int>(BuildingKind.TownHall)) < 0) {
+                    // The seat, free at founding, at the middle of where the people actually are.
+                    int b = this.town.mark(cast<int>(this.ccx[c]), cast<int>(this.ccy[c]),
+                                           cast<int>(BuildingKind.TownHall), c);
+                    if (b >= 0) {
+                        this.town.raise(b, Buildings.RAISE);
+                    }
+                    return;
+                }
+                if (this.town.unfinished(c) >= 0) {
+                    return;                          // one thing at a time; finish it first
+                }
+                mutable int best = cast<int>(BuildingKind.NoBuilding);
+                mutable int bestScore = 0;
+                for (int k in 1..BuildingKind.count()) {
+                    if (!Builds.produces(k)) {
+                        continue;
+                    }
+                    if (this.town.find(c, k) >= 0) {
+                        continue;                    // it already has one
+                    }
+                    if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(k))) {
+                        continue;
+                    }
+                    if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(k))) {
+                        continue;
+                    }
+                    // Worth is the SCARCER input, not the sum: a smithy is worth what it can smelt,
+                    // and all the iron in the world is worth nothing without charcoal.
+                    mutable int worth = this.stores.amountOf(c, Builds.in1(k));
+                    if (Builds.in2(k) != cast<int>(Good.Nothing)) {
+                        int other = this.stores.amountOf(c, Builds.in2(k));
+                        if (other < worth) {
+                            worth = other;
+                        }
+                    }
+                    if (worth > bestScore) {
+                        bestScore = worth;
+                        best = k;
+                    }
+                }
+                if (best == cast<int>(BuildingKind.NoBuilding) || bestScore < Simulation.WANT) {
+                    return;
+                }
+                // Somewhere near the middle, on ground you can stand on and not on top of something
+                // already there.
+                mutable int tries = 0;
+                while (tries < 10) {
+                    float a = LandMath.hash01(this.seed ^ 0x7C3B, c * 31 + tries, this.tick) * 6.2831853;
+                    float d = 4.0 + LandMath.hash01(this.seed ^ 0x51A9, c * 17 + tries, this.tick) * 10.0;
+                    int px = cast<int>(this.ccx[c] + LandMath.cos(a) * d);
+                    int py = cast<int>(this.ccy[c] + LandMath.sin(a) * d);
+                    if (this.walkable(px, py)) {
+                        this.town.mark(px, py, best, c);
+                        return;
+                    }
+                    tries = tries + 1;
+                }
+                return;
+            }
+
+            // Enough of an input piling up to be worth a workshop.
+            public static int WANT = 60;
+
             // How many of a community's grown people should be in one trade. Everybody doing the same
             // thing is not a village, and it is also the fastest way to strip a resource: the first
             // measurement had thirty-two thousand woodcutters take ninety-one per cent of the world's
             // trees in one arc. A share per trade, with a floor, so a small place still fishes.
-            private method quotaFor(int c, int hclass) returns int {
+            private method quotaFor(int c, int job) returns int {
                 int adults = this.cadults[c];
                 if (adults <= 0) {
                     return 0;
@@ -640,7 +777,7 @@ public bundle Agents {
                 // measurement had a sixth of each village foraging while the larder was empty seventy
                 // million times over, and the world died out in nineteen generations with woodcutters
                 // still dutifully cutting wood.
-                if (hclass == cast<int>(Harvest.Forage) || hclass == cast<int>(Harvest.Fishing)) {
+                if (job == cast<int>(Job.Forager) || job == cast<int>(Job.Fisher)) {
                     if (this.stores.foodOf(c) < this.cpop[c] * Simulation.LARDER) {
                         q = adults / 2;
                     }
@@ -896,13 +1033,15 @@ public bundle Agents {
                     return;
                 }
                 int nh = Harvest.count();
+                int nj = Job.count();
                 mutable int best = cast<int>(Job.Idle);
                 mutable int bestScore = 0;
                 for (int hc in 1..nh) {
                     if (this.cworkX[h * nh + hc] < 0) {
                         continue;                            // nothing of the kind within reach
                     }
-                    if (this.ctrade[h * nh + hc] >= this.quotaFor(h, hc)) {
+                    int jb = this.jobOfHarvest(hc);
+                    if (this.ctrade[h * nj + jb] >= this.quotaFor(h, jb)) {
                         continue;                            // that trade is full here
                     }
                     // Hungry places want food. It is not a preference, it is the only need the
@@ -916,15 +1055,70 @@ public bundle Agents {
                     }
                     if (want > bestScore) {
                         bestScore = want;
-                        best = this.jobOfHarvest(hc);
+                        best = jb;
+                    }
+                }
+                // A workshop with an empty bench beats going out to the field: it is nearer, the
+                // work is worth more, and somebody has already decided the village needs it.
+                for (int cr in 1..Craft.count()) {
+                    if (this.town.openFor(h, cr) < 0) {
+                        continue;
+                    }
+                    int jb = this.jobOfCraft(cr);
+                    if (this.ctrade[h * nj + jb] >= this.quotaFor(h, jb)) {
+                        continue;
+                    }
+                    if (55 > bestScore) {
+                        bestScore = 55;
+                        best = jb;
+                    }
+                }
+                // And something half-built beats everything, because until it stands nobody can
+                // work in it and the whole reason it was marked out goes unanswered.
+                if (this.town.unfinished(h) >= 0) {
+                    int jb = cast<int>(Job.Builder);
+                    if (this.ctrade[h * nj + jb] < this.quotaFor(h, jb)) {
+                        bestScore = 120;
+                        best = jb;
                     }
                 }
                 if (best != cast<int>(Job.Idle)) {
                     this.folk.setJob(i, best);
-                    int hc = this.harvestOf(best);
-                    this.ctrade[h * nh + hc] = this.ctrade[h * nh + hc] + 1;
+                    this.ctrade[h * nj + best] = this.ctrade[h * nj + best] + 1;
                 }
                 return;
+            }
+
+            private method jobOfCraft(int craft) returns int {
+                if (craft == cast<int>(Craft.Wright)) {
+                    return cast<int>(Job.Sawyer);
+                }
+                if (craft == cast<int>(Craft.Smith)) {
+                    return cast<int>(Job.Smith);
+                }
+                if (craft == cast<int>(Craft.Victualler)) {
+                    return cast<int>(Job.Baker);
+                }
+                if (craft == cast<int>(Craft.Weaving)) {
+                    return cast<int>(Job.Weaver);
+                }
+                return cast<int>(Job.Idle);
+            }
+
+            private method craftOfJob(int job) returns int {
+                if (job == cast<int>(Job.Sawyer)) {
+                    return cast<int>(Craft.Wright);
+                }
+                if (job == cast<int>(Job.Smith)) {
+                    return cast<int>(Craft.Smith);
+                }
+                if (job == cast<int>(Job.Baker)) {
+                    return cast<int>(Craft.Victualler);
+                }
+                if (job == cast<int>(Job.Weaver)) {
+                    return cast<int>(Craft.Weaving);
+                }
+                return cast<int>(Craft.NoCraft);
             }
 
             // Busy means committed to something. Wandering is NOT: somebody strolling because they had
@@ -933,6 +1127,99 @@ public bundle Agents {
             private method busy(int i) returns boolean {
                 int a = this.folk.actOf(i);
                 return a != cast<int>(Act.Idle) && a != cast<int>(Act.Wander);
+            }
+
+            // Raising a building. The builder walks to the site and works; when the last hour goes in
+            // the timber and stone come out of the store and it opens. Paying at the END and not at
+            // the start is what stops a plan from eating a village: a site nobody ever finishes has
+            // cost nothing but the walking.
+            private method workBuild(int i) returns void {
+                int h = this.folk.homeOf(i);
+                int b = this.town.unfinished(h);
+                if (b < 0) {
+                    this.folk.setJob(i, cast<int>(Job.Idle));
+                    return;
+                }
+                if (this.busy(i)) {
+                    return;
+                }
+                float bxf = cast<float>(this.town.xAt(b));
+                float byf = cast<float>(this.town.yAt(b));
+                float dx = bxf - this.folk.xAt(i);
+                float dy = byf - this.folk.yAt(i);
+                if (dx * dx + dy * dy >= 4.0) {
+                    this.folk.setTarget(i, this.town.xAt(b), this.town.yAt(b));
+                    this.folk.setAct(i, cast<int>(Act.WalkTo));
+                    return;
+                }
+                this.folk.setWorkplace(i, b);
+                this.folk.setAct(i, cast<int>(Act.Build));
+                return;
+            }
+
+            // Working inside one. A craftsman does not travel to a resource -- the resource has
+            // already been carried home by somebody else, which is the whole point of the store
+            // existing -- so this is a walk to the workshop and then a batch at a time.
+            private method workCraft(int i) returns void {
+                int h = this.folk.homeOf(i);
+                int craft = this.craftOfJob(this.folk.jobOf(i));
+                mutable int b = this.folk.workplaceOf(i);
+                if (b < 0 || !this.town.isWorking(b) || this.town.ownerOf(b) != h
+                    || Builds.craft(this.town.kindOf(b)) != craft) {
+                    b = this.town.openFor(h, craft);
+                    if (b < 0) {
+                        this.folk.setWorkplace(i, 0 - 1);
+                        this.folk.setJob(i, cast<int>(Job.Idle));
+                        this.folk.setThinkAt(i, this.tick + 20);
+                        return;
+                    }
+                    this.folk.setWorkplace(i, b);
+                }
+                if (this.busy(i)) {
+                    return;
+                }
+                float bxf = cast<float>(this.town.xAt(b));
+                float byf = cast<float>(this.town.yAt(b));
+                float dx = bxf - this.folk.xAt(i);
+                float dy = byf - this.folk.yAt(i);
+                if (dx * dx + dy * dy >= 4.0) {
+                    this.folk.setTarget(i, this.town.xAt(b), this.town.yAt(b));
+                    this.folk.setAct(i, cast<int>(Act.WalkTo));
+                    return;
+                }
+                this.folk.setAct(i, cast<int>(Act.Refine));
+                return;
+            }
+
+            // A batch comes off the bench. The inputs leave the store and the output enters it, and
+            // if an input is missing the batch does not happen -- the workshop STALLS, and that stall
+            // is the signal the next census reads when it decides what the village should build.
+            private method batchDone(int i) returns void {
+                int b = this.folk.workplaceOf(i);
+                if (b < 0 || !this.town.isWorking(b)) {
+                    this.folk.setAct(i, cast<int>(Act.Idle));
+                    return;
+                }
+                int h = this.town.ownerOf(b);
+                int k = this.town.kindOf(b);
+                int a1 = Builds.in1(k);
+                int a2 = Builds.in2(k);
+                boolean ready = this.stores.has(h, a1, Builds.n1(k))
+                             && (a2 == cast<int>(Good.Nothing) || this.stores.has(h, a2, Builds.n2(k)));
+                if (!ready) {
+                    this.stalled = this.stalled + 1;
+                    this.folk.setAct(i, cast<int>(Act.Idle));
+                    this.folk.setThinkAt(i, this.tick + 6);
+                    return;
+                }
+                this.stores.take(h, a1, Builds.n1(k));
+                if (a2 != cast<int>(Good.Nothing)) {
+                    this.stores.take(h, a2, Builds.n2(k));
+                }
+                this.stores.add(h, Builds.out(k), Builds.nout(k));
+                this.crafted = this.crafted + 1;
+                this.folk.setAct(i, cast<int>(Act.Idle));
+                return;
             }
 
             // Any extractive trade, whole: find something of your kind, walk to it, work a load off
@@ -1126,19 +1413,33 @@ public bundle Agents {
                     System.IO.Console.println($"    {Goods.name(gd)}: {made} / {this.stores.holders(gd)}");
                 }
                 System.IO.Console.println($"    ({idle} goods never produced at all)");
-                // How the trades were shared out, counted from the living rather than from intent.
-                int nh = Harvest.count();
-                mutable int[] byTrade = new int[nh]();
+                // How the trades were shared out, counted from the living rather than from intent --
+                // and by JOB, because a smith has no Harvest class and counting by that one read
+                // every craftsman in the world as idle.
+                mutable int[] byTrade = new int[Job.count()]();
                 int n = this.folk.limit();
                 mutable int k = 0;
                 while (k < n) {
                     if (this.folk.alive(k) && this.folk.isAdult(k)) {
-                        byTrade[this.harvestOf(this.folk.jobOf(k))] = byTrade[this.harvestOf(this.folk.jobOf(k))] + 1;
+                        int jb = this.folk.jobOf(k);
+                        byTrade[jb] = byTrade[jb] + 1;
                     }
                     k = k + 1;
                 }
-                System.IO.Console.println($"  trades: idle {byTrade[0]} | wood {byTrade[1]} | forage {byTrade[2]} | quarry {byTrade[3]} | mine {byTrade[4]} | fish {byTrade[5]}");
+                System.IO.Console.println($"  out of doors: wood {byTrade[cast<int>(Job.Woodcutter)]} | forage {byTrade[cast<int>(Job.Forager)]} | quarry {byTrade[cast<int>(Job.Quarrier)]} | mine {byTrade[cast<int>(Job.Miner)]} | fish {byTrade[cast<int>(Job.Fisher)]}");
+                System.IO.Console.println($"  indoors: sawyer {byTrade[cast<int>(Job.Sawyer)]} | smith {byTrade[cast<int>(Job.Smith)]} | baker {byTrade[cast<int>(Job.Baker)]} | weaver {byTrade[cast<int>(Job.Weaver)]} | builder {byTrade[cast<int>(Job.Builder)]} | idle {byTrade[cast<int>(Job.Idle)]}");
                 delete byTrade;
+                // What the villages built, and whether the workshops in them ever run. A building
+                // that stands and never makes anything is a chain that does not exist.
+                System.IO.Console.println($"  built: {this.town.working()} standing of {this.town.count()} marked out | {this.crafted} batches made, {this.stalled} could not start");
+                mutable String line = "  workshops:";
+                for (int bk in 1..BuildingKind.count()) {
+                    int cnt = this.town.countOfKind(bk);
+                    if (cnt > 0) {
+                        line = line + $" {Builds.name(bk)}={cnt}";
+                    }
+                }
+                System.IO.Console.println(line);
                 // What is left standing, against what the world started with. A resource that only
                 // goes down is being liquidated, and this is where that shows.
                 NodeField* nf = this.g.surface();

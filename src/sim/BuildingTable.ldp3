@@ -1,0 +1,231 @@
+import System.IO.Console;
+import Agents.World.BuildingKind;
+import Agents.World.Builds;
+import Agents.World.Good;
+
+// Every building standing or going up in the world, as one table. A building is an INDEX, the same
+// as an agent and a node, and for the same reason: the questions asked of it are "what is at this
+// community" and "who works here", both of which are loops.
+//
+// The state is deliberately three words and not a class hierarchy. A site is a decision somebody has
+// made and not yet paid for; a building under construction is a site with hours in it; a working
+// building is one whose hours are done. There is no behaviour that differs by state -- only numbers
+// -- so a byte says which and the simulation branches on it.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        public enum Standing {
+            Site,            // marked out, nothing built
+            Raising,         // work going in
+            Working          // finished, in use
+        }
+
+        public class Buildings {
+            private mutable int n;
+            private mutable int cap;
+            private mutable short[] bx;
+            private mutable short[] by;
+            private mutable byte[] kind;
+            private mutable short[] owner;      // the community it belongs to
+            private mutable byte[] state;
+            private mutable float[] effort;     // hours put into raising it
+            private mutable short[] hands;      // people working it right now
+            private mutable float[] batch;      // seconds into the current batch
+            private mutable long[] made;        // batches finished, per building
+
+            public constructor Buildings(int capacity) {
+                this.n = 0;
+                this.cap = capacity;
+                this.bx = new short[capacity]();
+                this.by = new short[capacity]();
+                this.kind = new byte[capacity]();
+                this.owner = new short[capacity]();
+                this.state = new byte[capacity]();
+                this.effort = new float[capacity]();
+                this.hands = new short[capacity]();
+                this.batch = new float[capacity]();
+                this.made = new long[capacity]();
+            }
+
+            public destructor ~Buildings() returns void {
+                delete this.bx;
+                delete this.by;
+                delete this.kind;
+                delete this.owner;
+                delete this.state;
+                delete this.effort;
+                delete this.hands;
+                delete this.batch;
+                delete this.made;
+            }
+
+            public method count() returns int {
+                return this.n;
+            }
+
+            public method limit() returns int {
+                return this.cap;
+            }
+
+            // Mark out a site. Nothing is spent yet: the cost comes out of the store when the
+            // builders have actually raised it, so a village cannot lose its wood to a plan.
+            public method mark(int x, int y, int k, int comm) returns int {
+                if (this.n >= this.cap) {
+                    return 0 - 1;
+                }
+                int i = this.n;
+                this.n = this.n + 1;
+                this.bx[i] = cast<short>(x);
+                this.by[i] = cast<short>(y);
+                this.kind[i] = cast<byte>(k);
+                this.owner[i] = cast<short>(comm);
+                this.state[i] = cast<byte>(cast<int>(Standing.Site));
+                this.effort[i] = 0.0;
+                this.hands[i] = cast<short>(0);
+                this.batch[i] = 0.0;
+                this.made[i] = 0;
+                return i;
+            }
+
+            public method xAt(int i) returns int {
+                return cast<int>(this.bx[i]);
+            }
+
+            public method yAt(int i) returns int {
+                return cast<int>(this.by[i]);
+            }
+
+            public method kindOf(int i) returns int {
+                return cast<int>(this.kind[i]) & 255;
+            }
+
+            public method ownerOf(int i) returns int {
+                return cast<int>(this.owner[i]);
+            }
+
+            public method stateOf(int i) returns int {
+                return cast<int>(this.state[i]) & 255;
+            }
+
+            public method isWorking(int i) returns boolean {
+                return this.stateOf(i) == cast<int>(Standing.Working);
+            }
+
+            public method madeAt(int i) returns long {
+                return this.made[i];
+            }
+
+            // Put an hour of work into raising it. Returns true on the hour it is finished, so the
+            // caller can pay for it exactly once.
+            public method raise(int i, float dt) returns boolean {
+                if (this.stateOf(i) == cast<int>(Standing.Working)) {
+                    return false;
+                }
+                this.state[i] = cast<byte>(cast<int>(Standing.Raising));
+                this.effort[i] = this.effort[i] + dt;
+                if (this.effort[i] >= Buildings.RAISE) {
+                    this.state[i] = cast<byte>(cast<int>(Standing.Working));
+                    return true;
+                }
+                return false;
+            }
+
+            // Seconds of work to put a building up, whatever it is. Size and materials differ by
+            // kind; the LABOUR does not, because what a building costs a village in people is the
+            // number that decides whether it can afford one at all, and one dial is enough for that
+            // until there is a reason for two.
+            public static float RAISE = 90.0;
+
+            public method progressOf(int i) returns float {
+                return this.effort[i] / Buildings.RAISE;
+            }
+
+            public method handsAt(int i) returns int {
+                return cast<int>(this.hands[i]);
+            }
+
+            public method clearHands() returns void {
+                for (int i in 0..this.n) {
+                    this.hands[i] = cast<short>(0);
+                }
+                return;
+            }
+
+            public method addHand(int i) returns void {
+                this.hands[i] = cast<short>(cast<int>(this.hands[i]) + 1);
+                return;
+            }
+
+            // A batch of work. The store is not touched here -- the caller owns it and knows whether
+            // the inputs are there -- so this only says when a batch has come round.
+            public method work(int i, float dt) returns boolean {
+                this.batch[i] = this.batch[i] + dt;
+                if (this.batch[i] >= Builds.secs(this.kindOf(i))) {
+                    this.batch[i] = 0.0;
+                    this.made[i] = this.made[i] + 1;
+                    return true;
+                }
+                return false;
+            }
+
+            // The first working building of a kind belonging to a community, or -1.
+            public method find(int comm, int k) returns int {
+                for (int i in 0..this.n) {
+                    if (cast<int>(this.owner[i]) == comm && this.kindOf(i) == k) {
+                        return i;
+                    }
+                }
+                return 0 - 1;
+            }
+
+            // A working building of this craft with room for another pair of hands, or -1.
+            public method openFor(int comm, int craft) returns int {
+                for (int i in 0..this.n) {
+                    if (cast<int>(this.owner[i]) != comm || !this.isWorking(i)) {
+                        continue;
+                    }
+                    int k = this.kindOf(i);
+                    if (Builds.craft(k) != craft) {
+                        continue;
+                    }
+                    if (cast<int>(this.hands[i]) < Builds.hands(k)) {
+                        return i;
+                    }
+                }
+                return 0 - 1;
+            }
+
+            // Something belonging to this community that is not finished, or -1.
+            public method unfinished(int comm) returns int {
+                for (int i in 0..this.n) {
+                    if (cast<int>(this.owner[i]) == comm && !this.isWorking(i)) {
+                        return i;
+                    }
+                }
+                return 0 - 1;
+            }
+
+            public method countOfKind(int k) returns int {
+                mutable int c = 0;
+                for (int i in 0..this.n) {
+                    if (this.kindOf(i) == k && this.isWorking(i)) {
+                        c = c + 1;
+                    }
+                }
+                return c;
+            }
+
+            public method working() returns int {
+                mutable int c = 0;
+                for (int i in 0..this.n) {
+                    if (this.isWorking(i)) {
+                        c = c + 1;
+                    }
+                }
+                return c;
+            }
+        }
+    }
+}
