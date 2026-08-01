@@ -99,6 +99,23 @@ public bundle Agents {
             MetalEnergy
         }
 
+        // Who goes and gets it. This is the axis the WORK is organised along, and it is deliberately
+        // not NodeClass: a boulder and an iron vein are both rock to a geologist, and a woodcutter
+        // and a forager both take living things, but the man who goes out with an axe and the woman
+        // who goes out with a basket are doing different jobs in different places.
+        //
+        // It is also the axis the world is INDEXED along. A community asks "where is there wood
+        // within reach" a few times a second, and the answer comes from a coarse count per class --
+        // one number per sixteen-cell block -- so the question costs a lookup instead of a sweep.
+        public enum Harvest {
+            Nothing,
+            Timber,      // the ten tree species
+            Forage,      // berries, mushrooms, herbs, wild grain, vines, fibre, reeds, cactus
+            Quarry,      // loose stone, marble, clay, salt -- and the boulder
+            Mine,        // the ten metal and energy veins
+            Fishing      // fishing spots
+        }
+
         // Which atlas holds a kind's mesh.
         public enum NodeAtlas {
             Nodes,
@@ -113,6 +130,10 @@ public bundle Agents {
             private static mutable int[] KLASS;
             private static mutable boolean[] BURY;
             private static mutable int[] QTY;
+            // What comes off it, and who goes and gets it -- the two facts that turn a thing standing
+            // on the ground into a link in docs/ECONOMY.md's first chain.
+            private static mutable int[] YIELD;
+            private static mutable int[] WORK;
 
             onClassLoad {
                 int n = NodeKind.count();
@@ -121,9 +142,13 @@ public bundle Agents {
                 Nodes.KLASS = new int[n]();
                 Nodes.BURY = new boolean[n]();
                 Nodes.QTY = new int[n]();
+                Nodes.YIELD = new int[n]();
+                Nodes.WORK = new int[n]();
                 mutable int i = 0;
                 while (i < n) {
                     Nodes.NAME[i] = "None";
+                    Nodes.YIELD[i] = cast<int>(Good.Nothing);
+                    Nodes.WORK[i] = cast<int>(Harvest.Nothing);
                     i = i + 1;
                 }
                 int nodes = cast<int>(NodeAtlas.Nodes);
@@ -132,61 +157,109 @@ public bundle Agents {
                 int rock = cast<int>(NodeClass.StoneEarth);
                 int ore = cast<int>(NodeClass.MetalEnergy);
 
-                // kind, mesh atlas, class, has a buried body, units in an average node
-                Nodes.put(cast<int>(NodeKind.None), "None", nodes, bio, false, 0);
+                int timber = cast<int>(Harvest.Timber);
+                int forage = cast<int>(Harvest.Forage);
+                int quarry = cast<int>(Harvest.Quarry);
+                int mine = cast<int>(Harvest.Mine);
+                int fishing = cast<int>(Harvest.Fishing);
+
+                // kind, mesh atlas, class, has a buried body, units in an average node, what it
+                // yields, who harvests it
+                Nodes.put(cast<int>(NodeKind.None), "None", nodes, bio, false, 0,
+                          cast<int>(Good.Nothing), cast<int>(Harvest.Nothing));
 
                 // The promoted prop meshes: seven tree species and the boulder, art already in
-                // props.index.
-                Nodes.put(cast<int>(NodeKind.Broadleaf), "Broadleaf", props, bio, false, 120);
-                Nodes.put(cast<int>(NodeKind.Pine), "Pine", props, bio, false, 120);
-                Nodes.put(cast<int>(NodeKind.Palm), "Palm", props, bio, false, 90);
-                Nodes.put(cast<int>(NodeKind.Acacia), "Acacia", props, bio, false, 80);
-                Nodes.put(cast<int>(NodeKind.SwampTree), "SwampTree", props, bio, false, 110);
-                Nodes.put(cast<int>(NodeKind.Mangrove), "Mangrove", props, bio, false, 100);
-                Nodes.put(cast<int>(NodeKind.Laurel), "Laurel", props, bio, false, 115);
-                Nodes.put(cast<int>(NodeKind.Boulder), "Boulder", props, rock, false, 200);
+                // props.index. Every species yields the same Wood -- the difference between an oak
+                // and a mangrove belongs to where they grow and what they look like, not to a
+                // separate entry in the warehouse.
+                Nodes.put(cast<int>(NodeKind.Broadleaf), "Broadleaf", props, bio, false, 120,
+                          cast<int>(Good.Wood), timber);
+                Nodes.put(cast<int>(NodeKind.Pine), "Pine", props, bio, false, 120,
+                          cast<int>(Good.Wood), timber);
+                Nodes.put(cast<int>(NodeKind.Palm), "Palm", props, bio, false, 90,
+                          cast<int>(Good.Wood), timber);
+                Nodes.put(cast<int>(NodeKind.Acacia), "Acacia", props, bio, false, 80,
+                          cast<int>(Good.Wood), timber);
+                Nodes.put(cast<int>(NodeKind.SwampTree), "SwampTree", props, bio, false, 110,
+                          cast<int>(Good.Wood), timber);
+                Nodes.put(cast<int>(NodeKind.Mangrove), "Mangrove", props, bio, false, 100,
+                          cast<int>(Good.Wood), timber);
+                Nodes.put(cast<int>(NodeKind.Laurel), "Laurel", props, bio, false, 115,
+                          cast<int>(Good.Wood), timber);
+                Nodes.put(cast<int>(NodeKind.Boulder), "Boulder", props, rock, false, 200,
+                          cast<int>(Good.Stone), quarry);
 
                 // Surface biology: never buried, whatever its class.
-                Nodes.put(cast<int>(NodeKind.OakTree), "OakTree", nodes, bio, false, 130);
-                Nodes.put(cast<int>(NodeKind.PineTree), "PineTree", nodes, bio, false, 120);
-                Nodes.put(cast<int>(NodeKind.BirchTree), "BirchTree", nodes, bio, false, 105);
-                Nodes.put(cast<int>(NodeKind.BerryBush), "BerryBush", nodes, bio, false, 40);
-                Nodes.put(cast<int>(NodeKind.MushroomPatch), "MushroomPatch", nodes, bio, false, 30);
-                Nodes.put(cast<int>(NodeKind.HerbPlant), "HerbPlant", nodes, bio, false, 25);
-                Nodes.put(cast<int>(NodeKind.WheatField), "WheatField", nodes, bio, false, 60);
-                Nodes.put(cast<int>(NodeKind.WildVine), "WildVine", nodes, bio, false, 45);
-                Nodes.put(cast<int>(NodeKind.CottonPlant), "CottonPlant", nodes, bio, false, 50);
-                Nodes.put(cast<int>(NodeKind.FlaxPlant), "FlaxPlant", nodes, bio, false, 50);
-                Nodes.put(cast<int>(NodeKind.Reeds), "Reeds", nodes, bio, false, 60);
-                Nodes.put(cast<int>(NodeKind.FishingSpot), "FishingSpot", nodes, bio, false, 900);
-                Nodes.put(cast<int>(NodeKind.Cactus), "Cactus", nodes, bio, false, 35);
+                Nodes.put(cast<int>(NodeKind.OakTree), "OakTree", nodes, bio, false, 130,
+                          cast<int>(Good.Wood), timber);
+                Nodes.put(cast<int>(NodeKind.PineTree), "PineTree", nodes, bio, false, 120,
+                          cast<int>(Good.Wood), timber);
+                Nodes.put(cast<int>(NodeKind.BirchTree), "BirchTree", nodes, bio, false, 105,
+                          cast<int>(Good.Wood), timber);
+                Nodes.put(cast<int>(NodeKind.BerryBush), "BerryBush", nodes, bio, false, 40,
+                          cast<int>(Good.Berries), forage);
+                Nodes.put(cast<int>(NodeKind.MushroomPatch), "MushroomPatch", nodes, bio, false, 30,
+                          cast<int>(Good.Mushrooms), forage);
+                Nodes.put(cast<int>(NodeKind.HerbPlant), "HerbPlant", nodes, bio, false, 25,
+                          cast<int>(Good.Herbs), forage);
+                Nodes.put(cast<int>(NodeKind.WheatField), "WheatField", nodes, bio, false, 60,
+                          cast<int>(Good.Grain), forage);
+                Nodes.put(cast<int>(NodeKind.WildVine), "WildVine", nodes, bio, false, 45,
+                          cast<int>(Good.Grapes), forage);
+                Nodes.put(cast<int>(NodeKind.CottonPlant), "CottonPlant", nodes, bio, false, 50,
+                          cast<int>(Good.Cotton), forage);
+                Nodes.put(cast<int>(NodeKind.FlaxPlant), "FlaxPlant", nodes, bio, false, 50,
+                          cast<int>(Good.Flax), forage);
+                Nodes.put(cast<int>(NodeKind.Reeds), "Reeds", nodes, bio, false, 60,
+                          cast<int>(Good.Reeds), forage);
+                Nodes.put(cast<int>(NodeKind.FishingSpot), "FishingSpot", nodes, bio, false, 900,
+                          cast<int>(Good.Fish), fishing);
+                // A cactus in a desert is water and flesh, which is why anyone bothers with it.
+                Nodes.put(cast<int>(NodeKind.Cactus), "Cactus", nodes, bio, false, 35,
+                          cast<int>(Good.Vegetables), forage);
 
                 // Stone and earth: an outcrop on the surface over a body underground.
-                Nodes.put(cast<int>(NodeKind.StoneRock), "StoneRock", nodes, rock, true, 1200);
-                Nodes.put(cast<int>(NodeKind.MarbleOutcrop), "MarbleOutcrop", nodes, rock, true, 800);
-                Nodes.put(cast<int>(NodeKind.ClayPit), "ClayPit", nodes, rock, true, 700);
-                Nodes.put(cast<int>(NodeKind.SaltDeposit), "SaltDeposit", nodes, rock, true, 600);
+                Nodes.put(cast<int>(NodeKind.StoneRock), "StoneRock", nodes, rock, true, 1200,
+                          cast<int>(Good.Stone), quarry);
+                Nodes.put(cast<int>(NodeKind.MarbleOutcrop), "MarbleOutcrop", nodes, rock, true, 800,
+                          cast<int>(Good.Marble), quarry);
+                Nodes.put(cast<int>(NodeKind.ClayPit), "ClayPit", nodes, rock, true, 700,
+                          cast<int>(Good.Clay), quarry);
+                Nodes.put(cast<int>(NodeKind.SaltDeposit), "SaltDeposit", nodes, rock, true, 600,
+                          cast<int>(Good.Salt), quarry);
 
                 // Metals and energy: the same, and the reason prospecting exists.
-                Nodes.put(cast<int>(NodeKind.GemRock), "GemRock", nodes, ore, true, 120);
-                Nodes.put(cast<int>(NodeKind.IronVein), "IronVein", nodes, ore, true, 900);
-                Nodes.put(cast<int>(NodeKind.CopperVein), "CopperVein", nodes, ore, true, 800);
-                Nodes.put(cast<int>(NodeKind.TinVein), "TinVein", nodes, ore, true, 500);
-                Nodes.put(cast<int>(NodeKind.GoldVein), "GoldVein", nodes, ore, true, 250);
-                Nodes.put(cast<int>(NodeKind.SilverVein), "SilverVein", nodes, ore, true, 350);
-                Nodes.put(cast<int>(NodeKind.CoalSeam), "CoalSeam", nodes, ore, true, 1500);
-                Nodes.put(cast<int>(NodeKind.SulfurVent), "SulfurVent", nodes, ore, true, 400);
-                Nodes.put(cast<int>(NodeKind.OilSeep), "OilSeep", nodes, ore, true, 1200);
-                Nodes.put(cast<int>(NodeKind.RareEarth), "RareEarth", nodes, ore, true, 200);
+                Nodes.put(cast<int>(NodeKind.GemRock), "GemRock", nodes, ore, true, 120,
+                          cast<int>(Good.Gems), mine);
+                Nodes.put(cast<int>(NodeKind.IronVein), "IronVein", nodes, ore, true, 900,
+                          cast<int>(Good.IronOre), mine);
+                Nodes.put(cast<int>(NodeKind.CopperVein), "CopperVein", nodes, ore, true, 800,
+                          cast<int>(Good.CopperOre), mine);
+                Nodes.put(cast<int>(NodeKind.TinVein), "TinVein", nodes, ore, true, 500,
+                          cast<int>(Good.TinOre), mine);
+                Nodes.put(cast<int>(NodeKind.GoldVein), "GoldVein", nodes, ore, true, 250,
+                          cast<int>(Good.GoldOre), mine);
+                Nodes.put(cast<int>(NodeKind.SilverVein), "SilverVein", nodes, ore, true, 350,
+                          cast<int>(Good.SilverOre), mine);
+                Nodes.put(cast<int>(NodeKind.CoalSeam), "CoalSeam", nodes, ore, true, 1500,
+                          cast<int>(Good.Coal), mine);
+                Nodes.put(cast<int>(NodeKind.SulfurVent), "SulfurVent", nodes, ore, true, 400,
+                          cast<int>(Good.Sulfur), mine);
+                Nodes.put(cast<int>(NodeKind.OilSeep), "OilSeep", nodes, ore, true, 1200,
+                          cast<int>(Good.Oil), mine);
+                Nodes.put(cast<int>(NodeKind.RareEarth), "RareEarth", nodes, ore, true, 200,
+                          cast<int>(Good.RareEarth), mine);
             }
 
             private static method put(int ord, String name, int atlas, int klass, boolean bury,
-                                      int qty) returns void {
+                                      int qty, int gives, int work) returns void {
                 Nodes.NAME[ord] = name;
                 Nodes.ATLAS[ord] = atlas;
                 Nodes.KLASS[ord] = klass;
                 Nodes.BURY[ord] = bury;
                 Nodes.QTY[ord] = qty;
+                Nodes.YIELD[ord] = gives;
+                Nodes.WORK[ord] = work;
             }
 
             public static method count() returns int {
@@ -239,18 +312,18 @@ public bundle Agents {
                 return Nodes.klass(ord) != cast<int>(NodeClass.Biological);
             }
 
+            // What comes off a unit of it, as a Good ordinal.
+            public static method gives(int ord) returns int {
+                return Nodes.YIELD[ord];
+            }
+
+            // Which trade goes and gets it, as a Harvest ordinal.
+            public static method work(int ord) returns int {
+                return Nodes.WORK[ord];
+            }
+
             public static method isTree(int ord) returns boolean {
-                if (ord == cast<int>(NodeKind.Broadleaf)) { return true; }
-                if (ord == cast<int>(NodeKind.Pine)) { return true; }
-                if (ord == cast<int>(NodeKind.Palm)) { return true; }
-                if (ord == cast<int>(NodeKind.Acacia)) { return true; }
-                if (ord == cast<int>(NodeKind.SwampTree)) { return true; }
-                if (ord == cast<int>(NodeKind.Mangrove)) { return true; }
-                if (ord == cast<int>(NodeKind.Laurel)) { return true; }
-                if (ord == cast<int>(NodeKind.OakTree)) { return true; }
-                if (ord == cast<int>(NodeKind.PineTree)) { return true; }
-                if (ord == cast<int>(NodeKind.BirchTree)) { return true; }
-                return false;
+                return Nodes.WORK[ord] == cast<int>(Harvest.Timber);
             }
         }
     }

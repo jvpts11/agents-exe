@@ -2,6 +2,7 @@ import System.IO.Console;
 import Agents.World.Grid;
 import Agents.World.Biomes;
 import Agents.World.NodeField;
+import Agents.World.Harvest;
 import Agents.World.LandMath;
 
 // Everybody alive, as one table. An agent is an INDEX, not a pointer -- the same Structure-of-Arrays
@@ -367,8 +368,10 @@ public bundle Agents {
                 return cast<int>(this.carryKind[i]) & 255;
             }
 
-            // One load at a time. Somebody hauling wood cannot also be hauling stone, which is the
-            // whole reason a trip home exists and therefore the whole reason distance costs anything.
+            // One load at a time, and `kind` is a GOOD -- what a person carries is Wood or Salt, not
+            // the oak or the deposit it came off. Somebody hauling wood cannot also be hauling stone,
+            // which is the whole reason a trip home exists and therefore the whole reason distance
+            // costs anything.
             public method setCarry(int i, int kind, int amount) returns void
                 requires amount >= 0
                 requires amount <= 32767
@@ -641,12 +644,21 @@ public bundle Agents {
                         if (Biomes.walkable(b) && g.elevAt(x, y) < 6300) {
                             int bx = x / 16;
                             int by = y / 16;
+                            // Weighted by what a village needs in the order it needs it. Food comes
+                            // first because it is the only need that kills, and a fishing spot is
+                            // worth a dozen berry bushes because it holds nine hundred units against
+                            // their forty. Wood next, because everything is built out of it; stone
+                            // last, because a place can live a long time without it.
                             mutable int score = 0;
                             mutable int oy = 0 - 3;
                             while (oy <= 3) {
                                 mutable int ox = 0 - 3;
                                 while (ox <= 3) {
-                                    score = score + nf.treesInBlock(bx + ox, by + oy);
+                                    score = score
+                                          + 4 * nf.inBlock(bx + ox, by + oy, cast<int>(Harvest.Forage))
+                                          + 12 * nf.inBlock(bx + ox, by + oy, cast<int>(Harvest.Fishing))
+                                          + 2 * nf.inBlock(bx + ox, by + oy, cast<int>(Harvest.Timber))
+                                          + nf.inBlock(bx + ox, by + oy, cast<int>(Harvest.Quarry));
                                     ox = ox + 1;
                                 }
                                 oy = oy + 1;

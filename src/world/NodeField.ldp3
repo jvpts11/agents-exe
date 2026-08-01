@@ -36,14 +36,20 @@ public bundle Agents {
             // been weighed against time, and this is no exception.
             private mutable int[] cellFirst;
             private mutable boolean ordered;
-            // Standing trees per BLOCK of 16x16 cells -- a coarse map of where the woods are, fifty-
-            // seven kilobytes for the whole world. A single tree is the wrong thing to know about:
-            // tell a community where one tree is and everybody walks to that tree, the first one there
-            // takes it and the rest arrive at a stump. A block is where the WOOD is, and people spread
-            // out inside it on their own. It is kept live by `harvest`, so it never lies.
-            private mutable int[] blockTree;
+            // Live nodes per BLOCK of 16x16 cells, one plane per Harvest class -- a coarse map of
+            // where the woods, the berries, the stone, the veins and the fishing are. Two hundred
+            // and eighty-eight kilobytes for the whole world, at 16x16 blocks.
+            //
+            // A single node is the wrong thing to know about: tell a community where one tree is and
+            // everybody walks to that tree, the first one there takes it and the rest arrive at a
+            // stump. A block is where the WORK is, and people spread out inside it on their own. It
+            // is kept live by `harvest`, so it never lies.
+            private mutable int[] blockHave;
             private mutable int bw;
             private mutable int bh;
+            private mutable int bplane;        // bw * bh, the stride between Harvest classes
+            private mutable int renewAt;       // where the regrowth sweep resumes
+            private mutable float renewDebt;   // nodes owed a top-up, carried between frames
 
             public constructor NodeField(int w, int h) {
                 this.w = w;
@@ -59,7 +65,10 @@ public bundle Agents {
                 this.ordered = false;
                 this.bw = (w + 15) / 16;
                 this.bh = (h + 15) / 16;
-                this.blockTree = new int[this.bw * this.bh]();
+                this.bplane = this.bw * this.bh;
+                this.blockHave = new int[this.bplane * Harvest.count()]();
+                this.renewAt = 0;
+                this.renewDebt = 0.0;
             }
 
             public destructor ~NodeField() returns void {
@@ -69,7 +78,7 @@ public bundle Agents {
                 delete this.qty;
                 delete this.rowStart;
                 delete this.cellFirst;
-                delete this.blockTree;
+                delete this.blockHave;
             }
 
             public method size() returns int {
@@ -197,14 +206,18 @@ public bundle Agents {
                     c3 = c3 + 1;
                 }
                 delete start;
-                // The coarse wood map, counted once here and maintained by `harvest` from now on.
-                for (int b in 0..this.bw * this.bh) {
-                    this.blockTree[b] = 0;
+                // The coarse work map, counted once here and maintained by `harvest` from now on.
+                for (int b in 0..this.bplane * Harvest.count()) {
+                    this.blockHave[b] = 0;
                 }
                 for (int j in 0..this.n) {
                     int k = cast<int>(this.kind[j]) & 255;
-                    if (k != 0 && Nodes.isTree(k) && cast<int>(this.qty[j]) > 0) {
-                        this.blockTree[this.blockOf(j)] = this.blockTree[this.blockOf(j)] + 1;
+                    if (k != 0 && cast<int>(this.qty[j]) > 0) {
+                        int hc = Nodes.work(k);
+                        if (hc != cast<int>(Harvest.Nothing)) {
+                            int b = hc * this.bplane + this.blockOf(j);
+                            this.blockHave[b] = this.blockHave[b] + 1;
+                        }
                     }
                 }
                 this.ordered = true;
@@ -237,12 +250,22 @@ public bundle Agents {
                 return this.bh;
             }
 
-            // Standing trees in the 16x16 block (bx, by). Zero outside the world.
-            public method treesInBlock(int bx, int by) returns int {
+            // Live nodes of one Harvest class in the 16x16 block (bx, by). Zero outside the world.
+            public method inBlock(int bx, int by, int hclass) returns int {
                 if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
                     return 0;
                 }
-                return this.blockTree[by * this.bw + bx];
+                return this.blockHave[hclass * this.bplane + by * this.bw + bx];
+            }
+
+            // Whole-world stock of one Harvest class, which is what says whether a resource is being
+            // liquidated or living within its means.
+            public method totalOf(int hclass) returns int {
+                mutable int t = 0;
+                for (int b in 0..this.bplane) {
+                    t = t + this.blockHave[hclass * this.bplane + b];
+                }
+                return t;
             }
 
             private method cellOf(int i) returns int {
@@ -310,9 +333,9 @@ public bundle Agents {
                 return this.cellFirst[y * this.w + x];
             }
 
-            // A live node of this kind-group standing on the cell, or -1. Instances of one cell are
+            // A live node this trade can work, standing on the cell, or -1. Instances of one cell are
             // contiguous, so this walks the two or three that share it and no further.
-            public method treeAt(int x, int y) returns int {
+            public method nodeAt(int x, int y, int hclass) returns int {
                 mutable int i = this.firstAt(x, y);
                 if (i < 0) {
                     return 0 - 1;
@@ -320,7 +343,7 @@ public bundle Agents {
                 int c = y * this.w + x;
                 while (i < this.n && this.cellOf(i) == c) {
                     int k = cast<int>(this.kind[i]) & 255;
-                    if (k != 0 && Nodes.isTree(k) && cast<int>(this.qty[i]) > 0) {
+                    if (k != 0 && Nodes.work(k) == hclass && cast<int>(this.qty[i]) > 0) {
                         return i;
                     }
                     i = i + 1;
@@ -345,13 +368,90 @@ public bundle Agents {
                 have = have - take;
                 this.qty[i] = cast<short>(have);
                 if (have == 0) {
-                    if (Nodes.isTree(cast<int>(this.kind[i]) & 255)) {
-                        int b = this.blockOf(i);
-                        this.blockTree[b] = this.blockTree[b] - 1;
+                    int k = cast<int>(this.kind[i]) & 255;
+                    int hc = Nodes.work(k);
+                    if (hc != cast<int>(Harvest.Nothing)) {
+                        int b = hc * this.bplane + this.blockOf(i);
+                        this.blockHave[b] = this.blockHave[b] - 1;
                     }
-                    this.kind[i] = cast<byte>(0);
+                    // A picked bush is not a destroyed bush. Forage and fishing are FLOWS -- the
+                    // berries come back, the shoal swims back -- so the node stays where it is with
+                    // nothing on it and `regrow` fills it again. A felled tree and a worked-out seam
+                    // are STOCKS: those are gone, and the kind is cleared.
+                    if (!NodeField.renews(hc)) {
+                        this.kind[i] = cast<byte>(0);
+                    }
                 }
                 return take;
+            }
+
+            // Which harvest classes come back on their own. Berries fruit again and a fishing ground
+            // refills; a tree that has been felled is gone and so is the ore out of a seam. That
+            // distinction is the difference between a world people can live in and one they strip:
+            // fifty thousand people eat about fourteen hundred units a second, and the wild food
+            // standing in the world is six and a half million units, so without this the whole
+            // species starves in an hour -- which is exactly what the first measurement did.
+            public static method renews(int hclass) returns boolean {
+                return hclass == cast<int>(Harvest.Forage) || hclass == cast<int>(Harvest.Fishing);
+            }
+
+            // Sweep every node once per this many seconds, topping the renewable ones up. Sliced by
+            // time rather than done all at once for the same reason the terrain bake is: constant
+            // cost per frame, more frames when there is more to do.
+            public static float RENEW_SWEEP = 20.0;
+
+            public method regrow(float dt) returns void {
+                if (this.n == 0) {
+                    return;
+                }
+                float share = cast<float>(this.n) * dt / NodeField.RENEW_SWEEP;
+                this.renewDebt = this.renewDebt + share;
+                mutable int todo = cast<int>(this.renewDebt);
+                if (todo <= 0) {
+                    return;
+                }
+                this.renewDebt = this.renewDebt - cast<float>(todo);
+                if (todo > this.n) {
+                    todo = this.n;
+                }
+                mutable int done = 0;
+                while (done < todo) {
+                    int i = this.renewAt;
+                    this.renewAt = this.renewAt + 1;
+                    if (this.renewAt >= this.n) {
+                        this.renewAt = 0;
+                    }
+                    done = done + 1;
+                    int k = cast<int>(this.kind[i]) & 255;
+                    if (k == 0) {
+                        continue;
+                    }
+                    int hc = Nodes.work(k);
+                    if (!NodeField.renews(hc)) {
+                        continue;
+                    }
+                    int full = Nodes.baseQty(k);
+                    mutable int have = cast<int>(this.qty[i]);
+                    if (have >= full) {
+                        continue;
+                    }
+                    // A fishing ground refills far faster than a berry patch, because what is being
+                    // taken is a flow of fish and not the plant itself.
+                    mutable int refill = full / 12;
+                    if (refill < 1) {
+                        refill = 1;
+                    }
+                    mutable int now = have + refill;
+                    if (now > full) {
+                        now = full;
+                    }
+                    this.qty[i] = cast<short>(now);
+                    if (have == 0 && now > 0) {
+                        int b = hc * this.bplane + this.blockOf(i);
+                        this.blockHave[b] = this.blockHave[b] + 1;
+                    }
+                }
+                return;
             }
 
             // Per-cell counts, so a consumer that asks "how many trees are around here" thousands of

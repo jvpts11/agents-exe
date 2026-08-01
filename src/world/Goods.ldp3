@@ -1,0 +1,263 @@
+import System.IO.Console;
+
+// Everything a community can hold. The set is not a free list: docs/ECONOMY.md is a contract that
+// names every raw resource, every refined material and every prepared food, and each one already has
+// a producer and an era assigned to it. So it is written the same way the resource nodes were --
+// as a `catalog`, which makes dropping one a COMPILE error instead of a production chain that
+// silently starves at runtime.
+//
+// The names are the document's, in the document's order: section 1's raw resources, then section 2's
+// refined materials, then the prepared half of section 3 (the raw foods -- berries, fish, milk and
+// the rest -- are already in section 1 and are not repeated here). Section 4's advanced goods arrive
+// with the eras that make them.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public catalog EconomyGoods {
+            // section 1 -- raw resources, straight off a node or an animal
+            Wood,
+            Stone,
+            Marble,
+            Clay,
+            Sand,
+            Coal,
+            Salt,
+            Sulfur,
+            Gems,
+            Oil,
+            RareEarth,
+            IronOre,
+            CopperOre,
+            TinOre,
+            GoldOre,
+            SilverOre,
+            Grain,
+            Berries,
+            Fruit,
+            Grapes,
+            Vegetables,
+            Mushrooms,
+            Herbs,
+            Fish,
+            RawMeat,
+            Milk,
+            Honey,
+            Egg,
+            Cotton,
+            Flax,
+            Wool,
+            Hide,
+            Reeds,
+            // section 2 -- refined materials, out of a building
+            Plank,
+            Charcoal,
+            Brick,
+            Pottery,
+            Glass,
+            Paper,
+            Leather,
+            Cloth,
+            Rope,
+            Cement,
+            IronIngot,
+            CopperIngot,
+            BronzeIngot,
+            Steel,
+            GoldBar,
+            SilverBar,
+            // section 3 -- what a kitchen or a mill makes of the food above
+            Flour,
+            Bread,
+            Beer,
+            Wine,
+            Cheese,
+            DriedMeat,
+            CannedFood,
+            Preserves
+        }
+
+        // What a store holds. Ordinal 0 is Nothing, so an empty slot and "no good" are the same
+        // value and a zeroed array is an empty warehouse.
+        public enum Good extends EconomyGoods {
+            Nothing
+
+            byCatalog {
+                Wood,
+                Stone,
+                Marble,
+                Clay,
+                Sand,
+                Coal,
+                Salt,
+                Sulfur,
+                Gems,
+                Oil,
+                RareEarth,
+                IronOre,
+                CopperOre,
+                TinOre,
+                GoldOre,
+                SilverOre,
+                Grain,
+                Berries,
+                Fruit,
+                Grapes,
+                Vegetables,
+                Mushrooms,
+                Herbs,
+                Fish,
+                RawMeat,
+                Milk,
+                Honey,
+                Egg,
+                Cotton,
+                Flax,
+                Wool,
+                Hide,
+                Reeds,
+                Plank,
+                Charcoal,
+                Brick,
+                Pottery,
+                Glass,
+                Paper,
+                Leather,
+                Cloth,
+                Rope,
+                Cement,
+                IronIngot,
+                CopperIngot,
+                BronzeIngot,
+                Steel,
+                GoldBar,
+                SilverBar,
+                Flour,
+                Bread,
+                Beer,
+                Wine,
+                Cheese,
+                DriedMeat,
+                CannedFood,
+                Preserves
+            }
+        }
+
+        // The document's storage/UI grouping, and the only thing the sim needs to ask about a good
+        // it does not otherwise know: whether somebody can eat it.
+        public enum GoodTier {
+            None,
+            Raw,
+            Material,
+            Food
+        }
+
+        // The per-good table, in the same parallel-array style as Biomes and Nodes: filled once at
+        // class load, read by ordinal, sized from the enum so it cannot drift from it.
+        public class Goods {
+            private static mutable String[] NAME;
+            private static mutable int[] TIER;
+
+            onClassLoad {
+                int n = Good.count();
+                Goods.NAME = new String[n]();
+                Goods.TIER = new int[n]();
+                mutable int i = 0;
+                while (i < n) {
+                    Goods.NAME[i] = "Nothing";
+                    Goods.TIER[i] = cast<int>(GoodTier.None);
+                    i = i + 1;
+                }
+                int raw = cast<int>(GoodTier.Raw);
+                int mat = cast<int>(GoodTier.Material);
+                int food = cast<int>(GoodTier.Food);
+
+                Goods.put(cast<int>(Good.Wood), "Wood", raw);
+                Goods.put(cast<int>(Good.Stone), "Stone", raw);
+                Goods.put(cast<int>(Good.Marble), "Marble", raw);
+                Goods.put(cast<int>(Good.Clay), "Clay", raw);
+                Goods.put(cast<int>(Good.Sand), "Sand", raw);
+                Goods.put(cast<int>(Good.Coal), "Coal", raw);
+                Goods.put(cast<int>(Good.Salt), "Salt", raw);
+                Goods.put(cast<int>(Good.Sulfur), "Sulfur", raw);
+                Goods.put(cast<int>(Good.Gems), "Gems", raw);
+                Goods.put(cast<int>(Good.Oil), "Oil", raw);
+                Goods.put(cast<int>(Good.RareEarth), "RareEarth", raw);
+                Goods.put(cast<int>(Good.IronOre), "IronOre", raw);
+                Goods.put(cast<int>(Good.CopperOre), "CopperOre", raw);
+                Goods.put(cast<int>(Good.TinOre), "TinOre", raw);
+                Goods.put(cast<int>(Good.GoldOre), "GoldOre", raw);
+                Goods.put(cast<int>(Good.SilverOre), "SilverOre", raw);
+
+                // Raw AND edible: these come off a node or an animal and go straight into a mouth.
+                Goods.put(cast<int>(Good.Grain), "Grain", food);
+                Goods.put(cast<int>(Good.Berries), "Berries", food);
+                Goods.put(cast<int>(Good.Fruit), "Fruit", food);
+                Goods.put(cast<int>(Good.Grapes), "Grapes", food);
+                Goods.put(cast<int>(Good.Vegetables), "Vegetables", food);
+                Goods.put(cast<int>(Good.Mushrooms), "Mushrooms", food);
+                Goods.put(cast<int>(Good.Herbs), "Herbs", raw);
+                Goods.put(cast<int>(Good.Fish), "Fish", food);
+                Goods.put(cast<int>(Good.RawMeat), "RawMeat", food);
+                Goods.put(cast<int>(Good.Milk), "Milk", food);
+                Goods.put(cast<int>(Good.Honey), "Honey", food);
+                Goods.put(cast<int>(Good.Egg), "Egg", food);
+                Goods.put(cast<int>(Good.Cotton), "Cotton", raw);
+                Goods.put(cast<int>(Good.Flax), "Flax", raw);
+                Goods.put(cast<int>(Good.Wool), "Wool", raw);
+                Goods.put(cast<int>(Good.Hide), "Hide", raw);
+                Goods.put(cast<int>(Good.Reeds), "Reeds", raw);
+
+                Goods.put(cast<int>(Good.Plank), "Plank", mat);
+                Goods.put(cast<int>(Good.Charcoal), "Charcoal", mat);
+                Goods.put(cast<int>(Good.Brick), "Brick", mat);
+                Goods.put(cast<int>(Good.Pottery), "Pottery", mat);
+                Goods.put(cast<int>(Good.Glass), "Glass", mat);
+                Goods.put(cast<int>(Good.Paper), "Paper", mat);
+                Goods.put(cast<int>(Good.Leather), "Leather", mat);
+                Goods.put(cast<int>(Good.Cloth), "Cloth", mat);
+                Goods.put(cast<int>(Good.Rope), "Rope", mat);
+                Goods.put(cast<int>(Good.Cement), "Cement", mat);
+                Goods.put(cast<int>(Good.IronIngot), "IronIngot", mat);
+                Goods.put(cast<int>(Good.CopperIngot), "CopperIngot", mat);
+                Goods.put(cast<int>(Good.BronzeIngot), "BronzeIngot", mat);
+                Goods.put(cast<int>(Good.Steel), "Steel", mat);
+                Goods.put(cast<int>(Good.GoldBar), "GoldBar", mat);
+                Goods.put(cast<int>(Good.SilverBar), "SilverBar", mat);
+
+                Goods.put(cast<int>(Good.Flour), "Flour", mat);
+                Goods.put(cast<int>(Good.Bread), "Bread", food);
+                Goods.put(cast<int>(Good.Beer), "Beer", food);
+                Goods.put(cast<int>(Good.Wine), "Wine", food);
+                Goods.put(cast<int>(Good.Cheese), "Cheese", food);
+                Goods.put(cast<int>(Good.DriedMeat), "DriedMeat", food);
+                Goods.put(cast<int>(Good.CannedFood), "CannedFood", food);
+                Goods.put(cast<int>(Good.Preserves), "Preserves", food);
+            }
+
+            private static method put(int ord, String name, int tier) returns void {
+                Goods.NAME[ord] = name;
+                Goods.TIER[ord] = tier;
+            }
+
+            public static method count() returns int {
+                return Good.count();
+            }
+
+            public static method name(int ord) returns String {
+                return Goods.NAME[ord];
+            }
+
+            public static method tier(int ord) returns int {
+                return Goods.TIER[ord];
+            }
+
+            // Whether a hungry person can live on it. Flour is a material and bread is a meal, which
+            // is the whole point of the mill and the bakery existing.
+            public static method edible(int ord) returns boolean {
+                return Goods.TIER[ord] == cast<int>(GoodTier.Food);
+            }
+        }
+    }
+}

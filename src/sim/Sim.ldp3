@@ -2,9 +2,15 @@ import System.IO.Console;
 import Agents.World.Grid;
 import Agents.World.Biomes;
 import Agents.World.LandMath;
+import Agents.World.NodeField;
+import Agents.World.Nodes;
+import Agents.World.Harvest;
+import Agents.World.Good;
+import Agents.World.Goods;
 import System.Math.Math;
 import Agents.People.AgentTable;
 import Agents.People.Act;
+import Agents.People.Job;
 
 // The clock. Named Simulation and not World or Sim: `World` is a NAMESPACE here and `Sim`
 // is this one, and a type sharing either name corrupts symbol resolution -- which the compiler
@@ -57,12 +63,18 @@ public bundle Agents {
             private mutable int[] cmales;
             private mutable float[] ccx;       // where the community actually is, as its mean
             private mutable float[] ccy;
-            private mutable int[] cwood;       // its store
-            // Where this community knows there is wood, or -1. A community is swept once a second
-            // anyway, so it can afford the wide search that an individual cannot: asking it costs
-            // one search per PLACE per second instead of one per PERSON per decision.
-            private mutable int[] cwoodX;
-            private mutable int[] cwoodY;
+            // Everything every community owns. It was a single `int cwood`, which was honest for one
+            // trade and stopped being honest the moment there were six.
+            private mutable Stores* stores;
+            // Where this community knows there is work of each kind, or -1: one site per Harvest
+            // class per community. A community is swept once a second anyway, so it can afford the
+            // wide search that an individual cannot -- asking it costs one search per PLACE per
+            // second instead of one per PERSON per decision.
+            private mutable int[] cworkX;
+            private mutable int[] cworkY;
+            // How many of its grown people are already in each trade, so a place cannot become a
+            // thousand woodcutters and no fishermen.
+            private mutable int[] ctrade;
             private mutable int ncomm;
             private mutable float censusDue;
             private mutable long births;
@@ -79,9 +91,11 @@ public bundle Agents {
             private mutable long walkTicks;
             private mutable long wanderTicks;
             private mutable long workTicks;
-            private mutable long felled;
-            private mutable long woodHome;
-            private mutable long noWood;       // searches that found no tree at all
+            private mutable long felled;       // nodes worked out entirely
+            private mutable long carried;      // units that reached a store
+            private mutable long noWork;       // decisions that found nothing to do
+            private mutable long meals;        // units eaten
+            private mutable long hungryTicks;  // seconds lived by somebody with nothing to eat
             private mutable int frames;
 
             public static float SPEED = 1.25;       // cells a second
@@ -109,11 +123,13 @@ public bundle Agents {
                 this.cmales = new int[this.ncomm]();
                 this.ccx = new float[this.ncomm]();
                 this.ccy = new float[this.ncomm]();
-                this.cwood = new int[this.ncomm]();
-                this.cwoodX = new int[this.ncomm]();
-                this.cwoodY = new int[this.ncomm]();
-                for (int c in 0..this.ncomm) {
-                    this.cwoodX[c] = 0 - 1;                 // nowhere known yet, and (0,0) is not it
+                this.stores = new Stores(this.ncomm) on heap;
+                int nh = Harvest.count();
+                this.cworkX = new int[this.ncomm * nh]();
+                this.cworkY = new int[this.ncomm * nh]();
+                this.ctrade = new int[this.ncomm * nh]();
+                for (int s in 0..this.ncomm * nh) {
+                    this.cworkX[s] = 0 - 1;                 // nowhere known yet, and (0,0) is not it
                 }
                 this.censusDue = 0.0;
                 this.births = 0;
@@ -123,8 +139,10 @@ public bundle Agents {
                 this.wanderTicks = 0;
                 this.workTicks = 0;
                 this.felled = 0;
-                this.woodHome = 0;
-                this.noWood = 0;
+                this.carried = 0;
+                this.noWork = 0;
+                this.meals = 0;
+                this.hungryTicks = 0;
                 this.frames = 0;
             }
 
@@ -134,9 +152,14 @@ public bundle Agents {
                 delete this.cmales;
                 delete this.ccx;
                 delete this.ccy;
-                delete this.cwood;
-                delete this.cwoodX;
-                delete this.cwoodY;
+                delete this.stores;
+                delete this.cworkX;
+                delete this.cworkY;
+                delete this.ctrade;
+            }
+
+            public method store() returns Stores* {
+                return this.stores;
             }
 
             public method setBudget(int b) returns void
@@ -249,16 +272,16 @@ public bundle Agents {
                     if (this.folk.thinkAtOf(i) > this.tick) {
                         continue;
                     }
-                    // Everybody grown is a woodcutter in this slice. That is not a shortcut for the
-                    // job system -- it is the point of the measurement: fifty thousand people all
-                    // doing the one trade is the harshest possible test of whether a living can be
-                    // made within a walk of home. Capacity rules that stop a place becoming ten
-                    // thousand woodcutters belong with the other twelve trades.
+                    // A grown person takes a trade their community has room and work for, and then
+                    // goes and does it. Everybody being a woodcutter -- which is what the previous
+                    // slice measured -- was the harshest possible test of travel, and it also took
+                    // ninety-one per cent of the world's trees in one arc. What stops that is not a
+                    // cap on cutting: it is that there are five other things worth doing.
                     if (this.folk.isAdult(i)) {
                         if (this.folk.jobOf(i) == cast<int>(Job.Idle)) {
-                            this.folk.setJob(i, cast<int>(Job.Woodcutter));
+                            this.chooseJob(i);
                         }
-                        this.workWood(i);
+                        this.workGather(i);
                     }
                     if (this.folk.actOf(i) == cast<int>(Act.Idle)) {
                         this.chooseTarget(i);
@@ -297,7 +320,11 @@ public bundle Agents {
                     this.folk.setAct(i, cast<int>(Act.Idle));
                     return;
                 }
-                int got = nf.harvest(t, Simulation.LOAD);
+                // What comes off it is decided by the NODE and not by the worker: the table in
+                // docs/ECONOMY.md section 1 says an oak gives Wood and a salt deposit gives Salt,
+                // and reading it here is what stops the trades and the world drifting apart.
+                int good = Nodes.gives(nf.kindAt(t));
+                int got = nf.harvest(t, this.loadFor(this.harvestOf(this.folk.jobOf(i))));
                 if (got <= 0) {
                     this.folk.setTargetNode(i, 0 - 1);
                     this.folk.setAct(i, cast<int>(Act.Idle));
@@ -307,7 +334,7 @@ public bundle Agents {
                     this.felled = this.felled + 1;               // that one is gone for good
                     this.folk.setTargetNode(i, 0 - 1);
                 }
-                this.folk.setCarry(i, cast<int>(NodeKind.Broadleaf), got);
+                this.folk.setCarry(i, good, got);
                 this.folk.setAct(i, cast<int>(Act.Idle));
                 return;
             }
@@ -326,7 +353,7 @@ public bundle Agents {
                     if (this.folk.actOf(i) == cast<int>(Act.Gather)) {
                         this.folk.addTimer(i, dt);
                         this.workTicks = this.workTicks + 1;
-                        if (this.folk.timerOf(i) >= Simulation.CHOP) {
+                        if (this.folk.timerOf(i) >= this.workTime(this.harvestOf(this.folk.jobOf(i)))) {
                             this.chop(i);
                         }
                         i = i + 1;
@@ -433,20 +460,31 @@ public bundle Agents {
             // one world. It is a handful of byte updates a head, cheaper than deciding to skip them.
             public static float ADULT_AT = 60.0;
             public static float HUNGER_EVERY = 7.0;      // one point of hunger per this many seconds
+            // Both of these were set against a scale that does not exist. Hunger killed at a hundred
+            // points and a life is three hundred and sixty seconds, so at a point every seven the
+            // most anyone ever reached was fifty-one: NOBODY COULD STARVE, and the starvation counter
+            // read zero for the honest reason that the mechanism was unreachable. Eating started at
+            // thirty, which is two hundred and ten seconds -- most of a life -- so a person ate about
+            // once before dying of old age and the larders filled up with food nobody wanted.
+            //
+            // Against a six-minute life: peckish after thirty-five seconds, dead after a hundred and
+            // seventy-five without anything at all. That is about ten meals in a life, which is what
+            // makes food a constraint instead of decoration.
+            public static int HUNGRY_AT = 5;
+            public static int STARVE_AT = 25;
             public static float TIRED_EVERY = 12.0;
             public static float TERM = 45.0;             // a pregnancy
             public static float FERTILE_TO = 0.85;       // of a lifespan
-            // The logistic pair. CARRY is where a community stops growing outright; the population
-            // settles WELL BELOW it, at whatever size makes the birth rate equal the death rate.
-            // Both numbers stand in for the real limit -- how much food there is -- and are replaced
-            // by it, not tuned around it, when the economy arrives.
-            // Below the fifty thousand rows of the table on purpose. With a hundred communities at
-            // seven hundred each the ceiling was seventy thousand, so the world never reached its own
-            // carrying capacity -- it ran out of TABLE, and the flat population curve across twenty
-            // generations was the pool being full, not an equilibrium. A ceiling the simulation can
-            // actually reach is the only way the logistic means anything.
-            public static int CARRY = 450;
-            public static float FERTILITY = 0.045;       // chance per SECOND when a place is empty
+            // What a full larder means, in units of food per head. Reach it and a community is as
+            // fertile as it gets; hold half of it and the birth rate halves with it.
+            //
+            // This replaces CARRY, a fixed number of people that stood in for how much food there
+            // was. The design said from the start that both it and FERTILITY "stand in for the real
+            // limit -- how much food there is -- and are replaced by it, not tuned around it, when
+            // the economy arrives". It has arrived: a community's ceiling is now something it can
+            // raise by working well and lose by stripping the land around it.
+            public static int LARDER = 8;
+            public static float FERTILITY = 0.045;       // chance per SECOND with a full larder
 
             private method live(float dt) returns void {
                 float t = this.clock;
@@ -478,16 +516,26 @@ public bundle Agents {
                     if (wearier) {
                         this.folk.setTired(i, this.folk.tiredOf(i) + 1);
                     }
-                    if (this.folk.hungerOf(i) >= 100) {
+                    if (this.folk.hungerOf(i) >= Simulation.STARVE_AT) {
                         this.folk.kill(i);
                         this.deathsHunger = this.deathsHunger + 1;
                         i = i + 1;
                         continue;
                     }
-                    // Food is free in this slice, so nobody starves. The mechanism is whole and in
-                    // place; what is missing is the COST, and that arrives with the woodcutter.
-                    if (this.folk.hungerOf(i) >= 30 && this.folk.isAdult(i)) {
-                        this.folk.setHunger(i, 0);
+                    // Food was free until this slice, and CARRY stood in for it. It is real now:
+                    // eating takes something edible out of the community's store, and if the store
+                    // is empty the hunger stays and eventually kills. This is the whole reason the
+                    // forager and the fisherman exist, and the reason a place that quarries
+                    // beautifully and grows nothing does not last.
+                    if (this.folk.hungerOf(i) >= Simulation.HUNGRY_AT) {
+                        int hh = this.folk.homeOf(i);
+                        int ate = this.stores.eat(hh, 1);
+                        if (ate > 0) {
+                            this.meals = this.meals + cast<long>(ate);
+                            this.folk.setHunger(i, 0);
+                        } else {
+                            this.hungryTicks = this.hungryTicks + 1;
+                        }
                     }
                     if (this.folk.tiredOf(i) >= 70) {
                         this.folk.setTired(i, 0);
@@ -513,6 +561,7 @@ public bundle Agents {
             }
 
             private method census() returns void {
+                int nh = Harvest.count();
                 mutable int c = 0;
                 while (c < this.ncomm) {
                     this.cpop[c] = 0;
@@ -520,6 +569,9 @@ public bundle Agents {
                     this.cmales[c] = 0;
                     this.ccx[c] = 0.0;
                     this.ccy[c] = 0.0;
+                    for (int hc in 0..nh) {
+                        this.ctrade[c * nh + hc] = 0;
+                    }
                     c = c + 1;
                 }
                 int n = this.folk.limit();
@@ -536,6 +588,13 @@ public bundle Agents {
                                 if (!this.folk.isFemale(i)) {
                                     this.cmales[h] = this.cmales[h] + 1;
                                 }
+                                // Who is already doing what. Counted from the people themselves and
+                                // never incrementally, so a death or a change of trade can never
+                                // leave a phantom worker holding a place in a quota.
+                                int hc = this.harvestOf(this.folk.jobOf(i));
+                                if (hc != cast<int>(Harvest.Nothing)) {
+                                    this.ctrade[h * nh + hc] = this.ctrade[h * nh + hc] + 1;
+                                }
                             }
                         }
                     }
@@ -549,74 +608,139 @@ public bundle Agents {
                     if (this.cpop[c] > 0) {
                         this.ccx[c] = this.ccx[c] / cast<float>(this.cpop[c]);
                         this.ccy[c] = this.ccy[c] / cast<float>(this.cpop[c]);
-                        // And where its wood is. The wide search happens HERE, once for the whole
-                        // place, instead of once per person per decision -- which was eighteen
-                        // million failed searches in two hours of world time, each sweeping six
-                        // thousand cells, and four fifths of the running time.
-                        this.findWood(c);
+                        // And where its work is, of every kind. The wide search happens HERE, once
+                        // for the whole place, instead of once per person per decision -- which was
+                        // eighteen million failed searches in two hours of world time, each sweeping
+                        // six thousand cells, and four fifths of the running time.
+                        for (int hc in 1..Harvest.count()) {
+                            this.findWork(c, hc);
+                        }
                     } else {
-                        this.cwoodX[c] = 0 - 1;
+                        for (int hc in 0..Harvest.count()) {
+                            this.cworkX[c * Harvest.count() + hc] = 0 - 1;
+                        }
                     }
                     c = c + 1;
                 }
                 return;
             }
 
-            // The nearest BLOCK of woodland to a community's centre, in blocks of sixteen cells. Not
-            // the nearest tree: a community that knows one tree sends everybody to it, the first
-            // arrival takes it and the rest walk to a stump. A block is an area, so people spread out
-            // inside it by themselves, and it stays true without being re-searched because `harvest`
-            // decrements it as trees come down.
+            // How many of a community's grown people should be in one trade. Everybody doing the same
+            // thing is not a village, and it is also the fastest way to strip a resource: the first
+            // measurement had thirty-two thousand woodcutters take ninety-one per cent of the world's
+            // trees in one arc. A share per trade, with a floor, so a small place still fishes.
+            private method quotaFor(int c, int hclass) returns int {
+                int adults = this.cadults[c];
+                if (adults <= 0) {
+                    return 0;
+                }
+                mutable int q = adults / 6;
+                // Except that a hungry place puts most of its hands on food. A flat share of the
+                // adults for every trade is what a spreadsheet does, not what people do: the first
+                // measurement had a sixth of each village foraging while the larder was empty seventy
+                // million times over, and the world died out in nineteen generations with woodcutters
+                // still dutifully cutting wood.
+                if (hclass == cast<int>(Harvest.Forage) || hclass == cast<int>(Harvest.Fishing)) {
+                    if (this.stores.foodOf(c) < this.cpop[c] * Simulation.LARDER) {
+                        q = adults / 2;
+                    }
+                }
+                if (q < 2) {
+                    q = 2;
+                }
+                return q;
+            }
+
+            // How long one load takes, and how much of it comes away. Picking berries is not felling
+            // an oak and neither is cutting into a seam: giving them all the same eighteen seconds
+            // said a forager feeds about as many mouths as a woodcutter fills woodsheds, which is how
+            // a world with plenty of berries in it starved to death.
+            private method workTime(int hclass) returns float {
+                if (hclass == cast<int>(Harvest.Forage)) {
+                    return 8.0;
+                }
+                if (hclass == cast<int>(Harvest.Fishing)) {
+                    return 12.0;
+                }
+                if (hclass == cast<int>(Harvest.Quarry)) {
+                    return 22.0;
+                }
+                if (hclass == cast<int>(Harvest.Mine)) {
+                    return 28.0;
+                }
+                return Simulation.CHOP;
+            }
+
+            private method loadFor(int hclass) returns int {
+                if (hclass == cast<int>(Harvest.Forage)) {
+                    return 12;
+                }
+                if (hclass == cast<int>(Harvest.Fishing)) {
+                    return 20;
+                }
+                if (hclass == cast<int>(Harvest.Mine)) {
+                    return 8;
+                }
+                return Simulation.LOAD;
+            }
+
+            // The nearest BLOCK with work of one kind, in blocks of sixteen cells. Not the nearest
+            // node: a community that knows one tree sends everybody to it, the first arrival takes
+            // it and the rest walk to a stump. A block is an area, so people spread out inside it by
+            // themselves, and it stays true without being re-searched because `harvest` decrements
+            // it as things are used up.
             //
-            // A place with no woodland within reach records none, and its people stop asking instead
-            // of each of them discovering the same emptiness over and over.
-            private method findWood(int c) returns void {
+            // A place with nothing of that kind within reach records none, and its people stop
+            // asking instead of each of them discovering the same emptiness over and over.
+            private method findWork(int c, int hclass) returns void {
                 NodeField* nf = this.g.surface();
+                int at = c * Harvest.count() + hclass;
                 int cbx = cast<int>(this.ccx[c]) / 16;
                 int cby = cast<int>(this.ccy[c]) / 16;
-                if (this.cwoodX[c] >= 0) {
-                    if (nf.treesInBlock(this.cwoodX[c], this.cwoodY[c]) > 0) {
-                        return;                                  // the wood is still standing
+                if (this.cworkX[at] >= 0) {
+                    if (nf.inBlock(this.cworkX[at], this.cworkY[at], hclass) > 0) {
+                        return;                                  // it is all still there
                     }
                 }
                 mutable int r = 0;
-                while (r <= Simulation.WOOD_BLOCKS) {
+                while (r <= Simulation.WORK_BLOCKS) {
                     mutable int dx = 0 - r;
                     while (dx <= r) {
-                        if (nf.treesInBlock(cbx + dx, cby - r) > 0) {
-                            this.cwoodX[c] = cbx + dx;
-                            this.cwoodY[c] = cby - r;
+                        if (nf.inBlock(cbx + dx, cby - r, hclass) > 0) {
+                            this.cworkX[at] = cbx + dx;
+                            this.cworkY[at] = cby - r;
                             return;
                         }
-                        if (nf.treesInBlock(cbx + dx, cby + r) > 0) {
-                            this.cwoodX[c] = cbx + dx;
-                            this.cwoodY[c] = cby + r;
+                        if (nf.inBlock(cbx + dx, cby + r, hclass) > 0) {
+                            this.cworkX[at] = cbx + dx;
+                            this.cworkY[at] = cby + r;
                             return;
                         }
                         dx = dx + 1;
                     }
                     mutable int dy = 1 - r;
                     while (dy <= r - 1) {
-                        if (nf.treesInBlock(cbx - r, cby + dy) > 0) {
-                            this.cwoodX[c] = cbx - r;
-                            this.cwoodY[c] = cby + dy;
+                        if (nf.inBlock(cbx - r, cby + dy, hclass) > 0) {
+                            this.cworkX[at] = cbx - r;
+                            this.cworkY[at] = cby + dy;
                             return;
                         }
-                        if (nf.treesInBlock(cbx + r, cby + dy) > 0) {
-                            this.cwoodX[c] = cbx + r;
-                            this.cwoodY[c] = cby + dy;
+                        if (nf.inBlock(cbx + r, cby + dy, hclass) > 0) {
+                            this.cworkX[at] = cbx + r;
+                            this.cworkY[at] = cby + dy;
                             return;
                         }
                         dy = dy + 1;
                     }
                     r = r + 1;
                 }
-                this.cwoodX[c] = 0 - 1;
+                this.cworkX[at] = 0 - 1;
                 return;
             }
 
-            // Whether a grown woman conceives now, as a logistic: the chance falls as her community
-            // fills, so the population finds its own level rather than running away or dying out.
+            // Whether a grown woman conceives now, as a logistic against the LARDER: the chance falls
+            // as the food per head falls, so the population finds its own level rather than running
+            // away or dying out -- and the level is now something the community's own work decides.
             //
             // The first attempt died out inside fifteen generations, and the arithmetic says exactly
             // why -- worth keeping written down, because it is the same shape of mistake every time.
@@ -624,17 +748,13 @@ public bundle Agents {
             // from sixty seconds to FERTILE_TO of a life, about two hundred and fifty seconds. Each
             // child costs TERM in gestation plus 1/(p*room) waiting to conceive, so
             // 2*(TERM + 1/(p*room)) <= 250 -- which at p = 0.045 a second puts the balance at about
-            // room = 0.28, a community settling near three quarters of CARRY. The first attempt had
-            // an effective chance of 0.0057 a second inside a window of two hundred and fifty:
-            // most women never conceived at all.
+            // room = 0.28. The first attempt had an effective chance of 0.0057 a second inside a
+            // window of two hundred and fifty: most women never conceived at all.
             //
             // The shape underneath was wrong too. With `p = base * emptiness`, the only point where
             // births balance deaths is emptiness = 1, which is a population of zero: it was drawn
             // toward extinction by construction. With FERTILITY set well ABOVE replacement, the
             // balance lands at a real population instead, and the world finds it rather than me.
-            //
-            // CARRY and FERTILITY both stand in for the real limit -- how much food there is. The
-            // economy replaces them; it does not tune them.
             private method mayConceive(int i, float dt) returns boolean {
                 if (!this.folk.isFemale(i) || !this.folk.isAdult(i) || this.folk.isPregnant(i)) {
                     return false;
@@ -649,7 +769,17 @@ public bundle Agents {
                 if (this.cmales[h] == 0) {
                     return false;                       // nobody to father a child
                 }
-                float room = 1.0 - cast<float>(this.cpop[h]) / cast<float>(Simulation.CARRY);
+                // How much room there is, which since this slice means HOW MUCH FOOD THERE IS. CARRY
+                // was a stand-in for it and the design said so from the start: "both numbers stand
+                // in for the real limit -- how much food there is -- and are replaced by it, not
+                // tuned around it, when the economy arrives." It has arrived. A community with a
+                // full larder is empty; one living hand to mouth does not conceive.
+                float larder = cast<float>(this.stores.foodOf(h))
+                             / cast<float>(this.cpop[h] * Simulation.LARDER + 1);
+                mutable float room = larder;
+                if (room > 1.0) {
+                    room = 1.0;
+                }
                 if (room <= 0.0) {
                     return false;
                 }
@@ -659,7 +789,7 @@ public bundle Agents {
                 return LandMath.hash01(this.seed ^ 0x6C21, i, this.frames) < Simulation.FERTILITY * dt * room;
             }
 
-            public static int WOOD_BLOCKS = 3;           // 16-cell blocks a COMMUNITY looks over: 48 cells
+            public static int WORK_BLOCKS = 3;           // 16-cell blocks a COMMUNITY looks over: 48 cells
             public static int REACH = 6;                 // cells a person searches where they stand
             // A WORK SESSION, not a grab. At five seconds a load the trade was seventy-one per cent
             // walking -- and the wood was only seven or eight cells away, so the map was never the
@@ -670,17 +800,18 @@ public bundle Agents {
             public static float CHOP = 18.0;             // seconds to take a load off a tree
             public static int LOAD = 10;                 // wood carried in one trip
 
-            // The nearest tree, searched ring by ring outward so the FIRST one found is the closest
-            // and the search stops there. Ring by ring and not square by square: scanning the whole
-            // box at each radius would re-test everything inside it and turn a search into a sweep.
+            // The nearest node this trade can work, searched ring by ring outward so the FIRST one
+            // found is the closest and the search stops there. Ring by ring and not square by square:
+            // scanning the whole box at each radius would re-test everything inside it and turn a
+            // search into a sweep.
             //
             // A PERSON only ever calls this with a small radius, standing where the community said
-            // the wood was. The wide version belongs to the community and runs once a second.
-            private method findTree(int i, int reach) returns int {
+            // the work was. The wide version belongs to the community and runs once a second.
+            private method findNode(int i, int hclass, int reach) returns int {
                 NodeField* nf = this.g.surface();
                 int cx = cast<int>(this.folk.xAt(i));
                 int cy = cast<int>(this.folk.yAt(i));
-                mutable int here = nf.treeAt(cx, cy);
+                mutable int here = nf.nodeAt(cx, cy, hclass);
                 if (here >= 0) {
                     return here;
                 }
@@ -688,11 +819,11 @@ public bundle Agents {
                 while (r <= reach) {
                     mutable int dx = 0 - r;
                     while (dx <= r) {
-                        mutable int t = nf.treeAt(cx + dx, cy - r);
+                        mutable int t = nf.nodeAt(cx + dx, cy - r, hclass);
                         if (t >= 0) {
                             return t;
                         }
-                        t = nf.treeAt(cx + dx, cy + r);
+                        t = nf.nodeAt(cx + dx, cy + r, hclass);
                         if (t >= 0) {
                             return t;
                         }
@@ -700,11 +831,11 @@ public bundle Agents {
                     }
                     mutable int dy = 1 - r;
                     while (dy <= r - 1) {
-                        mutable int t = nf.treeAt(cx - r, cy + dy);
+                        mutable int t = nf.nodeAt(cx - r, cy + dy, hclass);
                         if (t >= 0) {
                             return t;
                         }
-                        t = nf.treeAt(cx + r, cy + dy);
+                        t = nf.nodeAt(cx + r, cy + dy, hclass);
                         if (t >= 0) {
                             return t;
                         }
@@ -715,6 +846,87 @@ public bundle Agents {
                 return 0 - 1;
             }
 
+            // The trade a Job goes out to do. Not every job is an extraction -- the refiners work in
+            // buildings and have no Harvest class at all, which is exactly why they wait for them.
+            private method harvestOf(int job) returns int {
+                if (job == cast<int>(Job.Woodcutter)) {
+                    return cast<int>(Harvest.Timber);
+                }
+                if (job == cast<int>(Job.Forager)) {
+                    return cast<int>(Harvest.Forage);
+                }
+                if (job == cast<int>(Job.Quarrier)) {
+                    return cast<int>(Harvest.Quarry);
+                }
+                if (job == cast<int>(Job.Miner)) {
+                    return cast<int>(Harvest.Mine);
+                }
+                if (job == cast<int>(Job.Fisher)) {
+                    return cast<int>(Harvest.Fishing);
+                }
+                return cast<int>(Harvest.Nothing);
+            }
+
+            private method jobOfHarvest(int hclass) returns int {
+                if (hclass == cast<int>(Harvest.Timber)) {
+                    return cast<int>(Job.Woodcutter);
+                }
+                if (hclass == cast<int>(Harvest.Forage)) {
+                    return cast<int>(Job.Forager);
+                }
+                if (hclass == cast<int>(Harvest.Quarry)) {
+                    return cast<int>(Job.Quarrier);
+                }
+                if (hclass == cast<int>(Harvest.Mine)) {
+                    return cast<int>(Job.Miner);
+                }
+                if (hclass == cast<int>(Harvest.Fishing)) {
+                    return cast<int>(Job.Fisher);
+                }
+                return cast<int>(Job.Idle);
+            }
+
+            // Choose a trade. Two rules, in order, and both of them are about the community rather
+            // than the person: you do not take up a trade there is no work for, and you do not take
+            // up one that is already full. What is left is picked by what the place is SHORT of --
+            // food first, because a village that quarries beautifully and starves is not a village.
+            private method chooseJob(int i) returns void {
+                int h = this.folk.homeOf(i);
+                if (h < 0 || h >= this.ncomm) {
+                    return;
+                }
+                int nh = Harvest.count();
+                mutable int best = cast<int>(Job.Idle);
+                mutable int bestScore = 0;
+                for (int hc in 1..nh) {
+                    if (this.cworkX[h * nh + hc] < 0) {
+                        continue;                            // nothing of the kind within reach
+                    }
+                    if (this.ctrade[h * nh + hc] >= this.quotaFor(h, hc)) {
+                        continue;                            // that trade is full here
+                    }
+                    // Hungry places want food. It is not a preference, it is the only need the
+                    // simulation can kill you for.
+                    mutable int want = 10;
+                    if (hc == cast<int>(Harvest.Forage) || hc == cast<int>(Harvest.Fishing)) {
+                        want = 10 + 40 * (this.cpop[h] + 1) / (this.stores.foodOf(h) + 1);
+                        if (want > 100) {
+                            want = 100;
+                        }
+                    }
+                    if (want > bestScore) {
+                        bestScore = want;
+                        best = this.jobOfHarvest(hc);
+                    }
+                }
+                if (best != cast<int>(Job.Idle)) {
+                    this.folk.setJob(i, best);
+                    int hc = this.harvestOf(best);
+                    this.ctrade[h * nh + hc] = this.ctrade[h * nh + hc] + 1;
+                }
+                return;
+            }
+
             // Busy means committed to something. Wandering is NOT: somebody strolling because they had
             // nothing better to do should drop it the moment there is work, or half the population
             // spends its life finishing an aimless walk it started three seconds ago.
@@ -723,13 +935,22 @@ public bundle Agents {
                 return a != cast<int>(Act.Idle) && a != cast<int>(Act.Wander);
             }
 
-            // One trade, whole: find a tree, walk to it, fell a load, carry it home, hand it over.
-            // Everything an economy needs is in this loop -- a resource that runs out, a distance
-            // that costs time, and a store that grows -- which is why it is worth building alone
-            // before the other twelve trades exist.
-            private method workWood(int i) returns void {
+            // Any extractive trade, whole: find something of your kind, walk to it, work a load off
+            // it, carry it home, put it in the store. Everything an economy needs is in this loop --
+            // a resource that runs out, a distance that costs time, and a store that grows.
+            //
+            // It is ONE method for all five trades and not five methods, because a woodcutter and a
+            // fisherman differ in exactly two things: which Harvest class they look for and which
+            // Good comes off it. Everything else -- the community's site, the local search, the
+            // walk, the load, the trip home -- is the same work, and writing it five times would be
+            // five places to fix the next thing found wrong with it.
+            private method workGather(int i) returns void {
                 NodeField* nf = this.g.surface();
                 int h = this.folk.homeOf(i);
+                int hclass = this.harvestOf(this.folk.jobOf(i));
+                if (hclass == cast<int>(Harvest.Nothing)) {
+                    return;
+                }
                 if (this.folk.carryAmtOf(i) > 0) {
                     // Carrying: head home if not already going there, hand over on arrival.
                     if (this.busy(i)) {
@@ -740,8 +961,9 @@ public bundle Agents {
                     float dx = hx - this.folk.xAt(i);
                     float dy = hy - this.folk.yAt(i);
                     if (dx * dx + dy * dy < 4.0) {
-                        this.cwood[h] = this.cwood[h] + this.folk.carryAmtOf(i);
-                        this.woodHome = this.woodHome + cast<long>(this.folk.carryAmtOf(i));
+                        int amt = this.folk.carryAmtOf(i);
+                        this.stores.add(h, this.folk.carryKindOf(i), amt);
+                        this.carried = this.carried + cast<long>(amt);
                         this.folk.setCarry(i, 0, 0);
                         // and straight back out. Returning here left the man standing in his own
                         // village with nothing decided, so the next thing that touched him was the
@@ -758,7 +980,7 @@ public bundle Agents {
                 }
                 int t = this.folk.targetNodeOf(i);
                 if (t >= 0) {
-                    // Standing at the tree it set out for -- unless somebody else emptied it first,
+                    // Standing at the thing it set out for -- unless somebody else emptied it first,
                     // which is exactly what a shared, finite resource does to a plan.
                     if (nf.qtyAt(t) > 0) {
                         this.folk.setAct(i, cast<int>(Act.Gather));
@@ -767,15 +989,17 @@ public bundle Agents {
                     this.folk.setTargetNode(i, 0 - 1);
                 }
                 // Look around where you stand -- six cells, not forty. If there is nothing, you do not
-                // go looking: you go where your community says the wood is, and only search again
+                // go looking: you go where your community says the work is, and only search again
                 // once you are there. A person who does not know the world cannot search it, and a
                 // person who searches it forty cells at a time, thousands of times a second, is a
                 // profiler entry rather than a woodcutter.
-                mutable int found = this.findTree(i, Simulation.REACH);
+                int at = h * Harvest.count() + hclass;
+                mutable int found = this.findNode(i, hclass, Simulation.REACH);
                 if (found < 0) {
-                    if (h < 0 || h >= this.ncomm || this.cwoodX[h] < 0) {
-                        this.noWood = this.noWood + 1;
-                        this.folk.setThinkAt(i, this.tick + 30);   // this place has no wood at all
+                    if (h < 0 || h >= this.ncomm || this.cworkX[at] < 0) {
+                        this.noWork = this.noWork + 1;
+                        this.folk.setJob(i, cast<int>(Job.Idle));  // this trade has nothing here
+                        this.folk.setThinkAt(i, this.tick + 30);
                         return;
                     }
                     // A point inside the block, different for each person, so a hundred woodcutters
@@ -783,14 +1007,14 @@ public bundle Agents {
                     // ground you can stand on: aiming at whatever the jitter lands on sent one walk
                     // in six into a lake or a cliff face, to be abandoned thirty seconds later --
                     // `stuck` went from two in a hundred journeys to seventeen.
-                    mutable int wx = this.cwoodX[h] * 16 + 8;
-                    mutable int wy = this.cwoodY[h] * 16 + 8;
+                    mutable int wx = this.cworkX[at] * 16 + 8;
+                    mutable int wy = this.cworkY[at] * 16 + 8;
                     mutable int tries = 0;
                     while (tries < 4) {
                         int jx = cast<int>(LandMath.hash01(this.seed ^ 0x11B3, i * 5 + tries, this.tick) * 16.0);
                         int jy = cast<int>(LandMath.hash01(this.seed ^ 0x274D, i * 5 + tries, this.tick) * 16.0);
-                        int tx = this.cwoodX[h] * 16 + jx;
-                        int ty = this.cwoodY[h] * 16 + jy;
+                        int tx = this.cworkX[at] * 16 + jx;
+                        int ty = this.cworkY[at] * 16 + jy;
                         if (this.walkable(tx, ty)) {
                             wx = tx;
                             wy = ty;
@@ -803,9 +1027,9 @@ public bundle Agents {
                     float ay = cast<float>(wy) - this.folk.yAt(i);
                     if (ax * ax + ay * ay < 4.0) {
                         // Inside the block, six cells searched, and nothing. The block still counts
-                        // trees, so they are further in than the search reached: wait a moment and
-                        // aim at a different point rather than re-deciding on every tick.
-                        this.noWood = this.noWood + 1;
+                        // work, so it is further in than the search reached: wait a moment and aim
+                        // at a different point rather than re-deciding on every tick.
+                        this.noWork = this.noWork + 1;
                         this.folk.setThinkAt(i, this.tick + 3);
                         return;
                     }
@@ -835,6 +1059,7 @@ public bundle Agents {
                     this.census();
                     this.censusDue = this.clock + 1.0;
                 }
+                this.g.surface().regrow(dt);
                 this.live(dt);
                 this.think();
                 this.move(dt);
@@ -884,7 +1109,40 @@ public bundle Agents {
                 }
                 System.IO.Console.println($"  travel share: {share}/1000 of busy time spent walking");
                 System.IO.Console.println($"  time: {this.walkTicks} walking to work, {this.workTicks} working, {this.wanderTicks} wandering with nothing to do");
-                System.IO.Console.println($"  wood: {this.woodHome} carried home, {this.felled} trees felled out, {this.noWood} searches found none");
+                System.IO.Console.println($"  work: {this.carried} units carried home, {this.felled} nodes worked out, {this.noWork} decisions found nothing");
+                System.IO.Console.println($"  food: {this.meals} eaten, {this.hungryTicks} times somebody found the larder empty");
+                // What the world actually holds. THE number of this slice: a chain in ECONOMY.md
+                // section 1 that no community ever fills is a chain that does not exist, whatever
+                // the code says, and one held by a single village is a chain the world cannot rely
+                // on. Reading it per good is the only way to tell those apart.
+                System.IO.Console.println("  stores (produced / communities holding any):");
+                mutable int idle = 0;
+                for (int gd in 1..Goods.count()) {
+                    long made = this.stores.producedOf(gd);
+                    if (made == 0) {
+                        idle = idle + 1;
+                        continue;
+                    }
+                    System.IO.Console.println($"    {Goods.name(gd)}: {made} / {this.stores.holders(gd)}");
+                }
+                System.IO.Console.println($"    ({idle} goods never produced at all)");
+                // How the trades were shared out, counted from the living rather than from intent.
+                int nh = Harvest.count();
+                mutable int[] byTrade = new int[nh]();
+                int n = this.folk.limit();
+                mutable int k = 0;
+                while (k < n) {
+                    if (this.folk.alive(k) && this.folk.isAdult(k)) {
+                        byTrade[this.harvestOf(this.folk.jobOf(k))] = byTrade[this.harvestOf(this.folk.jobOf(k))] + 1;
+                    }
+                    k = k + 1;
+                }
+                System.IO.Console.println($"  trades: idle {byTrade[0]} | wood {byTrade[1]} | forage {byTrade[2]} | quarry {byTrade[3]} | mine {byTrade[4]} | fish {byTrade[5]}");
+                delete byTrade;
+                // What is left standing, against what the world started with. A resource that only
+                // goes down is being liquidated, and this is where that shows.
+                NodeField* nf = this.g.surface();
+                System.IO.Console.println($"  left standing: timber {nf.totalOf(1)} | forage {nf.totalOf(2)} | quarry {nf.totalOf(3)} | ore {nf.totalOf(4)} | fishing {nf.totalOf(5)}");
                 return;
             }
         }
