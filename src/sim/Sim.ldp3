@@ -108,6 +108,16 @@ public bundle Agents {
             private mutable int[] cflee;
             private mutable int[] cleave;      // how many more may go before the next census
             private mutable int[] cfood;       // food a head, so the pair loop is arithmetic
+            // The quarrel. `cfoe` is who this place raids, `craided` how many more censuses it
+            // remembers being hit -- a feud is a memory with a length, and when it runs out the war
+            // ends without anybody deciding to end it.
+            private mutable int[] cfoe;
+            private mutable int[] craided;
+            private mutable int[] craider;     // and who it was, so the answer has an address
+            private mutable long feuds;        // censuses spent with somebody to fight
+            private mutable long raids;        // warriors who reached an enemy village
+            private mutable long plunder;      // goods carried home off somebody else's shelves
+            private mutable long deathsWar;
             private mutable long hived;        // villages founded by a place outgrowing its ground
             private mutable long hivedFolk;    // and how many walked out in those parties
             private mutable long fled;         // people who left a place that could not feed them
@@ -309,6 +319,17 @@ public bundle Agents {
                 this.cflee = new int[this.ncomm]();
                 this.cleave = new int[this.ncomm]();
                 this.cfood = new int[this.ncomm]();
+                this.cfoe = new int[this.ncomm]();
+                this.craided = new int[this.ncomm]();
+                this.craider = new int[this.ncomm]();
+                this.feuds = 0;
+                this.raids = 0;
+                this.plunder = 0;
+                this.deathsWar = 0;
+                for (int c in 0..this.ncomm) {
+                    this.cfoe[c] = 0 - 1;
+                    this.craider[c] = 0 - 1;
+                }
                 for (int c in 0..this.ncomm) {
                     this.cworst[c] = 0 - 1;
                     this.cdead[c] = 0 - 1;
@@ -415,6 +436,9 @@ public bundle Agents {
                 delete this.cflee;
                 delete this.cleave;
                 delete this.cfood;
+                delete this.cfoe;
+                delete this.craided;
+                delete this.craider;
                 delete this.claim;
                 delete this.claimHold;
                 delete this.claimEdge;
@@ -551,7 +575,10 @@ public bundle Agents {
                 if (job == cast<int>(Job.Forager) || job == cast<int>(Job.Fisher)) {
                     return Simulation.C_CURIOUS;
                 }
-                if (job == cast<int>(Job.Builder)) {
+                if (job == cast<int>(Job.Builder) || job == cast<int>(Job.Raider)) {
+                    // Ambition is wanting more than you have and doing something about it. Raising
+                    // a hall is one way; taking somebody else's is the other. This axis read
+                    // 0..14 mean 0 across every measured arc until there was a second way.
                     return Simulation.C_AMBITION;
                 }
                 if (job == cast<int>(Job.Idle)) {
@@ -877,7 +904,9 @@ public bundle Agents {
                             this.chooseJob(i);
                         }
                         int jb = this.folk.jobOf(i);
-                        if (jb == cast<int>(Job.Builder)) {
+                        if (jb == cast<int>(Job.Raider)) {
+                            this.workRaid(i);
+                        } else if (jb == cast<int>(Job.Builder)) {
                             this.workBuild(i);
                         } else if (jb == cast<int>(Job.Hunter)) {
                             this.workHunt(i);
@@ -969,6 +998,15 @@ public bundle Agents {
                         this.workTicks = this.workTicks + 1;
                         if (this.folk.timerOf(i) >= Simulation.STALK) {
                             this.killDone(i);
+                        }
+                        i = i + 1;
+                        continue;
+                    }
+                    if (this.folk.actOf(i) == cast<int>(Act.Fight)) {
+                        this.folk.addTimer(i, dt);
+                        this.workTicks = this.workTicks + 1;
+                        if (this.folk.timerOf(i) >= Simulation.MELEE) {
+                            this.blowLanded(i);
                         }
                         i = i + 1;
                         continue;
@@ -1311,8 +1349,67 @@ public bundle Agents {
                 this.hive();
                 this.absorb();
                 this.wayOut();
+                this.quarrel();
                 return;
             }
+
+            // Who a community is at war with, or -1.
+            //
+            // The cause is never a die roll. It is the SAME signal that drives migration -- we are
+            // hungry and there is a fatter place within reach -- and what a village does about it is
+            // decided by what the village IS. A bold and greedy place takes; anybody else walks.
+            // That is the whole point of the culture slice finally paying for itself: two villages
+            // on identical ground, one starving beside the other's granary, do different things, and
+            // the difference is a hundred and twenty seconds of their own history.
+            //
+            // The second cause is being raided, and it is the one that makes violence last. A place
+            // that was hit hits back, whatever its temperament, and it goes on hitting back while it
+            // remembers -- which is how a quarrel over one bad winter becomes a feud that outlives
+            // everybody who started it.
+            private method quarrel() returns void {
+                for (int c in 0..this.ncomm) {
+                    if (this.craided[c] > 0) {
+                        this.craided[c] = this.craided[c] - 1;
+                    }
+                    if (this.cpop[c] <= 0) {
+                        this.cfoe[c] = 0 - 1;
+                        this.craided[c] = 0;
+                        this.craider[c] = 0 - 1;
+                        continue;
+                    }
+                    // A feud outranks a want. You do not go looking for somebody else's granary
+                    // while somebody is at your own door, and no temperament is consulted -- a
+                    // gentle village that has been raided raids back, which is the whole reason
+                    // violence in this world outlives the hunger that started it.
+                    int back = this.craider[c];
+                    if (this.craided[c] > 0 && back >= 0 && this.cpop[back] > 0) {
+                        this.cfoe[c] = back;
+                        this.feuds = this.feuds + 1;
+                        continue;
+                    }
+                    int want = this.cflee[c];
+                    if (want < 0) {
+                        this.cfoe[c] = 0 - 1;
+                        continue;
+                    }
+                    int nerve = this.cultureOf(c, Simulation.C_BOLD)
+                              + this.cultureOf(c, Simulation.C_GREED);
+                    if (nerve < Simulation.WARLIKE) {
+                        this.cfoe[c] = 0 - 1;    // they will go hungry, or they will leave
+                        continue;
+                    }
+                    this.cfoe[c] = want;
+                    this.feuds = this.feuds + 1;
+                }
+                return;
+            }
+
+            // Boldness plus greed at which a starving village takes instead of leaving. Both axes
+            // are a share of the trades in per cent, so this is "more than a fifth of everybody is
+            // out hunting or digging" -- a place whose living is already got by force or by tearing
+            // it out of the ground. Every place begins at fifty on every axis and drifts from what
+            // its people actually do, so nothing here is decided at world generation.
+            public static int WARLIKE = 40;
 
             // Two places that have grown into each other are one place.
             //
@@ -1953,6 +2050,19 @@ public bundle Agents {
                 if (adults <= 0) {
                     return 0;
                 }
+                // Nobody carries a spear in peacetime. A raider is not a standing profession in this
+                // world -- it is what a place puts its hands to while it has somebody to fight, and
+                // the trade empties again when the quarrel does. Being raided is worth more hands
+                // than raiding: an attacker chooses the day, a defender does not.
+                if (job == cast<int>(Job.Raider)) {
+                    if (this.craided[c] > 0) {
+                        return adults / 4;
+                    }
+                    if (this.cfoe[c] >= 0) {
+                        return adults / 8;
+                    }
+                    return 0;
+                }
                 mutable int q = adults / 6;
                 // Except that a hungry place puts most of its hands on food. A flat share of the
                 // adults for every trade is what a spreadsheet does, not what people do: the first
@@ -2291,6 +2401,18 @@ public bundle Agents {
                         best = jb;
                     }
                 }
+                // Somebody at the gate, or a granary worth walking to. Above every trade that feeds
+                // and below the one that shelters: a village under attack does not stop to fell
+                // timber, and a village that has decided to raid does not do it instead of finishing
+                // the roof it is standing under.
+                int rb = cast<int>(Job.Raider);
+                if ((this.cfoe[h] >= 0 || this.craided[h] > 0)
+                    && this.ctrade[h * nj + rb] < this.quotaFor(h, rb)) {
+                    if (100 > bestScore) {
+                        bestScore = 100;
+                        best = rb;
+                    }
+                }
                 // And something half-built beats everything, because until it stands nobody can
                 // work in it and the whole reason it was marked out goes unanswered.
                 if (this.cbusy[h] >= 0) {
@@ -2489,6 +2611,164 @@ public bundle Agents {
                 this.folk.earn(i, 6);
                 return;
             }
+
+            // Raiding, and defending, which are the same verb pointed in opposite directions.
+            //
+            // A defender's foe is whoever is standing in their own village; an attacker's is a place
+            // on the map. So a raider with plunder on their back is going home, a raider whose
+            // village is under attack fights where they stand, and a raider with a quarrel and empty
+            // hands marches. Three states and no others, which is why this is one method.
+            private method workRaid(int i) returns void {
+                int h = this.folk.homeOf(i);
+                if (h < 0 || h >= this.ncomm) {
+                    return;
+                }
+                // Coming home with somebody else's grain.
+                if (this.folk.carryAmtOf(i) > 0) {
+                    if (this.busy(i)) {
+                        return;
+                    }
+                    float dx = this.ccx[h] - this.folk.xAt(i);
+                    float dy = this.ccy[h] - this.folk.yAt(i);
+                    if (dx * dx + dy * dy < 4.0) {
+                        int amt = this.folk.carryAmtOf(i);
+                        this.stores.stow(h, this.folk.carryKindOf(i), amt);
+                        this.plunder = this.plunder + cast<long>(amt);
+                        this.carried = this.carried + cast<long>(amt);
+                        // Coming home with what the village needed and somebody else had is the
+                        // loudest thing anybody in this world does. It is also how a war chief
+                        // comes to exist: standing is earned, and the leadership slice hands the
+                        // role to whoever has the most of it.
+                        this.folk.earn(i, 8);
+                        this.folk.setCarry(i, 0, 0);
+                    } else {
+                        this.folk.setTarget(i, cast<int>(this.ccx[h]), cast<int>(this.ccy[h]));
+                        this.folk.setAct(i, cast<int>(Act.WalkTo));
+                    }
+                    return;
+                }
+                if (this.busy(i)) {
+                    return;
+                }
+                // Anybody from another village within arm's reach, wherever we are. This is what
+                // makes a defender: they never march, but the enemy comes to them.
+                if (this.foeNear(i, h) >= 0) {
+                    this.folk.setAct(i, cast<int>(Act.Fight));
+                    return;
+                }
+                int foe = this.cfoe[h];
+                if (foe < 0 || this.cpop[foe] <= 0) {
+                    this.folk.setJob(i, cast<int>(Job.Idle));
+                    return;                              // the quarrel is over, or its village is
+                }
+                this.folk.setTarget(i, cast<int>(this.ccx[foe]), cast<int>(this.ccy[foe]));
+                this.folk.setAct(i, cast<int>(Act.WalkTo));
+                return;
+            }
+
+            // Somebody of another community close enough to hit, or -1.
+            //
+            // A linear scan of fifty thousand rows per raider per decision would be the woodcutter's
+            // mistake again, so it asks the wildlife index's neighbour -- no: it asks the ONE place
+            // that already knows who is nearby, which is the block claim. A raider standing in a
+            // block claimed by their foe is in the enemy village, and that is the whole test; who
+            // exactly they hit is then found among the few dozen the reach covers.
+            private method foeNear(int i, int h) returns int {
+                int bx = cast<int>(this.folk.xAt(i)) / 16;
+                int by = cast<int>(this.folk.yAt(i)) / 16;
+                if (bx < 0 || by < 0 || bx >= this.claimW || by >= this.claimH) {
+                    return 0 - 1;
+                }
+                int held = this.claim[by * this.claimW + bx];
+                if (held < 0 || held == h) {
+                    return 0 - 1;                        // our ground, or nobody's
+                }
+                // Somebody of that community, near. The search is bounded by the block, so it walks
+                // the folk in it and not the world -- and it takes the first it finds, because a
+                // fight is not an optimisation problem.
+                int n = this.folk.limit();
+                int stride = 1 + (i % 7);                // `step` is a keyword; this is not it
+                mutable int seen = 0;
+                mutable int j = i;
+                while (seen < n) {
+                    j = j + stride;
+                    if (j >= n) {
+                        j = j - n;
+                    }
+                    seen = seen + 1;
+                    if (j == i || !this.folk.alive(j)) {
+                        continue;
+                    }
+                    if (this.folk.homeOf(j) != held) {
+                        continue;
+                    }
+                    float dx = this.folk.xAt(j) - this.folk.xAt(i);
+                    float dy = this.folk.yAt(j) - this.folk.yAt(i);
+                    if (dx * dx + dy * dy <= Simulation.SWING) {
+                        return j;
+                    }
+                    if (seen > Simulation.LOOKERS) {
+                        return 0 - 1;                    // nobody within a glance; keep marching
+                    }
+                }
+                return 0 - 1;
+            }
+
+            // How long a blow takes, how far a spear reaches, and how many people somebody scans
+            // before giving up and moving on. The last one is a BUDGET and not a radius: it is what
+            // stops a raider standing in an empty enemy village from reading fifty thousand rows
+            // every second looking for a fight that is not there.
+            public static float MELEE = 3.0;
+            public static fixed float SWING = 9.0;
+            public static int LOOKERS = 600;
+
+            // The blow lands, or it does not. Whoever swung takes a wound back if the other is armed
+            // -- a raider against a raider is a fight and a raider against a forager is a killing,
+            // and both belong in the numbers under their own names.
+            private method blowLanded(int i) returns void {
+                this.folk.setAct(i, cast<int>(Act.Idle));
+                int h = this.folk.homeOf(i);
+                int j = this.foeNear(i, h);
+                if (j < 0) {
+                    return;                              // they moved; nothing happened
+                }
+                int them = this.folk.homeOf(j);
+                this.craided[them] = Simulation.GRUDGE;
+                this.craider[them] = h;
+                this.raids = this.raids + 1;
+                boolean armed = this.folk.jobOf(j) == cast<int>(Job.Raider);
+                if (this.folk.wound(j, Simulation.HURT)) {
+                    this.deathsWar = this.deathsWar + 1;
+                    // A kill is seen and remembered. It is the same earning as bringing a load home,
+                    // eight times over, which is exactly why a world with war in it produces chiefs
+                    // who are not the best farmers.
+                    this.folk.earn(i, 8);
+                }
+                if (armed && this.folk.wound(i, Simulation.HURT)) {
+                    this.deathsWar = this.deathsWar + 1;
+                    return;
+                }
+                // The granary is the point. Having reached it and cleared the way, take what can be
+                // carried -- one load, the same as any other trade brings home.
+                if (this.folk.carryAmtOf(i) == 0) {
+                    int gd = this.stores.richest(them);
+                    if (gd > 0) {
+                        int took = this.stores.seize(them, gd, Simulation.LOAD);
+                        if (took > 0) {
+                            this.folk.setCarry(i, gd, took);
+                        }
+                    }
+                }
+                return;
+            }
+
+            // What a blow costs, and how long a village remembers one. A hundred points of health at
+            // twenty-five a blow is four blows to kill somebody who does not fight back, which at
+            // three seconds a blow is a raid that takes about as long as felling an oak. The grudge
+            // is a hundred and twenty censuses -- two minutes, a third of a life -- so a feud
+            // outlives the people who started it and ends without anybody deciding to end it.
+            public static int HURT = 25;
+            public static int GRUDGE = 120;
 
             // Raising a building. The builder walks to the site and works; when the last hour goes in
             // the timber and stone come out of the store and it opens. Paying at the END and not at
@@ -2770,7 +3050,7 @@ public bundle Agents {
                 System.IO.Console.println($"sim: t={cast<int>(this.clock)}s over {this.frames} frames | arrivals {this.arrivals} | stuck {this.stuckTotal}");
                 System.IO.Console.println($"  think: {perFrame}/frame average, worst {this.worstThink} (budget {this.budget}) | demand {demand}/s vs capacity {capacity}/s");
                 System.IO.Console.println($"  people standing off walkable ground: {this.offLand()}");
-                System.IO.Console.println($"  life: {this.folk.count()} alive | {this.births} born, {this.deathsOld} of old age, {this.deathsHunger} starved");
+                System.IO.Console.println($"  life: {this.folk.count()} alive | {this.births} born, {this.deathsOld} of old age, {this.deathsHunger} starved, {this.deathsWar} killed");
                 // THE number of this slice. Walking is pure cost -- it produces nothing -- so the
                 // share of it says whether the map is a place people can live in or a distance they
                 // spend their lives crossing. Everything about how big a community is, how far a
@@ -2814,6 +3094,18 @@ public bundle Agents {
                 }
                 System.IO.Console.println($"  out of doors: wood {byTrade[cast<int>(Job.Woodcutter)]} | forage {byTrade[cast<int>(Job.Forager)]} | quarry {byTrade[cast<int>(Job.Quarrier)]} | mine {byTrade[cast<int>(Job.Miner)]} | fish {byTrade[cast<int>(Job.Fisher)]} | hunt {byTrade[cast<int>(Job.Hunter)]}");
                 System.IO.Console.println($"  indoors: sawyer {byTrade[cast<int>(Job.Sawyer)]} | smith {byTrade[cast<int>(Job.Smith)]} | baker {byTrade[cast<int>(Job.Baker)]} | weaver {byTrade[cast<int>(Job.Weaver)]} | builder {byTrade[cast<int>(Job.Builder)]} | idle {byTrade[cast<int>(Job.Idle)]}");
+                // Under arms, against everybody who is not. This line exists because the first war
+                // measurement did not have it: crafting fell by two thirds and there was no number
+                // anywhere saying that a third of the world's grown people were carrying a spear.
+                mutable int grown = 0;
+                for (int jb in 0..Job.count()) {
+                    grown = grown + byTrade[jb];
+                }
+                mutable int armedShare = 0;
+                if (grown > 0) {
+                    armedShare = byTrade[cast<int>(Job.Raider)] * 100 / grown;
+                }
+                System.IO.Console.println($"  under arms: {byTrade[cast<int>(Job.Raider)]} of {grown} grown ({armedShare} in a hundred)");
                 delete byTrade;
                 // What the villages built, and whether the workshops in them ever run. A building
                 // that stands and never makes anything is a chain that does not exist.
@@ -2899,6 +3191,18 @@ public bundle Agents {
                 }
                 System.IO.Console.println($"  land: {countries} places holding {held} blocks of {this.claimW * this.claimH} | widest {widest}, mean {mean}, narrowest {narrow}");
                 System.IO.Console.println($"  spread: {this.hived} villages founded by splitting ({this.hivedFolk} folk walked out) | {this.joined} grew into a bigger neighbour ({this.joinedFolk} folk) | {this.fled} left a place that could not feed them");
+                // War. `at war` is community-seconds and not wars: a quarrel has no beginning
+                // anybody declares, so what can honestly be counted is how much of the world's time
+                // was spent with somebody to fight. Places at war RIGHT NOW is the second number,
+                // and if it is zero at the end of an arc while the first is large, the feuds all
+                // burned out -- which is a world, not a bug.
+                mutable int fighting = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] > 0 && this.cfoe[c] >= 0) {
+                        fighting = fighting + 1;
+                    }
+                }
+                System.IO.Console.println($"  war: {this.feuds} community-seconds at war, {fighting} places at war now | {this.raids} blows struck, {this.deathsWar} killed, {this.plunder} carried off somebody else's shelves");
                 // What is left standing, against what the world started with. A resource that only
                 // goes down is being liquidated, and this is where that shows.
                 NodeField* nf = this.g.surface();
