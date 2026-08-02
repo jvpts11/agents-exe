@@ -175,8 +175,8 @@ public bundle Agents {
             // compromise: `hands` itself is only counted at census, so a live scan was never any
             // fresher -- it just cost more to be equally stale.
             public method sweep(int[] pop, int[] room, int[] worst, int[] worstRoom, int[] dead,
-                                int[] busy, int[] open, int[] seat,
-                                int ncomm, int ncraft, int seatKind) returns void {
+                                int[] busy, int[] open, int[] made, int[] seat,
+                                int ncomm, int ncraft, int ngood, int seatKind) returns void {
                 for (int c in 0..ncomm) {
                     room[c] = 0;
                     worst[c] = 0 - 1;
@@ -187,6 +187,21 @@ public bundle Agents {
                 }
                 for (int s in 0..(ncomm * ncraft)) {
                     open[s] = 0 - 1;
+                }
+                // The same "somebody has an empty bench" question asked by WHAT THE BENCH MAKES.
+                //
+                // Per craft it was too coarse by exactly one step. A toolmaker and a weaponsmith are
+                // both Smith, so a town with one idle toolmaker bench would not raise an armoury --
+                // and since tools are wanted by every pair of hands in the village and weapons only
+                // by the few carrying a grudge, the toolmaker always came first and the armoury
+                // never came at all. Measured over twenty generations: six hundred and fifty-six
+                // toolmakers, no weaponsmith anywhere, nought armed, nought in mail.
+                //
+                // By output it says the thing it was always meant to say: a village with a pasture
+                // nobody stands in does not need a second PASTURE. What it needs from the smith is
+                // a different question entirely.
+                for (int s in 0..(ncomm * ngood)) {
+                    made[s] = 0 - 1;
                 }
                 for (int i in 0..this.n) {
                     int c = cast<int>(this.owner[i]);
@@ -227,8 +242,14 @@ public bundle Agents {
                         continue;                // the seat: nobody's trade, so never idle
                     }
                     int cr = Builds.craft(k);
-                    if (cast<int>(this.hands[i]) < Builds.hands(k) && open[c * ncraft + cr] < 0) {
-                        open[c * ncraft + cr] = i;
+                    if (cast<int>(this.hands[i]) < Builds.hands(k)) {
+                        if (open[c * ncraft + cr] < 0) {
+                            open[c * ncraft + cr] = i;
+                        }
+                        int mk = Builds.out(k);
+                        if (mk >= 0 && mk < ngood && made[c * ngood + mk] < 0) {
+                            made[c * ngood + mk] = i;
+                        }
                     }
                     // A workshop nobody has set foot in for a long time. Not decay by age: a
                     // building that is USED does not fall down, and one nobody needs does.

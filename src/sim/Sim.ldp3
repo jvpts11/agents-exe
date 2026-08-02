@@ -117,6 +117,10 @@ public bundle Agents {
             private mutable int[] cdead;
             private mutable int[] cbusy;
             private mutable int[] copen;
+            // The same, by what the bench MAKES rather than by which trade it belongs to. A village
+            // does not need a second pasture while the first has nobody in it; what it needs from
+            // the smith is a different question from what it needs from the toolmaker.
+            private mutable int[] cmade;
             private mutable int[] cseat;
             // Splitting and leaving. `cfar` is the person a community's far end has gathered around,
             // `cparty` how many would go with them, `cchild` the number the daughter got; `cflee` is
@@ -414,6 +418,7 @@ public bundle Agents {
                 this.cdead = new int[this.ncomm]();
                 this.cbusy = new int[this.ncomm]();
                 this.copen = new int[this.ncomm * Craft.count()]();
+                this.cmade = new int[this.ncomm * Goods.count()]();
                 this.cseat = new int[this.ncomm]();
                 this.cfar = new int[this.ncomm]();
                 this.cfarD = new float[this.ncomm]();
@@ -596,6 +601,7 @@ public bundle Agents {
                 delete this.cdead;
                 delete this.cbusy;
                 delete this.copen;
+                delete this.cmade;
                 delete this.cseat;
                 delete this.cfar;
                 delete this.cfarD;
@@ -2427,8 +2433,9 @@ public bundle Agents {
                 // Everything the table has to say about every community, in one read of each row.
                 // It has to come after the hands are counted and before anybody decides anything.
                 this.town.sweep(this.cpop, this.croom, this.cworst, this.cworstRoom, this.cdead,
-                                this.cbusy, this.copen, this.cseat,
-                                this.ncomm, Craft.count(), cast<int>(BuildingKind.TownHall));
+                                this.cbusy, this.copen, this.cmade, this.cseat,
+                                this.ncomm, Craft.count(), Goods.count(),
+                                cast<int>(BuildingKind.TownHall));
                 // And what those buildings are waiting for. Read here, before anybody decides what
                 // to build next, because what a place should build is what it is short of.
                 this.town.wants(this.cwant, this.cfed, this.ncomm, Goods.count());
@@ -3616,9 +3623,14 @@ public bundle Agents {
                     // An empty bench is the one signal that is true of every kind of building at
                     // once. A village with a pasture nobody stands in does not need a second
                     // pasture; it needs somebody to stand in the first.
-                    int craft = Builds.craft(k);
-                    if (craft != cast<int>(Craft.NoCraft)
-                        && this.copen[c * Craft.count() + craft] >= 0) {
+                    // Asked by OUTPUT and not by trade, which is the same rule one step finer and
+                    // the difference between a world with armouries in it and one without. Per
+                    // craft, a toolmaker with an idle bench also blocked the weaponsmith beside it
+                    // -- and tools are wanted by every pair of hands in a village while weapons are
+                    // wanted only by the few carrying a grudge, so the toolmaker won every census
+                    // for ever. Six hundred and fifty-six toolmakers, no weaponsmith anywhere in
+                    // the world, and nobody armed in twenty generations.
+                    if (Builds.staffed(k) && this.cmade[c * Goods.count() + Builds.out(k)] >= 0) {
                         continue;
                     }
                     // A wall makes nothing, so it has no output to be short of. What a town is
@@ -3998,6 +4010,15 @@ public bundle Agents {
                     // might become rather than only at what it already is. It goes through the
                     // explosion below, so wanting a smithy makes it want the brick, and wanting the
                     // brick makes it want the clay.
+                    //
+                    // FLAT, and measured that way. Scaling it by the town's size is the obvious next
+                    // move and it was tried: kilns went three to thirteen and sawmills sixty-eight
+                    // to a hundred and ninety-two, and the SMITHIES WENT TO NONE -- workshops pulled
+                    // down nearly tripled, the modern nations halved, and the twenty cells of
+                    // railway the world had just managed to lay went back to nought. A place that
+                    // wants materials in proportion to its size spends its whole life raising and
+                    // demolishing sheds. It is the third time inflating a want deep in a chain has
+                    // made everything above it worse, and the third time it has been reverted.
                     for (int k in 1..BuildingKind.count()) {
                         if (Builds.era(k) > era) {
                             continue;
