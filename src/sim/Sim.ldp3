@@ -709,6 +709,27 @@ public bundle Agents {
                 return this.ncomm;
             }
 
+            // How many people are doing each thing, right now. Read by the detail window, and by
+            // the test that makes sure no verb in the enum is one nobody in the world ever performs.
+            public method doingCount(int act) returns int {
+                mutable int c = 0;
+                mutable int i = 0;
+                int n = this.folk.limit();
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.actOf(i) == act) {
+                        c = c + 1;
+                    }
+                    i = i + 1;
+                }
+                return c;
+            }
+
+            // And how many have EVER been seen doing it since the world began, which is the honest
+            // question: a two-second act is rarely caught by a snapshot however common it is.
+            public method everDid(int act) returns long {
+                return this.folk.timesDone(act);
+            }
+
             // The grain territory is actually decided at. Nobody owns a CELL: the claim is stored
             // per block, so this is the honest resolution to draw a border at from a distance.
             public method claimWide() returns int {
@@ -1962,6 +1983,32 @@ public bundle Agents {
                                 continue;
                             }
                         }
+                        // BEING LISTENED TO IS THE WORK. An elder or a priest standing among their
+                        // own people is not between jobs, and asking this AFTER the trade has been
+                        // picked never fired once -- by then they are always holding something, and
+                        // `busy` refuses. It has to come first, and it has to displace the trade
+                        // for that moment rather than wait for a gap that never comes.
+                        int myRole = this.folk.roleOf(i);
+                        boolean speaks = myRole == cast<int>(Role.Elder)
+                                      || myRole == cast<int>(Role.Priest);
+                        // A chief LEANS, it is the whole design of leadership here -- he works
+                        // beside everybody and is heeded because of what he has done, not because
+                        // of a title. So he leads a quarter as often as an elder teaches: often
+                        // enough to be seen doing it, rarely enough that he is still one of them.
+                        boolean leads = myRole == cast<int>(Role.Chief)
+                                     || myRole == cast<int>(Role.General);
+                        if ((speaks && (i + this.frames) % 24 == 0)
+                            || (leads && (i + this.frames) % 96 == 0)) {
+                            if (speaks) {
+                                this.folk.setAct(i, cast<int>(Act.Teach));
+                            } else {
+                                this.folk.setAct(i, cast<int>(Act.Lead));
+                            }
+                            this.folk.setThinkAt(i, this.tick + 3);
+                            this.thoughtThisFrame = this.thoughtThisFrame + 1;
+                            i = i + 1;
+                            continue;
+                        }
                         if (this.folk.jobOf(i) == cast<int>(Job.Idle)) {
                             this.chooseJob(i);
                         }
@@ -1982,6 +2029,25 @@ public bundle Agents {
                             this.workCraft(i);
                         } else {
                             this.workGather(i);
+                        }
+                        // A PERSON WALKING HOME UNDER A LOAD IS NOT A PERSON WALKING.
+                        //
+                        // Four trades carry things home -- the gatherer, the raider, the carter and
+                        // the builder -- and every one of them said WalkTo, so nineteen million
+                        // loads crossed this world and not one of them looked like a load. Promoted
+                        // here rather than in four places, because it is one fact about anybody who
+                        // is holding something, not four decisions.
+                        if (this.folk.actOf(i) == cast<int>(Act.WalkTo)
+                            && this.folk.carryAmtOf(i) > 0) {
+                            this.folk.setAct(i, cast<int>(Act.Carry));
+                        }
+                        // And whoever a village follows is doing that, visibly, rather than standing
+                        // in a field looking like everybody else. A chief still works -- that is
+                        // the whole point of a chief in this world -- so this only takes the gaps.
+                        if (!this.busy(i) && (i + this.frames) % 96 == 0
+                            && (myRole == cast<int>(Role.Chief)
+                             || myRole == cast<int>(Role.General))) {
+                            this.folk.setAct(i, cast<int>(Act.Lead));
                         }
                     }
                     if (this.folk.actOf(i) == cast<int>(Act.Idle)) {
@@ -2089,7 +2155,15 @@ public bundle Agents {
                         i = i + 1;
                         continue;
                     }
-                    if (this.folk.actOf(i) == cast<int>(Act.Refine)) {
+                    // Refining, tilling and copying out a page are ONE piece of arithmetic and three
+                    // things to watch. They are listed together here rather than folded into one
+                    // act, because the day somebody adds a fourth the compiler should make them
+                    // come and look at this line -- and because splitting them without touching
+                    // this loop would have quietly left every farmer standing in a field waiting
+                    // for a batch that could never finish.
+                    int busyAt = this.folk.actOf(i);
+                    if (busyAt == cast<int>(Act.Refine) || busyAt == cast<int>(Act.Till)
+                        || busyAt == cast<int>(Act.Discover)) {
                         this.folk.addTimer(i, dt);
                         this.workTicks = this.workTicks + 1;
                         int wp = this.folk.workplaceOf(i);
@@ -2132,12 +2206,38 @@ public bundle Agents {
                         i = i + 1;
                         continue;
                     }
+                    // THE SHORT ACTS: a mouthful, a sit-down, a word with somebody, a load set on a
+                    // shelf. Each is a second or two and then the person is free again.
+                    //
+                    // They must expire HERE and not by anybody deciding, because `busy` treats
+                    // every act but Idle and Wander as work in progress -- somebody who sat down to
+                    // eat and had nothing to clear it would sit there for the rest of their life,
+                    // and the world would starve to death looking peaceful.
+                    int paused = this.folk.actOf(i);
+                    if (paused == cast<int>(Act.Eat) || paused == cast<int>(Act.Rest)
+                        || paused == cast<int>(Act.Court) || paused == cast<int>(Act.Raise)
+                        || paused == cast<int>(Act.Follow) || paused == cast<int>(Act.Lead)
+                        || paused == cast<int>(Act.Teach) || paused == cast<int>(Act.Deposit)) {
+                        this.folk.addTimer(i, dt);
+                        if (this.folk.timerOf(i) >= Simulation.PAUSE) {
+                            this.folk.setAct(i, cast<int>(Act.Idle));
+                        }
+                        i = i + 1;
+                        continue;
+                    }
                     boolean wandering = this.folk.actOf(i) == cast<int>(Act.Wander);
-                    // Marching is walking. It is a separate act only so that the renderer and the
-                    // detail window can tell an army crossing the country from a woodcutter going
-                    // to a tree, and so that a soldier on the road is not mistaken for one idle.
-                    boolean marching = this.folk.actOf(i) == cast<int>(Act.March);
-                    if (this.folk.actOf(i) != cast<int>(Act.WalkTo) && !wandering && !marching) {
+                    // FOUR WAYS OF WALKING, and the difference between them is the whole of what
+                    // the renderer and the detail window have to go on. Marching is an army crossing
+                    // the country; carrying is somebody bent under a load on the way home; fleeing
+                    // is somebody leaving a place that could not feed them. Underneath they are the
+                    // same arithmetic, which is why they share this loop -- but a world where all
+                    // four look identical is a world where nothing anybody does can be read.
+                    int doing = this.folk.actOf(i);
+                    boolean marching = doing == cast<int>(Act.March);
+                    boolean hauling = doing == cast<int>(Act.Carry);
+                    boolean fleeing = doing == cast<int>(Act.Flee);
+                    if (doing != cast<int>(Act.WalkTo) && !wandering && !marching
+                        && !hauling && !fleeing) {
                         i = i + 1;
                         continue;
                     }
@@ -2278,6 +2378,19 @@ public bundle Agents {
             // makes food a constraint instead of decoration.
             public static int HUNGRY_AT = 5;
             public static int STARVE_AT = 25;
+            // How long a short act holds somebody.
+            //
+            // MEASURED, because the first guess was not free. At two seconds against a six-minute
+            // life, ten meals a life is five and a half per cent of everybody's waking time -- and
+            // the two-generation arc lost its walls, which had been standing the run before. A
+            // visible act is not allowed to quietly cost the world a twentieth of its labour.
+            //
+            // One second is twenty frames at the arc's step, which is plainly visible at every zoom
+            // the renderer offers, and half the bill.
+            public static float PAUSE = 1.0;
+            // Tiredness rises by one every TIRED_EVERY, so this is a number of MINUTES on your feet
+            // and has to be read against a six-minute life. Twenty is about four minutes.
+            public static int WEARY_AT = 20;
             public static float TIRED_EVERY = 12.0;
             public static float TERM = 45.0;             // a pregnancy
             public static float FERTILE_TO = 0.85;       // of a lifespan
@@ -2341,12 +2454,37 @@ public bundle Agents {
                         if (ate > 0) {
                             this.meals = this.meals + cast<long>(ate);
                             this.folk.setHunger(i, 0);
+                            // AND THEY STOP TO DO IT.
+                            //
+                            // Nine and a half million meals were eaten over an arc and not one of
+                            // them was ever a thing anybody could see: hunger went to zero between
+                            // two frames and the person carried on walking. An act that nothing ever
+                            // sets is an act the renderer can never draw, which is why this world
+                            // had people who worked and fought and never once sat down.
+                            //
+                            // Only if they are not in the middle of something that matters more.
+                            // Nobody stops to eat while a spear is coming at them.
+                            if (!this.busy(i)) {
+                                this.folk.setAct(i, cast<int>(Act.Eat));
+                            }
                         } else {
                             this.hungryTicks = this.hungryTicks + 1;
                         }
                     }
-                    if (this.folk.tiredOf(i) >= 70) {
+                    // WEARINESS DID NOTHING AT ALL, and the arithmetic says so plainly: tiredness
+                    // rises by one every twelve seconds and a life is three hundred and sixty, so
+                    // the most anybody could ever reach was thirty and the threshold was SEVENTY.
+                    // Not one person in the history of this world has ever been tired enough to
+                    // rest. The number was never measured against the life it applies to.
+                    //
+                    // Twenty: about four minutes on your feet, so a person sits down two or three
+                    // times in a life. That is a rhythm you can watch rather than a constant that
+                    // happens to be unreachable.
+                    if (this.folk.tiredOf(i) >= Simulation.WEARY_AT) {
                         this.folk.setTired(i, 0);
+                        if (!this.busy(i)) {
+                            this.folk.setAct(i, cast<int>(Act.Rest));
+                        }
                     }
                     if (this.folk.gestate(i, dt)) {
                         int child = this.folk.bear(i, this.seed, cast<int>(this.births));
@@ -2378,7 +2516,17 @@ public bundle Agents {
                     if ((i + this.frames) % 20 == 0) {
                         if (this.mayConceive(i, dt * 20.0)) {
                             this.folk.conceive(i, Simulation.TERM);
+                            if (!this.busy(i)) {
+                                this.folk.setAct(i, cast<int>(Act.Court));
+                            }
                         }
+                    }
+                    // And a parent with a small child is doing something, even if what they are
+                    // doing is the least visible work in the world. A million children were born
+                    // over an arc and nobody was ever seen with one.
+                    if (this.folk.isPregnant(i) && !this.busy(i)
+                        && (i + this.frames) % 64 == 0) {
+                        this.folk.setAct(i, cast<int>(Act.Raise));
                     }
                     i = i + 1;
                 }
@@ -3248,7 +3396,7 @@ public bundle Agents {
                 this.vacate(i, h);
                 this.folk.setHome(i, to);
                 this.folk.setTarget(i, cast<int>(this.ccx[to]), cast<int>(this.ccy[to]));
-                this.folk.setAct(i, cast<int>(Act.WalkTo));
+                this.folk.setAct(i, cast<int>(Act.Flee));
                 this.fled = this.fled + 1;
                 return true;
             }
@@ -3907,6 +4055,9 @@ public bundle Agents {
                         this.folk.earn(i, 4);
                         this.folk.setCarry(i, 0, 0);
                         this.folk.setBound(i, 0 - 1);
+                        // The one moment in the world worth its own act: a caravan that has walked
+                        // across a country setting its load down at the far end.
+                        this.folk.setAct(i, cast<int>(Act.Deposit));
                     } else {
                         this.folk.setTarget(i, cast<int>(this.ccx[to]), cast<int>(this.ccy[to]));
                         this.folk.setAct(i, cast<int>(Act.WalkTo));
@@ -5024,6 +5175,9 @@ public bundle Agents {
                         if (cast<int>(LandMath.hash01(this.seed ^ 0x2E77, i, this.tick) * 100.0) < odds) {
                             this.followed = this.followed + 1;
                             best = jb;
+                            // Going along with somebody is a thing that happens to a person, and
+                            // until now the only trace of it was a counter in the report.
+                            this.folk.setAct(i, cast<int>(Act.Follow));
                         } else {
                             this.resisted = this.resisted + 1;
                         }
@@ -5545,7 +5699,17 @@ public bundle Agents {
                     this.folk.setAct(i, cast<int>(Act.WalkTo));
                     return;
                 }
-                this.folk.setAct(i, cast<int>(Act.Refine));
+                // Three trades that all "refine" and look nothing alike. Somebody bent over a
+                // furrow, somebody copying a page and somebody at a bench are the same line of
+                // arithmetic and three different things to watch, and the enum has had words for
+                // all three since the beginning with nothing ever setting two of them.
+                if (craft == cast<int>(Craft.Tilling)) {
+                    this.folk.setAct(i, cast<int>(Act.Till));
+                } else if (craft == cast<int>(Craft.Lettering)) {
+                    this.folk.setAct(i, cast<int>(Act.Discover));
+                } else {
+                    this.folk.setAct(i, cast<int>(Act.Refine));
+                }
                 return;
             }
 
