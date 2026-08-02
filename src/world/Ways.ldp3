@@ -217,6 +217,48 @@ public bundle Agents {
                 return;
             }
 
+            // Is this cell a LANE, or merely trodden ground?
+            //
+            // The difference is the whole reason this method exists. Around a village the ground is
+            // worn in every direction -- people fan out to the fields, the wood, the water -- so a
+            // wide patch crosses the trail threshold at once. Drawing every one of those cells with
+            // all eight of its arms produced a lattice of perfect diamonds and stars across the
+            // common: grid-aligned, geometric, and unmistakably a rendering artefact rather than a
+            // place where people walk.
+            //
+            // A lane is NARROW. That is what tells it from a common, and it is a ridge test: the
+            // tread has to fall away to at least one side. Along a corridor the cells left and
+            // right of it are untrodden, so it reads; in the middle of a worn patch every
+            // neighbour is as worn as the middle, so it does not -- and the patch goes back to
+            // being ground that happens to be bare, which is what it is.
+            //
+            // Asked by the RENDERER and not by `surfaceAt`, deliberately. The trodden common really
+            // is easier to walk over and should still speed somebody crossing it; what it is not is
+            // a road, and only the drawing has to know the difference. Putting the test in
+            // `surfaceAt` would also have put four more reads into the hottest loop there is.
+            public method isLane(int x, int y) returns boolean {
+                int here = this.treadAt(x, y);
+                if ((cast<int>(this.laid[y * this.w + x]) & 255) != 0) {
+                    return true;                 // laid ground is a lane by definition
+                }
+                int drop = here / 2;
+                mutable int b = 0;
+                while (b < 4) {
+                    int dx = Ways.stepX(b);
+                    int dy = Ways.stepY(b);
+                    // The two cells either side of this direction. If BOTH are much less trodden,
+                    // the traffic here runs along it rather than over it.
+                    int px = 0 - dy;
+                    int py = dx;
+                    if (this.treadAt(x + px, y + py) < here - drop
+                        && this.treadAt(x - px, y - py) < here - drop) {
+                        return true;
+                    }
+                    b = b + 1;
+                }
+                return false;
+            }
+
             // The eight-neighbour mask the renderer needs, in the same bit order the rivers use:
             // N, NE, E, SE, S, SW, W, NW. A way tile is chosen by which of its neighbours carry a
             // way of AT LEAST this good a surface -- so a trail meeting a road draws an arm into
@@ -227,7 +269,10 @@ public bundle Agents {
                 while (b < 8) {
                     int dx = Ways.stepX(b);
                     int dy = Ways.stepY(b);
-                    if (this.joins(surface, this.surfaceAt(x + dx, y + dy))) {
+                    // A lane only joins a lane. Otherwise a road running past a village would put
+                    // an arm into every worn square of its common and fray into a fan.
+                    if (this.joins(surface, this.surfaceAt(x + dx, y + dy))
+                        && this.isLane(x + dx, y + dy)) {
                         mask = mask | (1 << b);
                     }
                     b = b + 1;

@@ -139,6 +139,17 @@ public bundle Agents {
             private mutable int bkOy;
             private mutable int bkPhase;        // 0 = counting, 1 = emitting
             private mutable int[] dRiverC;      // detail bake scratch: river variant per cell, or -1
+            // The roads. One atlas for all four surfaces, because their names already carry which
+            // one they are -- four atlases would have been four fields, four lookups and four more
+            // parameters through `setup` for nothing.
+            private mutable MeshAtlas* wayArt;
+            private mutable Ways* paths;
+            // (surface, neighbour mask) -> atlas ordinal, resolved once at setup. A thousand and
+            // twenty name lookups per FRAME is a thousand and twenty string comparisons; a table is
+            // an array read, and the whole thing is five kilobytes.
+            private mutable int[] wayOrd;
+            private mutable int[] dWayC;        // detail bake scratch: way variant per cell, or -1
+            private mutable int wayVersion;     // what the last bake saw, so a new road rebakes
             private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
             private mutable int[] dNodeA;       // detail bake scratch: first node instance of each row
             private mutable int[] dNodeB;       // detail bake scratch: one past the last
@@ -270,6 +281,9 @@ public bundle Agents {
                 this.bkOy = 0;
                 this.bkPhase = 0;
                 this.dRiverC = new int[1]();
+                this.wayOrd = new int[1]();
+                this.dWayC = new int[1]();
+                this.wayVersion = 0 - 1;
                 this.dPropC = new int[1]();
                 this.dNodeA = new int[1]();
                 this.dNodeB = new int[1]();
@@ -326,6 +340,8 @@ public bundle Agents {
                 delete this.sMilli;
                 delete this.sScale;
                 delete this.dRiverC;
+                delete this.wayOrd;
+                delete this.dWayC;
                 delete this.dPropC;
                 delete this.dNodeA;
                 delete this.dNodeB;
@@ -1371,6 +1387,77 @@ public bundle Agents {
                 return p;
             }
 
+            // Which way tile this cell draws, or -1 for bare ground.
+            private method pickWay(int gx, int gy) returns int {
+                if (this.paths == null || this.wayArt == null) {
+                    return 0 - 1;
+                }
+                int s = this.paths.surfaceAt(gx, gy);
+                if (s == cast<int>(Surface.Bare)) {
+                    return 0 - 1;
+                }
+                // Trodden is not the same as a lane. Without this the common around every village
+                // -- worn in all directions because that is where people go -- drew every one of
+                // its cells with all eight arms, and came out as a lattice of perfect diamonds.
+                if (!this.paths.isLane(gx, gy)) {
+                    return 0 - 1;
+                }
+                int mask = this.paths.maskAt(gx, gy, s);
+                if (mask == 0) {
+                    // A cell of road with no neighbour carrying one. It is a scuff, not a way, and
+                    // drawing a lone disc of pavement in a field would read as a defect.
+                    return 0 - 1;
+                }
+                return this.wayOrd[s * 256 + mask];
+            }
+
+            // The mesh-name stem for a Surface ordinal. Kept beside the atlas lookup rather than in
+            // Ways, because it is a fact about the ART -- the simulation neither knows nor cares
+            // what a road is called on disk.
+            public static method wayStem(int surface) returns String {
+                if (surface == cast<int>(Surface.Trail)) {
+                    return "Trail";
+                }
+                if (surface == cast<int>(Surface.Road)) {
+                    return "Road";
+                }
+                if (surface == cast<int>(Surface.Paved)) {
+                    return "Paved";
+                }
+                return "Rail";
+            }
+
+            // The simulation's road field and the art to draw it with, handed over together and
+            // apart from `setup`. The world is built and bound before there is a simulation to run
+            // on it -- the same reason `setSim` exists -- and a preview of an empty world has no
+            // roads on it because there is nobody to have worn any.
+            //
+            // The (surface, mask) table is resolved here, once. The alternative is a name lookup
+            // per cell per bake: a string comparison against a thousand-entry atlas for every
+            // square of ground on screen.
+            public method setWays(Ways* w, MeshAtlas* art) returns void {
+                this.paths = w;
+                this.wayArt = art;
+                this.wayVersion = 0 - 1;
+                delete this.wayOrd;
+                this.wayOrd = new int[5 * 256]();
+                for (int s in 0..5 * 256) {
+                    this.wayOrd[s] = 0 - 1;
+                }
+                for (int s in 1..5) {
+                    String stem = GlWorld3D.wayStem(s);
+                    for (int mask in 1..256) {
+                        StringBuilder nm = new StringBuilder() on heap;
+                        nm.append(stem);
+                        nm.append("Conn");
+                        nm.appendInt(mask);
+                        this.wayOrd[s * 256 + mask] = art.ordOf(nm.toString());
+                        delete nm;
+                    }
+                }
+                return;
+            }
+
             // ---- coarse LOD: the whole world, one tile per stride, foam dropped, forest hint trees ----
             private method coarseHint(int bx, int by, int ord) returns boolean {
                 if (this.hintProp < 0) {
@@ -1541,8 +1628,10 @@ public bundle Agents {
                 int dn = this.detW * this.detH;
                 if (this.dRiverC.length() != dn) {
                     delete this.dRiverC;
+                    delete this.dWayC;
                     delete this.dPropC;
                     this.dRiverC = new int[dn]();
+                    this.dWayC = new int[dn]();
                     this.dPropC = new int[dn]();
                 }
                 if (this.dNodeA.length() != this.detH) {
@@ -1592,6 +1681,13 @@ public bundle Agents {
                         } else {
                             this.dRiverC[slot] = 0 - 1;
                             tris = tris + this.countTile(ord, false, this.thinDecor(ord, gx, gy)) + 8;
+                        }
+                        // The way over this cell, if any. Chosen by which neighbours carry one, so
+                        // a road that ends at the last house draws one arm and a crossroads draws
+                        // four -- no rotation table and no fallback, exactly as the rivers do it.
+                        this.dWayC[slot] = this.pickWay(gx, gy);
+                        if (this.dWayC[slot] >= 0) {
+                            tris = tris + this.wayArt.triCount[this.dWayC[slot]];
                         }
                         // Decorative clutter only: the resource nodes are instances with their own
                         // positions and are counted per ROW, below.
@@ -1683,6 +1779,15 @@ public bundle Agents {
                         } else {
                             w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false,
                                               this.thinDecor(ord, gx, gy), shade);
+                        }
+                        // The road goes down before anything that stands on the ground, and at the
+                        // ground's own height: a way is authored from z=0 up, unlike a river tile,
+                        // which brings its own block. That is what lets one road cross a desert, a
+                        // meadow and a snowfield without carrying any of their colours with it.
+                        int wv = this.dWayC[slot];
+                        if (wv >= 0) {
+                            w = this.emitMesh(this.wayArt, buf, w, wv, wx, wy,
+                                              this.tileTop[ord] + zOff, 1.0, shade);
                         }
                         int p = this.dPropC[slot];
                         if (p >= 0) {
