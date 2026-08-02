@@ -1307,6 +1307,9 @@ public bundle Agents {
                             int own = this.town.ownerOf(wp);
                             this.stores.take(own, cast<int>(Good.Wood), Builds.woodCost(k));
                             this.stores.take(own, cast<int>(Good.Stone), Builds.stoneCost(k));
+                            if (Builds.matCost(k) != cast<int>(Good.Nothing)) {
+                                this.stores.take(own, Builds.matCost(k), Builds.matCostN(k));
+                            }
                             this.raised = this.raised + 1;
                             if (this.cbusy[own] == wp) {
                                 // It is finished, so the village is free to decide again -- without
@@ -2625,6 +2628,10 @@ public bundle Agents {
                     if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(k))) {
                         continue;
                     }
+                    if (Builds.matCost(k) != cast<int>(Good.Nothing)
+                        && !this.stores.has(c, Builds.matCost(k), Builds.matCostN(k))) {
+                        continue;
+                    }
                     // ONE rule for every building: it is worth what the place is SHORT of.
                     //
                     // A place of learning is the exception the rule needs rather than an exception
@@ -2729,6 +2736,17 @@ public bundle Agents {
                 }
                 if (good == cast<int>(Good.Stone)) {
                     want = want + this.cpop[c] / 2;
+                }
+                // And out of whatever the best roof it knows is made of. This is the term that
+                // makes the wright chain worth having: a place that has learned to raise houses
+                // wants planks in proportion to how many people are still under sticks, which is a
+                // real number that grows with the town and shrinks as it is answered.
+                int roof = Builds.bestRoof(this.eraOf(c));
+                if (roof != cast<int>(BuildingKind.NoBuilding) && Builds.matCost(roof) == good) {
+                    int unroofed = this.cpop[c] - this.croom[c];
+                    if (unroofed > 0) {
+                        want = want + Builds.matCostN(roof) * unroofed / Builds.roof(roof);
+                    }
                 }
                 // A tool in every hand that can use one, and arms for everybody carrying a grudge.
                 if (good == cast<int>(Good.Tools)) {
@@ -2937,6 +2955,12 @@ public bundle Agents {
                     return false;
                 }
                 if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(best))) {
+                    return false;
+                }
+                if (Builds.matCost(best) != cast<int>(Good.Nothing)
+                    && !this.stores.has(c, Builds.matCost(best), Builds.matCostN(best))) {
+                    // A village that has learned to raise houses but has no sawmill goes on living
+                    // in huts, and wanting planks. That want is the sawmill's whole reason to be.
                     return false;
                 }
                 if (this.cworst[c] >= 0 && this.cworstRoom[c] < Builds.roof(best)) {
