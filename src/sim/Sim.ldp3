@@ -79,6 +79,16 @@ public bundle Agents {
             // second instead of one per PERSON per decision.
             private mutable int[] cworkX;
             private mutable int[] cworkY;
+            // What every place's workshops are hungry for, per good, read once a census off the
+            // building table. The other half of "worth is want" -- the half a store cannot answer,
+            // because a shelf knows what is on it and not what anybody is waiting for.
+            private mutable int[] cwant;
+            // And what its food buildings between them put on the table in a shift. Apart from
+            // `cwant` because hunger is ONE want however many different things answer it.
+            private mutable int[] cfed;
+            // And what its places of learning are already working out, so that want is bounded
+            // the way every other one is.
+            private mutable int[] clesson;
             // Ground worth opening: a block of bare rock inside this community's reach that nobody
             // has looked under. Found once per PLACE per second like every other work site, never
             // once per prospector -- the same rule the woodcutter and the wolves both had to learn.
@@ -86,6 +96,10 @@ public bundle Agents {
             private mutable int[] cdigY;
             private mutable long dug;          // discs prospected
             private mutable long struck;       // working faces opened by it
+            private mutable long tooled;       // tools taken up
+            private mutable long wornOut;      // and worn through
+            private mutable long armed;        // weapons taken up
+            private mutable long mailed;
             // How many of its grown people are already in each trade, so a place cannot become a
             // thousand woodcutters and no fishermen. Indexed by JOB and not by Harvest class,
             // because building and crafting are trades too and neither goes out to a resource.
@@ -327,6 +341,9 @@ public bundle Agents {
                 int nh = Harvest.count();
                 this.cworkX = new int[this.ncomm * nh]();
                 this.cworkY = new int[this.ncomm * nh]();
+                this.cwant = new int[this.ncomm * Goods.count()]();
+                this.cfed = new int[this.ncomm]();
+                this.clesson = new int[this.ncomm]();
                 this.cdigX = new int[this.ncomm]();
                 this.cdigY = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
@@ -334,6 +351,10 @@ public bundle Agents {
                 }
                 this.dug = 0;
                 this.struck = 0;
+                this.tooled = 0;
+                this.wornOut = 0;
+                this.armed = 0;
+                this.mailed = 0;
                 this.ctrade = new int[this.ncomm * Job.count()]();
                 // Sixteen rows a community was enough while a village only ever built workshops.
                 // Housing changed the arithmetic: at six to a hut, a place of six hundred needs a
@@ -480,6 +501,9 @@ public bundle Agents {
                 delete this.stores;
                 delete this.cworkX;
                 delete this.cworkY;
+                delete this.cwant;
+                delete this.cfed;
+                delete this.clesson;
                 delete this.cdigX;
                 delete this.cdigY;
                 delete this.ctrade;
@@ -1206,6 +1230,12 @@ public bundle Agents {
                     this.felled = this.felled + 1;               // that one is gone for good
                     this.folk.setTargetNode(i, 0 - 1);
                 }
+                // The tool takes a load's worth of wear. A tool that never wore out would be a
+                // one-off gift, and the whole reason iron is worth smelting is that a village has
+                // to keep replacing them.
+                if (this.folk.wearTool(i)) {
+                    this.wornOut = this.wornOut + 1;
+                }
                 this.folk.setCarry(i, good, got);
                 this.folk.setAct(i, cast<int>(Act.Idle));
                 return;
@@ -1225,7 +1255,11 @@ public bundle Agents {
                     if (this.folk.actOf(i) == cast<int>(Act.Gather)) {
                         this.folk.addTimer(i, dt);
                         this.workTicks = this.workTicks + 1;
-                        if (this.folk.timerOf(i) >= this.workTime(this.harvestOf(this.folk.jobOf(i)))) {
+                        mutable float takes = this.workTime(this.harvestOf(this.folk.jobOf(i)));
+                        if (this.folk.hasKit(i, AgentTable.K_TOOL)) {
+                            takes = takes * Simulation.TOOLED;
+                        }
+                        if (this.folk.timerOf(i) >= takes) {
                             this.chop(i);
                         }
                         i = i + 1;
@@ -1586,6 +1620,10 @@ public bundle Agents {
                 this.town.sweep(this.cpop, this.croom, this.cworst, this.cworstRoom, this.cdead,
                                 this.cbusy, this.copen, this.cseat,
                                 this.ncomm, Craft.count(), cast<int>(BuildingKind.TownHall));
+                // And what those buildings are waiting for. Read here, before anybody decides what
+                // to build next, because what a place should build is what it is short of.
+                this.town.wants(this.cwant, this.cfed, this.ncomm, Goods.count());
+                this.town.learning(this.clesson, this.ncomm);
                 // Where a community IS, taken as where its people are. Nobody planted a flag: the
                 // centre is the average of everybody standing there, so it drifts as they do -- and
                 // when a place empties out, it stops existing rather than leaving a marker behind.
@@ -2570,84 +2608,79 @@ public bundle Agents {
                     if (Builds.era(k) > this.eraOf(c)) {
                         continue;                    // nobody here knows how yet
                     }
-                    // ONE of each kind per place -- and this cap is doing more work than it looks
-                    // like it is, so read the measurements before lifting it.
+                    // The cap of one building per kind is GONE, and it could only go once the
+                    // scoring below stopped measuring abundance.
                     //
-                    // The complaint is real: a town of eight hundred gets exactly one bakery, the
-                    // same as a hamlet of forty, so industry scales with the NUMBER of communities
-                    // rather than with their size and a city cannot look like a city. Three
-                    // replacements were tried and all three were WORSE, over twenty-generation arcs
-                    // on seed 42:
-                    //
-                    //   this cap                45 places, 84% roofed, 11 kinds,  48 kilns,    4 pulled down
-                    //   quota / Builds.hands    32 places, 55% roofed,  5 kinds, 517 kilns, 1078 pulled down
-                    //   only when all benches full  52 places, 76% roofed,  9 kinds, 826 kilns,  582 pulled down
-                    //   ...plus worth/(1+already)   54 places, 83% roofed,  6 kinds, 806 kilns,  450 pulled down
-                    //
-                    // The cap has been carrying DIVERSIFICATION, silently. A kiln's input is wood,
-                    // wood is the most abundant thing in the world, so with the cap gone the kiln
-                    // wins every census forever and the windmill and the bakery are never built at
-                    // all -- variety fell from eleven kinds to six even with diminishing returns
-                    // applied to the score.
-                    //
-                    // So the cap stays until the SCORING is fixed, which is the actual defect: a
-                    // building's worth is the abundance of its input, and abundance is not want.
-                    // Worth should be what the place is short of -- consumption it cannot meet --
-                    // and then more of a kind follows from more mouths without anything holding it
-                    // back. That is a rebalance of the economy, not a one-line change, and doing it
-                    // blind would trade a visible flaw for an invisible one.
-                    if (this.town.find(c, k) >= 0) {
-                        continue;
-                    }
+                    // It was carrying diversification in silence. A kiln's input is wood, wood is
+                    // the commonest thing in the world, so under the old rule the kiln won every
+                    // census for ever and the mill and the bakery were never built; three
+                    // replacements for the cap were measured over twenty-generation arcs and all
+                    // three were worse, because every one of them left the scoring alone. With
+                    // worth read as WANT, a second kiln is only built by a place that is short of
+                    // charcoal -- and a town of eight hundred is short of more than a hamlet of
+                    // forty is, which is the whole thing that was missing.
                     if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(k))) {
                         continue;
                     }
                     if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(k))) {
                         continue;
                     }
-                    // What a building is worth, and there are three answers because there are three
-                    // kinds of building.
+                    // ONE rule for every building: it is worth what the place is SHORT of.
                     //
-                    // A workshop is worth its SCARCER input: a smithy is worth what it can smelt,
-                    // and all the iron in the world is worth nothing without charcoal.
+                    // A place of learning is the exception the rule needs rather than an exception
+                    // to it -- what it makes is knowledge, which no shelf holds, so what a village
+                    // is short of is the spare time to think, and that is the surplus it is sitting
+                    // on. Everything else is worth its output's unmet want.
                     //
-                    // A FIELD has no input to pile up -- its input is ground -- so it is worth what
-                    // the place is SHORT of. That is the scoring the whole catalogue ought to have
-                    // and does not yet: worth as unmet want rather than as abundance of stock. It is
-                    // right here first because for husbandry there is no other candidate, and it is
-                    // the first honest piece of the answer to why a town of eight hundred builds no
-                    // more bakeries than a hamlet of forty.
+                    // Gated on being able to run at all: a workshop with no input in the store is a
+                    // want the place cannot answer yet, and building it would only add a stall.
+                    // NOBODY RAISES A SECOND WORKSHOP OF A TRADE WHILE THE FIRST HAS AN EMPTY SEAT.
                     //
-                    // A place of LEARNING is worth the spare food behind it. A people living hand to
-                    // mouth does not raise a library however much paper it has -- which is the same
-                    // rule discovery has always run on, now visible on the map as a building.
+                    // This is the bound that makes "worth is want" terminate, and it took three
+                    // measured arcs to find that it has to be universal. Every want in this world
+                    // has a term that answers it -- stock for a good, a rate for hunger, a scholar
+                    // for a lesson -- and every one of those terms is measured on what is being
+                    // WORKED, not on what is standing. So an unstaffed building answers nothing,
+                    // the want that built it survives it, and the village builds another: four
+                    // thousand shrines, then two thousand once learning was bounded, then a
+                    // thousand pastures once it was not.
+                    //
+                    // An empty bench is the one signal that is true of every kind of building at
+                    // once. A village with a pasture nobody stands in does not need a second
+                    // pasture; it needs somebody to stand in the first.
+                    int craft = Builds.craft(k);
+                    if (craft != cast<int>(Craft.NoCraft)
+                        && this.copen[c * Craft.count() + craft] >= 0) {
+                        continue;
+                    }
                     mutable int worth = 0;
                     if (Builds.study(k) > 0) {
-                        int spare = this.stores.foodOf(c) - this.cpop[c] * Simulation.LARDER;
-                        if (spare > 0) {
-                            worth = spare;
-                            if (Builds.in1(k) != cast<int>(Good.Nothing)) {
-                                int ink = this.stores.amountOf(c, Builds.in1(k));
-                                if (ink < worth) {
-                                    worth = ink;
-                                }
+                        // A place of learning is bounded by the people who can sit in it, and by
+                        // nothing else -- what it makes is knowledge, and no shelf fills up.
+                        //
+                        // Two bounds were tried and measured before this one. Spare food alone is
+                        // unbounded and raised four thousand three hundred and fifty-five shrines;
+                        // spare food minus the learning already being done is no better, because
+                        // learning is only counted where somebody is STANDING, and nobody staffs
+                        // four thousand shrines -- so building more never reduced the want that
+                        // built them. An empty seat is the honest signal, and it is the one this
+                        // codebase already uses for every other workshop.
+                        if (this.copen[c * Craft.count() + cast<int>(Craft.Lettering)] < 0) {
+                            int spare = this.stores.foodOf(c) - this.cpop[c] * Simulation.LARDER;
+                            if (spare > 0) {
+                                worth = spare;
                             }
                         }
                     } else {
-                        if (Builds.in1(k) == cast<int>(Good.Nothing)) {
-                            worth = this.cpop[c] * Simulation.LARDER - this.stores.foodOf(c);
-                            if (worth < 0) {
-                                worth = 0;
-                            }
-                        } else {
-                            worth = this.stores.amountOf(c, Builds.in1(k));
-                            if (Builds.in2(k) != cast<int>(Good.Nothing)) {
-                                int other = this.stores.amountOf(c, Builds.in2(k));
-                                if (other < worth) {
-                                    worth = other;
-                                }
-                            }
-                        }
+                        worth = this.shortOf(c, Builds.out(k));
+                    }
+                    if (Builds.in1(k) != cast<int>(Good.Nothing)
+                        && !this.stores.has(c, Builds.in1(k), Builds.n1(k))) {
+                        worth = 0;
+                    }
+                    if (Builds.in2(k) != cast<int>(Good.Nothing)
+                        && !this.stores.has(c, Builds.in2(k), Builds.n2(k))) {
+                        worth = 0;
                     }
                     if (worth > bestScore) {
                         bestScore = worth;
@@ -2659,6 +2692,110 @@ public bundle Agents {
                 }
                 this.markNear(c, best);
                 return;
+            }
+
+            // How much of a good this place wants and has not got.
+            //
+            // Three sources, and every one of them scales with how many people are here, which is
+            // the whole reason a city can now out-build a hamlet: mouths to feed, benches to keep
+            // fed, and hands to put a tool in. The old rule -- worth is the abundance of the input
+            // -- scaled with nothing at all, which is why the number of workshops in the world grew
+            // only by the number of VILLAGES in it.
+            private method shortOf(int c, int good) returns int {
+                if (good <= 0) {
+                    return 0;
+                }
+                int ng = Goods.count();
+                mutable int want = this.cwant[c * ng + good];
+                if (Goods.edible(good)) {
+                    // One hunger, as a rate: what this many mouths eat in ten seconds against what
+                    // the food buildings put on the table in ten. Counted per good, every food
+                    // building saw the whole shortfall alone; counted as a stock, no amount of
+                    // building ever answered it. Both were measured, and both ended with a village
+                    // of nothing but pastures.
+                    int eats = this.cpop[c] * 10 / cast<int>(Simulation.HUNGER_EVERY + 1.0);
+                    // No multiplier on it. Scaling the food gap by the larder made it eight times
+                    // any other want in the world, so a village that was one pasture short of fed
+                    // still wanted a pasture more than it wanted the sawmill it had no planks for.
+                    // Wants are compared against each other, so they have to be in the same units.
+                    if (eats > this.cfed[c]) {
+                        want = want + eats - this.cfed[c];
+                    }
+                    return want;                 // a rate answered by a rate: no stock term here
+                }
+                // A village is always building something, and everything is built out of these two.
+                if (good == cast<int>(Good.Wood)) {
+                    want = want + this.cpop[c];
+                }
+                if (good == cast<int>(Good.Stone)) {
+                    want = want + this.cpop[c] / 2;
+                }
+                // A tool in every hand that can use one, and arms for everybody carrying a grudge.
+                if (good == cast<int>(Good.Tools)) {
+                    want = want + this.handsWanting(c);
+                }
+                if (good == cast<int>(Good.Weapon) || good == cast<int>(Good.Armour)) {
+                    want = want + this.ctrade[c * Job.count() + cast<int>(Job.Raider)];
+                }
+                // A CHAIN HAS TO BE ABLE TO START.
+                //
+                // Want read purely off what is standing deadlocks every chain in the catalogue:
+                // nobody wants planks until something that eats planks exists, and nothing that
+                // eats planks can be built without planks. A measured arc went from four goods
+                // never produced to twenty-seven -- the sawmill, the kiln, the weaver and the
+                // smokehouse all died at once, and the world reverted to pasture and shrines.
+                //
+                // So a place also wants a little of whatever it COULD use: enough of it to run one
+                // batch of anything it already knows how to build. That is a village looking at
+                // what it might become rather than only at what it is, and it is the smallest term
+                // that breaks the circle.
+                mutable int seed = 0;
+                for (int k in 1..BuildingKind.count()) {
+                    if (Builds.era(k) > this.eraOf(c)) {
+                        continue;
+                    }
+                    if (Builds.in1(k) == good) {
+                        seed = seed + Builds.n1(k);
+                    }
+                    if (Builds.in2(k) == good) {
+                        seed = seed + Builds.n2(k);
+                    }
+                }
+                want = want + seed;
+                int have = this.stores.amountOf(c, good);
+                if (want <= have) {
+                    return 0;
+                }
+                return want - have;
+            }
+
+            // The good a harvest class mostly brings home. A mine yields ten different metals and a
+            // forest a dozen woods, so this is the one the shortage is judged on -- an
+            // approximation, and the honest kind: a village that is short of iron is short of
+            // MINING, and which vein the pick lands in is not a decision anybody makes.
+            public static method staple(int hclass) returns int {
+                if (hclass == cast<int>(Harvest.Timber)) {
+                    return cast<int>(Good.Wood);
+                }
+                if (hclass == cast<int>(Harvest.Quarry)) {
+                    return cast<int>(Good.Stone);
+                }
+                if (hclass == cast<int>(Harvest.Mine)) {
+                    return cast<int>(Good.IronOre);
+                }
+                return cast<int>(Good.Nothing);
+            }
+
+            // Grown people here in a trade a tool is any use to.
+            private method handsWanting(int c) returns int {
+                int nj = Job.count();
+                mutable int t = 0;
+                for (int jb in 1..nj) {
+                    if (Simulation.toolTrade(jb)) {
+                        t = t + this.ctrade[c * nj + jb];
+                    }
+                }
+                return t;
             }
 
             // Somewhere near the middle, on ground you can stand on. Returns true if a site was
@@ -2863,6 +3000,60 @@ public bundle Agents {
             // an oak and neither is cutting into a seam: giving them all the same eighteen seconds
             // said a forager feeds about as many mouths as a woodcutter fills woodsheds, which is how
             // a world with plenty of berries in it starved to death.
+            // Take up whatever the village has that this person's work wants.
+            //
+            // Asked when somebody picks a trade, which is the moment they would actually walk to
+            // the store and pick something up -- not every tick, and not by a sweep over the whole
+            // population. A tool comes out of the shelves like any other good, so a place that has
+            // not learned to make them simply does without, and the first village to raise a
+            // toolsmith is visibly better at everything within a generation.
+            private method kitUp(int i, int h) returns void {
+                int jb = this.folk.jobOf(i);
+                if (!this.folk.hasKit(i, AgentTable.K_TOOL) && Simulation.toolTrade(jb)) {
+                    if (this.stores.take(h, cast<int>(Good.Tools), 1) > 0) {
+                        this.folk.equip(i, AgentTable.K_TOOL, Simulation.TOOL_LIFE);
+                        this.tooled = this.tooled + 1;
+                    }
+                }
+                // Arms and mail are for the people who will be hit. Handing a spear to a baker
+                // would empty an armoury into a kitchen.
+                if (jb != cast<int>(Job.Raider) && jb != cast<int>(Job.General)) {
+                    return;
+                }
+                if (!this.folk.hasKit(i, AgentTable.K_WEAPON)) {
+                    if (this.stores.take(h, cast<int>(Good.Weapon), 1) > 0) {
+                        this.folk.equip(i, AgentTable.K_WEAPON, 0);
+                        this.armed = this.armed + 1;
+                    }
+                }
+                if (!this.folk.hasKit(i, AgentTable.K_ARMOUR)) {
+                    if (this.stores.take(h, cast<int>(Good.Armour), 1) > 0) {
+                        this.folk.equip(i, AgentTable.K_ARMOUR, 0);
+                        this.mailed = this.mailed + 1;
+                    }
+                }
+                return;
+            }
+
+            // Which trades a tool is any use to. Everything that goes out and works on something
+            // with its hands; the ones that stand at a bench have the bench.
+            public static method toolTrade(int job) returns boolean {
+                return job == cast<int>(Job.Woodcutter) || job == cast<int>(Job.Miner)
+                    || job == cast<int>(Job.Quarrier) || job == cast<int>(Job.Farmer)
+                    || job == cast<int>(Job.Forager) || job == cast<int>(Job.Fisher)
+                    || job == cast<int>(Job.Hunter) || job == cast<int>(Job.Builder)
+                    || job == cast<int>(Job.Prospector);
+            }
+
+            // Loads of work a tool has in it before it is finished, and what having one is worth.
+            //
+            // Thirty is about a third of a working life, so a village needs a standing trickle of
+            // them rather than one gift -- which is the whole point of making them a good. Seven
+            // tenths of the time is a big enough difference to see in the ledger within an arc and
+            // small enough that a village without a toolsmith is behind rather than dead.
+            public static int TOOL_LIFE = 30;
+            public static float TOOLED = 0.70;
+
             private method workTime(int hclass) returns float {
                 if (hclass == cast<int>(Harvest.Forage)) {
                     return 8.0;
@@ -3217,12 +3408,21 @@ public bundle Agents {
                     }
                     // Hungry places want food. It is not a preference, it is the only need the
                     // simulation can kill you for.
+                    //
+                    // And a place short of anything else wants that too. This was a flat ten for
+                    // every trade but the two that feed, so a village with no stone put no more
+                    // people on the quarry than one with a mountain of it -- and since a workshop
+                    // cannot be raised without stone, the whole catalogue above the first era
+                    // simply never got built. Reading the same shortage the builder reads is what
+                    // joins the two halves of the economy up.
                     mutable int want = 10;
                     if (hc == cast<int>(Harvest.Forage) || hc == cast<int>(Harvest.Fishing)) {
                         want = 10 + 40 * (this.cpop[h] + 1) / (this.stores.foodOf(h) + 1);
-                        if (want > 100) {
-                            want = 100;
-                        }
+                    } else {
+                        want = 10 + this.shortOf(h, Simulation.staple(hc)) / 4;
+                    }
+                    if (want > 100) {
+                        want = 100;
                     }
                     if (want > bestScore) {
                         bestScore = want;
@@ -3355,6 +3555,10 @@ public bundle Agents {
                 if (best != cast<int>(Job.Idle)) {
                     this.folk.setJob(i, best);
                     this.ctrade[h * nj + best] = this.ctrade[h * nj + best] + 1;
+                    // Taking up a trade is the moment you would go to the store and pick up what
+                    // it needs, so it is the moment this is asked -- not every tick, and not by a
+                    // sweep over fifty thousand people looking for empty hands.
+                    this.kitUp(i, h);
                 }
                 return;
             }
@@ -3646,14 +3850,31 @@ public bundle Agents {
                 this.craider[them] = h;
                 this.raids = this.raids + 1;
                 boolean armed = this.folk.jobOf(j) == cast<int>(Job.Raider);
-                if (this.folk.wound(j, Simulation.HURT)) {
+                // What a blow costs, and what it costs to take one. This is where the whole iron
+                // chain arrives: a village that smelts, forges and mails its raiders beats one
+                // that does not, and until now all that iron was a number on a shelf.
+                mutable int blow = Simulation.HURT;
+                if (this.folk.hasKit(i, AgentTable.K_WEAPON)) {
+                    blow = blow * 8 / 5;
+                }
+                if (this.folk.hasKit(j, AgentTable.K_ARMOUR)) {
+                    blow = blow * 3 / 5;
+                }
+                if (this.folk.wound(j, blow)) {
                     this.deathsWar = this.deathsWar + 1;
                     // A kill is seen and remembered. It is the same earning as bringing a load home,
                     // eight times over, which is exactly why a world with war in it produces chiefs
                     // who are not the best farmers.
                     this.folk.earn(i, 8);
                 }
-                if (armed && this.folk.wound(i, Simulation.HURT)) {
+                mutable int back = Simulation.HURT;
+                if (this.folk.hasKit(j, AgentTable.K_WEAPON)) {
+                    back = back * 8 / 5;
+                }
+                if (this.folk.hasKit(i, AgentTable.K_ARMOUR)) {
+                    back = back * 3 / 5;
+                }
+                if (armed && this.folk.wound(i, back)) {
                     this.deathsWar = this.deathsWar + 1;
                     return;
                 }
@@ -4249,6 +4470,7 @@ public bundle Agents {
                 System.IO.Console.println($"  nations: {alive} living || {bands} bands, {chiefs} chiefdoms, {kings} kingdoms, {empires} empires || {this.annexed} towns changed hands, {this.extinct} peoples ended");
                 System.IO.Console.println($"  expansion: {this.hived} villages hived off ({this.hivedFolk} people), {this.colonies} colonies sent out ({this.colonists} settlers, {this.planted} arrived, {this.strayed} turned back), {this.joined} places merged");
                 System.IO.Console.println($"  prospecting: {this.dug} tracts opened, {this.struck} working faces found");
+                System.IO.Console.println($"  kit: {this.tooled} tools taken up, {this.wornOut} worn through || {this.armed} armed, {this.mailed} in mail");
                 this.paths.report();
                 int top = this.realm.biggest();
                 if (top >= 0) {

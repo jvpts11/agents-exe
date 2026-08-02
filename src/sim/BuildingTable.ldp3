@@ -332,6 +332,87 @@ public bundle Agents {
                 return;
             }
 
+            // What every community is SHORT OF, per good, in one pass over the table.
+            //
+            // This replaces the rule that decided what to build for the whole life of the project:
+            // a building's worth was the ABUNDANCE OF ITS INPUT, so a village built a charcoal kiln
+            // because it had wood, not because it wanted charcoal. Wood is the commonest thing in
+            // the world, so the kiln won every census for ever and the mill and the bakery were
+            // never raised at all; the only thing holding the catalogue open was a cap of one
+            // building per kind, and that cap is why a town of eight hundred got exactly one bakery
+            // and looked no different from a hamlet of forty.
+            //
+            // Want is the honest question and it was always the honest question. A place wants what
+            // its people eat, what its workshops feed on, and what it needs to keep building. All
+            // three scale with how many people are there, which is the whole thing the old rule
+            // could not express -- and with it expressed, the cap comes off and a city grows
+            // industry because a city has more mouths, not because somebody raised a limit.
+            public method wants(int[] out, int[] fed, int ncomm, int ngood) returns void {
+                for (int s in 0..ncomm * ngood) {
+                    out[s] = 0;
+                }
+                for (int c in 0..ncomm) {
+                    fed[c] = 0;
+                }
+                for (int i in 0..this.n) {
+                    if (this.isGone(i) || !this.isWorking(i)) {
+                        continue;
+                    }
+                    int c = cast<int>(this.owner[i]);
+                    if (c < 0 || c >= ncomm) {
+                        continue;
+                    }
+                    int k = this.kindOf(i);
+                    mutable int room = Builds.hands(k);
+                    if (room <= 0) {
+                        room = 1;
+                    }
+                    // Enough of the input to keep every bench of it busy for a full shift. A
+                    // workshop that stalls is the loudest want a village has.
+                    int a = Builds.in1(k);
+                    if (a > 0) {
+                        out[c * ngood + a] = out[c * ngood + a] + Builds.n1(k) * room;
+                    }
+                    int b = Builds.in2(k);
+                    if (b > 0) {
+                        out[c * ngood + b] = out[c * ngood + b] + Builds.n2(k) * room;
+                    }
+                    // And what is ALREADY ANSWERING that want, subtracted from it. Without this
+                    // term a want that can never be filled -- food, which people keep eating --
+                    // beats every bounded one for ever, and a measured village raised three hundred
+                    // and thirty-nine pastures and not one workshop of any other kind. It is the
+                    // same failure the charcoal kiln had, arriving from the opposite direction: an
+                    // unbounded number wins every comparison it is allowed into.
+                    //
+                    // A place stops building bakeries when the bakeries it has can feed it. That is
+                    // the whole rule, and it is what makes "worth is want" terminate.
+                    int made = Builds.out(k);
+                    if (made > 0) {
+                        // HUNGER IS ONE WANT, not one per edible good. Counted per good, a village
+                        // of a hundred and twenty wanted nine hundred and sixty of milk AND nine
+                        // hundred and sixty of eggs AND the same of bread, so every food building
+                        // saw the whole shortfall by itself and no number of them ever answered it
+                        // -- a measured village raised four hundred and three henhouses and not one
+                        // workshop of any other kind. What a pasture answers is FOOD.
+                        if (Goods.edible(made)) {
+                            // Food is a RATE, not a stock. Compared against a stock target the
+                            // want could never be answered -- people eat continuously, so the
+                            // larder is near empty whatever anybody builds, and a measured village
+                            // raised three hundred and forty-two pastures still reading a shortage
+                            // of nine hundred. What a village needs is enough food coming IN to
+                            // match what is going out, and that is a comparison of two speeds.
+                            //
+                            // Per ten seconds, in whole units, so the arithmetic stays integer.
+                            fed[c] = fed[c] + Builds.nout(k) * room * 10
+                                            / cast<int>(Builds.secs(k) + 1.0);
+                        } else {
+                            out[c * ngood + made] = out[c * ngood + made] - Builds.nout(k) * room;
+                        }
+                    }
+                }
+                return;
+            }
+
             // Knowledge made this census, per community: one pass over the table.
             //
             // A place of learning only counts while somebody is standing in it. An empty library is

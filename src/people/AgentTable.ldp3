@@ -98,6 +98,18 @@ public bundle Agents {
             private mutable short[] targetY;
             private mutable byte[] carryKind;
             private mutable short[] carryAmt;
+            // What this person owns rather than what they are carrying home. A bitset because the
+            // three are independent and a byte holds them: a soldier may have a weapon and no
+            // armour, a woodcutter a tool and neither.
+            //
+            // Armour is HERE and never in the renderer. It changes what a blow costs and that is
+            // all it does -- Joao's call, and the right one: on a two-unit cube at eight pixels a
+            // breastplate is three pixels of grey, and the twelve authored models earn their keep
+            // in an inventory panel rather than on a body nobody can see it on.
+            private mutable byte[] kit;
+            // Uses left in the tool. A tool that never wore out would be a one-off gift, and the
+            // whole reason the iron chain exists is that a village has to keep making them.
+            private mutable short[] toolLife;
             // life
             private mutable float[] age;
             private mutable float[] lifespan;
@@ -143,6 +155,8 @@ public bundle Agents {
                 this.targetX = new short[cap]();
                 this.targetY = new short[cap]();
                 this.carryKind = new byte[cap]();
+                this.kit = new byte[cap]();
+                this.toolLife = new short[cap]();
                 this.carryAmt = new short[cap]();
                 this.age = new float[cap]();
                 this.lifespan = new float[cap]();
@@ -181,6 +195,8 @@ public bundle Agents {
                 delete this.targetX;
                 delete this.targetY;
                 delete this.carryKind;
+                delete this.kit;
+                delete this.toolLife;
                 delete this.carryAmt;
                 delete this.age;
                 delete this.lifespan;
@@ -249,6 +265,10 @@ public bundle Agents {
                 this.targetY[i] = cast<short>(0);
                 this.carryKind[i] = cast<byte>(0);
                 this.carryAmt[i] = cast<short>(0);
+                // Nobody is born with anything. A recycled row must not hand a newborn the axe the
+                // last occupant of it died holding -- the same reason a community slot is cleared.
+                this.kit[i] = cast<byte>(0);
+                this.toolLife[i] = cast<short>(0);
                 this.age[i] = 0.0;
                 this.lifespan[i] = 360.0;
                 this.hp[i] = cast<byte>(100);
@@ -396,6 +416,52 @@ public bundle Agents {
             public method setTargetNode(int i, int node) returns void {
                 this.targetNode[i] = node;
                 return;
+            }
+
+            // ---- what a person owns ----
+
+            public static fixed int K_TOOL = 1;
+            public static fixed int K_WEAPON = 2;
+            public static fixed int K_ARMOUR = 4;
+
+            public method hasKit(int i, int what) returns boolean {
+                return (cast<int>(this.kit[i]) & what) != 0;
+            }
+
+            public method kitOf(int i) returns int {
+                return cast<int>(this.kit[i]) & 255;
+            }
+
+            // Take up a tool, a weapon or a coat of mail. A tool arrives with a working life in it;
+            // the other two do not wear out, they are lost with the person.
+            public method equip(int i, int what, int life) returns void
+                requires life >= 0
+            {
+                this.kit[i] = cast<byte>((cast<int>(this.kit[i]) & 255) | what);
+                if (what == AgentTable.K_TOOL) {
+                    this.toolLife[i] = cast<short>(life);
+                }
+                return;
+            }
+
+            public method toolLifeOf(int i) returns int {
+                return cast<int>(this.toolLife[i]);
+            }
+
+            // One more piece of work done with it. Returns true on the stroke that finishes it, so
+            // the caller can count what the world wore out exactly once.
+            public method wearTool(int i) returns boolean {
+                if ((cast<int>(this.kit[i]) & AgentTable.K_TOOL) == 0) {
+                    return false;
+                }
+                int left = cast<int>(this.toolLife[i]) - 1;
+                if (left > 0) {
+                    this.toolLife[i] = cast<short>(left);
+                    return false;
+                }
+                this.toolLife[i] = cast<short>(0);
+                this.kit[i] = cast<byte>(cast<int>(this.kit[i]) & 255 & ~AgentTable.K_TOOL);
+                return true;
             }
 
             public method carryAmtOf(int i) returns int {
