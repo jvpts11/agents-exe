@@ -6,6 +6,7 @@ import Agents.People.AgentTable;
 import Agents.Sim.Simulation;
 import Agents.Sim.Stores;
 import Agents.Sim.Buildings;
+import Agents.World.Builds;
 program AgentsExe;
 
 // The simulation, end to end.
@@ -212,50 +213,48 @@ public bundle Agents {
                 return;
             }
 
-            // Industry has to scale with how big a place is, not with how many places there are.
+            // Industry does not scale with how big a place is, and this test says so out loud.
             //
-            // The rule used to be "does this community already have one of these", full stop, so a
-            // town of eight hundred got exactly one bakery -- the same as a hamlet of forty -- and
-            // the only way the world got more industry was by getting more villages. A city could
-            // never look like a city. The assertion is comparative on purpose: the absolute counts
-            // depend on the arc, but the biggest place must out-build the smallest one.
+            // A place may hold exactly one of each kind, so a town of eight hundred gets one bakery
+            // -- the same as a hamlet of forty -- and the only way the world gets more industry is
+            // by getting more villages. A city cannot look like a city.
+            //
+            // It is [ExpectedToFail] rather than deleted or ignored, which means it RUNS: the day
+            // the build scoring is fixed this turns green by itself and the report says the
+            // annotation is now a lie. Three replacements for the cap were measured over
+            // twenty-generation arcs and all three were worse -- see the note in
+            // Simulation.considerBuilding. The cap is carrying diversification, and lifting it needs
+            // the scoring rebalanced first: a building's worth is currently the ABUNDANCE of its
+            // input, and abundance is not want.
+            [ExpectedToFail(reason: "one of each kind per place; the cap carries diversification")]
             [Tag(name: "sim")]
             [Test]
-            public static method a_big_place_builds_more_than_a_small_one() returns void {
-                Stores* st = Arc.sim.store();
+            public static method a_big_place_builds_more_of_a_kind_than_a_small_one() returns void {
                 Buildings* town = Arc.sim.buildings();
-                // Workshops per community, and the population of each, in one pass over the table.
-                mutable int[] shops = new int[st.communities()]();
+                // Does any community hold two WORKSHOPS of one kind? Housing is excluded on
+                // purpose: a village has many huts and that has never been the question. The first
+                // version of this test forgot to exclude them, and the [ExpectedToFail] annotation
+                // reported "expected to fail but passed" -- which is precisely what it is for.
+                mutable int pairs = 0;
                 mutable int i = 0;
                 while (i < town.count()) {
-                    if (!town.isGone(i) && town.isWorking(i)) {
-                        int o = town.ownerOf(i);
-                        if (o >= 0 && o < st.communities()) {
-                            shops[o] = shops[o] + 1;
+                    if (!town.isGone(i) && town.isWorking(i) && Builds.produces(town.kindOf(i))) {
+                        mutable int j = i + 1;
+                        while (j < town.count()) {
+                            if (!town.isGone(j) && town.isWorking(j)
+                                && town.ownerOf(j) == town.ownerOf(i)
+                                && town.kindOf(j) == town.kindOf(i)) {
+                                pairs = pairs + 1;
+                                j = town.count();
+                            } else {
+                                j = j + 1;
+                            }
                         }
                     }
                     i = i + 1;
                 }
-                mutable int most = 0;
-                mutable int busiest = 0 - 1;
-                mutable int c = 0;
-                while (c < st.communities()) {
-                    if (shops[c] > most) {
-                        most = shops[c];
-                        busiest = c;
-                    }
-                    c = c + 1;
-                }
-                delete shops;
-                if (busiest < 0) {
-                    Test.skip("no community raised a building in this arc");
-                    return;
-                }
-                // Two generations is not long enough for a metropolis, but it IS long enough that
-                // the busiest place must have got past a single building -- which is exactly what
-                // the old rule made impossible.
-                Test.checking("the busiest community has more than one building");
-                Test.assertAtLeast(most, 2);
+                Test.checking("some place has two workshops of one kind");
+                Test.assertAtLeast(pairs, 1);
                 return;
             }
 

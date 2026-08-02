@@ -1,0 +1,221 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.Sim.Stores;
+import Agents.Sim.Buildings;
+import Agents.World.Goods;
+import Agents.World.Builds;
+import Agents.World.BuildingKind;
+program AgentsExe;
+
+// The two tables everything else writes into: what a community owns, and what it has built.
+//
+// These are the cheap tests, and they are the ones that catch the defects that are worst to chase.
+// A store that goes negative, a take that hands out more than it holds, a slot handed to two
+// buildings -- each of those shows up somewhere else entirely, hours later, as an economy that
+// makes no sense.
+
+public bundle Agents {
+    public namespace Checks {
+
+        public class Ledger {
+            private static mutable Stores* store;
+
+            [Setup]
+            public static method freshStore() returns void {
+                Ledger.store = new Stores(4) on heap;
+                return;
+            }
+
+            [Teardown]
+            public static method dropStore() returns void {
+                delete Ledger.store;
+                return;
+            }
+
+            [Tag(name: "ledger")]
+            [Test]
+            public static method a_new_store_holds_nothing() returns void {
+                mutable int total = 0;
+                mutable int c = 0;
+                while (c < Ledger.store.communities()) {
+                    mutable int g = 0;
+                    while (g < Ledger.store.goods()) {
+                        total = total + Ledger.store.amountOf(c, g);
+                        g = g + 1;
+                    }
+                    c = c + 1;
+                }
+                Test.checking("every shelf starts empty");
+                Test.assertEqual(total, 0);
+                return;
+            }
+
+            [Tag(name: "ledger")]
+            [Test]
+            public static method what_goes_in_comes_out() returns void {
+                int wood = cast<int>(Good.Wood);
+                Ledger.store.add(1, wood, 50);
+                Test.checking("the shelf holds what was put on it");
+                Test.assertEqual(Ledger.store.amountOf(1, wood), 50);
+                Test.checking("and no other community was touched");
+                Test.assertEqual(Ledger.store.amountOf(0, wood), 0);
+                Test.assertEqual(Ledger.store.amountOf(2, wood), 0);
+
+                int got = Ledger.store.take(1, wood, 20);
+                Test.checking("a take hands over what was asked for");
+                Test.assertEqual(got, 20);
+                Test.checking("and leaves the rest");
+                Test.assertEqual(Ledger.store.amountOf(1, wood), 30);
+                return;
+            }
+
+            // Taking more than is there must hand over what there is, not conjure the difference and
+            // not leave a negative. A negative stock is silent until something divides by it.
+            [Tag(name: "ledger")]
+            [Test]
+            public static method you_cannot_take_what_is_not_there() returns void {
+                int stone = cast<int>(Good.Stone);
+                Ledger.store.add(0, stone, 10);
+                int got = Ledger.store.take(0, stone, 999);
+                Test.checking("the take is capped at what was on the shelf");
+                Test.assertEqual(got, 10);
+                Test.checking("and the shelf is empty, not negative");
+                Test.assertEqual(Ledger.store.amountOf(0, stone), 0);
+                int again = Ledger.store.take(0, stone, 5);
+                Test.checking("taking from an empty shelf hands over nothing");
+                Test.assertEqual(again, 0);
+                Test.checking("and still leaves nothing rather than a debt");
+                Test.assertEqual(Ledger.store.amountOf(0, stone), 0);
+                return;
+            }
+
+            [Tag(name: "ledger")]
+            [Test]
+            public static method has_answers_the_question_take_would() returns void {
+                int wood = cast<int>(Good.Wood);
+                Ledger.store.add(2, wood, 7);
+                Test.checking("it has what it has");
+                Test.assertTrue(Ledger.store.has(2, wood, 7));
+                Test.checking("and less than it has");
+                Test.assertTrue(Ledger.store.has(2, wood, 1));
+                Test.checking("but not more than it has");
+                Test.assertFalse(Ledger.store.has(2, wood, 8));
+                return;
+            }
+
+            // Seizing is raiding: it moves goods between communities WITHOUT touching the produced
+            // and consumed ledgers, because nothing was made or eaten -- it changed hands. A raid
+            // that counted as production would make war look like industry in every report.
+            [Tag(name: "ledger")]
+            [Test]
+            public static method a_raid_moves_goods_without_making_any() returns void {
+                int wood = cast<int>(Good.Wood);
+                Ledger.store.add(0, wood, 100);
+                long madeBefore = Ledger.store.producedOf(wood);
+                long eatenBefore = Ledger.store.consumedOf(wood);
+                int carried = Ledger.store.seize(0, wood, 40);
+                Ledger.store.stow(1, wood, carried);
+                Test.checking("the raider carried off what it could");
+                Test.assertEqual(carried, 40);
+                Test.checking("the victim is down by that much");
+                Test.assertEqual(Ledger.store.amountOf(0, wood), 60);
+                Test.checking("and the raider is up by it");
+                Test.assertEqual(Ledger.store.amountOf(1, wood), 40);
+                Test.checking("nothing was produced by the raid");
+                Test.assertEqualLong(Ledger.store.producedOf(wood), madeBefore);
+                Test.checking("and nothing was consumed by it");
+                Test.assertEqualLong(Ledger.store.consumedOf(wood), eatenBefore);
+                return;
+            }
+        }
+
+        public class Town {
+            private static mutable Buildings* town;
+
+            [Setup]
+            public static method freshTown() returns void {
+                Town.town = new Buildings(64) on heap;
+                return;
+            }
+
+            [Teardown]
+            public static method dropTown() returns void {
+                delete Town.town;
+                return;
+            }
+
+            [Tag(name: "ledger")]
+            [Test]
+            public static method marking_a_site_puts_a_building_on_the_map() returns void {
+                int b = Town.town.mark(100, 200, cast<int>(BuildingKind.TownHall), 3);
+                Test.checking("the site was accepted");
+                Test.assertAtLeast(b, 0);
+                Test.checking("and it is where it was put");
+                Test.assertEqual(Town.town.xAt(b), 100);
+                Test.assertEqual(Town.town.yAt(b), 200);
+                Test.checking("of the kind it was asked for");
+                Test.assertEqual(Town.town.kindOf(b), cast<int>(BuildingKind.TownHall));
+                Test.checking("and belongs to who asked");
+                Test.assertEqual(Town.town.ownerOf(b), 3);
+                Test.checking("but it is not working yet -- it has only been marked out");
+                Test.assertFalse(Town.town.isWorking(b));
+                return;
+            }
+
+            [Tag(name: "ledger")]
+            [Test]
+            public static method a_building_has_to_be_raised_before_it_works() returns void {
+                int b = Town.town.mark(10, 10, cast<int>(BuildingKind.TownHall), 0);
+                mutable boolean finished = false;
+                mutable int hours = 0;
+                while (!finished && hours < 1000) {
+                    finished = Town.town.raise(b, Buildings.RAISE);
+                    hours = hours + 1;
+                }
+                Test.checking("it finished in a sane number of hours");
+                Test.assertTrue(finished);
+                Test.checking("and now it works");
+                Test.assertTrue(Town.town.isWorking(b));
+                Test.checking("and the table counts it");
+                Test.assertAtLeast(Town.town.working(), 1);
+                return;
+            }
+
+            // A demolished building must stop being a building in every sense: gone, not working,
+            // and out of the counts. A ghost in this table is a community slot nobody can found in.
+            [Tag(name: "ledger")]
+            [Test]
+            public static method a_demolished_building_is_gone_in_every_sense() returns void {
+                int b = Town.town.mark(20, 20, cast<int>(BuildingKind.TownHall), 1);
+                Town.town.raise(b, Buildings.RAISE);
+                int before = Town.town.version();
+                Town.town.demolish(b);
+                Test.checking("it reads as gone");
+                Test.assertTrue(Town.town.isGone(b));
+                Test.checking("it is not working");
+                Test.assertFalse(Town.town.isWorking(b));
+                Test.checking("and the table's version moved, so a renderer knows to rebake");
+                Test.assertNotEqual(Town.town.version(), before);
+                return;
+            }
+
+            [Tag(name: "ledger")]
+            [Test]
+            public static method the_table_refuses_to_overflow() returns void {
+                mutable int made = 0;
+                mutable int i = 0;
+                while (i < Town.town.limit() + 10) {
+                    if (Town.town.mark(i % 100, i % 100, cast<int>(BuildingKind.TownHall), 0) >= 0) {
+                        made = made + 1;
+                    }
+                    i = i + 1;
+                }
+                Test.checking("no more buildings were accepted than the table holds");
+                Test.assertAtMost(made, Town.town.limit());
+                Test.checking("and the count never passed the limit");
+                Test.assertAtMost(Town.town.count(), Town.town.limit());
+                return;
+            }
+        }
+    }
+}
