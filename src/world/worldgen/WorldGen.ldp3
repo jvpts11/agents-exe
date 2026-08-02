@@ -2,6 +2,7 @@ import System.IO.Console;
 import System.Memory.Units.megabytes;
 import Agents.World.Grid;
 import Agents.World.Biome;
+import Agents.World.WorldAudit;
 
 // World generation: deterministic, size-agnostic.
 // Pipeline: relief + flood -> tectonic deformation -> thermal erosion -> climate (latitude/lapse
@@ -986,6 +987,66 @@ public bundle Agents {
                 delete this.hkey;
                 delete this.hval;
                 return g;
+            }
+
+            // Generation is a SEARCH, and this is the half of it that was missing.
+            //
+            // WorldAudit exists to say whether a generated world is worth playing, and until now the
+            // only thing that ever asked it was a `preview` mode run by hand: the game itself took
+            // whatever the first roll produced. Three seeds in twelve produce a world the project's
+            // own criteria reject -- one continent and five scraps, or fourteen islands -- and three
+            // players in twelve got that world with nothing to tell them it was not the intended
+            // shape. So roll again.
+            //
+            // The retry seed is derived from the one that failed, so the same starting seed still
+            // gives the same world: a search, not a lottery. `tries` bounds it; if nothing passes,
+            // the last roll is returned rather than nothing, because a flawed world beats no world
+            // and the caller has been told which criterion it failed.
+            private static method rollOnce(int seed, int worldType, float land, int continents,
+                                           int w, int h) returns Grid* {
+                WorldGen gen = new WorldGen(seed) on stack;
+                gen.setWorld(worldType, land);
+                if (continents > 0) {
+                    gen.setContinents(continents);
+                }
+                return gen.generate(w, h);
+            }
+
+            public static method acceptable(int seed, int worldType, float land, int continents,
+                                            int w, int h, int tries, boolean loud) returns Grid* {
+                int want = 6;
+                mutable Grid* kept = WorldGen.rollOnce(seed, worldType, land, continents, w, h);
+                mutable int attempt = 0;
+                mutable boolean settled = false;
+                while (!settled) {
+                    WorldAudit* wa = new WorldAudit(kept) on heap;
+                    wa.analyse();
+                    int v = wa.verdict(want);
+                    String why = wa.reasonName(v);
+                    delete wa;
+                    attempt = attempt + 1;
+                    if (v == 0) {
+                        if (loud && attempt > 1) {
+                            System.IO.Console.println($"world: accepted on roll {attempt}");
+                        }
+                        settled = true;
+                    } else {
+                        if (attempt >= tries) {
+                            if (loud) {
+                                System.IO.Console.println($"world: no roll passed in {tries}; keeping the last, which fails on {why}");
+                            }
+                            settled = true;
+                        } else {
+                            if (loud) {
+                                System.IO.Console.println($"world: roll {attempt} fails on {why}, rolling again");
+                            }
+                            delete kept;
+                            kept = WorldGen.rollOnce(seed + attempt * 7717, worldType, land,
+                                                     continents, w, h);
+                        }
+                    }
+                }
+                return kept;
             }
         }
 

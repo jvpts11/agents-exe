@@ -1,0 +1,197 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.World.Grid;
+import Agents.World.WorldGen;
+import Agents.World.NodeField;
+import Agents.World.Nodes;
+import Agents.World.Harvest;
+program AgentsExe;
+
+// What the world is made of, and what happens to it when people use it.
+//
+// The distinction these tests pin is the one the economy rests on: a berry patch and a fishing
+// ground are FLOWS and come back on their own; a seam of ore is a STOCK and does not; a forest is
+// neither, and gets it wrong in both directions if you model it as either. Before this, wood was a
+// stock -- 96% of the world's forest was felled in a single arc and none of it ever returned, so
+// every long game ended on a plain.
+
+public bundle Agents {
+    public namespace Checks {
+
+        public class Woods {
+            private static mutable Grid* world;
+
+            public static method W() returns int {
+                return 640;
+            }
+
+            public static method H() returns int {
+                return 360;
+            }
+
+            // A small world: these tests are about the RULE, and the rule does not care how big the
+            // map is. A full-size world here would cost 3.7 s per test for nothing.
+            [BeforeAll]
+            public static method buildASmallWorld() returns void {
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Woods.world = gen.generate(Woods.W(), Woods.H());
+                return;
+            }
+
+            [AfterAll]
+            public static method dropTheWorld() returns void {
+                delete Woods.world;
+                return;
+            }
+
+            // Counts living nodes of one harvest class across the whole field.
+            public static method standing(int wantClass) returns int {
+                NodeField* f = Woods.world.surface();
+                mutable int total = 0;
+                mutable int i = 0;
+                while (i < f.size()) {
+                    int k = f.kindAt(i);
+                    if (k > 0 && Nodes.work(k) == wantClass) {
+                        total = total + 1;
+                    }
+                    i = i + 1;
+                }
+                return total;
+            }
+
+            // Fells every tree in the field, the way a very determined century would.
+            public static method fellEverything() returns int {
+                NodeField* f = Woods.world.surface();
+                mutable int felled = 0;
+                mutable int i = 0;
+                while (i < f.size()) {
+                    int k = f.kindAt(i);
+                    if (k > 0 && Nodes.work(k) == cast<int>(Harvest.Timber)) {
+                        // 32767 is the ceiling a node's quantity can hold, so this empties it
+                        // whatever the generator put there -- baseQty is a floor, not the amount.
+                        f.harvest(i, 32767);
+                        felled = felled + 1;
+                    }
+                    i = i + 1;
+                }
+                return felled;
+            }
+
+            [Tag(name: "world")]
+            [Test]
+            public static method the_world_is_born_with_woods_and_seams() returns void {
+                Test.checking("the world has timber");
+                Test.assertAtLeast(Woods.standing(cast<int>(Harvest.Timber)), 100);
+                Test.checking("and forage");
+                Test.assertAtLeast(Woods.standing(cast<int>(Harvest.Forage)), 100);
+                Test.checking("and something to mine");
+                Test.assertAtLeast(Woods.standing(cast<int>(Harvest.Mine)), 1);
+                return;
+            }
+
+            // Fells every other tree: what a working century actually does to a wood, as opposed to
+            // the total wipe below. Seed remains everywhere, so this is the fast path.
+            public static method thinTheWoods() returns int {
+                NodeField* f = Woods.world.surface();
+                mutable int felled = 0;
+                mutable int i = 0;
+                while (i < f.size()) {
+                    int k = f.kindAt(i);
+                    if (k > 0 && Nodes.work(k) == cast<int>(Harvest.Timber) && i % 2 == 0) {
+                        f.harvest(i, 32767);
+                        felled = felled + 1;
+                    }
+                    i = i + 1;
+                }
+                return felled;
+            }
+
+            // The heart of it. A thinned wood grows back, because there is seed standing in it.
+            // This is the test that fails against the old model, where a felled tree was gone for
+            // good and every long game ended on a plain.
+            [Tag(name: "world")]
+            [Test]
+            public static method a_thinned_wood_grows_back() returns void {
+                NodeField* f = Woods.world.surface();
+                int before = Woods.standing(cast<int>(Harvest.Timber));
+                int felled = Woods.thinTheWoods();
+                Test.checking("the test actually felled trees");
+                Test.assertAtLeast(felled, 100);
+                int thinned = Woods.standing(cast<int>(Harvest.Timber));
+                Test.checking("and the wood really is thinner");
+                Test.assertAtMost(thinned, before - felled + 1);
+
+                // Twenty minutes of world time: a tree waits eight sweeps of twenty seconds where
+                // there is seed beside it, so this is several regrowth windows.
+                mutable int t = 0;
+                while (t < 1200) {
+                    f.regrow(1.0);
+                    t = t + 1;
+                }
+                int after = Woods.standing(cast<int>(Harvest.Timber));
+                Test.checking("the wood is filling back in");
+                Test.assertAtLeast(after, thinned + 1);
+                // And not instantly: a world where felling costs nothing is a world where the
+                // woodcutter is a decoration.
+                Test.checking("but it has not simply been restored");
+                Test.assertAtMost(after, before);
+                return;
+            }
+
+            // The other end of the rule: fell the LOT, everywhere, and the land still remembers.
+            // Not a dead end -- but it takes about fourteen lifetimes, which is the cost of doing it.
+            [Tag(name: "slow")]
+            [Test]
+            public static method even_a_cleared_world_recovers_eventually() returns void {
+                NodeField* f = Woods.world.surface();
+                int felled = Woods.fellEverything();
+                Test.checking("the test actually cleared the world");
+                Test.assertAtLeast(felled, 100);
+                Test.checking("and nothing at all is left standing");
+                Test.assertEqual(Woods.standing(cast<int>(Harvest.Timber)), 0);
+
+                mutable int t = 0;
+                while (t < 12000) {
+                    f.regrow(1.0);
+                    t = t + 1;
+                }
+                Test.checking("wood returns to a world that has none, given long enough");
+                Test.assertAtLeast(Woods.standing(cast<int>(Harvest.Timber)), 1);
+                return;
+            }
+
+            // Ore is the other half of the rule, and it is the half that must NOT change: a worked-out
+            // seam does not refill on any timescale a person lives through.
+            [Tag(name: "world")]
+            [Test]
+            public static method a_worked_out_seam_stays_worked_out() returns void {
+                NodeField* f = Woods.world.surface();
+                mutable int mined = 0;
+                mutable int i = 0;
+                while (i < f.size()) {
+                    int k = f.kindAt(i);
+                    if (k > 0 && Nodes.work(k) == cast<int>(Harvest.Mine)) {
+                        // 32767 is the ceiling a node's quantity can hold, so this empties it
+                        // whatever the generator put there -- baseQty is a floor, not the amount.
+                        f.harvest(i, 32767);
+                        mined = mined + 1;
+                    }
+                    i = i + 1;
+                }
+                if (mined == 0) {
+                    Test.skip("this small world rolled no metal veins");
+                    return;
+                }
+                mutable int t = 0;
+                while (t < 1200) {
+                    f.regrow(1.0);
+                    t = t + 1;
+                }
+                Test.checking("the ore is still gone");
+                Test.assertEqual(Woods.standing(cast<int>(Harvest.Mine)), 0);
+                return;
+            }
+        }
+    }
+}

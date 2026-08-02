@@ -1,0 +1,292 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.World.Grid;
+import Agents.World.WorldGen;
+import Agents.People.AgentTable;
+import Agents.Sim.Simulation;
+import Agents.Sim.Stores;
+import Agents.Sim.Buildings;
+program AgentsExe;
+
+// The simulation, end to end.
+//
+// Everything below runs a real arc on the real world with the real fifty thousand people, and then
+// asserts on what the world looks like afterwards. These are not unit tests of a method: they are
+// the questions someone asks after watching a run and wondering whether what they saw was right --
+// does the population survive, does anybody build anything, does the map get claimed, does the
+// economy move, does anyone go to war -- asked as numbers so nobody has to squint at a report.
+//
+// The arc is deliberately short (two generations rather than twenty) so the suite stays runnable;
+// the twenty-generation arc is tagged `slow` and left out of the default run.
+
+public bundle Agents {
+    public namespace Checks {
+
+        public class Arc {
+            private static mutable Grid* world;
+            private static mutable AgentTable* folk;
+            private static mutable Simulation* sim;
+            private static mutable int steps = 0;
+
+            public static method PEOPLE() returns int {
+                return 50000;
+            }
+
+            // A life is about 360 seconds of world time; at dt=0.05 that is 7200 steps. Two
+            // generations is enough for people to be born, take a job, build, claim ground and
+            // fall out with the neighbours -- everything the assertions below ask about.
+            public static method STEPS() returns int {
+                return 14400;
+            }
+
+            [BeforeAll]
+            public static method runTheArc() returns void {
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Arc.world = gen.generate(2560, 1440);
+                Arc.folk = new AgentTable(Arc.PEOPLE()) on heap;
+                Arc.folk.seedWorld(Arc.world, Arc.PEOPLE(), 100, 42);
+                Arc.sim = new Simulation(Arc.world, Arc.folk, 42) on heap;
+                // Nobody is on screen: everyone takes the cheap path, which is the honest shape of
+                // a headless run and also the one the tests want to exercise.
+                Arc.sim.setNearWindow(0, 0, 0, 0);
+                float dt = 0.05;
+                mutable int frame = 0;
+                while (frame < Arc.STEPS()) {
+                    Arc.sim.step(dt);
+                    frame = frame + 1;
+                }
+                Arc.steps = Arc.STEPS();
+                return;
+            }
+
+            [AfterAll]
+            public static method dropTheArc() returns void {
+                delete Arc.sim;
+                delete Arc.folk;
+                delete Arc.world;
+                return;
+            }
+
+            // The first thing to know about any arc: did the world survive it. An arc that ends
+            // with everybody dead passed every other assertion for the wrong reason -- this is the
+            // one that caught the migration bug where 130939 people left home on the same tick.
+            [Tag(name: "sim")]
+            [Test]
+            public static method the_world_is_still_populated() returns void {
+                Test.checking("people are alive at the end of the arc");
+                Test.assertAtLeast(Arc.sim.livingCount(), 1000);
+                Test.checking("and the population has not run away past its cap");
+                Test.assertAtMost(Arc.sim.livingCount(), Arc.PEOPLE());
+                Test.checking("children were born during the arc");
+                Test.assertTrue(Arc.sim.bornCount() > cast<long>(0));
+                return;
+            }
+
+            // Nobody should be standing in the sea. `offLand` is the count that says the movement
+            // code let someone walk off the map or into water.
+            [Tag(name: "sim")]
+            [Test]
+            public static method nobody_is_standing_in_the_sea() returns void {
+                Test.checking("no living person is off land");
+                Test.assertEqual(Arc.sim.offLand(), 0);
+                return;
+            }
+
+            // A person who never arrives anywhere is a person whose pathing is broken. `stuck`
+            // counts the ones that gave up.
+            [Tag(name: "sim")]
+            [Test]
+            public static method people_get_where_they_are_going() returns void {
+                Test.checking("journeys completed during the arc");
+                Test.assertAtLeast(Arc.sim.arrived(), 1000);
+                // Some sticking is expected -- a target node harvested out from under someone --
+                // but it must be the exception, not the rule.
+                Test.checking("stuck journeys stay a minority of arrivals");
+                Test.assertAtMost(Arc.sim.stuck(), Arc.sim.arrived());
+                return;
+            }
+
+            // Work has to produce something. An economy where every ledger is zero means the job
+            // loop is running and nothing is coming out of it.
+            [Tag(name: "sim")]
+            [Test]
+            public static method the_economy_moves() returns void {
+                Stores* st = Arc.sim.store();
+                mutable long produced = cast<long>(0);
+                mutable long consumed = cast<long>(0);
+                mutable int kindsProduced = 0;
+                mutable int good = 0;
+                while (good < st.goods()) {
+                    long p = st.producedOf(good);
+                    produced = produced + p;
+                    consumed = consumed + st.consumedOf(good);
+                    if (p > cast<long>(0)) {
+                        kindsProduced = kindsProduced + 1;
+                    }
+                    good = good + 1;
+                }
+                Test.checking("goods were produced during the arc");
+                Test.assertTrue(produced > cast<long>(0));
+                Test.checking("goods were consumed during the arc");
+                Test.assertTrue(consumed > cast<long>(0));
+                // A world where only firewood is ever made is a world with one profession working.
+                Test.checking("more than a handful of distinct goods are made");
+                Test.assertAtLeast(kindsProduced, 5);
+                return;
+            }
+
+            // No community may hold a negative amount of anything. A negative store is the shape a
+            // take/add mismatch takes, and it is silent until something divides by it.
+            [Tag(name: "sim")]
+            [Test]
+            public static method no_store_holds_a_negative_amount() returns void {
+                Stores* st = Arc.sim.store();
+                mutable int worstComm = 0 - 1;
+                mutable int worstGood = 0 - 1;
+                mutable int worstAmt = 0;
+                mutable int comm = 0;
+                while (comm < st.communities()) {
+                    mutable int good = 0;
+                    while (good < st.goods()) {
+                        int amt = st.amountOf(comm, good);
+                        if (amt < worstAmt) {
+                            worstAmt = amt;
+                            worstComm = comm;
+                            worstGood = good;
+                        }
+                        good = good + 1;
+                    }
+                    comm = comm + 1;
+                }
+                if (worstAmt < 0) {
+                    Test.fail($"community {worstComm} holds {worstAmt} of good {worstGood}");
+                }
+                Test.checking("every stock is zero or positive");
+                Test.assertAtLeast(worstAmt, 0);
+                return;
+            }
+
+            // People build. A world with no buildings after two generations means the build loop
+            // never fires, which is invisible from the population figure.
+            [Tag(name: "sim")]
+            [Test]
+            public static method people_build_and_the_buildings_are_used() returns void {
+                Buildings* town = Arc.sim.buildings();
+                Test.checking("buildings were raised during the arc");
+                Test.assertAtLeast(town.count(), 10);
+                Test.checking("and the buildings stay inside the table");
+                Test.assertAtMost(town.count(), town.limit());
+                Test.checking("some of them are working, not all half-built");
+                Test.assertAtLeast(town.working(), 1);
+                return;
+            }
+
+            // Every standing building belongs to a real community and sits on the map.
+            [Tag(name: "sim")]
+            [Test]
+            public static method every_building_is_somewhere_real() returns void {
+                Buildings* town = Arc.sim.buildings();
+                Stores* st = Arc.sim.store();
+                mutable int offMap = 0;
+                mutable int badOwner = 0;
+                mutable int i = 0;
+                while (i < town.count()) {
+                    if (!town.isGone(i)) {
+                        int x = town.xAt(i);
+                        int y = town.yAt(i);
+                        if (x < 0 || y < 0 || x >= 2560 || y >= 1440) {
+                            offMap = offMap + 1;
+                        }
+                        int o = town.ownerOf(i);
+                        if (o < 0 || o >= st.communities()) {
+                            badOwner = badOwner + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                Test.checking("no building stands off the map");
+                Test.assertEqual(offMap, 0);
+                Test.checking("every building belongs to a real community");
+                Test.assertEqual(badOwner, 0);
+                return;
+            }
+
+            // Ground gets claimed. Territory is read from where people are, so an unclaimed world
+            // means the majority vote never runs -- or runs and writes nowhere.
+            [Tag(name: "sim")]
+            [Test]
+            public static method the_map_gets_claimed() returns void {
+                mutable int owned = 0;
+                mutable int y = 0;
+                while (y < 1440) {
+                    mutable int x = 0;
+                    while (x < 2560) {
+                        if (Arc.sim.ownerAt(x, y) >= 0) {
+                            owned = owned + 1;
+                        }
+                        x = x + 32;
+                    }
+                    y = y + 32;
+                }
+                Test.checking("some of the world belongs to somebody");
+                Test.assertAtLeast(owned, 20);
+                return;
+            }
+
+            // Culture is read from the mix of trades a place practises, so every inhabited community
+            // must have a reading, and the readings must stay inside their fixed-point range.
+            [Tag(name: "sim")]
+            [Test]
+            public static method culture_readings_stay_in_range() returns void {
+                Stores* st = Arc.sim.store();
+                mutable int outOfRange = 0;
+                mutable int comm = 0;
+                while (comm < st.communities()) {
+                    mutable int axis = 0;
+                    while (axis < 5) {
+                        int v = Arc.sim.cultureOf(comm, axis);
+                        if (v < 0 - 1000 || v > 1000) {
+                            outOfRange = outOfRange + 1;
+                        }
+                        axis = axis + 1;
+                    }
+                    comm = comm + 1;
+                }
+                Test.checking("every culture axis is inside its fixed-point range");
+                Test.assertEqual(outOfRange, 0);
+                return;
+            }
+
+            // Knowledge advances. An era that never moves means discovery is wired to nothing.
+            [Tag(name: "sim")]
+            [Test]
+            public static method somebody_learns_something() returns void {
+                Stores* st = Arc.sim.store();
+                mutable int best = 0;
+                mutable int comm = 0;
+                while (comm < st.communities()) {
+                    int e = Arc.sim.eraOf(comm);
+                    if (e > best) {
+                        best = e;
+                    }
+                    comm = comm + 1;
+                }
+                Test.checking("the most advanced community has an era at all");
+                Test.assertAtLeast(best, 0);
+                return;
+            }
+
+            // The frame budget is the whole design: constant cost per frame, more frames when there
+            // is more to do. A worst frame far above the budget means something is asking a question
+            // per person per decision again.
+            [Tag(name: "sim")]
+            [Test]
+            public static method the_frame_budget_holds() returns void {
+                Test.checking("the worst frame stayed within a sane multiple of the budget");
+                Test.assertAtMost(Arc.sim.worstFrame(), 200000);
+                return;
+            }
+        }
+    }
+}

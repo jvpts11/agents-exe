@@ -26,6 +26,10 @@ public bundle Agents {
             private mutable float[] px;      // position in CELL units, fractional
             private mutable float[] py;
             private mutable byte[] kind;
+            // What stood here before it was cleared. A felled tree sets `kind` to 0 and this keeps
+            // the species, so the forest can come back as the forest it was rather than as whatever
+            // the regrowth pass felt like planting. One byte per node -- 360 KB for the whole world.
+            private mutable byte[] born;
             private mutable short[] qty;
             private mutable int[] rowStart;  // h + 1 entries, valid once sorted
             // First instance standing on each cell, or -1. Eleven megabytes, and the header above
@@ -50,6 +54,7 @@ public bundle Agents {
             private mutable int bplane;        // bw * bh, the stride between Harvest classes
             private mutable int renewAt;       // where the regrowth sweep resumes
             private mutable float renewDebt;   // nodes owed a top-up, carried between frames
+            private mutable int renewSweeps;   // full passes completed: the clock a felled tree waits on
 
             public constructor NodeField(int w, int h) {
                 this.w = w;
@@ -59,6 +64,7 @@ public bundle Agents {
                 this.px = new float[this.cap]();
                 this.py = new float[this.cap]();
                 this.kind = new byte[this.cap]();
+                this.born = new byte[this.cap]();   // filled by finish(), once the sort has settled
                 this.qty = new short[this.cap]();
                 this.rowStart = new int[h + 1]();
                 this.cellFirst = new int[1]();
@@ -69,12 +75,14 @@ public bundle Agents {
                 this.blockHave = new int[this.bplane * Harvest.count()]();
                 this.renewAt = 0;
                 this.renewDebt = 0.0;
+                this.renewSweeps = 0;
             }
 
             public destructor ~NodeField() returns void {
                 delete this.px;
                 delete this.py;
                 delete this.kind;
+                delete this.born;
                 delete this.qty;
                 delete this.rowStart;
                 delete this.cellFirst;
@@ -189,6 +197,16 @@ public bundle Agents {
                 this.py = oy;
                 this.kind = ok;
                 this.qty = oq;
+                // What the world was born with, taken here because nothing has been harvested yet.
+                // A felled tree clears `kind`; this remembers the species so the wood that grows
+                // back is the wood that was there.
+                delete this.born;
+                this.born = new byte[this.cap]();
+                mutable int seedIdx = 0;
+                while (seedIdx < this.n) {
+                    this.born[seedIdx] = this.kind[seedIdx];
+                    seedIdx = seedIdx + 1;
+                }
                 // start[c] has been walked forward to the END of bucket c by the fill, so the
                 // beginning of c is where c-1 ended -- and a cell nobody stands on gets -1 rather
                 // than an empty range, so a caller tests one integer instead of comparing two.
@@ -376,8 +394,12 @@ public bundle Agents {
                     }
                     // A picked bush is not a destroyed bush. Forage and fishing are FLOWS -- the
                     // berries come back, the shoal swims back -- so the node stays where it is with
-                    // nothing on it and `regrow` fills it again. A felled tree and a worked-out seam
-                    // are STOCKS: those are gone, and the kind is cleared.
+                    // nothing on it and `regrow` fills it again.
+                    //
+                    // A felled tree and a worked-out seam both clear the kind, but they are not the
+                    // same kind of gone: ore does not come back on any timescale a person lives
+                    // through, and a forest does. `born` remembers what stood here so `regrow` can
+                    // put the wood back where there is still wood nearby to seed it.
                     if (!NodeField.renews(hc)) {
                         this.kind[i] = cast<byte>(0);
                     }
@@ -394,6 +416,80 @@ public bundle Agents {
             public static method renews(int hclass) returns boolean {
                 return hclass == cast<int>(Harvest.Forage) || hclass == cast<int>(Harvest.Fishing);
             }
+
+            // A cleared slot, considered for coming back.
+            //
+            // Only timber does: ore does not return on any timescale a person lives through, and a
+            // quarry is a hole in the ground. A forest does, and it comes back the way a forest does
+            // -- from seed, so only where there is still wood standing to seed it. Clear-cut a whole
+            // block and the trees return slowly from the blocks around it; clear-cut the region and
+            // it stays cleared, which is the only version of this rule that gives felling a cost.
+            //
+            // Deterministic, not random: the same arc replays the same way, which is what makes the
+            // simulation testable at all. `renewSweeps` advances once per full pass, so a given slot
+            // comes up for regrowth every REGROW_SWEEPS passes and the world does not come back all
+            // at once.
+            private method reseed(int i) returns void {
+                int was = cast<int>(this.born[i]) & 255;
+                if (was == 0) {
+                    return;
+                }
+                int hc = Nodes.work(was);
+                if (hc != cast<int>(Harvest.Timber)) {
+                    return;
+                }
+                int b = this.blockOf(i);
+                int plane = hc * this.bplane;
+                int here = this.blockHave[plane + b];
+                mutable int pace = NodeField.REGROW_SWEEPS;
+                if (here == 0) {
+                    // No seed source in this block: the wood has to walk in from a neighbour, which
+                    // takes four times as long.
+                    if (this.neighbourWood(b, plane) == 0) {
+                        // Nothing standing anywhere near. The land still remembers it was forest --
+                        // `born` says so -- and given long enough it becomes forest again, because a
+                        // world where the last tree ends the possibility of trees is a trap rather
+                        // than a consequence. Thirty-two times the base pace is about fourteen
+                        // lifetimes: felling everything is not free, and it is not final either.
+                        pace = NodeField.REGROW_SWEEPS * 32;
+                    } else {
+                        pace = NodeField.REGROW_SWEEPS * 4;
+                    }
+                }
+                if ((this.renewSweeps + i) % pace != 0) {
+                    return;
+                }
+                this.kind[i] = cast<byte>(was);
+                this.qty[i] = cast<short>(Nodes.baseQty(was));
+                this.blockHave[plane + b] = here + 1;
+                return;
+            }
+
+            // Living timber in the four blocks around this one. Four reads, and only ever asked
+            // about a slot that is already known to be bare.
+            private method neighbourWood(int b, int plane) returns int {
+                int bx = b % this.bw;
+                int by = b / this.bw;
+                mutable int total = 0;
+                if (bx > 0) {
+                    total = total + this.blockHave[plane + b - 1];
+                }
+                if (bx < this.bw - 1) {
+                    total = total + this.blockHave[plane + b + 1];
+                }
+                if (by > 0) {
+                    total = total + this.blockHave[plane + b - this.bw];
+                }
+                if (by < this.bh - 1) {
+                    total = total + this.blockHave[plane + b + this.bw];
+                }
+                return total;
+            }
+
+            // How many full sweeps a felled tree waits before it may come back. At a 20 s sweep that
+            // is 160 s with wood still standing in the block, and 640 s -- most of two lifetimes --
+            // when the block was cleared out and the seed has to arrive from next door.
+            public static fixed int REGROW_SWEEPS = 8;
 
             // Sweep every node once per this many seconds, topping the renewable ones up. Sliced by
             // time rather than done all at once for the same reason the terrain bake is: constant
@@ -420,10 +516,12 @@ public bundle Agents {
                     this.renewAt = this.renewAt + 1;
                     if (this.renewAt >= this.n) {
                         this.renewAt = 0;
+                        this.renewSweeps = this.renewSweeps + 1;
                     }
                     done = done + 1;
                     int k = cast<int>(this.kind[i]) & 255;
                     if (k == 0) {
+                        this.reseed(i);
                         continue;
                     }
                     int hc = Nodes.work(k);
