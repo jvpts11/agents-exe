@@ -149,6 +149,11 @@ public bundle Agents {
             // an array read, and the whole thing is five kilobytes.
             private mutable int[] wayOrd;
             private mutable int[] dWayC;        // detail bake scratch: way variant per cell, or -1
+            // What people carry and what marks a leader.
+            private mutable MeshAtlas* items;
+            private mutable int starModel;
+            private mutable int[] goodModel;    // Good ordinal -> item atlas ordinal, or -1
+            private mutable int[] toolModel;    // Job ordinal  -> item atlas ordinal, or -1
             private mutable int wayVersion;     // what the last bake saw, so a new road rebakes
             private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
             private mutable int[] dNodeA;       // detail bake scratch: first node instance of each row
@@ -284,6 +289,9 @@ public bundle Agents {
                 this.wayOrd = new int[1]();
                 this.dWayC = new int[1]();
                 this.wayVersion = 0 - 1;
+                this.starModel = 0 - 1;
+                this.goodModel = new int[1]();
+                this.toolModel = new int[1]();
                 this.dPropC = new int[1]();
                 this.dNodeA = new int[1]();
                 this.dNodeB = new int[1]();
@@ -342,6 +350,8 @@ public bundle Agents {
                 delete this.dRiverC;
                 delete this.wayOrd;
                 delete this.dWayC;
+                delete this.goodModel;
+                delete this.toolModel;
                 delete this.dPropC;
                 delete this.dNodeA;
                 delete this.dNodeB;
@@ -1909,6 +1919,120 @@ public bundle Agents {
             // The people, and the art that draws them. A separate call rather than more arguments on
             // setup(): the world can be rendered with nobody in it, and every capture path would
             // otherwise have to know about a population it does not use.
+            // What this person is holding, as an ordinal into the item atlas, or -1.
+            //
+            // A load on the way home beats the tool that got it: somebody walking back with an
+            // armful of wood is carrying wood, and the axe is over their shoulder. Which model a
+            // load draws is the good itself -- there is one for every good in the catalogue, and
+            // the whole point of exporting them is that a woodcutter and a fisher stop walking
+            // home identically.
+            private method heldModel(int i) returns int {
+                if (this.items == null) {
+                    return 0 - 1;
+                }
+                if (this.folk.carryAmtOf(i) > 0) {
+                    return this.goodModel[this.folk.carryKindOf(i)];
+                }
+                if (this.folk.hasKit(i, AgentTable.K_TOOL)) {
+                    return this.toolModel[this.folk.jobOf(i)];
+                }
+                return 0 - 1;
+            }
+
+            // Which star, if any, floats over this person. 3 gold, 2 silver, 1 bronze, 0 none.
+            //
+            // Read off the world rather than stored: a leader is whoever a place currently listens
+            // to, and it changes every time one dies -- which at six minutes a life is often. A
+            // stored flag would be wrong within the minute.
+            private method rankOfAgent(int i) returns int {
+                if (this.sim == null || this.folk.roleOf(i) != cast<int>(Role.Chief)) {
+                    return 0;
+                }
+                int c = this.folk.homeOf(i);
+                int nat = this.sim.nationOf(c);
+                if (nat < 0) {
+                    return 0;
+                }
+                Nations* realm = this.sim.nations();
+                if (realm.seatOf(nat) == c) {
+                    // The capital's chief IS the nation's ruler -- but a band with one village is
+                    // a tribe and not a kingdom, and the metal says which.
+                    if (realm.rankOf(nat) >= cast<int>(Rank.Kingdom)) {
+                        return 3;
+                    }
+                    return 1;
+                }
+                return 2;
+            }
+
+            public static method starR(int rank) returns float {
+                if (rank == 3) {
+                    return 0.96;
+                }
+                if (rank == 2) {
+                    return 0.82;
+                }
+                return 0.72;
+            }
+
+            public static method starG(int rank) returns float {
+                if (rank == 3) {
+                    return 0.82;
+                }
+                if (rank == 2) {
+                    return 0.84;
+                }
+                return 0.46;
+            }
+
+            public static method starB(int rank) returns float {
+                if (rank == 3) {
+                    return 0.30;
+                }
+                if (rank == 2) {
+                    return 0.88;
+                }
+                return 0.22;
+            }
+
+            // The item atlas, and the two tables that say which model a good and a trade draw with.
+            // Resolved once at bind: a name lookup per agent per frame is fifty thousand string
+            // comparisons against a hundred-and-twenty-eight-entry atlas.
+            public method setItems(MeshAtlas* art) returns void {
+                this.items = art;
+                this.starModel = art.ordOf("Star");
+                delete this.goodModel;
+                this.goodModel = new int[Goods.count()]();
+                for (int g in 0..Goods.count()) {
+                    this.goodModel[g] = 0 - 1;
+                }
+                for (int g in 1..Goods.count()) {
+                    this.goodModel[g] = art.ordOf(Goods.name(g));
+                }
+                delete this.toolModel;
+                this.toolModel = new int[Job.count()]();
+                for (int j in 0..Job.count()) {
+                    this.toolModel[j] = 0 - 1;
+                }
+                // A trade and the thing it is holding. The art has fourteen tools and the economy
+                // has one fungible Tools good, which is the right split: which one a woodcutter
+                // picked up is a fact about the woodcutter.
+                this.toolModel[cast<int>(Job.Woodcutter)] = art.ordOf("Axe");
+                this.toolModel[cast<int>(Job.Miner)] = art.ordOf("Pickaxe");
+                this.toolModel[cast<int>(Job.Quarrier)] = art.ordOf("Hammer");
+                this.toolModel[cast<int>(Job.Farmer)] = art.ordOf("Hoe");
+                this.toolModel[cast<int>(Job.Forager)] = art.ordOf("Sickle");
+                this.toolModel[cast<int>(Job.Fisher)] = art.ordOf("FishingRod");
+                this.toolModel[cast<int>(Job.Hunter)] = art.ordOf("Spear");
+                this.toolModel[cast<int>(Job.Builder)] = art.ordOf("Saw");
+                this.toolModel[cast<int>(Job.Prospector)] = art.ordOf("Shovel");
+                this.toolModel[cast<int>(Job.Smith)] = art.ordOf("Tongs");
+                this.toolModel[cast<int>(Job.Raider)] = art.ordOf("Sword");
+                this.toolModel[cast<int>(Job.General)] = art.ordOf("Sword");
+                this.toolModel[cast<int>(Job.Scholar)] = art.ordOf("Book");
+                return;
+            }
+
             public method setPeople(AgentTable* who, MeshAtlas* art) returns void {
                 this.folk = who;
                 this.people = art;
@@ -2076,7 +2200,20 @@ public bundle Agents {
                         int ax = cast<int>(this.folk.xAt(i));
                         int ay = cast<int>(this.folk.yAt(i));
                         if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
-                            tris = tris + this.people.triCount[this.bodyModel[this.folk.bodyOf(i)]];
+                            // The body, its shadow, whatever it is holding, and a star if anybody
+                            // answers to it. Counted here and emitted below in the same order --
+                            // one walk of the table for both, because a second walk of fifty
+                            // thousand rows to count what the first one is about to draw is the
+                            // kind of thing that turns a frame budget into a suggestion.
+                            tris = tris
+                                 + this.people.triCount[this.bodyModel[this.folk.bodyOf(i)]] * 2;
+                            int held = this.heldModel(i);
+                            if (held >= 0) {
+                                tris = tris + this.items.triCount[held];
+                            }
+                            if (this.rankOfAgent(i) > 0) {
+                                tris = tris + this.items.triCount[this.starModel];
+                            }
                         }
                     }
                     i = i + 1;
@@ -2105,12 +2242,51 @@ public bundle Agents {
                             float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
                             float topZ = this.tileTop[ord] + zOff;
                             int c = this.folk.homeOf(i);
+                            float shade = this.shadeAt(ax, ay, 1, lvl);
+                            // The shadow goes down first, so the body lands on top of it. The
+                            // ground colour is what it darkens, not black: a shadow on sand and a
+                            // shadow on snow are different colours, and a flat black disc under
+                            // everything is the thing that makes a pixel-art world look pasted.
+                            int ut = this.terr.triStart[ord] + 8;
+                            float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
+                            float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
+                            float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
+                            w = this.emitMeshShadow(this.people, this.abuf, w,
+                                                    this.bodyModel[this.folk.bodyOf(i)],
+                                                    fx * 2.0, fy * 2.0, topZ + 0.010, 0.30,
+                                                    gr, gg, gb, false);
                             w = this.emitTinted(this.people, this.abuf, w,
                                                 this.bodyModel[this.folk.bodyOf(i)],
                                                 fx * 2.0, fy * 2.0, topZ, 0.30,
                                                 this.communityTint(c, 0), this.communityTint(c, 1),
-                                                this.communityTint(c, 2),
-                                                this.shadeAt(ax, ay, 1, lvl));
+                                                this.communityTint(c, 2), shade);
+                            // What they are holding. A TOOL goes at their side, in the hand; a load
+                            // of something goes ON THE HEAD, which is how a person actually carries
+                            // a basket and also the only place it can go on a two-unit cube without
+                            // hiding the body. Armour is never drawn -- at this size a breastplate
+                            // is three grey pixels, and what it changes is what a blow costs.
+                            int held = this.heldModel(i);
+                            if (held >= 0) {
+                                if (this.folk.carryAmtOf(i) > 0) {
+                                    w = this.emitMesh(this.items, this.abuf, w, held,
+                                                      fx * 2.0, fy * 2.0, topZ + 1.72, 0.55, shade);
+                                } else {
+                                    w = this.emitMesh(this.items, this.abuf, w, held,
+                                                      fx * 2.0 + 0.62, fy * 2.0, topZ + 0.30,
+                                                      0.55, shade);
+                                }
+                            }
+                            // And the star, in the metal of what they lead. Gold over the ruler of
+                            // a nation, silver over a city that is not its capital, bronze over the
+                            // chief of a band -- one mesh, tinted, because the metal is a fact
+                            // about who is standing there.
+                            int rank = this.rankOfAgent(i);
+                            if (rank > 0) {
+                                w = this.emitTinted(this.items, this.abuf, w, this.starModel,
+                                                    fx * 2.0, fy * 2.0, topZ + 2.60, 0.75,
+                                                    GlWorld3D.starR(rank), GlWorld3D.starG(rank),
+                                                    GlWorld3D.starB(rank), 1.0);
+                            }
                         }
                     }
                     i = i + 1;
