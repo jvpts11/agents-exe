@@ -12,6 +12,8 @@ import Agents.World.Craft;
 import Agents.World.Builds;
 import Agents.World.Species;
 import Agents.World.Beasts;
+import Agents.World.Ways;
+import Agents.World.Surface;
 import System.Math.Math;
 import Agents.People.AgentTable;
 import Agents.People.Act;
@@ -163,6 +165,9 @@ public bundle Agents {
             // cleverer. Measured over twenty generations the world ended tribal 23, medieval 18,
             // industrial 4, modern 0: the fourth era was unreachable by construction. A nation pools
             // what all of its towns can spare, so growing is finally worth something.
+            // The ground people move over, and how it changes because they moved over it. Not a
+            // map anybody draws: a road here is a record of where the traffic already was.
+            private mutable Ways* paths;
             private mutable Nations* realm;
             private mutable int[] cnat;        // settlement -> nation
             // A colony that has been decided on but not yet walked to. Until its people are
@@ -419,6 +424,7 @@ public bundle Agents {
                 // countries the only way it can, by some of those bands growing seats that others
                 // come to answer to. The count of living nations FALLS over an arc while each of
                 // them gets bigger, which is the shape history actually has.
+                this.paths = new Ways(grid.width(), grid.height()) on heap;
                 this.realm = new Nations(this.ncomm) on heap;
                 this.cnat = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
@@ -506,6 +512,7 @@ public bundle Agents {
                 delete this.lean;
                 delete this.culture;
                 delete this.deeds;
+                delete this.paths;
                 delete this.realm;
                 delete this.cnat;
                 delete this.csiteX;
@@ -582,6 +589,10 @@ public bundle Agents {
 
             public method nations() returns Nations* {
                 return this.realm;
+            }
+
+            public method ways() returns Ways* {
+                return this.paths;
             }
 
             // Which nation holds this ground, or -1. The border is not drawn anywhere: it is the
@@ -1203,7 +1214,7 @@ public bundle Agents {
             // The unbudgeted half. Everyone advances at the same speed, so travel time is honest
             // everywhere; only the people on screen pay for testing the ground and turning to face.
             private method move(float dt) returns void {
-                float span = Simulation.SPEED * dt;
+                float stride = Simulation.SPEED * dt;
                 int n = this.folk.limit();
                 mutable int i = 0;
                 while (i < n) {
@@ -1290,6 +1301,18 @@ public bundle Agents {
                     }
                     float x = this.folk.xAt(i);
                     float y = this.folk.yAt(i);
+                    // The ground decides the pace and the feet wear the ground. Both here, in the
+                    // same two lines, because both want the same cell and this is the hottest loop
+                    // in the simulation -- a second lookup somewhere tidier would cost more than
+                    // everything else this slice adds put together.
+                    //
+                    // Only a journey WITH A PURPOSE wears a path. Somebody ambling in circles
+                    // treads just as hard, but they tread everywhere, so folding wandering in
+                    // would raise the whole map's baseline instead of drawing the lines people
+                    // actually take -- and lines people actually take is the entire idea.
+                    int onX = cast<int>(x);
+                    int onY = cast<int>(y);
+                    float span = stride * Ways.paceOn(this.paths.surfaceAt(onX, onY));
                     float tx = cast<float>(this.folk.targetXOf(i)) + 0.5;
                     float ty = cast<float>(this.folk.targetYOf(i)) + 0.5;
                     float dx = tx - x;
@@ -1368,6 +1391,23 @@ public bundle Agents {
                         this.folk.setDir(i, d);
                     }
                     this.folk.setPos(i, nx, ny);
+                    // A CROSSING wears the ground, not a tick of standing on it.
+                    //
+                    // Counted per tick instead, which is what this did first, a person walking a
+                    // cell and a quarter a second deposits about sixteen marks in every cell they
+                    // pass through -- so the whole thing outran the fade twelve to one and an arc
+                    // ended with six hundred and ninety-one thousand cells of ROAD against a
+                    // hundred and seventy-three thousand of trail. More road than path, and a
+                    // fifth of the world paved in mud: the brown smear the fade exists to prevent,
+                    // arrived by the front door. The thresholds were always meant to count
+                    // crossings; now they do.
+                    if (!wandering) {
+                        int toX = cast<int>(nx);
+                        int toY = cast<int>(ny);
+                        if (toX != onX || toY != onY) {
+                            this.paths.walked(toX, toY);
+                        }
+                    }
                     i = i + 1;
                 }
                 return;
@@ -3637,6 +3677,13 @@ public bundle Agents {
                 int h = this.folk.homeOf(i);
                 int b = this.cbusy[h];
                 if (b < 0 || this.town.isWorking(b) || this.town.isGone(b)) {
+                    // Nothing standing half-built. A builder in a place that knows how to lay a
+                    // surface goes and lays one instead of going idle -- which is the whole of what
+                    // the third era changes about the ground: up to here every road in the world
+                    // appeared because feet wore it, and from here a people can decide.
+                    if (this.eraOf(h) >= Simulation.PAVE_ERA && this.pave(i, h)) {
+                        return;
+                    }
                     this.folk.setJob(i, cast<int>(Job.Idle));
                     return;
                 }
@@ -3656,6 +3703,60 @@ public bundle Agents {
                 this.folk.setAct(i, cast<int>(Act.Build));
                 return;
             }
+
+            // Laying a surface where the feet already chose one.
+            //
+            // A paver does not survey. He walks the road his village already has and puts stone on
+            // it, which is why pavement in this world always follows a route that was worth having
+            // -- nobody ever paves a line nobody walks. The stone comes off the shelves, so a place
+            // that cannot quarry cannot pave however clever it is.
+            //
+            // He looks around HIMSELF rather than around the village, and that is the one place
+            // this breaks the "ask per place, not per person" rule on purpose: the answer changes
+            // every time somebody acts on it, so a per-place cache would be stale by the second
+            // paver and every one of them would walk to the same cell.
+            private method pave(int i, int h) returns boolean {
+                if (!this.stores.has(h, cast<int>(Good.Stone), Simulation.PAVE_STONE)) {
+                    return false;
+                }
+                int px = cast<int>(this.folk.xAt(i));
+                int py = cast<int>(this.folk.yAt(i));
+                mutable int r = 0;
+                while (r <= Simulation.PAVE_REACH) {
+                    mutable int dy = 0 - r;
+                    while (dy <= r) {
+                        mutable int dx = 0 - r;
+                        while (dx <= r) {
+                            if (dx == 0 - r || dx == r || dy == 0 - r || dy == r) {
+                                int cx = px + dx;
+                                int cy = py + dy;
+                                if (this.paths.surfaceAt(cx, cy) == cast<int>(Surface.Road)) {
+                                    if (this.paths.lay(cx, cy, cast<int>(Surface.Paved))) {
+                                        this.stores.take(h, cast<int>(Good.Stone),
+                                                         Simulation.PAVE_STONE);
+                                        this.folk.setTarget(i, cx, cy);
+                                        this.folk.setAct(i, cast<int>(Act.WalkTo));
+                                        this.folk.earn(i, 2);
+                                        return true;
+                                    }
+                                }
+                            }
+                            dx = dx + 1;
+                        }
+                        dy = dy + 1;
+                    }
+                    r = r + 1;
+                }
+                return false;
+            }
+
+            // The era at which a people stops accepting the ground it was given, what a cell of
+            // pavement costs in stone, and how far a paver looks for the next one. The reach is
+            // small on purpose: pavement should creep out from a town along its busiest road,
+            // not appear in patches wherever somebody happened to be standing.
+            public static int PAVE_ERA = 3;
+            public static int PAVE_STONE = 4;
+            public static int PAVE_REACH = 10;
 
             // Working inside one. A craftsman does not travel to a resource -- the resource has
             // already been carried home by somebody else, which is the whole point of the store
@@ -3854,6 +3955,11 @@ public bundle Agents {
                     this.meter.lap(cast<int>(Phase.Census));
                 }
                 this.g.surface().regrow(dt);
+                // And the paths fade, for the same reason the woods grow back: without it every
+                // cell anybody ever crossed is a road for ever, and after an arc the map is a
+                // brown smear instead of a network. A route still in use is topped up far faster
+                // than this takes it away, so what fades is exactly what stopped being used.
+                this.paths.fade(dt);
                 this.meter.lap(cast<int>(Phase.Regrow));
                 // Split, because the phase profile said "beasts" and that is not an answer you can
                 // act on. Ageing and breeding is one loop; walking is another; they are timed apart
@@ -4133,6 +4239,7 @@ public bundle Agents {
                 System.IO.Console.println($"  nations: {alive} living || {bands} bands, {chiefs} chiefdoms, {kings} kingdoms, {empires} empires || {this.annexed} towns changed hands, {this.extinct} peoples ended");
                 System.IO.Console.println($"  expansion: {this.hived} villages hived off ({this.hivedFolk} people), {this.colonies} colonies sent out ({this.colonists} settlers, {this.planted} arrived, {this.strayed} turned back), {this.joined} places merged");
                 System.IO.Console.println($"  prospecting: {this.dug} tracts opened, {this.struck} working faces found");
+                this.paths.report();
                 int top = this.realm.biggest();
                 if (top >= 0) {
                     int tp = this.realm.peopleOf(top);

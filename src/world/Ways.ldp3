@@ -1,0 +1,313 @@
+import System.IO.Console;
+
+// The ground people move over, and how it changes because they moved over it.
+//
+// A road in this world is not placed. It is WORN: every person walking somewhere leaves a little
+// of themselves in the cell they crossed, the crossings pile up along the lines everybody happens
+// to take, and a line that enough feet have taken stops being grass and becomes a path. Nobody
+// surveys it, nobody decides where it goes, and it appears exactly where the traffic already was.
+// That is the same rule the territory map runs on -- what a nation holds is read off where its
+// people stand -- and it is the reason a road here means something a drawn road never could: it
+// is a record of what this place actually does.
+//
+// The last two rungs are different in kind and that difference is the point. Pavement and rail are
+// LAID. A people that has worked out how does it on purpose, spends the stone on it, and gets a
+// surface better than any amount of walking would ever produce. The map shows the moment a
+// civilisation stops accepting the ground it was given.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace World {
+
+        public enum Surface {
+            Bare,            // grass, sand, whatever the biome is
+            Trail,           // trodden through: one file, bare earth
+            Road,            // wide enough for a cart, and rutted by them
+            Paved,           // laid, era III
+            Rail             // laid, era III, and nothing but a train may use it
+        }
+
+        public class Ways {
+            private mutable int w;
+            private mutable int h;
+            // Footfall, one byte a cell. Nine thousand kilobytes for the whole world at
+            // 2560x1440, which is the same order as the flag plane already carried and buys the
+            // one thing that cannot be faked: a road that is where the walking was.
+            private mutable byte[] tread;
+            // What somebody LAID here, which no amount of walking produces and no amount of
+            // disuse takes away. Kept apart from the wear rather than folded into one number,
+            // because a paved road that nobody uses is still paved -- it is a decision that was
+            // made, not a habit that is being kept up, and the two decay differently.
+            private mutable byte[] laid;
+            private mutable int sweepAt;         // where the fading sweep resumes
+            private mutable float sweepDebt;
+            private mutable long worn;           // cells that became a trail
+            private mutable long widened;        // and then a road
+            private mutable long paved;          // and cells somebody paved or railed
+            private mutable long railed;
+            private mutable long faded;          // and cells the world took back
+
+            public constructor Ways(int width, int height) {
+                this.w = width;
+                this.h = height;
+                this.tread = new byte[width * height]();
+                this.laid = new byte[width * height]();
+                this.sweepAt = 0;
+                this.sweepDebt = 0.0;
+                this.worn = 0;
+                this.widened = 0;
+                this.paved = 0;
+                this.railed = 0;
+                this.faded = 0;
+            }
+
+            public destructor ~Ways() returns void {
+                delete this.tread;
+                delete this.laid;
+            }
+
+            public method width() returns int {
+                return this.w;
+            }
+
+            public method height() returns int {
+                return this.h;
+            }
+
+            // Footfall at which the ground gives up its grass, and at which the path is wide
+            // enough for a cart.
+            //
+            // Both are MEASURED against what a life produces, not chosen against what a byte
+            // holds -- the lesson this project keeps relearning. A person walks about a cell a
+            // second and lives six minutes, so a single life lays down a few hundred marks spread
+            // over everywhere it went; a line that a village uses every day collects from every
+            // one of them. Forty is a route a handful of people use daily; a hundred and sixty is
+            // one the whole place uses.
+            public static int TRAIL_AT = 40;
+            public static int ROAD_AT = 160;
+
+            // What one crossing is worth. One, and the cap is the byte -- so a cell cannot become
+            // a motorway because a thousand people stood on it during a siege.
+            public static int STEP = 1;
+
+            // Somebody walked here.
+            //
+            // Called from the movement loop, which is the hottest thing in the simulation, so it
+            // is a bounds test and an increment and nothing else. No decisions are made here: what
+            // the number MEANS is asked at the point where somebody wants to know, and that point
+            // is a render or a footstep, both of which are already reading this cell.
+            public method walked(int x, int y) returns void {
+                if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
+                    return;
+                }
+                int i = y * this.w + x;
+                int t = cast<int>(this.tread[i]) & 255;
+                if (t < 255) {
+                    this.tread[i] = cast<byte>(t + 1);
+                }
+                return;
+            }
+
+            public method treadAt(int x, int y) returns int {
+                if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
+                    return 0;
+                }
+                return cast<int>(this.tread[y * this.w + x]) & 255;
+            }
+
+            // What is on this cell: whatever was laid, or whatever the walking has produced,
+            // whichever is the better road. A paved road nobody uses any more is still paved.
+            public method surfaceAt(int x, int y) returns int {
+                if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
+                    return cast<int>(Surface.Bare);
+                }
+                int i = y * this.w + x;
+                int put = cast<int>(this.laid[i]) & 255;
+                if (put != 0) {
+                    return put;
+                }
+                int t = cast<int>(this.tread[i]) & 255;
+                if (t >= Ways.ROAD_AT) {
+                    return cast<int>(Surface.Road);
+                }
+                if (t >= Ways.TRAIL_AT) {
+                    return cast<int>(Surface.Trail);
+                }
+                return cast<int>(Surface.Bare);
+            }
+
+            // Lay something. Returns false if this cell already had it, so a caller can count what
+            // it actually achieved rather than what it attempted.
+            public method lay(int x, int y, int surface) returns boolean {
+                if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
+                    return false;
+                }
+                int i = y * this.w + x;
+                if ((cast<int>(this.laid[i]) & 255) == surface) {
+                    return false;
+                }
+                this.laid[i] = cast<byte>(surface);
+                if (surface == cast<int>(Surface.Paved)) {
+                    this.paved = this.paved + 1;
+                } else {
+                    this.railed = this.railed + 1;
+                }
+                return true;
+            }
+
+            // How much faster somebody moves on it. A road is worth having or it is decoration,
+            // and this is the whole of what it is worth: a cart on pavement covers half again the
+            // ground a person covers through scrub, which over a working day is the difference
+            // between a village that can trade with its neighbour and one that cannot.
+            public static method paceOn(int surface) returns float {
+                if (surface == cast<int>(Surface.Trail)) {
+                    return 1.20;
+                }
+                if (surface == cast<int>(Surface.Road)) {
+                    return 1.45;
+                }
+                if (surface == cast<int>(Surface.Paved)) {
+                    return 1.75;
+                }
+                if (surface == cast<int>(Surface.Rail)) {
+                    return 1.0;              // a rail is no help at all to a person on foot
+                }
+                return 1.0;
+            }
+
+            // The world taking a path back.
+            //
+            // Without this every cell anybody ever crossed becomes a road eventually, and after an
+            // arc the map is a brown smear rather than a network -- the same failure the forest
+            // had before felling had a cost. A route that is still used is topped up far faster
+            // than this takes it away, so what fades is exactly what stopped being used, which is
+            // what a path abandoned for a generation should do.
+            //
+            // Sliced by time like every other sweep here: constant cost per frame, more frames
+            // when there is more to do.
+            public static float FADE_SWEEP = 45.0;      // seconds for one pass over the world
+
+            public method fade(float dt) returns void {
+                int n = this.w * this.h;
+                this.sweepDebt = this.sweepDebt + cast<float>(n) * dt / Ways.FADE_SWEEP;
+                mutable int budget = cast<int>(this.sweepDebt);
+                if (budget <= 0) {
+                    return;
+                }
+                this.sweepDebt = this.sweepDebt - cast<float>(budget);
+                if (budget > n) {
+                    budget = n;
+                }
+                mutable int k = 0;
+                while (k < budget) {
+                    int i = this.sweepAt;
+                    this.sweepAt = this.sweepAt + 1;
+                    if (this.sweepAt >= n) {
+                        this.sweepAt = 0;
+                    }
+                    int t = cast<int>(this.tread[i]) & 255;
+                    if (t > 0) {
+                        this.tread[i] = cast<byte>(t - 1);
+                        if (t == Ways.TRAIL_AT) {
+                            this.faded = this.faded + 1;
+                        }
+                    }
+                    k = k + 1;
+                }
+                return;
+            }
+
+            // The eight-neighbour mask the renderer needs, in the same bit order the rivers use:
+            // N, NE, E, SE, S, SW, W, NW. A way tile is chosen by which of its neighbours carry a
+            // way of AT LEAST this good a surface -- so a trail meeting a road draws an arm into
+            // it, and the network reads as one network rather than as two that happen to touch.
+            public method maskAt(int x, int y, int surface) returns int {
+                mutable int mask = 0;
+                mutable int b = 0;
+                while (b < 8) {
+                    int dx = Ways.stepX(b);
+                    int dy = Ways.stepY(b);
+                    if (this.joins(surface, this.surfaceAt(x + dx, y + dy))) {
+                        mask = mask | (1 << b);
+                    }
+                    b = b + 1;
+                }
+                return mask;
+            }
+
+            // Does a way of `mine` draw an arm into a neighbour of `other`?
+            //
+            // Rail is not a better road, it is a different KIND of way, and asking that question
+            // with a rank got it exactly backwards: ranking rail above everything and testing
+            // `other >= mine` made every road connect into every railway, so a level crossing drew
+            // a junction and the test that says it must not went red. Degree was the wrong tool
+            // for a question about kind.
+            private method joins(int mine, int other) returns boolean {
+                boolean minesRail = mine == cast<int>(Surface.Rail);
+                boolean theirsRail = other == cast<int>(Surface.Rail);
+                if (minesRail != theirsRail) {
+                    return false;                // a level crossing is a crossing, not a junction
+                }
+                if (minesRail) {
+                    return true;
+                }
+                // Among roads, a better one still counts: a trail meeting a highway draws an arm
+                // into it, so the network reads as one network rather than as two that touch.
+                return other >= mine;
+            }
+
+            public static method stepX(int bit) returns int {
+                if (bit == 1 || bit == 2 || bit == 3) {
+                    return 1;
+                }
+                if (bit == 5 || bit == 6 || bit == 7) {
+                    return 0 - 1;
+                }
+                return 0;
+            }
+
+            public static method stepY(int bit) returns int {
+                if (bit == 0 || bit == 1 || bit == 7) {
+                    return 1;
+                }
+                if (bit == 3 || bit == 4 || bit == 5) {
+                    return 0 - 1;
+                }
+                return 0;
+            }
+
+            // ---- what the report reads ----
+
+            public method countOf(int surface) returns int {
+                mutable int c = 0;
+                for (int i in 0..this.w * this.h) {
+                    int put = cast<int>(this.laid[i]) & 255;
+                    if (put != 0) {
+                        if (put == surface) {
+                            c = c + 1;
+                        }
+                        continue;
+                    }
+                    int t = cast<int>(this.tread[i]) & 255;
+                    if (surface == cast<int>(Surface.Road) && t >= Ways.ROAD_AT) {
+                        c = c + 1;
+                    }
+                    if (surface == cast<int>(Surface.Trail) && t >= Ways.TRAIL_AT
+                        && t < Ways.ROAD_AT) {
+                        c = c + 1;
+                    }
+                }
+                return c;
+            }
+
+            public method report() returns void {
+                int tr = this.countOf(cast<int>(Surface.Trail));
+                int rd = this.countOf(cast<int>(Surface.Road));
+                int pv = this.countOf(cast<int>(Surface.Paved));
+                int rl = this.countOf(cast<int>(Surface.Rail));
+                System.IO.Console.println($"ways: {tr} cells of trail, {rd} of road, {pv} paved, {rl} railed || {this.paved} paving acts, {this.railed} rail acts");
+                return;
+            }
+        }
+    }
+}
