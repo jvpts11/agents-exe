@@ -1,5 +1,6 @@
 import System.IO.Console;
 import System.Test.Test;
+import System.Concurrency.Thread;
 import Agents.World.Grid;
 import Agents.World.WorldGen;
 import Agents.World.WorldAudit;
@@ -40,6 +41,77 @@ public bundle Agents {
                 return 1440;
             }
 
+            // TWELVE WORLDS AT ONCE, because there is no reason for them to wait for each other.
+            //
+            // Generating a world is the most expensive thing this suite does -- a hundred and five
+            // seconds of the hundred and sixty-four the whole suite takes -- and every one of the
+            // twelve is completely independent of the others: its own seed, its own WorldGen, its
+            // own arrays. They were run one after another only because that is the order a list is
+            // written in.
+            //
+            // Built once here and read by every case below, which also kills the duplicate: the
+            // search test regenerated three of these seeds with identical arguments to prove
+            // something the case test had already proved about the same world.
+            private static mutable Grid*[] worlds;
+            private static mutable boolean ready = false;
+
+            [BeforeAll]
+            public static method buildEveryWorld() returns void {
+                int[] seeds = WorldShape.seeds();
+                WorldShape.worlds = new Grid*[seeds.length()]();
+                mutable Thread*[] crew = new Thread*[seeds.length()]();
+                for (int k in 0..seeds.length()) {
+                    int seed = seeds[k];
+                    int slot = k;
+                    // Each thread owns its seed and its slot and touches nothing else. The
+                    // catalogues they all read -- biomes, nodes, buildings -- are filled by
+                    // onClassLoad before any of this runs and never written again, and no two
+                    // threads write the same slot, so there is nothing here to guard.
+                    function<void> build = lambda[captures: byvalue seed, byvalue slot]() returns void {
+                        WorldShape.worlds[slot] =
+                            WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, WorldShape.WIDTH(),
+                                                WorldShape.HEIGHT(), 6, false);
+                    };
+                    crew[k] = new Thread(build) on heap;
+                    crew[k].start();
+                }
+                for (int k in 0..seeds.length()) {
+                    crew[k].join();
+                    delete crew[k];
+                }
+                delete crew;
+                WorldShape.ready = true;
+                return;
+            }
+
+            [AfterAll]
+            public static method dropEveryWorld() returns void {
+                if (!WorldShape.ready) {
+                    return;
+                }
+                for (int k in 0..WorldShape.worlds.length()) {
+                    delete WorldShape.worlds[k];
+                }
+                delete WorldShape.worlds;
+                WorldShape.ready = false;
+                return;
+            }
+
+            // Which slot a seed was built into.
+            public static method slotOf(int seed) returns int {
+                int[] seeds = WorldShape.seeds();
+                for (int k in 0..seeds.length()) {
+                    if (seeds[k] == seed) {
+                        return k;
+                    }
+                }
+                return 0 - 1;
+            }
+
+            public static method worldFor(int seed) returns Grid* {
+                return WorldShape.worlds[WorldShape.slotOf(seed)];
+            }
+
             // Continental mode, six continents: the world the game actually starts in.
             //
             // Through WorldGen.acceptable, because that is the world a PLAYER gets -- generation is
@@ -51,8 +123,7 @@ public bundle Agents {
             [Tag(name: "world")]
             [Test]
             public static method a_generated_world_is_acceptable(int seed) returns void {
-                Grid* g = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, WorldShape.WIDTH(),
-                                              WorldShape.HEIGHT(), 6, false);
+                Grid* g = WorldShape.worldFor(seed);
                 WorldAudit* wa = new WorldAudit(g) on heap;
                 wa.analyse();  // the resource census runs inside it
 
@@ -112,18 +183,40 @@ public bundle Agents {
                 }
 
                 delete wa;
-                delete g;
+                return;                       // the world belongs to the fixture, not to this test
+            }
+
+            // Generation is a search, so the search has to actually find something.
+            //
+            // Three of the twelve seeds produce a world the criteria reject on the first roll. Until
+            // this existed the game took that first roll regardless, and three players in twelve got
+            // a world its own audit calls unplayable.
+            //
+            // IN THIS CLASS, NOT ITS OWN, BECAUSE IT READS THIS CLASS'S FIXTURE.
+            //
+            // [BeforeAll] and [AfterAll] bracket the tests of the class that declares them, and
+            // nothing else. It lived next door in a WorldSearch class, reading WorldShape.worldFor,
+            // which meant WorldShape's [AfterAll] had already deleted all twelve worlds by the time
+            // it ran: it read freed memory and the suite died with an access violation, from a
+            // process that had printed nothing but passes. A fixture is owned by exactly one class
+            // and read only by that class's tests.
+            [Cases(source: "rejectedSeeds")]
+            [Tag(name: "world")]
+            [Test]
+            public static method the_search_finds_a_world_the_first_roll_did_not(int seed) returns void {
+                // The same world the fixture already built, not a second identical generation.
+                // These three seeds were being rolled TWICE with identical arguments -- once by the
+                // case above and once here -- to prove the same thing about the same world, and
+                // that duplicate was a quarter of the slowest tag in the suite.
+                Grid* g = WorldShape.worldFor(seed);
+                WorldAudit* wa = new WorldAudit(g) on heap;
+                wa.analyse();
+                Test.checking("the world the search settled on passes every criterion");
+                Test.assertEqual(wa.verdict(6), 0);
+                delete wa;
                 return;
             }
-        }
 
-        // Generation is a search, so the search has to actually find something.
-        //
-        // Three of the twelve seeds above produce a world the criteria reject. Until this existed the
-        // game took the first roll regardless, and three players in twelve got a world its own
-        // designer would have thrown away. WorldGen.acceptable rolls again from a seed derived from
-        // the one that failed -- deterministic, so the same starting seed still gives the same world.
-        public class WorldSearch {
             // The three that fail on the first roll: 5 (fourteen islands), 6 and 11 (one continent
             // and five scraps, at ratios of 9.5:1).
             public static method rejectedSeeds() returns int[] {
@@ -133,22 +226,12 @@ public bundle Agents {
                 rows[2] = 42 + 11 * 7717;
                 return rows;
             }
+        }
 
-            [Cases(source: "rejectedSeeds")]
-            [Tag(name: "world")]
-            [Test]
-            public static method the_search_finds_a_world_the_first_roll_did_not(int seed) returns void {
-                Grid* g = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, WorldShape.WIDTH(),
-                                              WorldShape.HEIGHT(), 6, false);
-                WorldAudit* wa = new WorldAudit(g) on heap;
-                wa.analyse();
-                Test.checking("the world the search settled on passes every criterion");
-                Test.assertEqual(wa.verdict(6), 0);
-                delete wa;
-                delete g;
-                return;
-            }
-
+        // WorldGen.acceptable rolls again from a seed derived from the one that failed, so a
+        // rejected world is replaced rather than shipped. That the search FINDS something is tested
+        // in WorldShape, which owns the worlds it would read; what is left here needs no fixture.
+        public class WorldSearch {
             // A search that is not deterministic is a lottery, and a seed stops meaning anything.
             [Tag(name: "world")]
             [Test]

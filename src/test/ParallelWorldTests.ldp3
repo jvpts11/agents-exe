@@ -1,0 +1,86 @@
+import System.IO.Console;
+import System.Test.Test;
+import System.Concurrency.Thread;
+import Agents.World.Grid;
+import Agents.World.WorldGen;
+program AgentsExe;
+
+// Generating worlds side by side must be as safe as generating them one after another.
+//
+// The world fixture builds twelve at once, and doing so made the suite die with an access violation
+// partway through -- reliably, but only after a hundred seconds of generation, which is a useless
+// shape for a reproducer. This is the same thing in miniature: small worlds, so a round costs about
+// a second instead of two minutes, repeated enough times that a race has to show itself.
+//
+// Nothing about a world's generation touches another world's: its own seed, its own WorldGen, its
+// own arrays, and the catalogues they all read are filled before any thread starts and never
+// written again. So this test asserts something that ought to be free, and if it is not free the
+// arithmetic is happening somewhere shared and this is where it gets caught.
+public bundle Agents {
+    public namespace Checks {
+
+        public class ParallelWorlds {
+            private static mutable Grid*[] built;
+
+            public static method HANDS() returns int {
+                return 12;
+            }
+
+            public static method ROUNDS() returns int {
+                return 1;
+            }
+
+            // The size the game actually plays at. Half of it, twelve at a time, came back green
+            // six rounds running, so whatever this catches only appears at the full size.
+            public static method W() returns int {
+                return 2560;
+            }
+
+            public static method H() returns int {
+                return 1440;
+            }
+
+            [Tag(name: "race")]
+            [Test]
+            public static method worlds_built_side_by_side_all_arrive() returns void {
+                mutable int rounds = 0;
+                while (rounds < ParallelWorlds.ROUNDS()) {
+                    int hands = ParallelWorlds.HANDS();
+                    ParallelWorlds.built = new Grid*[hands]();
+                    mutable Thread*[] crew = new Thread*[hands]();
+                    for (int k in 0..hands) {
+                        int seed = 42 + rounds * 1000 + k * 7717;
+                        int slot = k;
+                        function<void> roll = lambda[captures: byvalue seed, byvalue slot]() returns void {
+                            ParallelWorlds.built[slot] =
+                                WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0,
+                                                    ParallelWorlds.W(), ParallelWorlds.H(),
+                                                    1, false);
+                        };
+                        crew[k] = new Thread(roll) on heap;
+                        crew[k].start();
+                    }
+                    for (int k in 0..hands) {
+                        crew[k].join();
+                        delete crew[k];
+                    }
+                    delete crew;
+                    // Every hand came back with a world, and every world is the size it was asked
+                    // for. A thread that died on the way leaves its slot null, and a world whose
+                    // arrays were written by somebody else reads back the wrong shape.
+                    for (int k in 0..hands) {
+                        Grid* g = ParallelWorlds.built[k];
+                        Test.checking($"round {rounds} slot {k} arrived");
+                        Test.assertTrue(g != null);
+                        Test.assertEqual(g.width(), ParallelWorlds.W());
+                        Test.assertEqual(g.height(), ParallelWorlds.H());
+                        delete g;
+                    }
+                    delete ParallelWorlds.built;
+                    rounds = rounds + 1;
+                }
+                return;
+            }
+        }
+    }
+}
