@@ -1,0 +1,199 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.World.Grid;
+import Agents.World.WorldGen;
+import Agents.World.Biomes;
+import Agents.People.AgentTable;
+program AgentsExe;
+
+// The people themselves, before anything happens to them.
+//
+// These are cheap: one small world, seeded once, and then questions about the table -- everybody is
+// somewhere real, nobody is standing in the sea, the pool hands out each slot once, temperaments
+// spread rather than clustering on a default. A defect here is invisible in an arc, because an arc
+// papers over a bad start within a generation.
+
+public bundle Agents {
+    public namespace Checks {
+
+        public class Folk {
+            private static mutable Grid* world;
+            private static mutable AgentTable* people;
+
+            public static method W() returns int {
+                return 640;
+            }
+
+            public static method H() returns int {
+                return 360;
+            }
+
+            public static method HOW_MANY() returns int {
+                return 4000;
+            }
+
+            [BeforeAll]
+            public static method seedThem() returns void {
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Folk.world = gen.generate(Folk.W(), Folk.H());
+                Folk.people = new AgentTable(Folk.HOW_MANY()) on heap;
+                Folk.people.seedWorld(Folk.world, Folk.HOW_MANY(), 20, 42);
+                return;
+            }
+
+            [AfterAll]
+            public static method dropThem() returns void {
+                delete Folk.people;
+                delete Folk.world;
+                return;
+            }
+
+            [Tag(name: "people")]
+            [Test]
+            public static method the_world_gets_the_people_it_asked_for() returns void {
+                Test.checking("the table filled up");
+                Test.assertAtLeast(Folk.people.count(), Folk.HOW_MANY() / 2);
+                Test.checking("and did not overflow its capacity");
+                Test.assertAtMost(Folk.people.count(), Folk.people.capacity());
+                return;
+            }
+
+            // Everybody is on land they can stand on. A person seeded into the sea is a person who
+            // will spend their life failing to path anywhere, and the symptom shows up three
+            // subsystems away as "movement is slow".
+            [Tag(name: "people")]
+            [Test]
+            public static method everybody_is_standing_somewhere_they_could_stand() returns void {
+                mutable int offMap = 0;
+                mutable int inTheSea = 0;
+                mutable int i = 0;
+                while (i < Folk.people.capacity()) {
+                    if (Folk.people.alive(i)) {
+                        int x = cast<int>(Folk.people.xAt(i));
+                        int y = cast<int>(Folk.people.yAt(i));
+                        if (x < 0 || y < 0 || x >= Folk.W() || y >= Folk.H()) {
+                            offMap = offMap + 1;
+                        } else {
+                            if (!Biomes.walkable(Folk.world.biomeAt(x, y))) {
+                                inTheSea = inTheSea + 1;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                Test.checking("nobody was seeded off the map");
+                Test.assertEqual(offMap, 0);
+                Test.checking("and nobody was seeded onto water or rock they cannot walk");
+                Test.assertEqual(inTheSea, 0);
+                return;
+            }
+
+            // Everybody belongs to a community, and the communities are the ones that were asked for.
+            [Tag(name: "people")]
+            [Test]
+            public static method everybody_belongs_somewhere() returns void {
+                mutable int homeless = 0;
+                mutable int i = 0;
+                while (i < Folk.people.capacity()) {
+                    if (Folk.people.alive(i) && Folk.people.homeOf(i) < 0) {
+                        homeless = homeless + 1;
+                    }
+                    i = i + 1;
+                }
+                Test.checking("everyone seeded has a community");
+                Test.assertEqual(homeless, 0);
+                return;
+            }
+
+            // Temperament is inherited and it has to SPREAD. A world where everybody has the same
+            // boldness is a world with one personality, and the leadership rule -- a chief emerges by
+            // influence, nobody appoints one -- has nothing to work with.
+            [Tag(name: "people")]
+            [Test]
+            public static method temperaments_spread_rather_than_clustering() returns void {
+                mutable int lowBold = 0;
+                mutable int highBold = 0;
+                mutable int lowSocial = 0;
+                mutable int highSocial = 0;
+                mutable int i = 0;
+                while (i < Folk.people.capacity()) {
+                    if (Folk.people.alive(i)) {
+                        if (Folk.people.boldnessOf(i) < 30) {
+                            lowBold = lowBold + 1;
+                        }
+                        if (Folk.people.boldnessOf(i) > 70) {
+                            highBold = highBold + 1;
+                        }
+                        if (Folk.people.sociabilityOf(i) < 30) {
+                            lowSocial = lowSocial + 1;
+                        }
+                        if (Folk.people.sociabilityOf(i) > 70) {
+                            highSocial = highSocial + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                Test.checking("there are timid people");
+                Test.assertAtLeast(lowBold, 1);
+                Test.checking("and bold ones");
+                Test.assertAtLeast(highBold, 1);
+                Test.checking("and solitary ones");
+                Test.assertAtLeast(lowSocial, 1);
+                Test.checking("and gregarious ones");
+                Test.assertAtLeast(highSocial, 1);
+                return;
+            }
+
+            // Ages spread too, or the whole world dies in the same minute -- which is exactly what a
+            // uniform starting age produces, one generation in.
+            [Tag(name: "people")]
+            [Test]
+            public static method ages_spread_across_a_lifetime() returns void {
+                mutable float youngest = 9999.0;
+                mutable float oldest = 0.0;
+                mutable int i = 0;
+                while (i < Folk.people.capacity()) {
+                    if (Folk.people.alive(i)) {
+                        float a = Folk.people.ageOf(i);
+                        if (a < youngest) {
+                            youngest = a;
+                        }
+                        if (a > oldest) {
+                            oldest = a;
+                        }
+                    }
+                    i = i + 1;
+                }
+                Test.checking("the world starts with people of different ages");
+                Test.assertTrue(oldest - youngest > 1.0);
+                Test.checking("and nobody starts older than a life is long");
+                Test.assertTrue(oldest < 1000.0);
+                return;
+            }
+
+            // The pool hands out each slot once. A pool that hands the same index to two people is
+            // the kind of defect that shows up as a person teleporting, months later.
+            [Tag(name: "people")]
+            [Test]
+            public static method the_pool_never_hands_out_a_live_slot() returns void {
+                int before = Folk.people.count();
+                int a = Folk.people.spawn(10.0, 10.0, 0);
+                int b = Folk.people.spawn(11.0, 11.0, 0);
+                Test.checking("two spawns give two different slots");
+                Test.assertNotEqual(a, b);
+                Test.checking("and the table grew by two");
+                Test.assertEqual(Folk.people.count(), before + 2);
+                Folk.people.kill(a);
+                Test.checking("a death frees the slot");
+                Test.assertEqual(Folk.people.count(), before + 1);
+                int c = Folk.people.spawn(12.0, 12.0, 0);
+                Test.checking("and the freed slot is handed out again rather than growing the table");
+                Test.assertEqual(c, a);
+                Folk.people.kill(b);
+                Folk.people.kill(c);
+                return;
+            }
+        }
+    }
+}

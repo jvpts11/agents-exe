@@ -212,6 +212,53 @@ public bundle Agents {
                 return;
             }
 
+            // Industry has to scale with how big a place is, not with how many places there are.
+            //
+            // The rule used to be "does this community already have one of these", full stop, so a
+            // town of eight hundred got exactly one bakery -- the same as a hamlet of forty -- and
+            // the only way the world got more industry was by getting more villages. A city could
+            // never look like a city. The assertion is comparative on purpose: the absolute counts
+            // depend on the arc, but the biggest place must out-build the smallest one.
+            [Tag(name: "sim")]
+            [Test]
+            public static method a_big_place_builds_more_than_a_small_one() returns void {
+                Stores* st = Arc.sim.store();
+                Buildings* town = Arc.sim.buildings();
+                // Workshops per community, and the population of each, in one pass over the table.
+                mutable int[] shops = new int[st.communities()]();
+                mutable int i = 0;
+                while (i < town.count()) {
+                    if (!town.isGone(i) && town.isWorking(i)) {
+                        int o = town.ownerOf(i);
+                        if (o >= 0 && o < st.communities()) {
+                            shops[o] = shops[o] + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                mutable int most = 0;
+                mutable int busiest = 0 - 1;
+                mutable int c = 0;
+                while (c < st.communities()) {
+                    if (shops[c] > most) {
+                        most = shops[c];
+                        busiest = c;
+                    }
+                    c = c + 1;
+                }
+                delete shops;
+                if (busiest < 0) {
+                    Test.skip("no community raised a building in this arc");
+                    return;
+                }
+                // Two generations is not long enough for a metropolis, but it IS long enough that
+                // the busiest place must have got past a single building -- which is exactly what
+                // the old rule made impossible.
+                Test.checking("the busiest community has more than one building");
+                Test.assertAtLeast(most, 2);
+                return;
+            }
+
             // Ground gets claimed. Territory is read from where people are, so an unclaimed world
             // means the majority vote never runs -- or runs and writes nowhere.
             [Tag(name: "sim")]

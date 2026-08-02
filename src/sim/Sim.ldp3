@@ -94,6 +94,11 @@ public bundle Agents {
             private mutable int[] cdead;
             private mutable int[] cbusy;
             private mutable int[] copen;
+            // Standing workshops of each craft, per community. Read in the same pass that fills
+            // `copen`, because "how many sawmills does this place already have" is a per-place
+            // question asked once a census -- not a scan of the whole table per decision, which is
+            // the shape every performance problem in this project has taken.
+            private mutable int[] cmade;
             private mutable int[] cseat;
             // Splitting and leaving. `cfar` is the person a community's far end has gathered around,
             // `cparty` how many would go with them, `cchild` the number the daughter got; `cflee` is
@@ -309,6 +314,7 @@ public bundle Agents {
                 this.cdead = new int[this.ncomm]();
                 this.cbusy = new int[this.ncomm]();
                 this.copen = new int[this.ncomm * Craft.count()]();
+                this.cmade = new int[this.ncomm * Craft.count()]();
                 this.cseat = new int[this.ncomm]();
                 this.cfar = new int[this.ncomm]();
                 this.cfarD = new float[this.ncomm]();
@@ -426,6 +432,7 @@ public bundle Agents {
                 delete this.cdead;
                 delete this.cbusy;
                 delete this.copen;
+                delete this.cmade;
                 delete this.cseat;
                 delete this.cfar;
                 delete this.cfarD;
@@ -1317,7 +1324,7 @@ public bundle Agents {
                 // Everything the table has to say about every community, in one read of each row.
                 // It has to come after the hands are counted and before anybody decides anything.
                 this.town.sweep(this.cpop, this.croom, this.cworst, this.cworstRoom, this.cdead,
-                                this.cbusy, this.copen, this.cseat,
+                                this.cbusy, this.copen, this.cmade, this.cseat,
                                 this.ncomm, Craft.count(), cast<int>(BuildingKind.TownHall));
                 // Where a community IS, taken as where its people are. Nobody planted a flag: the
                 // centre is the average of everybody standing there, so it drifts as they do -- and
@@ -1698,6 +1705,7 @@ public bundle Agents {
                 this.cseat[d] = 0 - 1;
                 for (int cr in 0..Craft.count()) {
                     this.copen[d * Craft.count() + cr] = 0 - 1;
+                    this.cmade[d * Craft.count() + cr] = 0;
                 }
                 this.cflee[d] = 0 - 1;
                 this.cleave[d] = 0;
@@ -1939,8 +1947,24 @@ public bundle Agents {
                     if (Builds.era(k) > this.era[c]) {
                         continue;                    // nobody here knows how yet
                     }
-                    if (this.town.find(c, k) >= 0) {
-                        continue;                    // it already has one
+                    // How many of this kind the place can actually keep busy. A town of eight
+                    // hundred used to get exactly one bakery, the same as a hamlet of forty,
+                    // because the only question asked was "does it already have one" -- so industry
+                    // scaled with the NUMBER of communities rather than with their size, and a city
+                    // could never look like a city however many people walked into it.
+                    //
+                    // The number is measured, not chosen: the trade's quota is how many grown people
+                    // this place should have in that trade, and Builds.hands is how many one
+                    // building holds. Their ratio is how many buildings the trade warrants. One is
+                    // the floor, so a hamlet still gets its sawmill.
+                    int cr = Builds.craft(k);
+                    int jb = this.jobOfCraft(cr);
+                    mutable int warranted = this.quotaFor(c, jb) / Builds.hands(k);
+                    if (warranted < 1) {
+                        warranted = 1;
+                    }
+                    if (this.cmade[c * Craft.count() + cr] >= warranted) {
+                        continue;                    // as many as it can staff
                     }
                     if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(k))) {
                         continue;
