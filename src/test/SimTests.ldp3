@@ -570,6 +570,101 @@ public bundle Agents {
                 return;
             }
 
+            // Nobody holds two of the three. A village has a chief, an elder and a priest, and if
+            // one person could be two of them the roles would be a label on whoever happened to
+            // have the most standing rather than three different things a place needs.
+            [Tag(name: "sim")]
+            [Test]
+            public static method the_three_standings_are_three_people() returns void {
+                AgentTable* folk = Arc.folk;
+                mutable int doubled = 0;
+                mutable int stranded = 0;
+                mutable int seated = 0;
+                mutable int c = 0;
+                while (c < Arc.sim.communityCount()) {
+                    int lead = Arc.sim.chiefOf(c);
+                    int old = Arc.sim.elderOf(c);
+                    int holy = Arc.sim.priestOf(c);
+                    int cart = Arc.sim.tradeChiefOf(c);
+                    // A role-holder who DIED since the last census is not checked for where they
+                    // live: the seat is re-read every census and the next one clears it, so a dead
+                    // elder is a state the world holds for under a second. What must never happen
+                    // is a LIVING one standing for a place they do not live in -- that would be the
+                    // seat surviving a move, which nothing re-reads would ever fix.
+                    if (old >= 0) {
+                        seated = seated + 1;
+                        if (old == lead || old == holy || old == cart) {
+                            doubled = doubled + 1;
+                        }
+                        if (folk.alive(old) && folk.homeOf(old) != c) {
+                            stranded = stranded + 1;
+                        }
+                    }
+                    if (holy >= 0) {
+                        seated = seated + 1;
+                        if (holy == lead || holy == cart) {
+                            doubled = doubled + 1;
+                        }
+                        if (folk.alive(holy) && folk.homeOf(holy) != c) {
+                            stranded = stranded + 1;
+                        }
+                    }
+                    if (cart >= 0) {
+                        seated = seated + 1;
+                        if (cart == lead) {
+                            doubled = doubled + 1;
+                        }
+                        if (folk.alive(cart) && folk.homeOf(cart) != c) {
+                            stranded = stranded + 1;
+                        }
+                    }
+                    c = c + 1;
+                }
+                Test.checking("somebody is standing in one of the three roles at all");
+                Test.assertAtLeast(seated, 1);
+                Test.checking("nobody holds two of them");
+                Test.assertEqual(doubled, 0);
+                Test.checking("and nobody living stands for a place they do not live in");
+                Test.assertEqual(stranded, 0);
+                return;
+            }
+
+            // A caravan runs inside one country. Sending a load to a neighbour would be trade with
+            // a foreign power, which is a different thing entirely and is not what this models --
+            // if a route ever crossed a border it would be a bug in who-answers-to-whom, not a
+            // feature nobody asked for.
+            [Tag(name: "sim")]
+            [Test]
+            public static method every_route_runs_inside_one_country() returns void {
+                mutable int foreign = 0;
+                mutable int empty = 0;
+                mutable int routes = 0;
+                mutable int c = 0;
+                while (c < Arc.sim.communityCount()) {
+                    int to = Arc.sim.caravanFrom(c);
+                    if (to >= 0) {
+                        routes = routes + 1;
+                        if (Arc.sim.nationOf(to) != Arc.sim.nationOf(c)) {
+                            foreign = foreign + 1;
+                        }
+                        if (to == c || Arc.sim.populationOf(to) <= 0) {
+                            empty = empty + 1;
+                        }
+                        if (Arc.sim.cargoFrom(c) <= 0) {
+                            empty = empty + 1;
+                        }
+                    }
+                    c = c + 1;
+                }
+                Test.checking("somebody is carrying something somewhere");
+                Test.assertAtLeast(routes, 1);
+                Test.checking("no route crosses a border");
+                Test.assertEqual(foreign, 0);
+                Test.checking("and none goes nowhere or carries nothing");
+                Test.assertEqual(empty, 0);
+                return;
+            }
+
             // The frame budget is the whole design: constant cost per frame, more frames when there
             // is more to do. A worst frame far above the budget means something is asking a question
             // per person per decision again.

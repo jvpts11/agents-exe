@@ -1,0 +1,176 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.Sim.Nations;
+import Agents.Sim.Rank;
+program AgentsExe;
+
+// Civilizations, as arithmetic on a table.
+//
+// A civilization is not declared, joined or founded -- it is the set of nations that turn out to
+// share a trunk, the same way a rank is what a nation's holdings add up to. Everything here checks
+// that the trunk really does survive the two things that would otherwise destroy it: a people
+// breaking away, and a language drifting until it is a different language.
+
+public bundle Agents {
+    public namespace Checks {
+
+        public class Stocks {
+
+            // The one rule the whole idea rests on. A nation that breaks away is a new country with
+            // a new number and, eventually, a new language -- but it is the SAME PEOPLE, and if the
+            // trunk did not survive that, no civilization would ever have more than one country in
+            // it and the word would mean nothing.
+            [Tag(name: "stock")]
+            [Test]
+            public static method breaking_away_does_not_leave_the_family() returns void {
+                Nations* realm = new Nations(8) on heap;
+                realm.raise(0, 0, 0 - 1, 0, 1);
+                realm.settleTrunk(0, 0);
+                realm.raise(1, 0, 0, 100, 1);        // broke from 0, keeps its tongue
+                Test.checking("a daughter is of her mother's stock");
+                Test.assertEqual(realm.trunkOf(1), realm.trunkOf(0));
+                Test.checking("and the two are the same people");
+                Test.assertTrue(realm.sameStock(0, 1));
+                // A grand-daughter of the same line, two removes down.
+                realm.raise(2, 0, 1, 200, 1);
+                Test.checking("and so is a daughter of the daughter");
+                Test.assertTrue(realm.sameStock(0, 2));
+                // Somebody from another hearth entirely is not.
+                realm.raise(3, 3, 0 - 1, 0, 1);
+                realm.settleTrunk(3, 3);
+                Test.checking("a people from another hearth is not of the family");
+                Test.assertTrue(!realm.sameStock(0, 3));
+                delete realm;
+                return;
+            }
+
+            // Speech moves and the family does not. This is the second thing that would sink the
+            // idea: if a language splitting reset the trunk, a civilization would dissolve exactly
+            // when it got old enough to be interesting.
+            [Tag(name: "stock")]
+            [Test]
+            public static method a_language_splits_and_the_stock_holds() returns void {
+                Nations* realm = new Nations(4) on heap;
+                realm.raise(0, 0, 0 - 1, 0, 1);
+                realm.settleTrunk(0, 0);
+                realm.raise(1, 0, 0, 10, 1);
+                realm.settleTrunk(1, 0);
+                realm.countTown(1, 5, 400);          // somebody has to be alive to speak
+                int spoke = realm.tongueOf(1);
+                Test.checking("mother and daughter begin speaking one language");
+                Test.assertEqual(spoke, realm.tongueOf(0));
+                // Long enough that the drift must have passed the split, whatever the nudges were.
+                mutable int t = 0;
+                while (t < Nations.SPLIT_DRIFT) {
+                    realm.wag(1, 7, t);
+                    t = t + 1;
+                }
+                Test.checking("far enough apart and it is a different language");
+                Test.assertTrue(realm.tongueOf(1) != spoke);
+                Test.checking("but the same stock, which is the whole point");
+                Test.assertTrue(realm.sameStock(0, 1));
+                delete realm;
+                return;
+            }
+
+            // A name has to be a fact about the thing, not about when you asked. Two runs of one
+            // seed produce the same world, and a people whose name changed between the report and
+            // the map would be two peoples as far as anybody reading it is concerned.
+            [Tag(name: "stock")]
+            [Test]
+            public static method a_people_is_called_the_same_thing_every_time() returns void {
+                String a = Nations.stockName(19);
+                String b = Nations.stockName(19);
+                Test.checking("the same stock gives the same name twice");
+                Test.assertTrue(a.equals(b));
+                Test.checking("and it is a word, not an empty string");
+                Test.assertAtLeast(a.length(), 4);
+                mutable int different = 0;
+                for (int i in 0..40) {
+                    if (!Nations.stockName(i).equals(a)) {
+                        different = different + 1;
+                    }
+                }
+                // Not all forty need be distinct -- syllables collide -- but a generator that
+                // returned one word for everything would name the whole world the same thing.
+                Test.checking("and different stocks are mostly called different things");
+                Test.assertAtLeast(different, 30);
+                return;
+            }
+
+            // The banner is what the map is coloured from. Everybody of one stock has to read as a
+            // family, and the countries within it still have to be told apart -- if either half
+            // fails the overlay is useless in a different way.
+            [Tag(name: "stock")]
+            [Test]
+            public static method one_stock_is_one_family_of_colour() returns void {
+                int a = Nations.banner(11, 3);
+                int b = Nations.banner(11, 4);
+                int other = Nations.banner(29, 3);
+                Test.checking("two countries of one stock are not the same colour");
+                Test.assertTrue(a != b);
+                // Same family: each channel within a shade of the other, since the only difference
+                // between them is the per-nation lightness.
+                int dr = Stocks.gap((a >> 16) & 255, (b >> 16) & 255);
+                int dg = Stocks.gap((a >> 8) & 255, (b >> 8) & 255);
+                int db = Stocks.gap(a & 255, b & 255);
+                Test.checking("but they are shades of one hue");
+                Test.assertAtMost(dr + dg + db, 120);
+                int er = Stocks.gap((a >> 16) & 255, (other >> 16) & 255);
+                int eg = Stocks.gap((a >> 8) & 255, (other >> 8) & 255);
+                int eb = Stocks.gap(a & 255, (other & 255));
+                Test.checking("and another stock is a different hue altogether");
+                Test.assertAtLeast(er + eg + eb, 60);
+                Test.checking("nothing comes out as mud");
+                Test.assertAtLeast((a >> 16) & 255, 30);
+                Test.assertAtLeast((a >> 8) & 255, 30);
+                Test.assertAtLeast(a & 255, 30);
+                return;
+            }
+
+            private static method gap(int a, int b) returns int {
+                if (a > b) {
+                    return a - b;
+                }
+                return b - a;
+            }
+
+            // Counting. A world of one stock and a world where every country is its own are both
+            // possible states and both have to come out right, because the first is what conquest
+            // tends toward and the second is what the world looks like before the hearths are seeded.
+            [Tag(name: "stock")]
+            [Test]
+            public static method the_count_of_peoples_is_what_it_looks_like() returns void {
+                Nations* realm = new Nations(8) on heap;
+                for (int i in 0..4) {
+                    realm.raise(i, i, 0 - 1, 0, 1);
+                    realm.settleTrunk(i, 0);          // all one people, all one language
+                    realm.countTown(i, i, 100);
+                }
+                Test.checking("four countries of one stock are one civilization");
+                Test.assertEqual(realm.civilizations(), 1);
+                Test.checking("and it holds all four of them");
+                Test.assertEqual(realm.nationsOfStock(0), 4);
+                // Founded together, so they begin speaking ONE language -- that is the whole point
+                // of seeding the tongue with the stock, and without it "two peoples who speak the
+                // same language" was a thing that never happened anywhere in a whole arc.
+                Test.checking("and they begin speaking one language between them");
+                Test.assertEqual(realm.livingTongues(), 1);
+                // Until one of them drifts far enough to be speaking something else.
+                mutable int t = 0;
+                while (t < Nations.SPLIT_DRIFT) {
+                    realm.wag(2, 11, t);
+                    t = t + 1;
+                }
+                Test.checking("and two once one of them has drifted apart");
+                Test.assertEqual(realm.livingTongues(), 2);
+                Test.checking("without the civilization coming apart with it");
+                Test.assertEqual(realm.civilizations(), 1);
+                Test.checking("and it is the widest there is");
+                Test.assertEqual(realm.widestStock(), 0);
+                delete realm;
+                return;
+            }
+        }
+    }
+}

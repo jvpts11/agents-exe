@@ -188,6 +188,32 @@ public bundle Agents {
             private mutable int[] cwall;       // how much wall each town has standing
             private mutable int[] carmy;       // the army besieging it, or -1
             private mutable int[] cbarr;       // barracks working in it
+            // The two authorities a place has besides the one in charge. An elder is whoever has
+            // lived longest and is believed about what this place is; a priest is whoever spends
+            // their days at the shrine. Neither is elected and neither can be appointed -- both are
+            // read off the world every census, exactly like the chief and the capital.
+            private mutable int[] celder;
+            private mutable int[] cpriest;
+            private mutable long eldersSeated;
+            private mutable long priestsSeated;
+            private mutable long tradeChiefs;
+            // And the third: whoever organises the carrying. Only ever seated in a capital, because
+            // a route between two towns is a thing only somebody who answers for both can arrange.
+            private mutable int[] ctchief;
+            // Where each town is sending a load, and what is in it. Decided ONCE a census per
+            // place -- "who needs what I have spare" is the expensive question in this file and it
+            // is asked per town per second, never per carter per decision.
+            private mutable int[] ccaravan;
+            private mutable int[] ccargo;
+            private mutable long caravans;
+            private mutable long trafficked;
+            // The one thing in this world nobody decides for themselves. A railway is not worn by
+            // feet and it is not laid by whoever happens to be standing there with spare stone: it
+            // is a LINE between two towns, and only something that answers for both ends can want
+            // one. Per nation: where the line is going, and how far along it has got.
+            private mutable int[] nrailTo;
+            private mutable int[] nrailAt;
+            private mutable long railed;
             // A conquered town keeps the language its people speak, which is the whole reason
             // conquest is worth doing carefully. Held per SETTLEMENT and not per nation, because
             // after a conquest the two disagree -- and that disagreement is the thing a ruler has
@@ -197,6 +223,7 @@ public bundle Agents {
             private mutable long conquests;
             private mutable long revolts;
             private mutable long converted;
+            private mutable boolean stocked;   // the peoples of the world have been founded
             private mutable Nations* realm;
             private mutable int[] cnat;        // settlement -> nation
             // A colony that has been decided on but not yet walked to. Until its people are
@@ -215,6 +242,7 @@ public bundle Agents {
             private mutable long strayed;      // and that did not
             private mutable long invented;     // eras reached by a nation's own work
             private mutable long learned;      // and by looking over the fence at a neighbour
+            private mutable long borrowed;     // of which, from a neighbour of the same stock
             private mutable long annexed;      // towns that changed hands
             private mutable long extinct;      // nations that lost their last town
             // Who claims each 16-cell block, or -1. A community's land is the ground its people
@@ -466,6 +494,28 @@ public bundle Agents {
                 this.cwall = new int[this.ncomm]();
                 this.carmy = new int[this.ncomm]();
                 this.cbarr = new int[this.ncomm]();
+                this.celder = new int[this.ncomm]();
+                this.cpriest = new int[this.ncomm]();
+                this.ctchief = new int[this.ncomm]();
+                this.ccaravan = new int[this.ncomm]();
+                this.ccargo = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    this.celder[c] = 0 - 1;
+                    this.cpriest[c] = 0 - 1;
+                    this.ctchief[c] = 0 - 1;
+                    this.ccaravan[c] = 0 - 1;
+                }
+                this.eldersSeated = 0;
+                this.priestsSeated = 0;
+                this.tradeChiefs = 0;
+                this.caravans = 0;
+                this.trafficked = 0;
+                this.nrailTo = new int[this.ncomm]();
+                this.nrailAt = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    this.nrailTo[c] = 0 - 1;
+                }
+                this.railed = 0;
                 this.ctongue = new int[this.ncomm]();
                 this.cheld = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
@@ -475,6 +525,7 @@ public bundle Agents {
                 this.conquests = 0;
                 this.revolts = 0;
                 this.converted = 0;
+                this.stocked = false;
                 this.realm = new Nations(this.ncomm) on heap;
                 this.cnat = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
@@ -496,6 +547,7 @@ public bundle Agents {
                 this.strayed = 0;
                 this.invented = 0;
                 this.learned = 0;
+                this.borrowed = 0;
                 this.annexed = 0;
                 this.extinct = 0;
                 this.crafted = 0;
@@ -571,6 +623,13 @@ public bundle Agents {
                 delete this.cwall;
                 delete this.carmy;
                 delete this.cbarr;
+                delete this.celder;
+                delete this.cpriest;
+                delete this.ctchief;
+                delete this.ccaravan;
+                delete this.ccargo;
+                delete this.nrailTo;
+                delete this.nrailAt;
                 delete this.ctongue;
                 delete this.cheld;
                 delete this.realm;
@@ -621,6 +680,13 @@ public bundle Agents {
             // seventeen were merely caught. Doubled instead of quadrupled, a leader stays a leader
             // long enough for the difference to be worth something.
             public static int TAUGHT = 2;
+
+            // And what being next to a COUSIN is worth. Half again as much, because the thing that
+            // makes copying slow is not distance, it is having to work out what the other lot are
+            // doing across a language you do not speak -- and inside a civilization you do. It is
+            // deliberately a nudge and not a multiple: a civilization should be an advantage its
+            // members can waste, not a rail they ride to the last era.
+            public static int TAUGHT_KIN = 3;
 
             // What a settlement knows how to build is what its NATION has worked out. A colony of
             // forty people fires bricks on the day it is founded because the kingdom that sent it
@@ -680,6 +746,50 @@ public bundle Agents {
                 return this.cheld[comm];
             }
 
+            // The three people a place has besides the one in charge, or -1.
+            public method elderOf(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0 - 1;
+                }
+                return this.celder[comm];
+            }
+
+            public method priestOf(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0 - 1;
+                }
+                return this.cpriest[comm];
+            }
+
+            public method tradeChiefOf(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0 - 1;
+                }
+                return this.ctchief[comm];
+            }
+
+            // Where this town is sending a load, and what is in it.
+            public method caravanFrom(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0 - 1;
+                }
+                return this.ccaravan[comm];
+            }
+
+            public method cargoFrom(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0;
+                }
+                return this.ccargo[comm];
+            }
+
+            public method chiefOf(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0 - 1;
+                }
+                return this.chief[comm];
+            }
+
             public method wallOf(int comm) returns int {
                 if (comm < 0 || comm >= this.ncomm) {
                     return 0;
@@ -728,6 +838,7 @@ public bundle Agents {
                 // touching each other teaches nobody anything, and a kingdom whose far province
                 // touches a cleverer neighbour learns from it in its capital.
                 mutable int[] ahead = new int[nn]();
+                mutable int[] kin = new int[nn]();
                 for (int by in 0..this.claimH) {
                     for (int bx in 0..this.claimW) {
                         int ms = this.claim[by * this.claimW + bx];
@@ -739,16 +850,39 @@ public bundle Agents {
                             int os = this.claim[by * this.claimW + bx + 1];
                             if (os >= 0 && this.cnat[os] != me) {
                                 int o = this.cnat[os];
-                                ahead[me] = this.higher(ahead[me], this.realm.eraOf(o));
-                                ahead[o] = this.higher(ahead[o], this.realm.eraOf(me));
+                                // A neighbour you can TALK TO is a different kind of neighbour, and
+                                // it is the tongue that decides it rather than the trunk. What
+                                // makes copying slow is not distance, it is having to work out what
+                                // the other lot are doing without being able to ask; two peoples of
+                                // one stock whose speech parted five generations ago are back to
+                                // guessing, and two who still share a language are being told.
+                                //
+                                // Measured, and the difference matters: on the trunk, nearly every
+                                // border in the world qualified -- twelve stocks over a hundred and
+                                // thirty places -- so the bonus was not a bonus, it was a raise for
+                                // everybody, and thirty of seventy-three nations ended modern
+                                // against ten before it. On the tongue it is what it was meant to
+                                // be: an advantage held by peoples who have not yet drifted apart.
+                                if (this.realm.tongueOf(me) == this.realm.tongueOf(o)) {
+                                    kin[me] = this.higher(kin[me], this.realm.eraOf(o));
+                                    kin[o] = this.higher(kin[o], this.realm.eraOf(me));
+                                } else {
+                                    ahead[me] = this.higher(ahead[me], this.realm.eraOf(o));
+                                    ahead[o] = this.higher(ahead[o], this.realm.eraOf(me));
+                                }
                             }
                         }
                         if (by + 1 < this.claimH) {
                             int os = this.claim[(by + 1) * this.claimW + bx];
                             if (os >= 0 && this.cnat[os] != me) {
                                 int o = this.cnat[os];
-                                ahead[me] = this.higher(ahead[me], this.realm.eraOf(o));
-                                ahead[o] = this.higher(ahead[o], this.realm.eraOf(me));
+                                if (this.realm.tongueOf(me) == this.realm.tongueOf(o)) {
+                                    kin[me] = this.higher(kin[me], this.realm.eraOf(o));
+                                    kin[o] = this.higher(kin[o], this.realm.eraOf(me));
+                                } else {
+                                    ahead[me] = this.higher(ahead[me], this.realm.eraOf(o));
+                                    ahead[o] = this.higher(ahead[o], this.realm.eraOf(me));
+                                }
                             }
                         }
                     }
@@ -803,19 +937,35 @@ public bundle Agents {
                     int curious = mind[nat] / souls[nat];
                     mutable int gain = slack[nat] * (curious + 10) / 20 + scholars[nat];
                     mutable boolean taught = false;
-                    if (ahead[nat] > this.realm.eraOf(nat)) {
+                    mutable boolean fromKin = false;
+                    int era = this.realm.eraOf(nat);
+                    if (kin[nat] > era) {
+                        gain = gain * Simulation.TAUGHT_KIN;
+                        taught = true;
+                        fromKin = true;
+                    } else if (ahead[nat] > era) {
                         gain = gain * Simulation.TAUGHT;  // copying is easier than working it out
                         taught = true;
                     }
+                    // Counted where the ERA IS ACTUALLY GAINED, not wherever a cleverer neighbour
+                    // happened to be standing. The first version incremented on every census a
+                    // cousin was ahead and reported "a hundred and fifteen learned from a
+                    // neighbour, a hundred and thirty-seven thousand of them from a cousin" -- a
+                    // subset larger than the set it belongs to, which is how you know a counter is
+                    // measuring something other than what its name says.
                     if (this.realm.study(nat, gain, Simulation.ERA_COST, Simulation.LAST_ERA)) {
                         if (taught) {
                             this.learned = this.learned + 1;
+                            if (fromKin) {
+                                this.borrowed = this.borrowed + 1;
+                            }
                         } else {
                             this.invented = this.invented + 1;
                         }
                     }
                 }
                 delete ahead;
+                delete kin;
                 delete slack;
                 delete mind;
                 delete souls;
@@ -952,6 +1102,15 @@ public bundle Agents {
                     boolean quarrel = this.craider[seat] == c || this.cfoe[seat] == c
                                    || this.craider[c] == seat || this.cfoe[c] == seat;
                     if (!quarrel) {
+                        continue;
+                    }
+                    // Cousins fight, but not over an old grudge. Somebody who speaks a dialect of
+                    // your language, whose grandparents came over the same ground as yours, has to
+                    // be raiding you NOW to be worth marching on -- while a stranger is worth it on
+                    // a memory. That is what "wars less among themselves" comes to: not a ban, a
+                    // higher bar, and one that a bad enough neighbour still clears.
+                    if (this.realm.sameStock(nat, this.cnat[c])
+                        && this.craided[seat] < Simulation.GRUDGE / 2) {
                         continue;
                     }
                     float dx = this.ccx[c] - this.ccx[seat];
@@ -1172,7 +1331,15 @@ public bundle Agents {
                         && this.stores.foodOf(seat) > this.cpop[seat] * Simulation.LARDER * 2) {
                         this.stores.take(seat, this.stores.richest(seat), Simulation.CONVERT_COST);
                         this.stores.add(c, cast<int>(Good.Grain), Simulation.CONVERT_COST / 2);
-                        if (this.cheld[c] > Simulation.CONVERT_TIME) {
+                        // A priest in the town halves it. Grain buys quiet; somebody standing in
+                        // the shrine every day, teaching in the new tongue, is what actually
+                        // changes what a people calls itself -- and it is why a ruler who wants a
+                        // conquest to stick raises a shrine in it rather than a garrison.
+                        mutable int patience = Simulation.CONVERT_TIME;
+                        if (this.cpriest[c] >= 0) {
+                            patience = patience / 2;
+                        }
+                        if (this.cheld[c] > patience) {
                             this.ctongue[c] = this.realm.tongueOf(nat);
                             this.converted = this.converted + 1;
                             this.cheld[c] = 0;
@@ -1180,8 +1347,13 @@ public bundle Agents {
                         continue;
                     }
                     // Nobody is spending anything on them, and they remember. The longer it goes
-                    // on the likelier it is that one morning they simply stop answering.
-                    int odds = this.cheld[c] / 8;
+                    // on the likelier it is that one morning they simply stop answering -- unless
+                    // somebody is at least talking to them, which is the other half of what the
+                    // shrine buys.
+                    mutable int odds = this.cheld[c] / 8;
+                    if (this.cpriest[c] >= 0) {
+                        odds = odds / 2;
+                    }
                     if (cast<int>(LandMath.hash01(this.seed ^ 0x51B3, c, this.tick) * 1000.0)
                         < odds) {
                         this.breakAway(c);
@@ -1262,8 +1434,104 @@ public bundle Agents {
                     this.realm.settleRank(nat, lord);
                     this.realm.wag(nat, this.seed, this.tick);
                 }
+                if (!this.stocked) {
+                    this.seedStocks();
+                    this.stocked = true;
+                }
                 return;
             }
+
+            // Where the peoples of the world came from, decided once, on the first census -- the
+            // first moment community centres are real rather than zero.
+            //
+            // Everybody having their own stock would be a world of a hundred and thirty
+            // civilizations, which is a list and not a history. What is actually true of a scattered
+            // people is that neighbours are already cousins: they came over the same ground within a
+            // few generations of one another, and the ones on the far side of the world did not.
+            // So a handful of HEARTHS are picked as far apart as the map allows, and every band
+            // belongs to the nearest -- which yields big cultural regions on day one that then drift
+            // apart into separate languages and separate countries over an arc, keeping the trunk.
+            //
+            // Once. A hundred and thirty communities against twelve hearths is sixteen hundred
+            // comparisons, paid one time at the start of the world.
+            private method seedStocks() returns void {
+                mutable int[] hearth = new int[Simulation.STOCKS]();
+                mutable int found = 0;
+                // Farthest-point sampling: the first band that exists, then repeatedly whichever
+                // band is furthest from every hearth already chosen. Deterministic, and it spreads
+                // the hearths over the continents instead of clumping them on the biggest one.
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] > 0 && found == 0) {
+                        hearth[0] = c;
+                        found = 1;
+                    }
+                }
+                if (found == 0) {
+                    delete hearth;
+                    return;                          // nobody is alive; nothing to found
+                }
+                while (found < Simulation.STOCKS) {
+                    mutable int far = 0 - 1;
+                    mutable float farD = 0.0 - 1.0;
+                    for (int c in 0..this.ncomm) {
+                        if (this.cpop[c] <= 0) {
+                            continue;
+                        }
+                        mutable float near = 0.0;
+                        mutable boolean first = true;
+                        for (int k in 0..found) {
+                            int h = hearth[k];
+                            float dx = this.ccx[c] - this.ccx[h];
+                            float dy = this.ccy[c] - this.ccy[h];
+                            float d = dx * dx + dy * dy;
+                            if (first || d < near) {
+                                near = d;
+                                first = false;
+                            }
+                        }
+                        if (near > farD) {
+                            farD = near;
+                            far = c;
+                        }
+                    }
+                    if (far < 0) {
+                        break;                       // fewer living bands than hearths wanted
+                    }
+                    hearth[found] = far;
+                    found = found + 1;
+                }
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    mutable int mine = hearth[0];
+                    mutable float best = 0.0;
+                    mutable boolean first = true;
+                    for (int k in 0..found) {
+                        int h = hearth[k];
+                        float dx = this.ccx[c] - this.ccx[h];
+                        float dy = this.ccy[c] - this.ccy[h];
+                        float d = dx * dx + dy * dy;
+                        if (first || d < best) {
+                            best = d;
+                            mine = h;
+                            first = false;
+                        }
+                    }
+                    this.realm.settleTrunk(this.cnat[c], mine);
+                    // And the settlement speaks what its people speak. Held per settlement so that
+                    // after a conquest the town and the flag over it can disagree -- which they
+                    // cannot do if every town starts out speaking something nobody else does.
+                    this.ctongue[c] = mine;
+                }
+                delete hearth;
+                return;
+            }
+
+            // How many peoples the world begins with. Twelve: enough that the map has distinct
+            // cultural regions rather than one grey mass, few enough that each of them is big enough
+            // to have a history worth watching.
+            public static int STOCKS = 12;
 
             private method higher(int a, int b) returns int {
                 if (b > a) {
@@ -1353,10 +1621,18 @@ public bundle Agents {
                     if (total < 4) {
                         continue;                        // too few at work to read anything from
                     }
+                    // A place with somebody old in it becomes itself faster. That is what an elder
+                    // IS: the person who remembers how this village does things and is believed
+                    // about it, so what the village does today is pulled harder toward what it has
+                    // always done. A place that loses its old people drifts.
+                    mutable int slow = 32;
+                    if (this.celder[c] >= 0) {
+                        slow = 24;
+                    }
                     for (int a in 0..5) {
                         int at = c * 5 + a;
                         int want = this.deeds[at] * 100 * Simulation.CFIX / total;
-                        this.culture[at] = this.culture[at] + (want - this.culture[at]) / 32;
+                        this.culture[at] = this.culture[at] + (want - this.culture[at]) / slow;
                     }
                 }
                 return;
@@ -1663,6 +1939,8 @@ public bundle Agents {
                             this.workProspect(i);
                         } else if (jb == cast<int>(Job.General)) {
                             this.workLead(i);
+                        } else if (jb == cast<int>(Job.Trader)) {
+                            this.workTrade(i);
                         } else if (this.craftOfJob(jb) != cast<int>(Craft.NoCraft)) {
                             this.workCraft(i);
                         } else {
@@ -1990,6 +2268,7 @@ public bundle Agents {
                     }
                     this.folk.addAge(i, dt);
                     if (this.folk.ageOf(i) >= this.folk.lifespanOf(i)) {
+                        this.vacate(i, this.folk.homeOf(i));
                         this.folk.kill(i);
                         this.deathsOld = this.deathsOld + 1;
                         i = i + 1;
@@ -2008,6 +2287,7 @@ public bundle Agents {
                         this.folk.setTired(i, this.folk.tiredOf(i) + 1);
                     }
                     if (this.folk.hungerOf(i) >= Simulation.STARVE_AT) {
+                        this.vacate(i, this.folk.homeOf(i));
                         this.folk.kill(i);
                         this.deathsHunger = this.deathsHunger + 1;
                         i = i + 1;
@@ -2121,6 +2401,7 @@ public bundle Agents {
                 // And what those buildings are waiting for. Read here, before anybody decides what
                 // to build next, because what a place should build is what it is short of.
                 this.town.wants(this.cwant, this.cfed, this.ncomm, Goods.count());
+                this.explode();
                 this.town.learning(this.clesson, this.ncomm);
                 // Where a community IS, taken as where its people are. Nobody planted a flag: the
                 // centre is the average of everybody standing there, so it drifts as they do -- and
@@ -2199,6 +2480,11 @@ public bundle Agents {
                 // being consistently one second old beats being right about some fields and wrong
                 // about others.
                 this.realmCensus();
+                // A route runs between two towns of ONE country, so it cannot be worked out before
+                // it is settled which towns exist and who they answer to -- the same reason the
+                // nations themselves are read after hiving, absorbing and colonising.
+                this.caravanRoutes();
+                this.railway();
                 // And then the wars, which need the nations settled to know who is whose.
                 this.campaign();
                 this.wayOut();
@@ -2386,6 +2672,7 @@ public bundle Agents {
                     if (this.folk.alive(i)) {
                         int h = this.folk.homeOf(i);
                         if (h >= 0 && h < this.ncomm && this.cjoin[h] >= 0) {
+                            this.vacate(i, h);
                             this.folk.setHome(i, this.cjoin[h]);
                         }
                     }
@@ -2493,6 +2780,7 @@ public bundle Agents {
                     if (this.folk.alive(i)) {
                         int h = this.folk.homeOf(i);
                         if (h >= 0 && h < this.ncomm && this.cchild[h] >= 0 && this.withFar(i, h)) {
+                            this.vacate(i, h);
                             this.folk.setHome(i, this.cchild[h]);
                         }
                     }
@@ -2638,6 +2926,7 @@ public bundle Agents {
                 mutable int i = 0;
                 while (i < n) {
                     if (this.folk.alive(i) && this.folk.homeOf(i) == c) {
+                        this.vacate(i, c);
                         this.folk.setHome(i, back);
                         this.folk.setTarget(i, cast<int>(this.ccx[back]),
                                             cast<int>(this.ccy[back]));
@@ -2799,6 +3088,7 @@ public bundle Agents {
                         float ax = this.folk.xAt(i) - this.ccx[seat];
                         float ay = this.folk.yAt(i) - this.ccy[seat];
                         if (ax * vx + ay * vy > 0.0) {
+                            this.vacate(i, seat);
                             this.folk.setHome(i, d);
                             // And they are TOLD to go. Changing where somebody belongs is not the
                             // same as sending them: a colonist who can still find work where he is
@@ -2917,6 +3207,7 @@ public bundle Agents {
                     return false;                    // nowhere better; they stay and take their chances
                 }
                 this.cleave[h] = this.cleave[h] - 1;
+                this.vacate(i, h);
                 this.folk.setHome(i, to);
                 this.folk.setTarget(i, cast<int>(this.ccx[to]), cast<int>(this.ccy[to]));
                 this.folk.setAct(i, cast<int>(Act.WalkTo));
@@ -2985,9 +3276,24 @@ public bundle Agents {
                 int n = this.folk.limit();
                 mutable int[] bestI = new int[this.ncomm]();
                 mutable int[] bestV = new int[this.ncomm]();
+                // The other two people a place has. Found in the SAME sweep -- one pass over fifty
+                // thousand rows answers all three questions, and asking them separately would be
+                // three passes for no reason.
+                mutable int[] oldI = new int[this.ncomm]();
+                mutable float[] oldA = new float[this.ncomm]();
+                mutable int[] holyI = new int[this.ncomm]();
+                mutable int[] holyV = new int[this.ncomm]();
+                mutable int[] cartI = new int[this.ncomm]();
+                mutable int[] cartV = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
                     bestI[c] = 0 - 1;
                     bestV[c] = 0 - 1;
+                    oldI[c] = 0 - 1;
+                    oldA[c] = 0.0;
+                    holyI[c] = 0 - 1;
+                    holyV[c] = 0 - 1;
+                    cartI[c] = 0 - 1;
+                    cartV[c] = 0 - 1;
                 }
                 mutable int i = 0;
                 while (i < n) {
@@ -2998,6 +3304,20 @@ public bundle Agents {
                             if (v > bestV[h]) {
                                 bestV[h] = v;
                                 bestI[h] = i;
+                            }
+                            float age = this.folk.ageOf(i);
+                            if (age > oldA[h]) {
+                                oldA[h] = age;
+                                oldI[h] = i;
+                            }
+                            int jb = this.folk.jobOf(i);
+                            if (jb == cast<int>(Job.Scholar) && v > holyV[h]) {
+                                holyV[h] = v;
+                                holyI[h] = i;
+                            }
+                            if (jb == cast<int>(Job.Trader) && v > cartV[h]) {
+                                cartV[h] = v;
+                                cartI[h] = i;
                             }
                         }
                     }
@@ -3033,8 +3353,117 @@ public bundle Agents {
                         this.passed = this.passed + 1;
                     }
                 }
+                // The other two. Neither is elected and neither can be appointed -- an elder is
+                // whoever has lived longest and a priest is whoever spends their days at the
+                // shrine, so both are read off the world exactly like the chief.
+                for (int c in 0..this.ncomm) {
+                    int wasOld = this.celder[c];
+                    if (wasOld >= 0 && this.folk.alive(wasOld)
+                        && this.folk.roleOf(wasOld) == cast<int>(Role.Elder)) {
+                        this.folk.setRole(wasOld, cast<int>(Role.None));
+                    }
+                    this.celder[c] = 0 - 1;
+                    int wasHoly = this.cpriest[c];
+                    if (wasHoly >= 0 && this.folk.alive(wasHoly)
+                        && this.folk.roleOf(wasHoly) == cast<int>(Role.Priest)) {
+                        this.folk.setRole(wasHoly, cast<int>(Role.None));
+                    }
+                    this.cpriest[c] = 0 - 1;
+                    int wasCart = this.ctchief[c];
+                    if (wasCart >= 0 && this.folk.alive(wasCart)
+                        && this.folk.roleOf(wasCart) == cast<int>(Role.TradeChief)) {
+                        this.folk.setRole(wasCart, cast<int>(Role.None));
+                    }
+                    this.ctchief[c] = 0 - 1;
+                    if (this.cpop[c] < Simulation.VILLAGE) {
+                        continue;                          // a band defers to age without naming it
+                    }
+                    // The eldest, unless the eldest is already the one in charge -- a village has
+                    // two authorities or one, never the same person twice.
+                    int old = oldI[c];
+                    if (old >= 0 && old != this.chief[c] && oldA[c] >= Simulation.ELDERLY) {
+                        this.folk.setRole(old, cast<int>(Role.Elder));
+                        this.celder[c] = old;
+                        // Counted when the person CHANGES, not every census the seat is filled.
+                        // The first version counted the seat and reported six hundred and eighty
+                        // thousand elders in a world of fifty thousand people -- a total larger than
+                        // everybody who ever lived, which is how you know a counter is measuring
+                        // ticks rather than events.
+                        if (old != wasOld) {
+                            this.eldersSeated = this.eldersSeated + 1;
+                        }
+                    }
+                    int holy = holyI[c];
+                    if (holy >= 0 && holy != this.chief[c] && holy != this.celder[c]) {
+                        this.folk.setRole(holy, cast<int>(Role.Priest));
+                        this.cpriest[c] = holy;
+                        if (holy != wasHoly) {
+                            this.priestsSeated = this.priestsSeated + 1;
+                        }
+                    }
+                    // And in a capital, whoever among the carters has the most standing. The role
+                    // is a CONSEQUENCE of the trade and not a precondition for it -- a country of
+                    // two towns has people walking loads between them whether or not anybody is
+                    // organising it, and the one they end up listening to is the one who has walked
+                    // the most. Making it a precondition would have been a circle nothing breaks.
+                    int cart = cartI[c];
+                    if (cart >= 0 && this.realm.seatOf(this.cnat[c]) == c
+                        && cart != this.chief[c] && cart != this.celder[c]
+                        && cart != this.cpriest[c]) {
+                        this.folk.setRole(cart, cast<int>(Role.TradeChief));
+                        this.ctchief[c] = cart;
+                        if (cart != wasCart) {
+                            this.tradeChiefs = this.tradeChiefs + 1;
+                        }
+                    }
+                }
                 delete bestI;
                 delete bestV;
+                delete oldI;
+                delete oldA;
+                delete holyI;
+                delete holyV;
+                delete cartI;
+                delete cartV;
+                return;
+            }
+
+            // How old somebody has to be before anybody calls them old. A life is about six minutes,
+            // so two thirds of one: old enough to have seen a village change and be believed about
+            // it, young enough that a place usually has somebody who qualifies.
+            public static float ELDERLY = 240.0;
+
+            // Somebody who leaves a place -- or leaves the world -- stops being anything in it, and
+            // the seat empties the moment they go rather than at the next census.
+            //
+            // Moving is the obvious half: hiving, absorbing, colonising and famine all reseat
+            // somebody's home after `hearWho` has already run.
+            //
+            // DYING is the half that actually bit, and it is worth writing down because a seat that
+            // holds an agent INDEX is only meaningful until that row is recycled. Somebody dies, the
+            // pool hands their row to the next child born anywhere in the world, and for the rest of
+            // that second the elder of a village of six hundred is a newborn two hundred cells away
+            // -- alive, so no aliveness check catches it, and in a different community, so every
+            // reader that trusted the seat was reading about the wrong person.
+            private method vacate(int i, int from) returns void {
+                if (from < 0 || from >= this.ncomm) {
+                    return;
+                }
+                if (this.chief[from] == i) {
+                    this.chief[from] = 0 - 1;
+                }
+                if (this.celder[from] == i) {
+                    this.celder[from] = 0 - 1;
+                }
+                if (this.cpriest[from] == i) {
+                    this.cpriest[from] = 0 - 1;
+                }
+                if (this.ctchief[from] == i) {
+                    this.ctchief[from] = 0 - 1;
+                }
+                if (this.folk.roleOf(i) != cast<int>(Role.None)) {
+                    this.folk.setRole(i, cast<int>(Role.None));
+                }
                 return;
             }
 
@@ -3234,6 +3663,361 @@ public bundle Agents {
             // fed, and hands to put a tool in. The old rule -- worth is the abundance of the input
             // -- scaled with nothing at all, which is why the number of workshops in the world grew
             // only by the number of VILLAGES in it.
+            // Where each town is sending a load, and what is in it.
+            //
+            // A country is not only a border: it is a set of places that can cover for each other,
+            // and this is the only thing in the world that actually makes that true. A town with a
+            // seam and no woodland and a town with woodland and no seam were two poor places under
+            // one flag; with a road between them they are one rich one.
+            //
+            // Asked ONCE a census per town, never per carter per decision. "Who needs what I have
+            // spare" is the expensive question in this file, and answering it per person would be
+            // the woodcutter's mistake for the fourth time.
+            private method caravanRoutes() returns void {
+                int ng = Goods.count();
+                for (int c in 0..this.ncomm) {
+                    this.ccaravan[c] = 0 - 1;
+                    this.ccargo[c] = 0;
+                }
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    int nat = this.cnat[c];
+                    if (this.realm.townsOf(nat) < Simulation.TRADE_TOWNS) {
+                        continue;                    // one town has nobody to send anything to
+                    }
+                    // What we have most spare of, keeping a floor back: a place that empties its
+                    // own shelves to be generous starves, and a caravan is not charity.
+                    mutable int good = 0;
+                    mutable int spare = 0;
+                    for (int g in 1..ng) {
+                        int over = this.stores.amountOf(c, g) - this.cwant[c * ng + g]
+                                 - Simulation.KEEP_BACK;
+                        if (over > spare) {
+                            spare = over;
+                            good = g;
+                        }
+                    }
+                    if (good <= 0) {
+                        continue;
+                    }
+                    // And whoever under the same flag is shortest of it, within a day's haul.
+                    mutable int to = 0 - 1;
+                    mutable int need = 0;
+                    for (int d in 0..this.ncomm) {
+                        if (d == c || this.cpop[d] <= 0 || this.cnat[d] != nat) {
+                            continue;
+                        }
+                        float dx = this.ccx[d] - this.ccx[c];
+                        float dy = this.ccy[d] - this.ccy[c];
+                        if (dx * dx + dy * dy
+                            > cast<float>(Simulation.TRADE_REACH * Simulation.TRADE_REACH)) {
+                            continue;
+                        }
+                        int gap = this.shortOf(d, good);
+                        if (gap > need) {
+                            need = gap;
+                            to = d;
+                        }
+                    }
+                    if (to < 0) {
+                        continue;
+                    }
+                    this.ccaravan[c] = to;
+                    this.ccargo[c] = good;
+                }
+                return;
+            }
+
+            // The railway.
+            //
+            // Everything else about the ground in this world is emergent: a trail is where people
+            // walked and a road is where enough of them did. A railway is the exception on purpose,
+            // and it is the point at which a country stops being the sum of its villages. Nobody
+            // wears a rail into the earth; somebody decides a LINE between two towns should exist,
+            // and it exists because a state can hold an intention across more ground than any one
+            // person can see.
+            //
+            // One cell a census, straight from the capital toward the biggest town it holds. Paid
+            // for out of the capital's own shelves in stone and iron -- so a nation that has not
+            // built the industry to make iron cannot have a railway however badly it wants one, and
+            // reaching the third era is worth something concrete rather than a number going up.
+            private method railway() returns void {
+                for (int nat in 0..this.realm.limit()) {
+                    if (!this.realm.alive(nat) || this.realm.eraOf(nat) < Simulation.RAIL_ERA) {
+                        continue;
+                    }
+                    int seat = this.realm.seatOf(nat);
+                    if (seat < 0) {
+                        continue;
+                    }
+                    // Pick the far end once and keep it. A line that re-aimed itself every census
+                    // because one town overtook another would be a spray of disconnected sleepers.
+                    mutable int to = this.nrailTo[nat];
+                    if (to < 0 || to >= this.ncomm || this.cpop[to] <= 0
+                        || this.cnat[to] != nat || to == seat) {
+                        to = 0 - 1;
+                        mutable int most = 0;
+                        for (int d in 0..this.ncomm) {
+                            if (d == seat || this.cpop[d] <= 0 || this.cnat[d] != nat) {
+                                continue;
+                            }
+                            if (this.cpop[d] > most) {
+                                most = this.cpop[d];
+                                to = d;
+                            }
+                        }
+                        if (to < 0) {
+                            continue;                // one town: nowhere to run a line to
+                        }
+                        this.nrailTo[nat] = to;
+                        this.nrailAt[nat] = 0;
+                    }
+                    if (!this.stores.has(seat, cast<int>(Good.Stone), Simulation.RAIL_STONE)
+                        || !this.stores.has(seat, cast<int>(Good.IronIngot),
+                                            Simulation.RAIL_IRON)) {
+                        continue;                    // it cannot afford the next sleeper yet
+                    }
+                    float ax = this.ccx[seat];
+                    float ay = this.ccy[seat];
+                    float bx = this.ccx[to];
+                    float by = this.ccy[to];
+                    float dx = bx - ax;
+                    float dy = by - ay;
+                    int span = cast<int>(Math.sqrt(cast<double>(dx * dx + dy * dy)));
+                    if (span <= 1) {
+                        continue;
+                    }
+                    mutable int at = this.nrailAt[nat];
+                    if (at > span) {
+                        continue;                    // the line is finished; nothing left to lay
+                    }
+                    // Walk forward until a cell that is not already rail, so a line whose middle was
+                    // laid by an earlier stretch does not stall on it.
+                    mutable boolean laid = false;
+                    mutable int tries = 0;
+                    while (at <= span && tries < Simulation.RAIL_SKIP) {
+                        float t = cast<float>(at) / cast<float>(span);
+                        int cx = cast<int>(ax + dx * t);
+                        int cy = cast<int>(ay + dy * t);
+                        at = at + 1;
+                        tries = tries + 1;
+                        if (this.paths.lay(cx, cy, cast<int>(Surface.Rail))) {
+                            this.stores.take(seat, cast<int>(Good.Stone), Simulation.RAIL_STONE);
+                            this.stores.take(seat, cast<int>(Good.IronIngot), Simulation.RAIL_IRON);
+                            this.railed = this.railed + 1;
+                            laid = true;
+                            at = at;
+                            tries = Simulation.RAIL_SKIP;
+                        }
+                    }
+                    this.nrailAt[nat] = at;
+                    if (!laid && at > span) {
+                        continue;                    // the whole line already exists
+                    }
+                }
+                return;
+            }
+
+            // The era a country can lay track in, what a sleeper costs, and how many already-laid
+            // cells it will step over in one census before giving up for this second.
+            public static int RAIL_ERA = 3;
+            public static int RAIL_STONE = 3;
+            public static int RAIL_IRON = 1;
+            public static int RAIL_SKIP = 16;
+
+            // Walking a load to the next town under the same flag.
+            //
+            // The road matters here and nowhere else in the world: everybody else walks to a tree
+            // or a seam and comes back, and a carter walks the same line between the same two
+            // places over and over. That is what wears a trail into a road, and the road is then
+            // what makes the next haul faster -- the one loop in this simulation that pays for
+            // itself.
+            private method workTrade(int i) returns void {
+                int h = this.folk.homeOf(i);
+                if (h < 0 || h >= this.ncomm) {
+                    return;
+                }
+                if (this.folk.carryAmtOf(i) > 0) {
+                    if (this.busy(i)) {
+                        return;
+                    }
+                    mutable int to = this.folk.boundFor(i);
+                    if (to < 0 || to >= this.ncomm || this.cpop[to] <= 0) {
+                        to = h;                      // nowhere to take it; carry it back home
+                    }
+                    float dx = this.ccx[to] - this.folk.xAt(i);
+                    float dy = this.ccy[to] - this.folk.yAt(i);
+                    if (dx * dx + dy * dy < 4.0) {
+                        int amt = this.folk.carryAmtOf(i);
+                        this.stores.stow(to, this.folk.carryKindOf(i), amt);
+                        this.trafficked = this.trafficked + cast<long>(amt);
+                        this.carried = this.carried + cast<long>(amt);
+                        this.folk.earn(i, 4);
+                        this.folk.setCarry(i, 0, 0);
+                        this.folk.setBound(i, 0 - 1);
+                    } else {
+                        this.folk.setTarget(i, cast<int>(this.ccx[to]), cast<int>(this.ccy[to]));
+                        this.folk.setAct(i, cast<int>(Act.WalkTo));
+                    }
+                    return;
+                }
+                if (this.busy(i)) {
+                    return;
+                }
+                int to = this.ccaravan[h];
+                int good = this.ccargo[h];
+                if (to < 0 || good <= 0) {
+                    this.folk.setJob(i, cast<int>(Job.Idle));
+                    return;                          // nothing spare and nobody wanting
+                }
+                float dx = this.ccx[h] - this.folk.xAt(i);
+                float dy = this.ccy[h] - this.folk.yAt(i);
+                if (dx * dx + dy * dy >= 4.0) {
+                    this.folk.setTarget(i, cast<int>(this.ccx[h]), cast<int>(this.ccy[h]));
+                    this.folk.setAct(i, cast<int>(Act.WalkTo));
+                    return;
+                }
+                int got = this.stores.take(h, good, this.loadOf(h));
+                if (got <= 0) {
+                    this.folk.setThinkAt(i, this.tick + 40);
+                    return;
+                }
+                this.folk.setCarry(i, good, got);
+                this.folk.setBound(i, to);
+                this.folk.setTarget(i, cast<int>(this.ccx[to]), cast<int>(this.ccy[to]));
+                this.folk.setAct(i, cast<int>(Act.WalkTo));
+                this.caravans = this.caravans + 1;
+                return;
+            }
+
+            // How much one of them carries. A back, then a handcart, then a wagon and a horse: the
+            // era is the difference, and it is the plainest thing a people gains by reaching one.
+            private method loadOf(int c) returns int {
+                int era = this.eraOf(c);
+                if (era >= 3) {
+                    return Simulation.HAUL * 4;
+                }
+                if (era >= 2) {
+                    return Simulation.HAUL * 2;
+                }
+                return Simulation.HAUL;
+            }
+
+            // Two towns before anybody carries anything between them, how far a haul goes, what a
+            // place keeps back before it calls anything spare, and what one carter shifts.
+            public static int TRADE_TOWNS = 2;
+            public static int TRADE_REACH = 260;
+            public static int KEEP_BACK = 40;
+            public static int HAUL = 20;
+
+            // What a want IMPLIES, down the chain that answers it.
+            //
+            // This is the term the whole industrial half of the world was missing. `wants` reads
+            // demand off the benches that are standing: a bakery wants grain, a smithy wants ore.
+            // Nothing anywhere said that a village which wants a TENEMENT therefore wants bricks,
+            // and therefore wants clay -- so brick had no want, clay had no want, and the only
+            // things ever built were the ones whose output somebody eats or holds. Twenty-two goods
+            // were never produced in a twenty-generation arc, one kiln stood in the entire world,
+            // and no weapon was ever made because Weaponsmith needs iron, iron needs a smithy, and
+            // a smithy is built out of brick.
+            //
+            // So a want is exploded: whatever the place wants, it also wants the inputs of whatever
+            // would make it, in proportion, and that again, four levels down -- which is deeper than
+            // the longest chain in the catalogue. It stops at anything nobody makes, which is
+            // exactly the goods that come out of the ground.
+            //
+            // Once a census over a hundred and thirty places and sixty goods. The alternative --
+            // asking it per building kind per place per decision -- is the woodcutter's mistake in
+            // a new coat.
+            private method explode() returns void {
+                int ng = Goods.count();
+                // The wants nobody's bench asked for: a roof over the people still under sticks, a
+                // tool in every hand that can hold one, and arms for everybody carrying a grudge.
+                // They were read at the point of scoring before, which is why they never travelled
+                // any further than the good they named.
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    int era = this.eraOf(c);
+                    int roof = Builds.bestRoof(era);
+                    if (roof != cast<int>(BuildingKind.NoBuilding) && Builds.roof(roof) > 0) {
+                        int mat = Builds.matCost(roof);
+                        int unroofed = this.cpop[c] - this.croom[c];
+                        if (mat > 0 && unroofed > 0) {
+                            int n = Builds.matCostN(roof) * unroofed / Builds.roof(roof);
+                            this.cwant[c * ng + mat] = this.cwant[c * ng + mat] + n;
+                        }
+                    }
+                    int tools = cast<int>(Good.Tools);
+                    this.cwant[c * ng + tools] = this.cwant[c * ng + tools] + this.handsWanting(c);
+                    int arms = this.ctrade[c * Job.count() + cast<int>(Job.Raider)];
+                    if (arms > 0) {
+                        int wp = cast<int>(Good.Weapon);
+                        int ar = cast<int>(Good.Armour);
+                        this.cwant[c * ng + wp] = this.cwant[c * ng + wp] + arms;
+                        this.cwant[c * ng + ar] = this.cwant[c * ng + ar] + arms;
+                    }
+                }
+                // And then the explosion itself, one level per round, breadth first.
+                //
+                // Only what was added LAST round is exploded this round. Exploding the whole running
+                // total each time would put the original want through the chain once per level, so
+                // four rounds would multiply the bottom of a chain by four -- and a village would
+                // want more clay than there is clay because it wants a house.
+                mutable int[] front = new int[this.ncomm * ng]();
+                mutable int[] added = new int[this.ncomm * ng]();
+                for (int s in 0..this.ncomm * ng) {
+                    front[s] = this.cwant[s];
+                }
+                mutable int round = 0;
+                while (round < Simulation.CHAIN_DEPTH) {
+                    for (int s in 0..this.ncomm * ng) {
+                        added[s] = 0;
+                    }
+                    for (int c in 0..this.ncomm) {
+                        if (this.cpop[c] <= 0) {
+                            continue;
+                        }
+                        int era = this.eraOf(c);
+                        for (int g in 1..ng) {
+                            int want = front[c * ng + g];
+                            if (want <= 0) {
+                                continue;
+                            }
+                            int k = Builds.makerOf(g, era);
+                            if (k < 0) {
+                                continue;        // it comes out of the ground; the chain ends here
+                            }
+                            int batches = want / Builds.nout(k) + 1;
+                            int a = Builds.in1(k);
+                            if (a > 0) {
+                                added[c * ng + a] = added[c * ng + a] + Builds.n1(k) * batches;
+                            }
+                            int b = Builds.in2(k);
+                            if (b > 0) {
+                                added[c * ng + b] = added[c * ng + b] + Builds.n2(k) * batches;
+                            }
+                        }
+                    }
+                    for (int s in 0..this.ncomm * ng) {
+                        this.cwant[s] = this.cwant[s] + added[s];
+                        front[s] = added[s];
+                    }
+                    round = round + 1;
+                }
+                delete front;
+                delete added;
+                return;
+            }
+
+            // How far down a want travels. Four: one more than the longest chain the catalogue has
+            // (ore to ingot to weapon, clay to brick to a wall that holds), so nothing is left
+            // unreachable and nothing is exploded twice for no reason.
+            public static int CHAIN_DEPTH = 4;
+
             private method shortOf(int c, int good) returns int {
                 if (good <= 0) {
                     return 0;
@@ -3263,24 +4047,12 @@ public bundle Agents {
                 if (good == cast<int>(Good.Stone)) {
                     want = want + this.cpop[c] / 2;
                 }
-                // And out of whatever the best roof it knows is made of. This is the term that
-                // makes the wright chain worth having: a place that has learned to raise houses
-                // wants planks in proportion to how many people are still under sticks, which is a
-                // real number that grows with the town and shrinks as it is answered.
-                int roof = Builds.bestRoof(this.eraOf(c));
-                if (roof != cast<int>(BuildingKind.NoBuilding) && Builds.matCost(roof) == good) {
-                    int unroofed = this.cpop[c] - this.croom[c];
-                    if (unroofed > 0) {
-                        want = want + Builds.matCostN(roof) * unroofed / Builds.roof(roof);
-                    }
-                }
-                // A tool in every hand that can use one, and arms for everybody carrying a grudge.
-                if (good == cast<int>(Good.Tools)) {
-                    want = want + this.handsWanting(c);
-                }
-                if (good == cast<int>(Good.Weapon) || good == cast<int>(Good.Armour)) {
-                    want = want + this.ctrade[c * Job.count() + cast<int>(Job.Raider)];
-                }
+                // The roof material, a tool in every hand and arms for everybody carrying a grudge
+                // used to be read HERE, which is precisely why they never travelled: a want that
+                // exists only at the moment somebody asks about that one good cannot imply anything
+                // about the good below it. They are seeded into `explode` now, along with the whole
+                // chain each of them pulls, and arrive in `cwant` already exploded.
+                //
                 // A CHAIN HAS TO BE ABLE TO START.
                 //
                 // Want read purely off what is standing deadlocks every chain in the catalogue:
@@ -3546,6 +4318,23 @@ public bundle Agents {
                         }
                     }
                     return arms;
+                }
+                // Carters. Nobody walks a load to the next town when there is no next town, and a
+                // country that has one organising the routes puts twice as many on the road --
+                // which is the whole of what a trade chief is worth and is measured, not asserted.
+                if (job == cast<int>(Job.Trader)) {
+                    int nat = this.cnat[c];
+                    if (this.realm.townsOf(nat) < Simulation.TRADE_TOWNS) {
+                        return 0;
+                    }
+                    if (this.ccaravan[c] < 0) {
+                        return 0;                    // nothing spare here and nobody wanting it
+                    }
+                    int seat = this.realm.seatOf(nat);
+                    if (seat >= 0 && this.ctchief[seat] >= 0) {
+                        return adults / 6;
+                    }
+                    return adults / 12;
                 }
                 mutable int q = adults / 6;
                 // Except that a hungry place puts most of its hands on food. A flat share of the
@@ -4052,6 +4841,28 @@ public bundle Agents {
                         best = pb;
                     }
                 }
+                // Somebody walks a load to the next town.
+                //
+                // Asked here for the same reason the raider and the prospector are: a carter has no
+                // craft and no harvest class, so the two loops below -- one over crafts with an
+                // empty bench, one over things to go and dig up -- can never reach it. A trade that
+                // exists in the enum and in nobody's decision is a trade nobody ever takes, which
+                // is exactly what a measured arc showed: fifty-eight routes standing open and not
+                // one load ever set out on any of them.
+                int tb = cast<int>(Job.Trader);
+                if (this.ccaravan[h] >= 0 && this.ctrade[h * nj + tb] < this.quotaFor(h, tb)) {
+                    // Worth what the far end is short of, capped so a desperate neighbour cannot
+                    // empty this village into a cart. It competes with every other trade on the
+                    // same scale as everything else here.
+                    mutable int want = this.shortOf(this.ccaravan[h], this.ccargo[h]) / 4;
+                    if (want > 60) {
+                        want = 60;
+                    }
+                    if (want > bestScore) {
+                        bestScore = want;
+                        best = tb;
+                    }
+                }
                 // A workshop with an empty bench beats going out to the field: it is nearer, the
                 // work is worth more, and somebody has already decided the village needs it.
                 for (int cr in 1..Craft.count()) {
@@ -4120,7 +4931,14 @@ public bundle Agents {
                         }
                         int mind = this.folk.sociabilityOf(i) + 40
                                  - this.folk.boldnessOf(i) / 2 - this.folk.ambitionOf(i) / 2;
-                        int odds = sway * mind / Simulation.NOTABLE;
+                        mutable int odds = sway * mind / Simulation.NOTABLE;
+                        // And an elder standing behind him. A chief who has the old people's
+                        // backing is heeded by people who would have shrugged him off, which is the
+                        // only power an elder has and the whole of it -- they command nobody and
+                        // they make the person who does easier to believe.
+                        if (this.celder[h] >= 0 && this.celder[h] != i) {
+                            odds = odds + odds / 4;
+                        }
                         if (cast<int>(LandMath.hash01(this.seed ^ 0x2E77, i, this.tick) * 100.0) < odds) {
                             this.followed = this.followed + 1;
                             best = jb;
@@ -5045,6 +5863,35 @@ public bundle Agents {
                     heed = cast<int>(this.followed * cast<long>(1000) / said);
                 }
                 System.IO.Console.println($"  chiefs: {seated} seated | {this.risen} rose, {this.passed} handed on | {heed}/1000 of those spoken to went along ({this.followed} of {said})");
+                mutable int elders = 0;
+                mutable int priests = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.celder[c] >= 0) {
+                        elders = elders + 1;
+                    }
+                    if (this.cpriest[c] >= 0) {
+                        priests = priests + 1;
+                    }
+                }
+                mutable int carters = 0;
+                mutable int routes = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.ctchief[c] >= 0) {
+                        carters = carters + 1;
+                    }
+                    if (this.ccaravan[c] >= 0) {
+                        routes = routes + 1;
+                    }
+                }
+                System.IO.Console.println($"  standing: {elders} elders, {priests} priests and {carters} trade chiefs seated now || {this.eldersSeated} elders, {this.priestsSeated} priests, {this.tradeChiefs} trade chiefs in all");
+                mutable int lines = 0;
+                for (int nat in 0..this.realm.limit()) {
+                    if (this.realm.alive(nat) && this.nrailTo[nat] >= 0) {
+                        lines = lines + 1;
+                    }
+                }
+                System.IO.Console.println($"  trade: {routes} routes running | {this.caravans} loads set out, {this.trafficked} units carried between towns");
+                System.IO.Console.println($"  rail: {lines} lines begun, {this.railed} cells of track laid");
                 // THE number of the culture slice. Every community started at fifty on every axis,
                 // so the spread at the end is entirely the work its people did coming back at them
                 // through their children. A world where this stays near zero has a feedback loop
@@ -5083,7 +5930,7 @@ public bundle Agents {
                         byEra[e] = byEra[e] + 1;
                     }
                 }
-                System.IO.Console.println($"  eras: tribal {byEra[1]} | medieval {byEra[2]} | industrial {byEra[3]} | modern {byEra[4]} || {this.invented} invented, {this.learned} learned from a neighbour");
+                System.IO.Console.println($"  eras: tribal {byEra[1]} | medieval {byEra[2]} | industrial {byEra[3]} | modern {byEra[4]} || {this.invented} invented, {this.learned} learned from a neighbour ({this.borrowed} of them from a cousin)");
                 delete byEra;
                 // The polities, and the shape of them. A world whose nations are all bands is a
                 // world where nothing came together; one with a handful of empires and no bands
@@ -5094,6 +5941,24 @@ public bundle Agents {
                 int kings = this.realm.countOfRank(cast<int>(Rank.Kingdom));
                 int empires = this.realm.countOfRank(cast<int>(Rank.Empire));
                 System.IO.Console.println($"  nations: {alive} living || {bands} bands, {chiefs} chiefdoms, {kings} kingdoms, {empires} empires || {this.annexed} towns changed hands, {this.extinct} peoples ended");
+                // The peoples. A civilization is not a thing anybody joined -- it is the set of
+                // countries that turn out to share a trunk, so this line is read off the same
+                // language history the map is coloured from.
+                int stocks = this.realm.civilizations();
+                int tongues = this.realm.livingTongues();
+                int eldest = this.realm.widestStock();
+                if (eldest >= 0) {
+                    int under = this.realm.nationsOfStock(eldest);
+                    String greatest = Nations.stockName(eldest);
+                    System.IO.Console.println($"  civilizations: {stocks} stocks speaking {tongues} living tongues || the widest is the {greatest}, {under} countries of one people");
+                    for (int s in 0..this.realm.limit()) {
+                        if (this.realm.trunkOf(s) == s && this.realm.nationsOfStock(s) > 1) {
+                            String nm = Nations.stockName(s);
+                            int cn = this.realm.nationsOfStock(s);
+                            System.IO.Console.println($"    the {nm}: {cn} countries");
+                        }
+                    }
+                }
                 System.IO.Console.println($"  expansion: {this.hived} villages hived off ({this.hivedFolk} people), {this.colonies} colonies sent out ({this.colonists} settlers, {this.planted} arrived, {this.strayed} turned back), {this.joined} places merged");
                 System.IO.Console.println($"  prospecting: {this.dug} tracts opened, {this.struck} working faces found");
                 System.IO.Console.println($"  kit: {this.tooled} tools taken up, {this.wornOut} worn through || {this.armed} armed, {this.mailed} in mail");
@@ -5106,7 +5971,9 @@ public bundle Agents {
                     int tt = this.realm.townsOf(top);
                     int tl = this.realm.landOf(top);
                     int te = this.realm.eraOf(top);
-                    System.IO.Console.println($"  the largest: nation {top} -- {tp} people over {tt} towns and {tl} blocks, era {te}");
+                    String tn = this.realm.nameOf(top);
+                    String tc = this.realm.civilizationName(top);
+                    System.IO.Console.println($"  the largest: {tn} of the {tc} -- {tp} people over {tt} towns and {tl} blocks, era {te}");
                 }
                 if (places > 0) {
                     System.IO.Console.println($"  culture over {places} places (all began at 50):");

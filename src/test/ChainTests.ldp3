@@ -1,0 +1,173 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.World.Builds;
+import Agents.World.BuildingKind;
+import Agents.World.Good;
+import Agents.World.Craft;
+program AgentsExe;
+
+// The chains the catalogue describes, checked as a graph.
+//
+// Twenty-two goods were never produced in a twenty-generation arc and the reason was not that any
+// recipe was wrong -- every one of them reads correctly here. It was that a want never travelled
+// DOWN a chain: a village that wanted a tenement never therefore wanted the bricks it is made of,
+// so brick had no want, clay had no want, and the only things anybody ever built were the ones
+// whose output somebody eats or holds in their hand.
+//
+// These check the two halves of that. The catalogue half: every chain has to bottom out at
+// something that comes out of the ground, or the explosion of wants would never terminate. And the
+// reachability half: every good has to be REACHABLE from raw materials at some era, or it is a
+// recipe nobody in the world can ever run.
+
+public bundle Agents {
+    public namespace Checks {
+
+        public class Chains {
+
+            // The explosion walks from a good to whatever makes it, four levels down. If the
+            // catalogue had a cycle in it -- A made from B, B made from A -- the walk would go round
+            // it once per level and a village would want more clay than there is clay.
+            [Tag(name: "chain")]
+            [Test]
+            public static method no_recipe_eats_its_own_output() returns void {
+                for (int k in 1..BuildingKind.count()) {
+                    int out = Builds.out(k);
+                    if (out <= 0) {
+                        continue;
+                    }
+                    Test.checking($"{Builds.name(k)} does not eat what it makes");
+                    Test.assertTrue(Builds.in1(k) != out);
+                    Test.assertTrue(Builds.in2(k) != out);
+                }
+                return;
+            }
+
+            // And no pair of them do it between themselves either, which is the shape a real cycle
+            // would take: a kiln that needs charcoal and a charcoal kiln that needs bricks.
+            [Tag(name: "chain")]
+            [Test]
+            public static method no_two_recipes_feed_each_other() returns void {
+                mutable int cycles = 0;
+                for (int a in 1..BuildingKind.count()) {
+                    int outA = Builds.out(a);
+                    if (outA <= 0) {
+                        continue;
+                    }
+                    for (int b in 1..BuildingKind.count()) {
+                        if (b == a) {
+                            continue;
+                        }
+                        int outB = Builds.out(b);
+                        if (outB <= 0) {
+                            continue;
+                        }
+                        boolean aEatsB = Builds.in1(a) == outB || Builds.in2(a) == outB;
+                        boolean bEatsA = Builds.in1(b) == outA || Builds.in2(b) == outA;
+                        if (aEatsB && bEatsA) {
+                            System.IO.Console.println($"    cycle: {Builds.name(a)} and {Builds.name(b)}");
+                            cycles = cycles + 1;
+                        }
+                    }
+                }
+                Test.checking("no two workshops make each other's inputs");
+                Test.assertEqual(cycles, 0);
+                return;
+            }
+
+            // Every good either comes out of the ground or has somebody who makes it. A good with
+            // neither is a dead entry: it can be wanted, it can be listed, and no arrangement of
+            // buildings anywhere will ever produce one.
+            [Tag(name: "chain")]
+            [Test]
+            public static method every_good_has_a_source() returns void {
+                mutable int orphans = 0;
+                for (int g in 1..Good.count()) {
+                    if (Builds.makerOf(g, 4) >= 0) {
+                        continue;                    // somebody makes it
+                    }
+                    if (Chains.harvested(g)) {
+                        continue;                    // it comes out of the ground
+                    }
+                    System.IO.Console.println($"    nothing makes or digs good {g}");
+                    orphans = orphans + 1;
+                }
+                Test.checking("no good is unreachable from raw materials");
+                Test.assertEqual(orphans, 0);
+                return;
+            }
+
+            // Whether anything in the world puts this good on a shelf without a bench: the outputs
+            // of the trades that go out and work the ground.
+            private static method harvested(int g) returns boolean {
+                return g == cast<int>(Good.Wood) || g == cast<int>(Good.Stone)
+                    || g == cast<int>(Good.Clay) || g == cast<int>(Good.Sand)
+                    || g == cast<int>(Good.Marble)
+                    || g == cast<int>(Good.Coal) || g == cast<int>(Good.Salt)
+                    || g == cast<int>(Good.Sulfur) || g == cast<int>(Good.Gems)
+                    || g == cast<int>(Good.Oil) || g == cast<int>(Good.RareEarth)
+                    || g == cast<int>(Good.IronOre) || g == cast<int>(Good.CopperOre)
+                    || g == cast<int>(Good.TinOre) || g == cast<int>(Good.GoldOre)
+                    || g == cast<int>(Good.SilverOre) || g == cast<int>(Good.Berries)
+                    || g == cast<int>(Good.Mushrooms) || g == cast<int>(Good.Herbs)
+                    || g == cast<int>(Good.Fish) || g == cast<int>(Good.RawMeat)
+                    || g == cast<int>(Good.Hide) || g == cast<int>(Good.Reeds)
+                    || g == cast<int>(Good.Grain) || g == cast<int>(Good.Vegetables)
+                    || g == cast<int>(Good.Grapes) || g == cast<int>(Good.Cotton)
+                    || g == cast<int>(Good.Flax) || g == cast<int>(Good.Milk)
+                    || g == cast<int>(Good.Egg) || g == cast<int>(Good.Honey);
+            }
+
+            // The one that matters most, because it is the chain a soldier's spear hangs off: the
+            // weapon needs iron, the iron needs a smithy, the smithy is built out of brick, and the
+            // brick needs a kiln. Nobody in a twenty-generation arc ever carried a weapon, and this
+            // is the line that has to be walkable for that to change.
+            [Tag(name: "chain")]
+            [Test]
+            public static method a_spear_is_four_steps_from_the_ground() returns void {
+                int smith = Builds.makerOf(cast<int>(Good.Weapon), 4);
+                Test.checking("somebody makes weapons");
+                Test.assertTrue(smith >= 0);
+                Test.checking("out of iron");
+                Test.assertTrue(Builds.in1(smith) == cast<int>(Good.IronIngot)
+                             || Builds.in2(smith) == cast<int>(Good.IronIngot));
+                int forge = Builds.makerOf(cast<int>(Good.IronIngot), 4);
+                Test.checking("and somebody makes iron");
+                Test.assertTrue(forge >= 0);
+                Test.checking("out of ore and something burnable");
+                Test.assertTrue(Builds.in1(forge) == cast<int>(Good.IronOre)
+                             || Builds.in2(forge) == cast<int>(Good.IronOre));
+                // And the smithy itself is built out of a good, not only out of wood and stone --
+                // which is what made brick matter and what nothing in the world was asking for.
+                Test.checking("a smithy costs a made material to raise");
+                Test.assertTrue(Builds.matCost(cast<int>(BuildingKind.Smithy))
+                                != cast<int>(Good.Nothing));
+                int kiln = Builds.makerOf(Builds.matCost(cast<int>(BuildingKind.Smithy)), 4);
+                Test.checking("and somebody makes that too");
+                Test.assertTrue(kiln >= 0);
+                return;
+            }
+
+            // The maker table has to answer the same thing every time and prefer what a people can
+            // actually afford -- a village at the second era asking "who makes tools" must be given
+            // the Toolmaker it can raise, not the Toolsmith it cannot.
+            [Tag(name: "chain")]
+            [Test]
+            public static method the_maker_offered_is_one_the_era_can_raise() returns void {
+                for (int g in 1..Good.count()) {
+                    for (int e in 1..5) {
+                        int k = Builds.makerOf(g, e);
+                        if (k < 0) {
+                            continue;
+                        }
+                        Test.checking($"the maker offered at era {e} is buildable at era {e}");
+                        Test.assertAtMost(Builds.era(k), e);
+                    }
+                }
+                int early = Builds.makerOf(cast<int>(Good.Tools), 1);
+                Test.checking("a tribal people is offered the toolmaker");
+                Test.assertEqual(early, cast<int>(BuildingKind.Toolmaker));
+                return;
+            }
+        }
+    }
+}
