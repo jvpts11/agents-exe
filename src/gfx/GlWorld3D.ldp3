@@ -2462,7 +2462,16 @@ public bundle Agents {
                 if (!this.haveSim || !this.showTerritory) {
                     return;
                 }
+                // FAR IS WHERE THE MAP IS FOR.
+                //
+                // This used to give up the moment the detail window turned off, which meant the
+                // territory overlay existed only at the one zoom where you can already see who
+                // lives where by looking at the huts. Pull back to where a border would actually
+                // tell you something and it vanished. The far view is its own pass now: one quad
+                // per claim block over the whole world, plus a marker on every settlement, so a
+                // glance from orbit reads the countries and the towns in them.
                 if (!this.detailOn || !this.haveDetail) {
+                    this.bakeOverlayFar();
                     return;
                 }
                 int x0 = this.detX0;
@@ -2477,17 +2486,20 @@ public bundle Agents {
                             continue;
                         }
                         held = held + 1;
-                        int o = this.sim.ownerAt(x, y);
-                        if (this.sim.ownerAt(x - 1, y) != o) {
+                        // The border is where the NATION changes, not where the settlement does.
+                        // Drawn on settlements it put a hard line between two towns of one kingdom
+                        // and none at all along the frontier that people actually die over.
+                        int o = this.sim.realmAt(x, y);
+                        if (this.sim.realmAt(x - 1, y) != o) {
                             edges = edges + 1;
                         }
-                        if (this.sim.ownerAt(x + 1, y) != o) {
+                        if (this.sim.realmAt(x + 1, y) != o) {
                             edges = edges + 1;
                         }
-                        if (this.sim.ownerAt(x, y - 1) != o) {
+                        if (this.sim.realmAt(x, y - 1) != o) {
                             edges = edges + 1;
                         }
-                        if (this.sim.ownerAt(x, y + 1) != o) {
+                        if (this.sim.realmAt(x, y + 1) != o) {
                             edges = edges + 1;
                         }
                     }
@@ -2524,7 +2536,7 @@ public bundle Agents {
                 float br = 0.16;                               // how wide the border strip sits
                 for (int y in y0..y1) {
                     for (int x in x0..x1) {
-                        int o = this.sim.ownerAt(x, y);
+                        int o = this.sim.realmAt(x, y);
                         if (o < 0) {
                             continue;
                         }
@@ -2534,20 +2546,21 @@ public bundle Agents {
                                 + this.zAdj[ord] + 0.90;
                         float cx = cast<float>(x) * 2.0 + 1.0;
                         float cy = cast<float>(y) * 2.0 + 1.0;
+                        int own = this.sim.ownerAt(x, y);
                         // Brighter than the wash so the line reads as a line and not as thicker paint.
-                        float r = 0.35 + 0.65 * this.communityTint(o, 0);
-                        float g = 0.35 + 0.65 * this.communityTint(o, 1);
-                        float b = 0.35 + 0.65 * this.communityTint(o, 2);
-                        if (this.sim.ownerAt(x - 1, y) != o) {
+                        float r = 0.35 + 0.65 * this.communityTint(own, 0);
+                        float g = 0.35 + 0.65 * this.communityTint(own, 1);
+                        float b = 0.35 + 0.65 * this.communityTint(own, 2);
+                        if (this.sim.realmAt(x - 1, y) != o) {
                             w = this.ovQuad(w, cx - 1.0 + br, cy, z, br, 1.0, r, g, b);
                         }
-                        if (this.sim.ownerAt(x + 1, y) != o) {
+                        if (this.sim.realmAt(x + 1, y) != o) {
                             w = this.ovQuad(w, cx + 1.0 - br, cy, z, br, 1.0, r, g, b);
                         }
-                        if (this.sim.ownerAt(x, y - 1) != o) {
+                        if (this.sim.realmAt(x, y - 1) != o) {
                             w = this.ovQuad(w, cx, cy - 1.0 + br, z, 1.0, br, r, g, b);
                         }
-                        if (this.sim.ownerAt(x, y + 1) != o) {
+                        if (this.sim.realmAt(x, y + 1) != o) {
                             w = this.ovQuad(w, cx, cy + 1.0 - br, z, 1.0, br, r, g, b);
                         }
                     }
@@ -2560,6 +2573,190 @@ public bundle Agents {
                 this.onverts = tris * 3;
                 this.bakedClaim = this.sim.claimVersion();
                 return;
+            }
+
+            // The whole world's politics, at the resolution the world's politics are DECIDED at.
+            //
+            // Territory is not stored per cell anywhere -- it is stored per sixteen-cell block, the
+            // block claim, and that is the honest grain to draw it at from a distance. A hundred and
+            // sixty by ninety blocks is fourteen thousand quads for the entire map, which is less
+            // than the near view spends on one town, and it is rebuilt only when the claim changes.
+            //
+            // The height comes from the TALLEST thing in the block rather than the average, because
+            // depth testing is still on for the overlay: a wash sitting at the mean height of a
+            // block with a mountain in it disappears behind the mountain, which is the one place
+            // you most want to know whose side of the range you are looking at.
+            private method bakeOverlayFar() returns void {
+                int bw = this.sim.claimWide();
+                int bh = this.sim.claimHigh();
+                int bs = this.sim.claimBlock();
+                mutable int held = 0;
+                for (int by in 0..bh) {
+                    for (int bx in 0..bw) {
+                        if (this.sim.realmAt(bx * bs + bs / 2, by * bs + bs / 2) >= 0) {
+                            held = held + 1;
+                        }
+                    }
+                }
+                // Where one country stops and the next begins, counted between BLOCKS. Without it
+                // the far view is a scatter of coloured patches; with it the same data reads as a
+                // political map, which is the entire reason to look at the world from up here.
+                mutable int edges = 0;
+                for (int by in 0..bh) {
+                    for (int bx in 0..bw) {
+                        int nat = this.sim.realmAt(bx * bs + bs / 2, by * bs + bs / 2);
+                        if (nat < 0) {
+                            continue;
+                        }
+                        if (this.blockRealm(bx - 1, by, bs) != nat) {
+                            edges = edges + 1;
+                        }
+                        if (this.blockRealm(bx + 1, by, bs) != nat) {
+                            edges = edges + 1;
+                        }
+                        if (this.blockRealm(bx, by - 1, bs) != nat) {
+                            edges = edges + 1;
+                        }
+                        if (this.blockRealm(bx, by + 1, bs) != nat) {
+                            edges = edges + 1;
+                        }
+                    }
+                }
+                mutable int towns = 0;
+                for (int c in 0..this.sim.communityCount()) {
+                    if (this.sim.populationOf(c) > 0) {
+                        towns = towns + 1;
+                    }
+                }
+                if (held == 0 && towns == 0) {
+                    return;
+                }
+                int tris = held * 2 + edges * 2 + towns * 2;
+                if (tris > this.ocap) {
+                    if (this.ocap > 0) {
+                        Memory.free(this.obuf);
+                    }
+                    this.ocap = tris * 2;
+                    this.obuf = Memory.alloc(cast<long>(this.ocap * 27 * 4 + 4));
+                }
+                float half = cast<float>(bs);          // a block is bs cells, a cell is 2 units
+                mutable int w = 0;
+                for (int by in 0..bh) {
+                    for (int bx in 0..bw) {
+                        int mx = bx * bs + bs / 2;
+                        int my = by * bs + bs / 2;
+                        int nat = this.sim.realmAt(mx, my);
+                        if (nat < 0) {
+                            continue;
+                        }
+                        int own = this.sim.ownerAt(mx, my);
+                        w = this.ovQuad(w, cast<float>(bx * bs) * 2.0 + half,
+                                        cast<float>(by * bs) * 2.0 + half,
+                                        this.blockRoof(bx * bs, by * bs, bs),
+                                        half, half,
+                                        this.communityTint(own, 0), this.communityTint(own, 1),
+                                        this.communityTint(own, 2));
+                    }
+                }
+                this.oedge = w / 9;
+                float bth = cast<float>(bs) / 5.0;      // how wide a frontier strip sits
+                for (int by in 0..bh) {
+                    for (int bx in 0..bw) {
+                        int mx = bx * bs + bs / 2;
+                        int my = by * bs + bs / 2;
+                        int nat = this.sim.realmAt(mx, my);
+                        if (nat < 0) {
+                            continue;
+                        }
+                        int own = this.sim.ownerAt(mx, my);
+                        float ex = cast<float>(bx * bs) * 2.0 + half;
+                        float ey = cast<float>(by * bs) * 2.0 + half;
+                        float ez = this.blockRoof(bx * bs, by * bs, bs) + 0.3;
+                        float r = 0.35 + 0.65 * this.communityTint(own, 0);
+                        float g = 0.35 + 0.65 * this.communityTint(own, 1);
+                        float b = 0.35 + 0.65 * this.communityTint(own, 2);
+                        if (this.blockRealm(bx - 1, by, bs) != nat) {
+                            w = this.ovQuad(w, ex - half + bth, ey, ez, bth, half, r, g, b);
+                        }
+                        if (this.blockRealm(bx + 1, by, bs) != nat) {
+                            w = this.ovQuad(w, ex + half - bth, ey, ez, bth, half, r, g, b);
+                        }
+                        if (this.blockRealm(bx, by - 1, bs) != nat) {
+                            w = this.ovQuad(w, ex, ey - half + bth, ez, half, bth, r, g, b);
+                        }
+                        if (this.blockRealm(bx, by + 1, bs) != nat) {
+                            w = this.ovQuad(w, ex, ey + half - bth, ez, half, bth, r, g, b);
+                        }
+                    }
+                }
+                // And a mark on every town, drawn at the border opacity so it reads as a solid pip
+                // rather than a wash. It grows with the place: a hamlet is a dot and a city of a
+                // thousand is something you can pick out from the far side of the world.
+                for (int c in 0..this.sim.communityCount()) {
+                    int pop = this.sim.populationOf(c);
+                    if (pop <= 0) {
+                        continue;
+                    }
+                    float px = this.sim.centreXOf(c);
+                    float py = this.sim.centreYOf(c);
+                    mutable float size = 6.0 + cast<float>(pop) / 40.0;
+                    if (size > 26.0) {
+                        size = 26.0;
+                    }
+                    w = this.ovQuad(w, px * 2.0, py * 2.0,
+                                    this.blockRoof(cast<int>(px) - bs / 2,
+                                                   cast<int>(py) - bs / 2, bs) + 0.6,
+                                    size, size,
+                                    0.30 + 0.70 * this.communityTint(c, 0),
+                                    0.30 + 0.70 * this.communityTint(c, 1),
+                                    0.30 + 0.70 * this.communityTint(c, 2));
+                }
+                this.gl.bindVertexArray(this.ovao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.ovbo);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4),
+                                   cast<long>(this.obuf), GL.DYNAMIC_DRAW);
+                this.gl.bindVertexArray(0);
+                this.onverts = tris * 3;
+                this.bakedClaim = this.sim.claimVersion();
+                return;
+            }
+
+            // Which country holds a block, by its middle cell, or -1 for one off the edge of the
+            // map. Off-map counts as nobody, so the coast gets a frontier drawn along it -- which
+            // is right: a shoreline IS where a country stops.
+            private method blockRealm(int bx, int by, int bs) returns int {
+                if (bx < 0 || by < 0 || bx >= this.sim.claimWide() || by >= this.sim.claimHigh()) {
+                    return 0 - 1;
+                }
+                return this.sim.realmAt(bx * bs + bs / 2, by * bs + bs / 2);
+            }
+
+            // The height to float a block-sized wash at: the top of the tallest cell in it. Sampled
+            // on a coarse lattice rather than every cell -- a sixteen-cell block is two hundred and
+            // fifty-six reads and there are fourteen thousand blocks, and the answer only has to be
+            // above the terrain, not exact.
+            private method blockRoof(int x0, int y0, int bs) returns float {
+                mutable float top = 0.0;
+                mutable int y = 0;
+                while (y < bs) {
+                    mutable int x = 0;
+                    while (x < bs) {
+                        int gx = x0 + x;
+                        int gy = y0 + y;
+                        if (gx >= 0 && gy >= 0 && gx < this.srcW && gy < this.srcH) {
+                            int ord = this.grid.biomeAt(gx, gy);
+                            float z = this.tileTop[ord]
+                                    + cast<float>(this.stackLvl(ord, gx, gy)) * this.stepH
+                                    + this.zAdj[ord];
+                            if (z > top) {
+                                top = z;
+                            }
+                        }
+                        x = x + 4;
+                    }
+                    y = y + 4;
+                }
+                return top + 1.2;
             }
 
             // Rebuild the building buffer: everything inside the detail window. Unlike the agents
@@ -2711,6 +2908,10 @@ public bundle Agents {
                 if (this.detailOn) {
                     if (need > this.detailCap * 5 / 4) {
                         this.detailOn = false;
+                        // The overlay is a different drawing at each level -- cells in a window
+                        // near, blocks over the whole world far -- so crossing the threshold makes
+                        // whatever is baked the wrong one, exactly as moving the window does.
+                        this.bakedClaim = 0 - 1;
                         return;
                     }
                 } else {
@@ -2718,6 +2919,7 @@ public bundle Agents {
                         return;
                     }
                     this.detailOn = true;
+                    this.bakedClaim = 0 - 1;
                 }
                 // THE WINDOW HAS TO COVER WHAT THE CAMERA CAN SEE, and how much that is depends on
                 // how high the camera is. Fixed at 144 cells it spanned 288 world units, while at
