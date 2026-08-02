@@ -1,0 +1,400 @@
+import System.IO.Console;
+
+// Every polity in the world, as one table.
+//
+// A SETTLEMENT is a place: it has a store, workshops, houses, a centre that drifts with its people.
+// A NATION is who those places answer to, and it is the layer that was missing -- without it a
+// village that outgrows its ground becomes a STRANGER to the village it came from, so the world
+// could only ever fragment into more and more small independent places, and nothing anywhere ever
+// got bigger than one day's walk across. A daughter that stays under its mother's seat is the whole
+// difference between a world of hamlets and a world with countries in it.
+//
+// Nothing here is declared. A nation's rank, its capital, its ruler and its borders are all READ
+// off the settlements it holds, the same way a community's centre is read off where its people
+// stand and its culture is read off what they do for a living. Nobody proclaims a kingdom; a seat
+// with three towns under it IS one.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        // What a polity has become. The ladder is read from state that already exists, so a nation
+        // cannot be at a rank its people have not actually built.
+        public enum Rank {
+            Band,            // people who live together and answer to nobody
+            Chiefdom,        // one seat, one voice
+            Kingdom,         // that seat holds towns it did not start as
+            Empire           // and some of them were somebody else's
+        }
+
+        public class Nations {
+            private mutable int cap;
+            private mutable int[] seat;      // capital settlement, or -1 if nobody is left
+            private mutable int[] holds;     // settlements under it
+            private mutable int[] folk;      // people in all of them
+            private mutable int[] land;      // 16-cell blocks its settlements claim
+            private mutable int[] lore;      // what it is working out, pooled across every town
+            private mutable int[] era;
+            private mutable int[] ruler;     // the agent sitting in the capital, or -1
+            private mutable byte[] rank;
+            private mutable int[] taken;     // settlements that used to answer to somebody else
+            private mutable int[] lost;
+            private mutable int[] born;      // the second it came into being
+            private mutable int[] parent;    // the nation it broke from, or -1
+            // Speech. A root and a distance from it: two nations with the same root and a small gap
+            // between their drifts are speaking dialects of one language, and two with different
+            // roots are not related at all. Kept here from the start even though nothing reads it
+            // yet, because a tongue that begins the day a feature needs it has no history in it --
+            // and a language family is nothing BUT history.
+            private mutable int[] tongue;
+            private mutable int[] drift;
+            private mutable int[] hue;       // banner, so two neighbours never read as one country
+            // The biggest town seen so far this count, so the capital falls out of ONE pass over
+            // the settlements instead of the caller sorting anything.
+            private mutable int[] best;
+
+            public constructor Nations(int capacity) {
+                this.cap = capacity;
+                this.seat = new int[capacity]();
+                this.holds = new int[capacity]();
+                this.folk = new int[capacity]();
+                this.land = new int[capacity]();
+                this.lore = new int[capacity]();
+                this.era = new int[capacity]();
+                this.ruler = new int[capacity]();
+                this.rank = new byte[capacity]();
+                this.taken = new int[capacity]();
+                this.lost = new int[capacity]();
+                this.born = new int[capacity]();
+                this.parent = new int[capacity]();
+                this.tongue = new int[capacity]();
+                this.drift = new int[capacity]();
+                this.hue = new int[capacity]();
+                this.best = new int[capacity]();
+                for (int i in 0..capacity) {
+                    this.seat[i] = 0 - 1;
+                    this.ruler[i] = 0 - 1;
+                    this.parent[i] = 0 - 1;
+                    this.era[i] = 0;
+                    this.tongue[i] = 0 - 1;
+                }
+            }
+
+            public destructor ~Nations() returns void {
+                delete this.seat;
+                delete this.holds;
+                delete this.folk;
+                delete this.land;
+                delete this.lore;
+                delete this.era;
+                delete this.ruler;
+                delete this.rank;
+                delete this.taken;
+                delete this.lost;
+                delete this.born;
+                delete this.parent;
+                delete this.tongue;
+                delete this.drift;
+                delete this.hue;
+                delete this.best;
+            }
+
+            public method limit() returns int {
+                return this.cap;
+            }
+
+            // A nation exists while somebody lives under it. There is no dissolution ceremony: a
+            // polity whose last town was absorbed simply stops being counted, and its number goes
+            // back in the pot for a people who break away later.
+            public method alive(int nat) returns boolean {
+                if (nat < 0 || nat >= this.cap) {
+                    return false;
+                }
+                return this.folk[nat] > 0;
+            }
+
+            // Bring one into being. `root` is the tongue it speaks: a nation that breaks away keeps
+            // its mother's, which is what makes a language family rather than a list of languages.
+            public method raise(int nat, int root, int broke, int tick, int era0) returns void {
+                this.seat[nat] = 0 - 1;
+                this.holds[nat] = 0;
+                this.folk[nat] = 0;
+                this.land[nat] = 0;
+                this.lore[nat] = 0;
+                this.era[nat] = era0;
+                this.ruler[nat] = 0 - 1;
+                this.rank[nat] = cast<byte>(cast<int>(Rank.Band));
+                this.taken[nat] = 0;
+                this.lost[nat] = 0;
+                this.born[nat] = tick;
+                this.parent[nat] = broke;
+                this.tongue[nat] = root;
+                this.drift[nat] = 0;
+                this.hue[nat] = (nat * 2654435761) & 16777215;
+                return;
+            }
+
+            // A number nobody is using.
+            public method open() returns int {
+                for (int i in 0..this.cap) {
+                    if (this.folk[i] <= 0 && this.seat[i] < 0) {
+                        return i;
+                    }
+                }
+                return 0 - 1;
+            }
+
+            // ---- what the census writes ----
+
+            public method beginCount() returns void {
+                for (int i in 0..this.cap) {
+                    this.holds[i] = 0;
+                    this.folk[i] = 0;
+                    this.land[i] = 0;
+                    this.seat[i] = 0 - 1;
+                    this.best[i] = 0;
+                }
+                return;
+            }
+
+            // One settlement reporting in. The capital is simply the biggest town a nation holds --
+            // nobody chooses it, and a seat that is overtaken by one of its own colonies MOVES,
+            // which is how a country's centre of gravity travels over an arc.
+            public method countTown(int nat, int town, int pop) returns void {
+                if (nat < 0 || nat >= this.cap || pop <= 0) {
+                    return;
+                }
+                this.holds[nat] = this.holds[nat] + 1;
+                this.folk[nat] = this.folk[nat] + pop;
+                if (this.seat[nat] < 0 || pop > this.best[nat]) {
+                    this.seat[nat] = town;
+                    this.best[nat] = pop;
+                }
+                return;
+            }
+
+            // The biggest town seen so far this count, so `countTown` can pick a capital in one pass
+            // instead of the caller sorting anything.
+            private mutable int[] best;
+
+            public method countLand(int nat) returns void {
+                if (nat < 0 || nat >= this.cap) {
+                    return;
+                }
+                this.land[nat] = this.land[nat] + 1;
+                return;
+            }
+
+            // Settle the rank once every town has reported. Read, never set: a seat with three towns
+            // under it is a kingdom whether or not anybody in it uses the word.
+            public method settleRank(int nat, int lord) returns void {
+                this.ruler[nat] = lord;
+                mutable int r = cast<int>(Rank.Band);
+                if (lord >= 0) {
+                    r = cast<int>(Rank.Chiefdom);
+                    if (this.holds[nat] >= Nations.KINGDOM_TOWNS) {
+                        r = cast<int>(Rank.Kingdom);
+                        if (this.taken[nat] >= Nations.EMPIRE_TAKEN) {
+                            r = cast<int>(Rank.Empire);
+                        }
+                    }
+                }
+                this.rank[nat] = cast<byte>(r);
+                return;
+            }
+
+            // Towns under one seat before it is a kingdom rather than a chief and his neighbours.
+            // Three: the smallest number that cannot be one place and its overflow.
+            public static int KINGDOM_TOWNS = 3;
+
+            // And how many of them have to have been somebody else's. One is enough -- a polity that
+            // rules a people it did not raise is an empire however small, and holding two peoples
+            // together is the thing that is actually hard.
+            public static int EMPIRE_TAKEN = 1;
+
+            // Speech moves on its own, a step a census, and it moves DIFFERENTLY in every nation --
+            // which is the point. Two peoples who parted at the same hour drift apart from that hour
+            // on, so the gap between their tongues measures the time since they were one people.
+            public method wag(int nat, int seed, int tick) returns void {
+                if (this.folk[nat] <= 0) {
+                    return;
+                }
+                int nudge = ((nat * 40503 + tick * 2654435761 + seed) >> 7) & 3;
+                this.drift[nat] = this.drift[nat] + nudge;
+                return;
+            }
+
+            // ---- what everybody else reads ----
+
+            public method seatOf(int nat) returns int {
+                return this.seat[nat];
+            }
+
+            public method townsOf(int nat) returns int {
+                return this.holds[nat];
+            }
+
+            public method peopleOf(int nat) returns int {
+                return this.folk[nat];
+            }
+
+            public method landOf(int nat) returns int {
+                return this.land[nat];
+            }
+
+            public method rankOf(int nat) returns int {
+                return cast<int>(this.rank[nat]) & 255;
+            }
+
+            public method rulerOf(int nat) returns int {
+                return this.ruler[nat];
+            }
+
+            public method eraOf(int nat) returns int {
+                if (nat < 0 || nat >= this.cap) {
+                    return 1;
+                }
+                return this.era[nat];
+            }
+
+            public method loreOf(int nat) returns int {
+                return this.lore[nat];
+            }
+
+            public method tongueOf(int nat) returns int {
+                return this.tongue[nat];
+            }
+
+            public method driftOf(int nat) returns int {
+                return this.drift[nat];
+            }
+
+            public method parentOf(int nat) returns int {
+                return this.parent[nat];
+            }
+
+            public method takenBy(int nat) returns int {
+                return this.taken[nat];
+            }
+
+            public method lostBy(int nat) returns int {
+                return this.lost[nat];
+            }
+
+            public method bannerOf(int nat) returns int {
+                return this.hue[nat];
+            }
+
+            public method bornAt(int nat) returns int {
+                return this.born[nat];
+            }
+
+            // ---- what the simulation writes ----
+
+            // Knowledge is pooled and spent by the WHOLE nation. A kingdom of eight towns works
+            // things out faster than one village does, which is the plainest thing in the world and
+            // was exactly what the old per-community, per-HEAD rule denied: dividing surplus by
+            // population made a city of eight hundred learn at the same rate as a hamlet of forty,
+            // so nothing anybody built ever made the world cleverer and the fourth era was
+            // unreachable by construction.
+            public method study(int nat, int gain, int cost, int last) returns boolean {
+                if (nat < 0 || nat >= this.cap || this.era[nat] >= last || gain <= 0) {
+                    return false;
+                }
+                this.lore[nat] = this.lore[nat] + gain;
+                if (this.lore[nat] < cost) {
+                    return false;
+                }
+                this.lore[nat] = this.lore[nat] - cost;
+                this.era[nat] = this.era[nat] + 1;
+                return true;
+            }
+
+            // One nation swallows another's town, by absorption or by force. What it gains is a town
+            // and a claim to have ruled somebody; what the other loses is the same town, and when it
+            // loses the last one it is gone.
+            public method annex(int winner, int loser) returns void {
+                if (winner < 0 || winner >= this.cap || loser < 0 || loser >= this.cap) {
+                    return;
+                }
+                if (winner == loser) {
+                    return;
+                }
+                this.taken[winner] = this.taken[winner] + 1;
+                this.lost[loser] = this.lost[loser] + 1;
+                // Everything the smaller people knew, the bigger one now has somebody who knows it.
+                // Knowledge is not averaged away by being conquered.
+                if (this.era[loser] > this.era[winner]) {
+                    this.era[winner] = this.era[loser];
+                }
+                if (this.lore[loser] > this.lore[winner]) {
+                    this.lore[winner] = this.lore[loser];
+                }
+                return;
+            }
+
+            // Nations with anybody in them.
+            public method living() returns int {
+                mutable int c = 0;
+                for (int i in 0..this.cap) {
+                    if (this.folk[i] > 0) {
+                        c = c + 1;
+                    }
+                }
+                return c;
+            }
+
+            public method countOfRank(int r) returns int {
+                mutable int c = 0;
+                for (int i in 0..this.cap) {
+                    if (this.folk[i] > 0 && this.rankOf(i) == r) {
+                        c = c + 1;
+                    }
+                }
+                return c;
+            }
+
+            public method countOfEra(int e) returns int {
+                mutable int c = 0;
+                for (int i in 0..this.cap) {
+                    if (this.folk[i] > 0 && this.era[i] == e) {
+                        c = c + 1;
+                    }
+                }
+                return c;
+            }
+
+            public method mostTowns() returns int {
+                mutable int m = 0;
+                for (int i in 0..this.cap) {
+                    if (this.folk[i] > 0 && this.holds[i] > m) {
+                        m = this.holds[i];
+                    }
+                }
+                return m;
+            }
+
+            public method bestEra() returns int {
+                mutable int e = 0;
+                for (int i in 0..this.cap) {
+                    if (this.folk[i] > 0 && this.era[i] > e) {
+                        e = this.era[i];
+                    }
+                }
+                return e;
+            }
+
+            public method biggest() returns int {
+                mutable int at = 0 - 1;
+                mutable int most = 0;
+                for (int i in 0..this.cap) {
+                    if (this.folk[i] > most) {
+                        most = this.folk[i];
+                        at = i;
+                    }
+                }
+                return at;
+            }
+        }
+    }
+}

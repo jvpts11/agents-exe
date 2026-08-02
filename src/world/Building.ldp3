@@ -41,21 +41,87 @@ public bundle Agents {
             Hut,             // era I
             House,           // era II
             Tenement,        // era III
-            ResidentialTower // era IV
+            ResidentialTower,// era IV
+            // ---- husbandry ----
+            //
+            // The one chain in the catalogue whose input is LAND rather than a good, and the reason
+            // it had to exist: everything else here transforms something somebody carried home, so
+            // the ceiling on how much food a world holds was whatever worldgen happened to scatter
+            // on it. Foraging wild wheat cannot feed a city however many people do it. A field can,
+            // because a field turns LABOUR into bread -- and that is the whole of why farming makes
+            // countries possible and gathering does not.
+            Farm,            // arable ground -> Grain
+            Pasture,         // grazing        -> Milk
+            SheepFold,       // grazing        -> Wool
+            Orchard,         // arable ground  -> Fruit
+            Apiary,          // grazing        -> Honey
+            Henhouse,        // grazing        -> Egg
+            // ---- the rest of the chains, now that their inputs exist ----
+            Dairy,           // Milk -> Cheese
+            Vineyard,        // Grapes -> Wine
+            Tannery,         // Hide -> Leather
+            PaperMill,       // Reeds -> Paper
+            Preservery,      // Berries -> Preserves
+            Bronzeworks,     // CopperIngot + TinOre -> BronzeIngot
+            GoldSmelter,     // GoldOre -> GoldBar
+            SilverSmelter,   // SilverOre -> SilverBar
+            Ropewalk,        // Reeds -> Rope
+            TextileMill,     // Cotton -> Cloth
+            Ironworks,       // IronOre + Coal -> IronIngot, at industrial scale
+            SteelMill,       // IronIngot + Coal -> Steel
+            CementFactory,   // Stone + Coal -> Cement
+            Cannery,         // DriedMeat + Steel -> CannedFood
+            // ---- learning ----
+            //
+            // These make nothing anybody can hold, and that is the point. A nation's era used to be
+            // a side effect of having eaten well; here it is something a people BUILDS, staffs and
+            // keeps up. A scriptorium eats paper and produces knowledge, so the reed beds at the
+            // river turn into the university on the hill by a chain you can follow the whole way.
+            Shrine,          // era I  -- the first place anybody wrote anything down
+            Temple,
+            Scriptorium,
+            Library,
+            School,
+            University
         }
 
         // The trade that works inside. Kept as its own enum in World so the catalogue does not have
         // to reach into People for the Job ordinals; the simulation maps one to the other.
         public enum Craft {
             NoCraft,
-            Wright,          // Sawmill, CharcoalKiln, Kiln, Pottery -- wood and earth
-            Smith,           // Smithy, Forge -- metal
-            Victualler,      // Windmill, Bakery, Brewery, Smokehouse -- food
-            Weaving          // Weaver -- fibre
+            Wright,          // Sawmill, CharcoalKiln, Kiln, Pottery, PaperMill -- wood and earth
+            Smith,           // Smithy, Forge, Bronzeworks, SteelMill -- metal
+            Victualler,      // Windmill, Bakery, Brewery, Smokehouse, Dairy -- food
+            Weaving,         // Weaver, Tannery, TextileMill -- fibre and skin
+            Tilling,         // Farm, Pasture, Orchard, Apiary -- land
+            Lettering        // Scriptorium, Library, School, University -- knowledge
+        }
+
+        // Where a building may stand. Almost everything goes in the village and asks nothing of the
+        // ground under it; the husbandry chain is the exception, and it is the reason this enum
+        // exists -- a farm on a mountainside is not a farm, and a world where it could be would make
+        // geography stop mattering the moment agriculture arrived.
+        public enum Ground {
+            Anywhere,
+            Arable,          // grass or floodplain, with water within reach
+            Grazing,         // open ground, dry or cold; no water needed
+            Waterside,       // a river, a lake or the coast
+            Rock             // hill, mountain or bare stone
         }
 
         public class Builds {
             private static mutable String[] NAME;
+            // The .mesh a kind draws with, which is NOT always its own name: a bronzeworks and an
+            // ironworks are the same shed with a different fire in it, and two pens on a hillside
+            // look alike whether the animals in them give milk or wool. Splitting the two is what
+            // lets the catalogue name a chain honestly without waiting on a model for every one.
+            private static mutable String[] MESH;
+            // Knowledge made per census by one of these, staffed. Zero for everything that makes a
+            // good instead -- a building either produces something you can hold or something you
+            // can know, and the two are counted in different places for the same reason a granary
+            // and a library are different rooms.
+            private static mutable int[] STUDY;
+            private static mutable int[] SITE;      // the Ground it needs under it
             private static mutable int[] CRAFT;
             private static mutable int[] WOOD;      // to put it up
             private static mutable int[] STONE;
@@ -76,6 +142,9 @@ public bundle Agents {
             onClassLoad {
                 int n = BuildingKind.count();
                 Builds.NAME = new String[n]();
+                Builds.MESH = new String[n]();
+                Builds.STUDY = new int[n]();
+                Builds.SITE = new int[n]();
                 Builds.CRAFT = new int[n]();
                 Builds.WOOD = new int[n]();
                 Builds.STONE = new int[n]();
@@ -92,6 +161,9 @@ public bundle Agents {
                 mutable int i = 0;
                 while (i < n) {
                     Builds.NAME[i] = "NoBuilding";
+                    Builds.MESH[i] = "NoBuilding";
+                    Builds.STUDY[i] = 0;
+                    Builds.SITE[i] = cast<int>(Ground.Anywhere);
                     Builds.CRAFT[i] = cast<int>(Craft.NoCraft);
                     Builds.IN1[i] = cast<int>(Good.Nothing);
                     Builds.IN2[i] = cast<int>(Good.Nothing);
@@ -150,6 +222,151 @@ public bundle Agents {
                            45, 20, 3, cast<int>(Good.Fish), 10, none, 0,
                            cast<int>(Good.DriedMeat), 9, 16.0);
 
+                // ---- husbandry: the chain whose input is ground ----
+                //
+                // A field has no `in1`, and that is not a gap in the table -- it is the whole point.
+                // Everything above turns a good into another good, so the amount of food a world can
+                // hold was fixed by what worldgen scattered on it: pick every berry and there are no
+                // more berries. A farm turns LABOUR into bread, and labour is the one input that
+                // grows when a place does. That is the difference between a village and a city, and
+                // between a world where the fourth era is a rumour and one where somebody reaches it.
+                int till = cast<int>(Craft.Tilling);
+                Builds.put(cast<int>(BuildingKind.Farm), "Farm", till,
+                           25, 5, 8, none, 0, none, 0, cast<int>(Good.Grain), 14, 18.0);
+                Builds.put(cast<int>(BuildingKind.Pasture), "Pasture", till,
+                           18, 0, 5, none, 0, none, 0, cast<int>(Good.Milk), 10, 20.0);
+                Builds.put(cast<int>(BuildingKind.SheepFold), "SheepFold", till,
+                           16, 0, 4, none, 0, none, 0, cast<int>(Good.Wool), 8, 22.0);
+                Builds.put(cast<int>(BuildingKind.Orchard), "Orchard", till,
+                           20, 0, 5, none, 0, none, 0, cast<int>(Good.Fruit), 10, 22.0);
+                Builds.put(cast<int>(BuildingKind.Apiary), "Apiary", till,
+                           12, 0, 3, none, 0, none, 0, cast<int>(Good.Honey), 6, 26.0);
+                Builds.put(cast<int>(BuildingKind.Henhouse), "Henhouse", till,
+                           10, 0, 3, none, 0, none, 0, cast<int>(Good.Egg), 8, 18.0);
+                Builds.MESH[cast<int>(BuildingKind.SheepFold)] = "Pasture";
+                Builds.MESH[cast<int>(BuildingKind.Henhouse)] = "Stable";
+                Builds.ERA[cast<int>(BuildingKind.Farm)] = 1;
+                Builds.ERA[cast<int>(BuildingKind.Pasture)] = 1;
+                Builds.ERA[cast<int>(BuildingKind.SheepFold)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Orchard)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Apiary)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Henhouse)] = 1;
+                Builds.SITE[cast<int>(BuildingKind.Henhouse)] = cast<int>(Ground.Grazing);
+                Builds.SITE[cast<int>(BuildingKind.Farm)] = cast<int>(Ground.Arable);
+                Builds.SITE[cast<int>(BuildingKind.Orchard)] = cast<int>(Ground.Arable);
+                Builds.SITE[cast<int>(BuildingKind.Pasture)] = cast<int>(Ground.Grazing);
+                Builds.SITE[cast<int>(BuildingKind.SheepFold)] = cast<int>(Ground.Grazing);
+                Builds.SITE[cast<int>(BuildingKind.Apiary)] = cast<int>(Ground.Grazing);
+
+                // ---- the chains whose inputs finally exist ----
+                //
+                // Every one of these was already named in the goods catalogue and made by nobody:
+                // nineteen goods in the ledger with a lifetime total of zero. They are here now
+                // because the things they eat are being produced -- hides come off the hunt, reeds
+                // off the marshes, grapes and copper and tin out of the ground -- so each of these
+                // closes a chain rather than opening one that dead-ends.
+                Builds.put(cast<int>(BuildingKind.Dairy), "Dairy", vict,
+                           30, 20, 3, cast<int>(Good.Milk), 8, none, 0,
+                           cast<int>(Good.Cheese), 6, 16.0);
+                Builds.put(cast<int>(BuildingKind.Vineyard), "Vineyard", vict,
+                           25, 10, 4, cast<int>(Good.Grapes), 10, none, 0,
+                           cast<int>(Good.Wine), 6, 20.0);
+                Builds.put(cast<int>(BuildingKind.Preservery), "Preservery", vict,
+                           28, 18, 3, cast<int>(Good.Berries), 12, none, 0,
+                           cast<int>(Good.Preserves), 8, 18.0);
+                Builds.put(cast<int>(BuildingKind.Tannery), "Tannery", weave,
+                           40, 20, 4, cast<int>(Good.Hide), 8, none, 0,
+                           cast<int>(Good.Leather), 6, 18.0);
+                Builds.put(cast<int>(BuildingKind.TextileMill), "TextileMill", weave,
+                           80, 60, 8, cast<int>(Good.Cotton), 12, none, 0,
+                           cast<int>(Good.Cloth), 12, 12.0);
+                Builds.put(cast<int>(BuildingKind.PaperMill), "PaperMill", wright,
+                           45, 25, 4, cast<int>(Good.Reeds), 12, none, 0,
+                           cast<int>(Good.Paper), 8, 16.0);
+                Builds.put(cast<int>(BuildingKind.Ropewalk), "Ropewalk", wright,
+                           30, 10, 3, cast<int>(Good.Reeds), 10, none, 0,
+                           cast<int>(Good.Rope), 8, 14.0);
+                Builds.put(cast<int>(BuildingKind.CementFactory), "CementFactory", wright,
+                           70, 90, 5, cast<int>(Good.Stone), 12, cast<int>(Good.Coal), 4,
+                           cast<int>(Good.Cement), 8, 18.0);
+                Builds.put(cast<int>(BuildingKind.Bronzeworks), "Bronzeworks", smith,
+                           45, 70, 4, cast<int>(Good.CopperIngot), 4, cast<int>(Good.TinOre), 4,
+                           cast<int>(Good.BronzeIngot), 4, 24.0);
+                Builds.put(cast<int>(BuildingKind.GoldSmelter), "GoldSmelter", smith,
+                           40, 60, 3, cast<int>(Good.GoldOre), 6, none, 0,
+                           cast<int>(Good.GoldBar), 4, 22.0);
+                Builds.put(cast<int>(BuildingKind.SilverSmelter), "SilverSmelter", smith,
+                           40, 60, 3, cast<int>(Good.SilverOre), 6, none, 0,
+                           cast<int>(Good.SilverBar), 4, 22.0);
+                Builds.put(cast<int>(BuildingKind.Ironworks), "Ironworks", smith,
+                           60, 80, 6, cast<int>(Good.IronOre), 8, cast<int>(Good.Coal), 4,
+                           cast<int>(Good.IronIngot), 8, 20.0);
+                Builds.put(cast<int>(BuildingKind.SteelMill), "SteelMill", smith,
+                           80, 120, 6, cast<int>(Good.IronIngot), 6, cast<int>(Good.Coal), 6,
+                           cast<int>(Good.Steel), 5, 26.0);
+                Builds.put(cast<int>(BuildingKind.Cannery), "Cannery", vict,
+                           60, 80, 5, cast<int>(Good.DriedMeat), 8, cast<int>(Good.Steel), 2,
+                           cast<int>(Good.CannedFood), 10, 14.0);
+                Builds.MESH[cast<int>(BuildingKind.Bronzeworks)] = "Ironworks";
+                Builds.MESH[cast<int>(BuildingKind.GoldSmelter)] = "Jeweler";
+                Builds.MESH[cast<int>(BuildingKind.SilverSmelter)] = "Jeweler";
+                Builds.MESH[cast<int>(BuildingKind.Ropewalk)] = "Cooper";
+                Builds.MESH[cast<int>(BuildingKind.Preservery)] = "DryingRack";
+                Builds.ERA[cast<int>(BuildingKind.Ropewalk)] = 1;
+                Builds.ERA[cast<int>(BuildingKind.Dairy)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Vineyard)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Preservery)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Tannery)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.PaperMill)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Bronzeworks)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.GoldSmelter)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.SilverSmelter)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Ironworks)] = 3;
+                Builds.ERA[cast<int>(BuildingKind.SteelMill)] = 3;
+                Builds.ERA[cast<int>(BuildingKind.CementFactory)] = 3;
+                Builds.ERA[cast<int>(BuildingKind.TextileMill)] = 3;
+                Builds.ERA[cast<int>(BuildingKind.Cannery)] = 4;
+                Builds.SITE[cast<int>(BuildingKind.Vineyard)] = cast<int>(Ground.Arable);
+
+                // ---- learning ----
+                //
+                // A nation's era used to be a side effect of having eaten well, and nothing else.
+                // That is half true and it was the whole rule: a fed people has time to think, but
+                // thinking is also something a people BUILDS, staffs and keeps up, and a world where
+                // it is not shows nothing on the map for the difference between a kingdom that will
+                // reach the fourth era and one that will not.
+                //
+                // These make nothing anybody can hold. What they make is on `STUDY`, counted where
+                // knowledge is counted. A scriptorium eats paper, paper comes off the reed beds at
+                // the river, so the marshes turn into the university on the hill by a chain that can
+                // be followed the whole way -- which is the same standard every other chain here is
+                // held to.
+                int letter = cast<int>(Craft.Lettering);
+                Builds.put(cast<int>(BuildingKind.Shrine), "Shrine", letter,
+                           20, 10, 2, none, 0, none, 0, none, 0, 30.0);
+                Builds.put(cast<int>(BuildingKind.Temple), "Temple", letter,
+                           50, 60, 4, none, 0, none, 0, none, 0, 30.0);
+                Builds.put(cast<int>(BuildingKind.Scriptorium), "Scriptorium", letter,
+                           45, 40, 4, cast<int>(Good.Paper), 4, none, 0, none, 0, 30.0);
+                Builds.put(cast<int>(BuildingKind.Library), "Library", letter,
+                           70, 90, 6, cast<int>(Good.Paper), 6, none, 0, none, 0, 30.0);
+                Builds.put(cast<int>(BuildingKind.School), "School", letter,
+                           90, 110, 8, cast<int>(Good.Paper), 8, none, 0, none, 0, 30.0);
+                Builds.put(cast<int>(BuildingKind.University), "University", letter,
+                           160, 220, 12, cast<int>(Good.Paper), 12, none, 0, none, 0, 30.0);
+                Builds.ERA[cast<int>(BuildingKind.Shrine)] = 1;
+                Builds.ERA[cast<int>(BuildingKind.Temple)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Scriptorium)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Library)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.School)] = 3;
+                Builds.ERA[cast<int>(BuildingKind.University)] = 4;
+                Builds.STUDY[cast<int>(BuildingKind.Shrine)] = 8;
+                Builds.STUDY[cast<int>(BuildingKind.Temple)] = 20;
+                Builds.STUDY[cast<int>(BuildingKind.Scriptorium)] = 40;
+                Builds.STUDY[cast<int>(BuildingKind.Library)] = 70;
+                Builds.STUDY[cast<int>(BuildingKind.School)] = 110;
+                Builds.STUDY[cast<int>(BuildingKind.University)] = 180;
+
                 // What a tribal village can put up at all. The catalogue's Era I list is shelter,
                 // gathering and the two crafts that need no metal -- so a place that has discovered
                 // nothing can fire clay and smoke fish and must invent its way to everything else.
@@ -207,6 +424,7 @@ public bundle Agents {
                                       int hands, int in1, int n1, int in2, int n2,
                                       int out, int nout, float secs) returns void {
                 Builds.NAME[ord] = name;
+                Builds.MESH[ord] = name;
                 Builds.CRAFT[ord] = craft;
                 Builds.WOOD[ord] = wood;
                 Builds.STONE[ord] = stone;
@@ -226,6 +444,27 @@ public bundle Agents {
 
             public static method name(int ord) returns String {
                 return Builds.NAME[ord];
+            }
+
+            // The .mesh this kind draws with, which is not always its own name.
+            public static method mesh(int ord) returns String {
+                return Builds.MESH[ord];
+            }
+
+            // Knowledge a staffed one of these makes in a census, or 0.
+            public static method study(int ord) returns int {
+                return Builds.STUDY[ord];
+            }
+
+            public static method site(int ord) returns int {
+                return Builds.SITE[ord];
+            }
+
+            // Whether anybody works here at all -- goods or knowledge. A place of learning is a
+            // workplace like a forge: somebody has to be standing in it, it is idle without them,
+            // and it is pulled down when nobody has set foot in it for long enough.
+            public static method staffed(int ord) returns boolean {
+                return Builds.OUT[ord] != cast<int>(Good.Nothing) || Builds.STUDY[ord] > 0;
             }
 
             public static method craft(int ord) returns int {

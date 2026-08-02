@@ -6,6 +6,8 @@ import Agents.People.AgentTable;
 import Agents.Sim.Simulation;
 import Agents.Sim.Stores;
 import Agents.Sim.Buildings;
+import Agents.Sim.Nations;
+import Agents.Sim.Rank;
 import Agents.World.Builds;
 program AgentsExe;
 
@@ -320,6 +322,179 @@ public bundle Agents {
                 }
                 Test.checking("the most advanced community has an era at all");
                 Test.assertAtLeast(best, 0);
+                return;
+            }
+
+            // ---- the nation layer ----
+            //
+            // A settlement is a place; a nation is who those places answer to. Everything below asks
+            // whether the second layer is CONSISTENT with the first, because it is entirely derived
+            // from it -- a nation that holds towns nobody lives in, or whose capital is not its
+            // biggest town, means the census read the world wrong, and every rank, border and era
+            // downstream of that reading is wrong with it.
+
+            [Tag(name: "sim")]
+            [Test]
+            public static method every_settled_place_answers_to_a_living_nation() returns void {
+                Stores* st = Arc.sim.store();
+                Nations* realm = Arc.sim.nations();
+                mutable int orphans = 0;
+                mutable int comm = 0;
+                while (comm < st.communities()) {
+                    if (Arc.sim.populationOf(comm) > 0) {
+                        int nat = Arc.sim.nationOf(comm);
+                        if (nat < 0 || nat >= realm.limit() || !realm.alive(nat)) {
+                            orphans = orphans + 1;
+                        }
+                    }
+                    comm = comm + 1;
+                }
+                Test.checking("no inhabited settlement is stateless");
+                Test.assertEqual(orphans, 0);
+                Test.checking("and the world has nations in it at all");
+                Test.assertAtLeast(realm.living(), 1);
+                return;
+            }
+
+            // The nation's headcount must be the sum of its towns', because it IS that sum -- it is
+            // written by one pass over the settlements and read by everything from discovery to
+            // rank. A drift between the two is the census having double-counted or dropped a town.
+            [Tag(name: "sim")]
+            [Test]
+            public static method a_nation_holds_exactly_what_its_towns_hold() returns void {
+                Stores* st = Arc.sim.store();
+                Nations* realm = Arc.sim.nations();
+                mutable int[] people = new int[realm.limit()]();
+                mutable int[] towns = new int[realm.limit()]();
+                mutable int comm = 0;
+                while (comm < st.communities()) {
+                    int pop = Arc.sim.populationOf(comm);
+                    if (pop > 0) {
+                        int nat = Arc.sim.nationOf(comm);
+                        if (nat >= 0 && nat < realm.limit()) {
+                            people[nat] = people[nat] + pop;
+                            towns[nat] = towns[nat] + 1;
+                        }
+                    }
+                    comm = comm + 1;
+                }
+                mutable int wrongPeople = 0;
+                mutable int wrongTowns = 0;
+                mutable int nat = 0;
+                while (nat < realm.limit()) {
+                    if (realm.alive(nat)) {
+                        if (realm.peopleOf(nat) != people[nat]) {
+                            wrongPeople = wrongPeople + 1;
+                        }
+                        if (realm.townsOf(nat) != towns[nat]) {
+                            wrongTowns = wrongTowns + 1;
+                        }
+                    }
+                    nat = nat + 1;
+                }
+                delete people;
+                delete towns;
+                Test.checking("every nation's headcount is the sum of its towns'");
+                Test.assertEqual(wrongPeople, 0);
+                Test.checking("and its holdings are the towns that answer to it");
+                Test.assertEqual(wrongTowns, 0);
+                return;
+            }
+
+            // Nobody chooses a capital: it is whichever town is biggest, so that a seat overtaken by
+            // one of its own colonies moves rather than a country being permanently run from a
+            // village that stopped mattering.
+            [Tag(name: "sim")]
+            [Test]
+            public static method the_capital_is_the_biggest_town() returns void {
+                Stores* st = Arc.sim.store();
+                Nations* realm = Arc.sim.nations();
+                mutable int wrong = 0;
+                mutable int nat = 0;
+                while (nat < realm.limit()) {
+                    if (realm.alive(nat)) {
+                        int seat = realm.seatOf(nat);
+                        if (seat < 0) {
+                            wrong = wrong + 1;
+                        } else {
+                            int held = Arc.sim.populationOf(seat);
+                            mutable int comm = 0;
+                            while (comm < st.communities()) {
+                                if (Arc.sim.nationOf(comm) == nat
+                                    && Arc.sim.populationOf(comm) > held) {
+                                    wrong = wrong + 1;
+                                    comm = st.communities();
+                                } else {
+                                    comm = comm + 1;
+                                }
+                            }
+                        }
+                    }
+                    nat = nat + 1;
+                }
+                Test.checking("no nation is seated anywhere but its largest town");
+                Test.assertEqual(wrong, 0);
+                return;
+            }
+
+            // Rank is read, never set. A kingdom that does not hold three towns, or a band with a
+            // ruler sitting in it, means the ladder has come loose from the state it is read from.
+            [Tag(name: "sim")]
+            [Test]
+            public static method rank_matches_what_a_nation_actually_holds() returns void {
+                Nations* realm = Arc.sim.nations();
+                mutable int broken = 0;
+                mutable int nat = 0;
+                while (nat < realm.limit()) {
+                    if (realm.alive(nat)) {
+                        int r = realm.rankOf(nat);
+                        boolean led = realm.rulerOf(nat) >= 0;
+                        if (r == cast<int>(Rank.Band) && led) {
+                            broken = broken + 1;
+                        }
+                        if (r != cast<int>(Rank.Band) && !led) {
+                            broken = broken + 1;
+                        }
+                        if (r >= cast<int>(Rank.Kingdom) && realm.townsOf(nat) < 3) {
+                            broken = broken + 1;
+                        }
+                        if (r == cast<int>(Rank.Empire) && realm.takenBy(nat) < 1) {
+                            broken = broken + 1;
+                        }
+                    }
+                    nat = nat + 1;
+                }
+                Test.checking("no nation is at a rank its holdings do not support");
+                Test.assertEqual(broken, 0);
+                return;
+            }
+
+            // Knowledge belongs to the nation, so a colony founded this morning builds what the
+            // kingdom that sent it knows how to build -- and, the half that can actually go wrong,
+            // NOTHING anywhere is built from a menu its owner has not earned. A standing building
+            // whose era outranks its nation's is the era gate reading the wrong layer, which is
+            // exactly the defect that moving knowledge up here could have introduced.
+            [Tag(name: "sim")]
+            [Test]
+            public static method nobody_builds_above_their_nation_era() returns void {
+                Buildings* town = Arc.sim.buildings();
+                Nations* realm = Arc.sim.nations();
+                mutable int ahead = 0;
+                mutable int i = 0;
+                while (i < town.count()) {
+                    if (!town.isGone(i)) {
+                        int owner = town.ownerOf(i);
+                        int nat = Arc.sim.nationOf(owner);
+                        if (nat >= 0 && Builds.era(town.kindOf(i)) > realm.eraOf(nat)) {
+                            ahead = ahead + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                Test.checking("no building stands that its nation does not know how to raise");
+                Test.assertEqual(ahead, 0);
+                Test.checking("and nobody has climbed past the last rung");
+                Test.assertAtMost(realm.bestEra(), 4);
                 return;
             }
 

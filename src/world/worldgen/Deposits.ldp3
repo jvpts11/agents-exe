@@ -56,6 +56,7 @@ public bundle Agents {
                 this.owner = new int[1]();
                 this.shallow = new int[1]();
                 this.outCount = new int[1]();
+                this.seamCount = new int[1]();
                 this.outFallback = new int[1]();
                 this.outKind = new int[1]();
                 this.bodyOrigin = new int[1]();
@@ -69,6 +70,7 @@ public bundle Agents {
                 delete this.owner;
                 delete this.shallow;
                 delete this.outCount;
+                delete this.seamCount;
                 delete this.outFallback;
                 delete this.outKind;
                 delete this.bodyOrigin;
@@ -444,7 +446,68 @@ public bundle Agents {
                         made = made + 1;
                     }
                 }
+                this.seams(g);
                 return made;
+            }
+
+            // The working faces that are not there yet.
+            //
+            // An outcrop is what the vein shows at the surface, and it carries a third of what the
+            // kind is worth -- a man with a pick can take that much and no more. The rest of the
+            // body is underground, and until this existed there was nothing anybody could ever do
+            // about that: prospecting set a flag, the flag revealed the ore on a map nobody in the
+            // world can read, and fifty-two of a hundred and ninety-eight ore bodies were
+            // permanently unreachable by any action a person could take.
+            //
+            // So every body gets working faces scattered through it, standing there from the first
+            // second of the world with NOTHING in them. They are invisible: no block count includes
+            // them, no miner can find one, and the map does not draw them. A prospector opening
+            // ground is what puts the ore in them -- which is the same promise the outcrop always
+            // made, finally kept.
+            // Counted apart from the outcrops, and that separation is the whole point of the two
+            // numbers existing. "Bodies reachable without prospecting" is what the world audit
+            // judges a seed on, and sharing a counter with the blind seams made every body look
+            // reachable the moment seams were added -- 146 of 198 became 193 of 198 with nothing
+            // about the world having changed. A metric that improves because you added the thing it
+            // is supposed to measure the absence of is worse than no metric.
+            private mutable int[] seamCount;
+
+            private method seams(Grid* g) returns void {
+                delete this.seamCount;
+                this.seamCount = new int[this.nBodies]();
+                for (int y in 0..this.h) {
+                    for (int x in 0..this.w) {
+                        int i = y * this.w + x;
+                        int b = this.owner[i];
+                        if (b < 0 || g.subAt(x, y) == 0) {
+                            continue;
+                        }
+                        // One face in forty cells of body. The smallest bodies in a measured world
+                        // run to a few hundred cells, so every one of them gets several -- and the
+                        // count is worth watching if the deposit pass is ever retuned, because a
+                        // body with no face is a body nobody can ever work.
+                        if (LandMath.hash01(this.seed ^ 0x3D51, x * 7 + 2, y * 11 + 5) >= 0.025) {
+                            continue;
+                        }
+                        g.surface().add(cast<float>(x) + 0.5, cast<float>(y) + 0.5,
+                                        g.subAt(x, y), 0);
+                        this.seamCount[b] = this.seamCount[b] + 1;
+                    }
+                }
+                return;
+            }
+
+            // Bodies with at least one working face waiting to be found. A body with none is one
+            // that prospecting can never open, which is the same defect the outcrop guarantee
+            // exists to prevent, one layer down.
+            public method seamedBodies() returns int {
+                mutable int c = 0;
+                for (int b in 0..this.nBodies) {
+                    if (this.seamCount[b] > 0) {
+                        c = c + 1;
+                    }
+                }
+                return c;
             }
 
             // An outcrop stands near the middle of its tile -- unlike a plant it is a piece of the

@@ -77,6 +77,13 @@ public bundle Agents {
             // second instead of one per PERSON per decision.
             private mutable int[] cworkX;
             private mutable int[] cworkY;
+            // Ground worth opening: a block of bare rock inside this community's reach that nobody
+            // has looked under. Found once per PLACE per second like every other work site, never
+            // once per prospector -- the same rule the woodcutter and the wolves both had to learn.
+            private mutable int[] cdigX;
+            private mutable int[] cdigY;
+            private mutable long dug;          // discs prospected
+            private mutable long struck;       // working faces opened by it
             // How many of its grown people are already in each trade, so a place cannot become a
             // thousand woodcutters and no fishermen. Indexed by JOB and not by Harvest class,
             // because building and crafting are trades too and neither goes out to a resource.
@@ -146,14 +153,35 @@ public bundle Agents {
             // fifty generations ago should not still be a mining people.
             private mutable int[] culture;
             private mutable int[] deeds;
-            // What a community KNOWS. Surplus buys slack, slack and curiosity buy discovery, and
-            // discovery moves the place up the eras of docs/ECONOMY.md -- so one village can be
-            // firing bricks while the one over the hill is still only gathering, and the asymmetry
-            // is what makes contact between them worth anything.
-            private mutable int[] lore;
-            private mutable int[] era;
-            private mutable long invented;     // eras reached by a community's own work
+            // Who each settlement answers to, and everything that is true of a POLITY rather than
+            // of a place: its capital, its ruler, its rank, its borders, and what it knows.
+            //
+            // Knowledge lives up here and not on the settlement, and that is the fix for a defect
+            // that made the whole era ladder decoration. Surplus bought slack, slack bought
+            // discovery -- but the surplus was divided by HEAD, so a city of eight hundred learned
+            // at exactly the rate of a hamlet of forty and nothing anybody ever built made the world
+            // cleverer. Measured over twenty generations the world ended tribal 23, medieval 18,
+            // industrial 4, modern 0: the fourth era was unreachable by construction. A nation pools
+            // what all of its towns can spare, so growing is finally worth something.
+            private mutable Nations* realm;
+            private mutable int[] cnat;        // settlement -> nation
+            // A colony that has been decided on but not yet walked to. Until its people are
+            // standing on the ground it was sent to, the SITE is where the place is -- otherwise
+            // the centre is the mean of everybody who set out, which is still back at the capital,
+            // so they would search for work at home and never leave.
+            private mutable float[] csiteX;
+            private mutable float[] csiteY;
+            private mutable int[] csettle;     // censuses left to get there
+            private mutable int[] cmother;     // who sent them, so a failed expedition can go home
+            private mutable int settler;       // whose turn it is to think about it
+            private mutable long colonies;
+            private mutable long colonists;
+            private mutable long planted;      // expeditions that reached their ground
+            private mutable long strayed;      // and that did not
+            private mutable long invented;     // eras reached by a nation's own work
             private mutable long learned;      // and by looking over the fence at a neighbour
+            private mutable long annexed;      // towns that changed hands
+            private mutable long extinct;      // nations that lost their last town
             // Who claims each 16-cell block, or -1. A community's land is the ground its people
             // stand on, spread outward by how far they go to work -- so the shape of a country is
             // read off fifty thousand positions rather than drawn as a disk of a size somebody
@@ -294,6 +322,13 @@ public bundle Agents {
                 int nh = Harvest.count();
                 this.cworkX = new int[this.ncomm * nh]();
                 this.cworkY = new int[this.ncomm * nh]();
+                this.cdigX = new int[this.ncomm]();
+                this.cdigY = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    this.cdigX[c] = 0 - 1;
+                }
+                this.dug = 0;
+                this.struck = 0;
                 this.ctrade = new int[this.ncomm * Job.count()]();
                 // Sixteen rows a community was enough while a village only ever built workshops.
                 // Housing changed the arithmetic: at six to a hut, a place of six hundred needs a
@@ -378,13 +413,34 @@ public bundle Agents {
                 for (int s in 0..this.ncomm * 5) {
                     this.culture[s] = 50 * Simulation.CFIX;   // every place starts with no character
                 }
-                this.lore = new int[this.ncomm]();
-                this.era = new int[this.ncomm]();
+                // Every settlement begins as its own nation, of the lowest rank there is: a band of
+                // people who live together and answer to nobody. That is not a hundred countries at
+                // world generation -- it is the honest starting state, and the world gets its
+                // countries the only way it can, by some of those bands growing seats that others
+                // come to answer to. The count of living nations FALLS over an arc while each of
+                // them gets bigger, which is the shape history actually has.
+                this.realm = new Nations(this.ncomm) on heap;
+                this.cnat = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
-                    this.era[c] = 1;                          // everybody begins in the tribal age
+                    this.cnat[c] = c;
+                    this.realm.raise(c, c, 0 - 1, 0, 1);      // its own tongue, the tribal age
                 }
+                this.csiteX = new float[this.ncomm]();
+                this.csiteY = new float[this.ncomm]();
+                this.csettle = new int[this.ncomm]();
+                this.cmother = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    this.cmother[c] = 0 - 1;
+                }
+                this.settler = 0;
+                this.colonies = 0;
+                this.colonists = 0;
+                this.planted = 0;
+                this.strayed = 0;
                 this.invented = 0;
                 this.learned = 0;
+                this.annexed = 0;
+                this.extinct = 0;
                 this.crafted = 0;
                 this.stalled = 0;
                 this.housed = 0;
@@ -418,6 +474,8 @@ public bundle Agents {
                 delete this.stores;
                 delete this.cworkX;
                 delete this.cworkY;
+                delete this.cdigX;
+                delete this.cdigY;
                 delete this.ctrade;
                 delete this.town;
                 delete this.croom;
@@ -448,8 +506,12 @@ public bundle Agents {
                 delete this.lean;
                 delete this.culture;
                 delete this.deeds;
-                delete this.lore;
-                delete this.era;
+                delete this.realm;
+                delete this.cnat;
+                delete this.csiteX;
+                delete this.csiteY;
+                delete this.csettle;
+                delete this.cmother;
             }
 
             // What an era costs to reach.
@@ -461,11 +523,75 @@ public bundle Agents {
             // an era at two hundred and fifty thousand is about forty minutes of prosperity -- so a
             // world arc carries a village two rungs, three if it is rich and curious, and the
             // fourth is genuinely rare.
-            public static int ERA_COST = 250000;
+            // Re-read once knowledge became a NATION's rather than a village's, because the old
+            // number was calibrated against the old rule and both failure modes are the same
+            // failure: a ladder nobody can climb and a ladder everybody climbs are equally
+            // decorative, since the whole point of eras is that neighbours differ.
+            //
+            // Measured, twenty generations, seed 42. At 250000 with per-head slack: tribal 23,
+            // medieval 18, industrial 4, modern 0 -- the fourth rung unreachable at any population.
+            // At the same 250000 with nation-pooled slack: tribal 11, medieval 2, industrial 2,
+            // modern 43, with the leader modern by the sixth generation. Four times the cost puts
+            // the climb back across a whole arc.
+            // Re-read a third time once knowledge became something a people BUILDS. Same seed, same
+            // twenty generations, one variable each time:
+            //
+            //   per-head slack, 250k          tribal 23, medieval 18, industrial  4, modern  0
+            //   nation-pooled slack, 250k     tribal 11, medieval  2, industrial  2, modern 43 (gen 6)
+            //   nation-pooled slack, 1M       tribal 13, medieval 16, industrial  7, modern 21 (gen 15)
+            //   ...plus places of learning    tribal 16, medieval  7, industrial  2, modern 42 (gen 10)
+            //
+            // Shrines, temples, scriptoria, libraries, schools and universities roughly DOUBLED the
+            // rate, so the cost doubles with them and the composition is the better one: surplus
+            // still gets a people off the bottom rung, and institutions are what compound it.
+            public static int ERA_COST = 2500000;
             public static int LAST_ERA = 4;
 
+            // What being next to somebody cleverer is worth. Copying beats inventing, but at four
+            // times it was not copying, it was a CASCADE: the first nation to reach a rung dragged
+            // every neighbour up behind it within a generation, which is how forty-three of
+            // fifty-eight ended modern while thirty-eight eras were invented and a hundred and
+            // seventeen were merely caught. Doubled instead of quadrupled, a leader stays a leader
+            // long enough for the difference to be worth something.
+            public static int TAUGHT = 2;
+
+            // What a settlement knows how to build is what its NATION has worked out. A colony of
+            // forty people fires bricks on the day it is founded because the kingdom that sent it
+            // knows how -- which is the whole practical difference between a country and a scatter
+            // of villages that each had to invent everything for itself.
             public method eraOf(int comm) returns int {
-                return this.era[comm];
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 1;
+                }
+                return this.realm.eraOf(this.cnat[comm]);
+            }
+
+            public method populationOf(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0;
+                }
+                return this.cpop[comm];
+            }
+
+            public method nationOf(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0 - 1;
+                }
+                return this.cnat[comm];
+            }
+
+            public method nations() returns Nations* {
+                return this.realm;
+            }
+
+            // Which nation holds this ground, or -1. The border is not drawn anywhere: it is the
+            // union of what a nation's settlements hold, and it moves when they do.
+            public method realmAt(int x, int y) returns int {
+                int s = this.ownerAt(x, y);
+                if (s < 0) {
+                    return 0 - 1;
+                }
+                return this.cnat[s];
             }
 
             // Surplus buys slack time; slack time and curiosity buy discovery. A village living hand
@@ -476,57 +602,97 @@ public bundle Agents {
             // multiplies what an hour of thinking is worth, because copying is easier than
             // inventing; isolation is not a penalty here, it is simply the absence of that.
             private method discover() returns void {
-                // Who touches whom, in ONE sweep of the claim map rather than one sweep per
-                // community. The first version asked "who are MY neighbours" a hundred times over a
+                int nn = this.realm.limit();
+                // Who touches whom, in ONE sweep of the claim map rather than one sweep per nation.
+                // The first version asked "who are MY neighbours" a hundred times over a
                 // fourteen-thousand block map; this asks "who is next to whom" once. It is the same
                 // correction the woodcutter needed and the wolves needed, and it is cheaper to make
                 // it while writing the loop than after measuring it.
-                mutable int[] ahead = new int[this.ncomm]();
+                //
+                // Read at the border of NATIONS and not of villages: two towns of one kingdom
+                // touching each other teaches nobody anything, and a kingdom whose far province
+                // touches a cleverer neighbour learns from it in its capital.
+                mutable int[] ahead = new int[nn]();
                 for (int by in 0..this.claimH) {
                     for (int bx in 0..this.claimW) {
-                        int me = this.claim[by * this.claimW + bx];
-                        if (me < 0) {
+                        int ms = this.claim[by * this.claimW + bx];
+                        if (ms < 0) {
                             continue;
                         }
+                        int me = this.cnat[ms];
                         if (bx + 1 < this.claimW) {
-                            int o = this.claim[by * this.claimW + bx + 1];
-                            if (o >= 0 && o != me) {
-                                ahead[me] = this.higher(ahead[me], this.era[o]);
-                                ahead[o] = this.higher(ahead[o], this.era[me]);
+                            int os = this.claim[by * this.claimW + bx + 1];
+                            if (os >= 0 && this.cnat[os] != me) {
+                                int o = this.cnat[os];
+                                ahead[me] = this.higher(ahead[me], this.realm.eraOf(o));
+                                ahead[o] = this.higher(ahead[o], this.realm.eraOf(me));
                             }
                         }
                         if (by + 1 < this.claimH) {
-                            int o = this.claim[(by + 1) * this.claimW + bx];
-                            if (o >= 0 && o != me) {
-                                ahead[me] = this.higher(ahead[me], this.era[o]);
-                                ahead[o] = this.higher(ahead[o], this.era[me]);
+                            int os = this.claim[(by + 1) * this.claimW + bx];
+                            if (os >= 0 && this.cnat[os] != me) {
+                                int o = this.cnat[os];
+                                ahead[me] = this.higher(ahead[me], this.realm.eraOf(o));
+                                ahead[o] = this.higher(ahead[o], this.realm.eraOf(me));
                             }
                         }
                     }
                 }
+                // What every nation can spare, pooled over all of its towns, and how curious the
+                // people spending it are.
+                //
+                // The measure is FED MINDS and not surplus per head. A village of a hundred and
+                // twenty with full bellies frees about one person to spend the day thinking; a
+                // kingdom of eight such towns frees eight of them, and that is the entire reason
+                // countries out-invent villages. Dividing by head -- which is what this did before
+                // -- said the opposite: a city of eight hundred learned at exactly the rate of a
+                // hamlet of forty, so nothing anybody built ever made the world cleverer and the
+                // fourth era could not be reached at any population by any route.
+                //
+                // The per-head ceiling stays. A people can only think so hard however rich they get,
+                // so the surplus that counts is capped before it is multiplied by how many of them
+                // there are -- otherwise one absurdly fat harvest would buy an era.
+                mutable int[] slack = new int[nn]();
+                mutable int[] mind = new int[nn]();
+                mutable int[] souls = new int[nn]();
+                mutable int[] scholars = new int[nn]();
+                // And what its shrines, scriptoria, libraries and schools are working out. This is
+                // the half of discovery a people BUILDS rather than merely eats its way into: the
+                // same surplus, spent deliberately and visible on the map, instead of a number that
+                // rose because the harvest was good.
+                mutable int[] lessons = new int[this.ncomm]();
+                this.town.learning(lessons, this.ncomm);
                 for (int c in 0..this.ncomm) {
-                    if (this.cpop[c] <= 0 || this.era[c] >= Simulation.LAST_ERA) {
+                    if (this.cpop[c] <= 0) {
                         continue;
                     }
+                    int nat = this.cnat[c];
                     int need = this.cpop[c] * Simulation.LARDER;
                     int have = this.stores.foodOf(c);
-                    if (have <= need) {
-                        continue;                            // hand to mouth: no slack, no thinking
+                    if (have > need) {
+                        mutable int perHead = (have - need) / (this.cpop[c] + 1);
+                        if (perHead > 40) {
+                            perHead = 40;
+                        }
+                        slack[nat] = slack[nat] + perHead * this.cpop[c] / Simulation.VILLAGE;
                     }
-                    mutable int slack = (have - need) / (this.cpop[c] + 1);
-                    if (slack > 40) {
-                        slack = 40;                          // a place can only think so hard
+                    mind[nat] = mind[nat]
+                              + this.cultureOf(c, Simulation.C_CURIOUS) * this.cpop[c];
+                    souls[nat] = souls[nat] + this.cpop[c];
+                    scholars[nat] = scholars[nat] + lessons[c];
+                }
+                for (int nat in 0..nn) {
+                    if (souls[nat] <= 0 || slack[nat] + scholars[nat] <= 0) {
+                        continue;
                     }
-                    mutable int gain = slack * (this.cultureOf(c, Simulation.C_CURIOUS) + 10) / 20;
+                    int curious = mind[nat] / souls[nat];
+                    mutable int gain = slack[nat] * (curious + 10) / 20 + scholars[nat];
                     mutable boolean taught = false;
-                    if (ahead[c] > this.era[c]) {
-                        gain = gain * 4;
+                    if (ahead[nat] > this.realm.eraOf(nat)) {
+                        gain = gain * Simulation.TAUGHT;  // copying is easier than working it out
                         taught = true;
                     }
-                    this.lore[c] = this.lore[c] + gain;
-                    if (this.lore[c] >= Simulation.ERA_COST) {
-                        this.lore[c] = 0;
-                        this.era[c] = this.era[c] + 1;
+                    if (this.realm.study(nat, gain, Simulation.ERA_COST, Simulation.LAST_ERA)) {
                         if (taught) {
                             this.learned = this.learned + 1;
                         } else {
@@ -535,6 +701,43 @@ public bundle Agents {
                     }
                 }
                 delete ahead;
+                delete slack;
+                delete mind;
+                delete souls;
+                delete scholars;
+                delete lessons;
+                return;
+            }
+
+            // Everything that is true of a POLITY, read off the settlements that answer to it.
+            //
+            // Nobody is appointed and nothing is proclaimed. The capital is whichever of a nation's
+            // towns is biggest, so a seat overtaken by one of its own colonies MOVES; the ruler is
+            // whoever that town already listens to; the rank is what the holdings add up to. Each of
+            // those was already being decided somewhere for its own reasons, and this only reads
+            // them -- which is why a nation cannot be at a rank its people have not actually built.
+            private method realmCensus() returns void {
+                this.realm.beginCount();
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] > 0) {
+                        this.realm.countTown(this.cnat[c], c, this.cpop[c]);
+                    }
+                }
+                for (int b in 0..this.claimW * this.claimH) {
+                    int s = this.claim[b];
+                    if (s >= 0 && s < this.ncomm && this.cpop[s] > 0) {
+                        this.realm.countLand(this.cnat[s]);
+                    }
+                }
+                for (int nat in 0..this.realm.limit()) {
+                    int cap = this.realm.seatOf(nat);
+                    mutable int lord = 0 - 1;
+                    if (cap >= 0) {
+                        lord = this.chief[cap];
+                    }
+                    this.realm.settleRank(nat, lord);
+                    this.realm.wag(nat, this.seed, this.tick);
+                }
                 return;
             }
 
@@ -572,7 +775,8 @@ public bundle Agents {
                 if (job == cast<int>(Job.Miner) || job == cast<int>(Job.Quarrier)) {
                     return Simulation.C_GREED;
                 }
-                if (job == cast<int>(Job.Forager) || job == cast<int>(Job.Fisher)) {
+                if (job == cast<int>(Job.Forager) || job == cast<int>(Job.Fisher)
+                    || job == cast<int>(Job.Prospector) || job == cast<int>(Job.Scholar)) {
                     return Simulation.C_CURIOUS;
                 }
                 if (job == cast<int>(Job.Builder) || job == cast<int>(Job.Raider)) {
@@ -900,6 +1104,27 @@ public bundle Agents {
                             this.thoughtThisFrame = this.thoughtThisFrame + 1;
                             continue;               // gone; whatever they were is somebody else's
                         }
+                        // Somebody sent over the horizon keeps walking until they get there.
+                        //
+                        // One order at the start was not enough: a colonist who found work on the
+                        // way took it, stopped, and the party's centre never reached its ground --
+                        // six hundred and eighty-one expeditions in eleven hundred and seventy-one
+                        // turned back that way. While a place is still travelling, going there IS
+                        // the work, and this re-issues the order every time they think.
+                        int trek = this.folk.homeOf(i);
+                        if (trek >= 0 && trek < this.ncomm && this.csettle[trek] > 0) {
+                            float tx = this.ccx[trek] - this.folk.xAt(i);
+                            float ty = this.ccy[trek] - this.folk.yAt(i);
+                            if (tx * tx + ty * ty > cast<float>(Simulation.REIGN * Simulation.REIGN)) {
+                                this.folk.setJob(i, cast<int>(Job.Idle));
+                                this.folk.setTarget(i, cast<int>(this.ccx[trek]),
+                                                    cast<int>(this.ccy[trek]));
+                                this.folk.setAct(i, cast<int>(Act.WalkTo));
+                                this.folk.setThinkAt(i, this.tick + 8);
+                                this.thoughtThisFrame = this.thoughtThisFrame + 1;
+                                continue;
+                            }
+                        }
                         if (this.folk.jobOf(i) == cast<int>(Job.Idle)) {
                             this.chooseJob(i);
                         }
@@ -910,6 +1135,8 @@ public bundle Agents {
                             this.workBuild(i);
                         } else if (jb == cast<int>(Job.Hunter)) {
                             this.workHunt(i);
+                        } else if (jb == cast<int>(Job.Prospector)) {
+                            this.workProspect(i);
                         } else if (this.craftOfJob(jb) != cast<int>(Craft.NoCraft)) {
                             this.workCraft(i);
                         } else {
@@ -1325,8 +1552,38 @@ public bundle Agents {
                 c = 0;
                 while (c < this.ncomm) {
                     if (this.cpop[c] > 0) {
-                        this.ccx[c] = this.ccx[c] / cast<float>(this.cpop[c]);
-                        this.ccy[c] = this.ccy[c] / cast<float>(this.cpop[c]);
+                        mutable float mx = this.ccx[c] / cast<float>(this.cpop[c]);
+                        mutable float my = this.ccy[c] / cast<float>(this.cpop[c]);
+                        // A colony on the road is WHERE IT IS GOING, not where its people have got
+                        // to. Without that the centre is the mean of a party that has not left yet,
+                        // so the place searches for work back at the capital, everybody stays put,
+                        // and a founding expedition is a renaming that never travels.
+                        if (this.csettle[c] > 0) {
+                            float ax = mx - this.csiteX[c];
+                            float ay = my - this.csiteY[c];
+                            float span = cast<float>(Simulation.REIGN * Simulation.REIGN);
+                            if (ax * ax + ay * ay <= span) {
+                                this.csettle[c] = 0;      // arrived: an ordinary place from here on
+                                this.planted = this.planted + 1;
+                            } else {
+                                this.csettle[c] = this.csettle[c] - 1;
+                                if (this.csettle[c] <= 0) {
+                                    // The expedition failed. They go back to whoever sent them,
+                                    // rather than becoming a village standing wherever they gave up
+                                    // -- which was always within a walk of the capital, so it merged
+                                    // straight back in and the whole thing read as churn: nine
+                                    // hundred and ninety-six colonies planted against a thousand
+                                    // and forty-one places merged, in one arc.
+                                    this.abandon(c);
+                                    c = c + 1;
+                                    continue;
+                                }
+                                mx = this.csiteX[c];
+                                my = this.csiteY[c];
+                            }
+                        }
+                        this.ccx[c] = mx;
+                        this.ccy[c] = my;
                         // And where its work is, of every kind. The wide search happens HERE, once
                         // for the whole place, instead of once per person per decision -- which was
                         // eighteen million failed searches in two hours of world time, each sweeping
@@ -1334,6 +1591,7 @@ public bundle Agents {
                         for (int hc in 1..Harvest.count()) {
                             this.findWork(c, hc);
                         }
+                        this.findGround(c);
                         this.considerBuilding(c);
                     } else {
                         for (int hc in 0..Harvest.count()) {
@@ -1344,10 +1602,17 @@ public bundle Agents {
                 }
                 this.restake();
                 this.hearWho();
+                // Between the chiefs and the thinking: the nations are read off the towns and the
+                // chiefs that have just been settled, and everything from here down asks the polity
+                // rather than the place.
+                this.realmCensus();
                 this.steep();
                 this.discover();
                 this.hive();
                 this.absorb();
+                // After the two accidental ways the map changes -- a village smearing itself in two
+                // and two villages growing into one -- comes the deliberate one.
+                this.colonise();
                 this.wayOut();
                 this.quarrel();
                 return;
@@ -1411,6 +1676,16 @@ public bundle Agents {
             // its people actually do, so nothing here is decided at world generation.
             public static int WARLIKE = 40;
 
+            // How much bigger a neighbour has to be before a people simply becomes part of it.
+            //
+            // Twice over. Within one nation, two towns that touch are one town and no threshold is
+            // asked for -- they already answer to the same seat. Across a border it is a people
+            // losing its name, and that does not happen because a neighbour is one head larger; it
+            // happens when the neighbour is so much the bigger place that its market, its language
+            // and its chief are simply where life is. Anything gentler and the first census would
+            // dissolve every small nation into whichever big one it happened to be standing next to.
+            public static int ASSIMILATE = 2;
+
             // Two places that have grown into each other are one place.
             //
             // This is the half that was missing, and its absence was not a detail -- it was the
@@ -1434,13 +1709,16 @@ public bundle Agents {
                     this.cjoin[c] = 0 - 1;
                 }
                 for (int a in 0..this.ncomm) {
-                    if (this.cpop[a] <= 0) {
+                    // A party still walking to its ground is not a place yet, and neither end of a
+                    // merger may be one: its centre is where it is GOING, so the distance test
+                    // would be measuring against somewhere nobody is standing.
+                    if (this.cpop[a] <= 0 || this.csettle[a] > 0) {
                         continue;
                     }
                     mutable int into = 0 - 1;
                     mutable int biggest = this.cpop[a];
                     for (int b in 0..this.ncomm) {
-                        if (b == a || this.cpop[b] <= biggest) {
+                        if (b == a || this.cpop[b] <= biggest || this.csettle[b] > 0) {
                             continue;                // only ever join something bigger, so no cycles
                         }
                         float dx = this.ccx[b] - this.ccx[a];
@@ -1448,6 +1726,23 @@ public bundle Agents {
                         int near = Simulation.REIGN / 2;
                         if (dx * dx + dy * dy > cast<float>(near * near)) {
                             continue;
+                        }
+                        // Two towns of ONE nation that have grown into each other are one town, and
+                        // that is all it takes. Two towns of DIFFERENT nations touching is a border,
+                        // and a border is not a merger: a people is only absorbed by a neighbour
+                        // that plainly dwarfs it, and never by one it is at war with.
+                        //
+                        // Before nations existed this test did not exist either, so every place in
+                        // the world merged into every bigger place it touched -- which is why the
+                        // map had no countries on it, only a hundred and forty villages that had all
+                        // forgotten who they were related to.
+                        if (this.cnat[b] != this.cnat[a]) {
+                            if (this.cpop[b] < this.cpop[a] * Simulation.ASSIMILATE) {
+                                continue;
+                            }
+                            if (this.cfoe[a] == b || this.cfoe[b] == a || this.craided[a] > 0) {
+                                continue;
+                            }
                         }
                         biggest = this.cpop[b];
                         into = b;
@@ -1474,14 +1769,20 @@ public bundle Agents {
                     }
                     this.stores.clear(a);
                     this.town.reown(a, into, cast<int>(BuildingKind.TownHall));
-                    // Knowledge joins up; it is not averaged and it is not lost. Two villages that
-                    // become a town know everything either of them knew.
-                    if (this.lore[a] > this.lore[into]) {
-                        this.lore[into] = this.lore[a];
+                    // A town crossing a border takes its people's knowledge with it, and the nation
+                    // that gains it can now say it rules somebody it did not raise -- which is the
+                    // whole of what makes an empire an empire. Knowledge joins up; it is not
+                    // averaged and it is not lost.
+                    int mine = this.cnat[a];
+                    int theirs = this.cnat[into];
+                    if (mine != theirs) {
+                        this.realm.annex(theirs, mine);
+                        this.annexed = this.annexed + 1;
+                        if (this.realm.townsOf(mine) <= 1) {
+                            this.extinct = this.extinct + 1;
+                        }
                     }
-                    if (this.era[a] > this.era[into]) {
-                        this.era[into] = this.era[a];
-                    }
+                    this.cnat[a] = theirs;
                     this.joined = this.joined + 1;
                     this.joinedFolk = this.joinedFolk + cast<long>(this.cpop[a]);
                     this.cpop[into] = this.cpop[into] + this.cpop[a];
@@ -1536,7 +1837,11 @@ public bundle Agents {
                 while (i < n) {
                     if (this.folk.alive(i)) {
                         int h = this.folk.homeOf(i);
-                        if (h >= 0 && h < this.ncomm && this.cpop[h] >= Simulation.VILLAGE) {
+                        // A founding party is a village whose people are ALL beyond its centre, by
+                        // construction -- they are walking to it. Reading that as an outlying
+                        // cluster would split every colony in two before it ever arrived.
+                        if (h >= 0 && h < this.ncomm && this.csettle[h] <= 0
+                            && this.cpop[h] >= Simulation.VILLAGE) {
                             float dx = this.folk.xAt(i) - this.ccx[h];
                             float dy = this.folk.yAt(i) - this.ccy[h];
                             float d = dx * dx + dy * dy;
@@ -1688,8 +1993,14 @@ public bundle Agents {
                     this.culture[d * 5 + a] = this.culture[mother * 5 + a];
                     this.deeds[d * 5 + a] = 0;
                 }
-                this.lore[d] = this.lore[mother];
-                this.era[d] = this.era[mother];
+                // A daughter answers to whoever the mother answered to. This one assignment is the
+                // difference between a world of countries and a world of hamlets: before it, a
+                // village that outgrew its ground turned the half that walked out into STRANGERS,
+                // so nothing could ever get bigger than one day's walk across and the map was a
+                // scatter of a hundred and forty places that had all forgotten they were related.
+                // Knowledge comes with it and is not copied, because the nation is the thing that
+                // knows.
+                this.cnat[d] = this.cnat[mother];
                 this.croom[d] = 0;
                 this.cworst[d] = 0 - 1;
                 this.cworstRoom[d] = 0;
@@ -1706,8 +2017,278 @@ public bundle Agents {
                 this.cjoin[d] = 0 - 1;
                 this.cparty[d] = 0;
                 this.cfarAge[d] = 0;
+                this.csettle[d] = 0;
+                this.csiteX[d] = fx;
+                this.csiteY[d] = fy;
+                this.cmother[d] = mother;
                 return;
             }
+
+            // An expedition that did not get there.
+            //
+            // They go back to whoever sent them. The alternative -- letting them become a village
+            // standing wherever they gave up -- sounds more generous and is worse: they gave up
+            // within a walk of the capital, so the "village" merged straight back in on the next
+            // census, and an arc read nine hundred and ninety-six colonies planted against a
+            // thousand and forty-one places merged. That is not a world expanding, it is a world
+            // shuffling. If the people who sent them are themselves gone, there is nowhere to go
+            // back to and they settle for where they stand, which is the one case where a failed
+            // founding really is a new place.
+            private method abandon(int c) returns void {
+                int back = this.cmother[c];
+                boolean home = back >= 0 && back < this.ncomm && this.cpop[back] > 0;
+                if (!home) {
+                    this.csettle[c] = 0;
+                    this.cmother[c] = 0 - 1;
+                    return;
+                }
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.homeOf(i) == c) {
+                        this.folk.setHome(i, back);
+                        this.folk.setTarget(i, cast<int>(this.ccx[back]),
+                                            cast<int>(this.ccy[back]));
+                        this.folk.setAct(i, cast<int>(Act.WalkTo));
+                    }
+                    i = i + 1;
+                }
+                // Whatever they were still carrying goes back on the shelves that paid for it.
+                for (int g in 1..Goods.count()) {
+                    int had = this.stores.seize(c, g, 1000000);
+                    if (had > 0) {
+                        this.stores.stow(back, g, had);
+                    }
+                }
+                this.cpop[back] = this.cpop[back] + this.cpop[c];
+                this.cpop[c] = 0;
+                this.csettle[c] = 0;
+                this.cmother[c] = 0 - 1;
+                this.chief[c] = 0 - 1;
+                this.strayed = this.strayed + 1;
+                return;
+            }
+
+            // A nation deliberately putting a town somewhere it does not yet hold.
+            //
+            // This is the OTHER way the map grows, and it is nothing like the first. Hiving is an
+            // accident: a village smears itself across too much ground and the far end is given its
+            // own name, so a country can only ever spread by one work-radius at a time and only into
+            // land its own people were already standing on. Colonising is a decision -- a seat with
+            // a full granary picks ground beyond its border and sends people to it -- which is how a
+            // nation comes to hold country nobody had walked to yet.
+            //
+            // One a census for the whole world, taken in turn. That is the budget rule this codebase
+            // keeps having to relearn: the question "where should we put a town" is expensive and it
+            // is asked once per WORLD per second, never once per nation, and certainly never once
+            // per person. The turn-taking is what makes it fair without making it cost more.
+            private method colonise() returns void {
+                int nn = this.realm.limit();
+                mutable int tries = 0;
+                while (tries < nn) {
+                    this.settler = this.settler + 1;
+                    if (this.settler >= nn) {
+                        this.settler = 0;
+                    }
+                    tries = tries + 1;
+                    int nat = this.settler;
+                    if (!this.realm.alive(nat)) {
+                        continue;
+                    }
+                    // A people with nobody to say so does not mount an expedition. Below a chiefdom
+                    // there is no seat, and a colony is by definition somewhere that answers to one.
+                    if (this.realm.rankOf(nat) < cast<int>(Rank.Chiefdom)) {
+                        continue;
+                    }
+                    int seat = this.realm.seatOf(nat);
+                    if (seat < 0 || this.cpop[seat] < Simulation.VILLAGE) {
+                        continue;
+                    }
+                    if (this.csettle[seat] > 0) {
+                        continue;                    // still walking to its own ground
+                    }
+                    // Paid for out of a full granary, twice over. A people that cannot feed itself
+                    // does not send thirty of its own over the horizon with nothing, and the food
+                    // they carry comes off the shelves at home -- so an expedition is a real cost
+                    // and a hungry year is a year nobody expands.
+                    if (this.stores.foodOf(seat) < this.cpop[seat] * Simulation.LARDER * 2) {
+                        continue;
+                    }
+                    int d = this.freeCommunity();
+                    if (d < 0) {
+                        return;                      // the world is out of names
+                    }
+                    if (this.plant(nat, seat, d)) {
+                        return;                      // one a census, and no more
+                    }
+                }
+                return;
+            }
+
+            // Choose the ground, gather the party and send it. False if there was nowhere worth
+            // going or nobody facing that way, in which case the nation simply waits its turn again.
+            private method plant(int nat, int seat, int d) returns boolean {
+                int cbx = cast<int>(this.ccx[seat]) / 16;
+                int cby = cast<int>(this.ccy[seat]) / 16;
+                mutable int bestWorth = 0;
+                mutable int bestX = 0 - 1;
+                mutable int bestY = 0 - 1;
+                mutable int r = Simulation.COLONY_NEAR;
+                while (r <= Simulation.COLONY_FAR) {
+                    mutable int dx = 0 - r;
+                    while (dx <= r) {
+                        int wa = this.siteWorth(cbx + dx, cby - r);
+                        if (wa > bestWorth) {
+                            bestWorth = wa;
+                            bestX = cbx + dx;
+                            bestY = cby - r;
+                        }
+                        int wb = this.siteWorth(cbx + dx, cby + r);
+                        if (wb > bestWorth) {
+                            bestWorth = wb;
+                            bestX = cbx + dx;
+                            bestY = cby + r;
+                        }
+                        dx = dx + 1;
+                    }
+                    mutable int dy = 1 - r;
+                    while (dy <= r - 1) {
+                        int wc = this.siteWorth(cbx - r, cby + dy);
+                        if (wc > bestWorth) {
+                            bestWorth = wc;
+                            bestX = cbx - r;
+                            bestY = cby + dy;
+                        }
+                        int wd = this.siteWorth(cbx + r, cby + dy);
+                        if (wd > bestWorth) {
+                            bestWorth = wd;
+                            bestX = cbx + r;
+                            bestY = cby + dy;
+                        }
+                        dy = dy + 1;
+                    }
+                    r = r + 1;
+                }
+                if (bestX < 0) {
+                    return false;                    // hemmed in: no unheld ground worth a town
+                }
+                float sx = cast<float>(bestX * 16 + 8);
+                float sy = cast<float>(bestY * 16 + 8);
+                // Who goes is not chosen either: it is whoever is already on that side of the
+                // village. The same reading hiving uses, and for the same reason -- a party picked
+                // by number would be thirty people teleported out of the middle of a crowd, and a
+                // party picked by where they stand is the edge of the place walking further out.
+                float vx = sx - this.ccx[seat];
+                float vy = sy - this.ccy[seat];
+                int n = this.folk.limit();
+                mutable int facing = 0;
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.isAdult(i)
+                        && this.folk.homeOf(i) == seat) {
+                        float ax = this.folk.xAt(i) - this.ccx[seat];
+                        float ay = this.folk.yAt(i) - this.ccy[seat];
+                        if (ax * vx + ay * vy > 0.0) {
+                            facing = facing + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                if (facing < Simulation.HAMLET) {
+                    return false;                    // not enough of them are out that way
+                }
+                this.found(d, seat, sx, sy);
+                this.csettle[d] = Simulation.TREK;
+                mutable int took = 0;
+                i = 0;
+                while (i < n) {
+                    if (took < Simulation.HAMLET && this.folk.alive(i) && this.folk.isAdult(i)
+                        && this.folk.homeOf(i) == seat) {
+                        float ax = this.folk.xAt(i) - this.ccx[seat];
+                        float ay = this.folk.yAt(i) - this.ccy[seat];
+                        if (ax * vx + ay * vy > 0.0) {
+                            this.folk.setHome(i, d);
+                            // And they are TOLD to go. Changing where somebody belongs is not the
+                            // same as sending them: a colonist who can still find work where he is
+                            // standing never takes a step, the party never reaches its ground, and
+                            // the founding expires next to the capital as a second village close
+                            // enough to be absorbed straight back. Migration already had to learn
+                            // this -- `leaving` sets a target for exactly the same reason.
+                            this.folk.setTarget(i, cast<int>(sx), cast<int>(sy));
+                            this.folk.setAct(i, cast<int>(Act.WalkTo));
+                            took = took + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                this.cpop[d] = took;
+                this.cpop[seat] = this.cpop[seat] - took;
+                // Provisions for the road, off the capital's shelves. Not counted as eaten and not
+                // counted as grown -- it is the same food, on somebody's back.
+                int fare = this.stores.richest(seat);
+                if (fare > 0) {
+                    int packed = this.stores.seize(seat, fare, took * Simulation.LARDER * 2);
+                    this.stores.stow(d, fare, packed);
+                }
+                this.colonies = this.colonies + 1;
+                this.colonists = this.colonists + cast<long>(took);
+                return true;
+            }
+
+            // What a block is worth as somewhere to live, or 0 if it is not a candidate at all.
+            //
+            // Three things and no dials: it must be nobody's, it must be walkable, and it must have
+            // the two things a place cannot start without -- something to eat and something to build
+            // with -- inside the radius a community actually works. The last part is why the count
+            // is over the block AND its neighbours: a village reaches three blocks, so asking
+            // whether one block happens to hold both would reject most of the habitable world.
+            private method siteWorth(int bx, int by) returns int {
+                if (bx < 1 || by < 1 || bx >= this.claimW - 1 || by >= this.claimH - 1) {
+                    return 0;
+                }
+                if (this.claim[by * this.claimW + bx] >= 0) {
+                    return 0;                        // somebody already lives off this ground
+                }
+                if (!this.walkable(bx * 16 + 8, by * 16 + 8)) {
+                    return 0;
+                }
+                NodeField* nf = this.g.surface();
+                mutable int food = 0;
+                mutable int wood = 0;
+                mutable int oy = 0 - 1;
+                while (oy <= 1) {
+                    mutable int ox = 0 - 1;
+                    while (ox <= 1) {
+                        food = food + nf.inBlock(bx + ox, by + oy, cast<int>(Harvest.Forage))
+                                    + nf.inBlock(bx + ox, by + oy, cast<int>(Harvest.Fishing));
+                        wood = wood + nf.inBlock(bx + ox, by + oy, cast<int>(Harvest.Timber));
+                        ox = ox + 1;
+                    }
+                    oy = oy + 1;
+                }
+                if (food <= 0 || wood <= 0) {
+                    return 0;
+                }
+                // Food counts double. A colony that runs out of timber sends for more; one that
+                // runs out of bread is not a colony next month.
+                return food * 2 + wood;
+            }
+
+            // How far out a colony is planted, in 16-cell blocks.
+            //
+            // The near edge is beyond WORK_BLOCKS, which is the distance a community searches for
+            // work: any nearer and the new town would be competing with its own capital for the
+            // same trees, and the split rule would pull the two straight back together. The far edge
+            // is a walk of about a hundred and sixty cells, which at a cell and a quarter a second
+            // is a third of a life -- far enough to be somewhere else, near enough that the people
+            // sent there arrive alive.
+            public static int COLONY_NEAR = 4;
+            public static int COLONY_FAR = 10;
+
+            // Censuses a founding party has to reach its ground before it gives up and settles for
+            // wherever it got to. Four minutes: two thirds of a life, and long enough for the
+            // longest walk the far edge allows even for somebody who stops to eat.
+            public static int TREK = 240;
 
             // Does this person walk away from where they were born?
             //
@@ -1933,10 +2514,10 @@ public bundle Agents {
                 mutable int best = cast<int>(BuildingKind.NoBuilding);
                 mutable int bestScore = 0;
                 for (int k in 1..BuildingKind.count()) {
-                    if (!Builds.produces(k)) {
+                    if (!Builds.staffed(k)) {
                         continue;
                     }
-                    if (Builds.era(k) > this.era[c]) {
+                    if (Builds.era(k) > this.eraOf(c)) {
                         continue;                    // nobody here knows how yet
                     }
                     // ONE of each kind per place -- and this cap is doing more work than it looks
@@ -1974,13 +2555,48 @@ public bundle Agents {
                     if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(k))) {
                         continue;
                     }
-                    // Worth is the SCARCER input, not the sum: a smithy is worth what it can smelt,
+                    // What a building is worth, and there are three answers because there are three
+                    // kinds of building.
+                    //
+                    // A workshop is worth its SCARCER input: a smithy is worth what it can smelt,
                     // and all the iron in the world is worth nothing without charcoal.
-                    mutable int worth = this.stores.amountOf(c, Builds.in1(k));
-                    if (Builds.in2(k) != cast<int>(Good.Nothing)) {
-                        int other = this.stores.amountOf(c, Builds.in2(k));
-                        if (other < worth) {
-                            worth = other;
+                    //
+                    // A FIELD has no input to pile up -- its input is ground -- so it is worth what
+                    // the place is SHORT of. That is the scoring the whole catalogue ought to have
+                    // and does not yet: worth as unmet want rather than as abundance of stock. It is
+                    // right here first because for husbandry there is no other candidate, and it is
+                    // the first honest piece of the answer to why a town of eight hundred builds no
+                    // more bakeries than a hamlet of forty.
+                    //
+                    // A place of LEARNING is worth the spare food behind it. A people living hand to
+                    // mouth does not raise a library however much paper it has -- which is the same
+                    // rule discovery has always run on, now visible on the map as a building.
+                    mutable int worth = 0;
+                    if (Builds.study(k) > 0) {
+                        int spare = this.stores.foodOf(c) - this.cpop[c] * Simulation.LARDER;
+                        if (spare > 0) {
+                            worth = spare;
+                            if (Builds.in1(k) != cast<int>(Good.Nothing)) {
+                                int ink = this.stores.amountOf(c, Builds.in1(k));
+                                if (ink < worth) {
+                                    worth = ink;
+                                }
+                            }
+                        }
+                    } else {
+                        if (Builds.in1(k) == cast<int>(Good.Nothing)) {
+                            worth = this.cpop[c] * Simulation.LARDER - this.stores.foodOf(c);
+                            if (worth < 0) {
+                                worth = 0;
+                            }
+                        } else {
+                            worth = this.stores.amountOf(c, Builds.in1(k));
+                            if (Builds.in2(k) != cast<int>(Good.Nothing)) {
+                                int other = this.stores.amountOf(c, Builds.in2(k));
+                                if (other < worth) {
+                                    worth = other;
+                                }
+                            }
                         }
                     }
                     if (worth > bestScore) {
@@ -2000,13 +2616,27 @@ public bundle Agents {
             // nowhere to put, and that has to read as "did not build" rather than as a silent
             // success.
             private method markNear(int c, int k) returns boolean {
-                mutable int tries = 0;
-                while (tries < 10) {
-                    float a = LandMath.hash01(this.seed ^ 0x7C3B, c * 31 + tries, this.tick) * 6.2831853;
-                    float d = 4.0 + LandMath.hash01(this.seed ^ 0x51A9, c * 17 + tries, this.tick) * 10.0;
+                int ground = Builds.site(k);
+                // A workshop goes in the village; a field does not. Husbandry reaches out to where
+                // the ground is right for it -- which is why the search widens, and why a village
+                // beside a river ends up ringed with fields while one on a mountainside never grows
+                // any. That asymmetry is the whole reason geography keeps mattering after farming
+                // arrives instead of stopping the day it does.
+                mutable float near = 4.0;
+                mutable float span = 10.0;
+                mutable int tries = 10;
+                if (ground != cast<int>(Ground.Anywhere)) {
+                    near = 6.0;
+                    span = 34.0;
+                    tries = 24;
+                }
+                mutable int t = 0;
+                while (t < tries) {
+                    float a = LandMath.hash01(this.seed ^ 0x7C3B, c * 31 + t, this.tick) * 6.2831853;
+                    float d = near + LandMath.hash01(this.seed ^ 0x51A9, c * 17 + t, this.tick) * span;
                     int px = cast<int>(this.ccx[c] + LandMath.cos(a) * d);
                     int py = cast<int>(this.ccy[c] + LandMath.sin(a) * d);
-                    if (this.walkable(px, py)) {
+                    if (this.groundOk(px, py, ground)) {
                         // A full table is a refusal like any other. The first version took `mark`
                         // on trust and reported three hundred thousand plots marked out against
                         // four thousand rows -- the counter was measuring how often the world had
@@ -2018,10 +2648,82 @@ public bundle Agents {
                         this.cbusy[c] = b;           // it is the thing being finished now
                         return true;
                     }
-                    tries = tries + 1;
+                    t = t + 1;
                 }
                 return false;
             }
+
+            // May this kind of building stand on this cell?
+            //
+            // Almost everything asks only that you can stand there. Husbandry asks about the ground
+            // itself, and that is the point of the Ground enum existing: a farm on a glacier is not
+            // a farm, and a world where it could be would make geography stop mattering the moment
+            // agriculture arrived. Where the fields can go is where the cities will be.
+            public method groundOk(int x, int y, int ground) returns boolean {
+                if (!this.walkable(x, y)) {
+                    return false;
+                }
+                if (ground == cast<int>(Ground.Anywhere)) {
+                    return true;
+                }
+                int b = this.g.biomeAt(x, y);
+                if (ground == cast<int>(Ground.Waterside)) {
+                    return this.g.hasFlag(x, y, Grid.FLAG_COAST)
+                        || this.g.hasFlag(x, y, Grid.FLAG_RIVER)
+                        || this.g.hasFlag(x, y, Grid.FLAG_LAKE);
+                }
+                if (ground == cast<int>(Ground.Rock)) {
+                    return b == cast<int>(Biome.Hills) || b == cast<int>(Biome.Mountain)
+                        || b == cast<int>(Biome.Badlands) || b == cast<int>(Biome.RockyShore)
+                        || b == cast<int>(Biome.Volcanic);
+                }
+                boolean open = b == cast<int>(Biome.WarmGrassland) || b == cast<int>(Biome.Prairie)
+                            || b == cast<int>(Biome.Steppe) || b == cast<int>(Biome.Savanna)
+                            || b == cast<int>(Biome.MedShrubland);
+                if (ground == cast<int>(Ground.Grazing)) {
+                    // Animals eat what people cannot. Thin cold ground and scrub are pasture and
+                    // nothing else, which is what makes the herding half of husbandry worth having
+                    // rather than a second, worse farm.
+                    return open || b == cast<int>(Biome.Tundra) || b == cast<int>(Biome.ColdDesert)
+                        || b == cast<int>(Biome.ThornScrub) || b == cast<int>(Biome.AlpineMeadow);
+                }
+                // Arable: open ground WITH WATER within reach of it. Every early civilisation grew
+                // in a river valley and none grew in the middle of a steppe, and the reason is this
+                // line -- a field that cannot be watered is grazing.
+                if (!open && b != cast<int>(Biome.Oasis) && b != cast<int>(Biome.Marsh)) {
+                    return false;
+                }
+                return this.waterNear(x, y);
+            }
+
+            // Is there water within a field's reach? Sampled on rings rather than swept, because
+            // this is asked ten to twenty times per building decision and the answer only has to be
+            // right about a neighbourhood, not about a cell.
+            private method waterNear(int x, int y) returns boolean {
+                mutable int r = 3;
+                while (r <= Simulation.WATER_REACH) {
+                    mutable int s = 0;
+                    while (s < 8) {
+                        float a = cast<float>(s) * 0.7853981;
+                        int px = x + cast<int>(LandMath.cos(a) * cast<float>(r));
+                        int py = y + cast<int>(LandMath.sin(a) * cast<float>(r));
+                        if (px >= 0 && py >= 0 && px < this.g.width() && py < this.g.height()) {
+                            if (this.g.hasFlag(px, py, Grid.FLAG_RIVER)
+                                || this.g.hasFlag(px, py, Grid.FLAG_LAKE)
+                                || this.g.hasFlag(px, py, Grid.FLAG_COAST)) {
+                                return true;
+                            }
+                        }
+                        s = s + 1;
+                    }
+                    r = r + 3;
+                }
+                return false;
+            }
+
+            // How far a field may be from water, in cells. Twelve: a walk with a bucket, and near
+            // enough that the belt of arable ground round a river reads as a shape on the map.
+            public static int WATER_REACH = 12;
 
             // Shelter, and the one place in the catalogue where a building is REPLACED rather than
             // added to. Two rules and no third:
@@ -2037,7 +2739,7 @@ public bundle Agents {
             // and a place that is merely large look different -- the first is dense and tall, the
             // second is a scatter of huts -- and the difference is visible without a single number.
             private method considerHousing(int c) returns boolean {
-                int best = Builds.bestRoof(this.era[c]);
+                int best = Builds.bestRoof(this.eraOf(c));
                 if (best == cast<int>(BuildingKind.NoBuilding)) {
                     return false;
                 }
@@ -2304,6 +3006,106 @@ public bundle Agents {
 
             // The trade a Job goes out to do. Not every job is an extraction -- the refiners work in
             // buildings and have no Harvest class at all, which is exactly why they wait for them.
+            // Bare rock within reach that nobody has looked under.
+            //
+            // The prospector's answer to "where do I work", and it is a question about a PLACE, so
+            // it is asked once a second for the whole community exactly like every other work site.
+            // An outcrop is a promise that the vein carries on; this is where somebody goes to find
+            // out. A block is used up once it has been opened, so a village works outward through
+            // its own stone rather than everybody digging the same hill for ever.
+            private method findGround(int c) returns void {
+                if (this.cdigX[c] >= 0) {
+                    return;                              // still somewhere to look
+                }
+                int cbx = cast<int>(this.ccx[c]) / 16;
+                int cby = cast<int>(this.ccy[c]) / 16;
+                mutable int r = 1;
+                while (r <= Simulation.WORK_BLOCKS) {
+                    mutable int dy = 0 - r;
+                    while (dy <= r) {
+                        mutable int dx = 0 - r;
+                        while (dx <= r) {
+                            if (dx == 0 - r || dx == r || dy == 0 - r || dy == r) {
+                                int bx = cbx + dx;
+                                int by = cby + dy;
+                                int px = bx * 16 + 8;
+                                int py = by * 16 + 8;
+                                if (bx >= 0 && by >= 0 && bx < this.claimW && by < this.claimH
+                                    && !this.g.hasFlag(px, py, Grid.FLAG_PROSPECTED)
+                                    && this.groundOk(px, py, cast<int>(Ground.Rock))) {
+                                    this.cdigX[c] = px;
+                                    this.cdigY[c] = py;
+                                    return;
+                                }
+                            }
+                            dx = dx + 1;
+                        }
+                        dy = dy + 1;
+                    }
+                    r = r + 1;
+                }
+                return;
+            }
+
+            // Opening ground. The walk out, and then the digging -- and what comes of it is not a
+            // die roll: worldgen buried every body where the tectonics put it, scattered working
+            // faces through each one, and left them empty. This fills the ones under this disc.
+            //
+            // Fifty-two of a hundred and ninety-eight ore bodies in a measured world never touch
+            // daylight anywhere, which before this made them permanently unreachable by any action
+            // anybody could take. A quarter of the world's metal was in the save file and in no
+            // other sense in the world.
+            private method workProspect(int i) returns void {
+                int h = this.folk.homeOf(i);
+                if (h < 0 || h >= this.ncomm || this.cdigX[h] < 0) {
+                    this.folk.setJob(i, cast<int>(Job.Idle));
+                    return;
+                }
+                if (this.busy(i)) {
+                    return;
+                }
+                int tx = this.cdigX[h];
+                int ty = this.cdigY[h];
+                float dx = cast<float>(tx) - this.folk.xAt(i);
+                float dy = cast<float>(ty) - this.folk.yAt(i);
+                if (dx * dx + dy * dy >= 9.0) {
+                    this.folk.setTarget(i, tx, ty);
+                    this.folk.setAct(i, cast<int>(Act.WalkTo));
+                    return;
+                }
+                this.folk.setAct(i, cast<int>(Act.Prospect));
+                this.g.prospect(tx, ty, Simulation.PROSPECT_R);
+                this.dug = this.dug + 1;
+                NodeField* nf = this.g.surface();
+                mutable int y = ty - Simulation.PROSPECT_R;
+                while (y <= ty + Simulation.PROSPECT_R) {
+                    mutable int x = tx - Simulation.PROSPECT_R;
+                    while (x <= tx + Simulation.PROSPECT_R) {
+                        if (x >= 0 && y >= 0 && x < this.g.width() && y < this.g.height()) {
+                            int ax = x - tx;
+                            int ay = y - ty;
+                            if (ax * ax + ay * ay <= Simulation.PROSPECT_R * Simulation.PROSPECT_R) {
+                                if (nf.openSeam(x, y) != 0) {
+                                    this.struck = this.struck + 1;
+                                }
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                // Finding a seam is seen, and it is remembered -- which is how a prospector comes to
+                // be somebody a village listens to.
+                this.folk.earn(i, 5);
+                this.cdigX[h] = 0 - 1;                   // this ground is opened; look elsewhere
+                this.folk.setAct(i, cast<int>(Act.Idle));
+                return;
+            }
+
+            // How wide a disc one man opens. Eight cells: a morning's work with a pick, and small
+            // enough that a body is opened over several trips rather than in one.
+            public static int PROSPECT_R = 8;
+
             private method harvestOf(int job) returns int {
                 if (job == cast<int>(Job.Woodcutter)) {
                     return cast<int>(Harvest.Timber);
@@ -2412,6 +3214,25 @@ public bundle Agents {
                         }
                     }
                 }
+                // Somebody goes and looks under the hill.
+                //
+                // Wanted in proportion to how little metal the place has: a village with a full
+                // ore shed does not send anybody prospecting, and one that has worked its outcrop
+                // out does. That is the whole shape of the trade -- an outcrop promises the vein
+                // carries on, and this is the trade that goes and collects on the promise.
+                int pb = cast<int>(Job.Prospector);
+                if (this.cdigX[h] >= 0 && this.ctrade[h * nj + pb] < this.quotaFor(h, pb)) {
+                    mutable int want = 30;
+                    if (this.stores.amountOf(h, cast<int>(Good.IronOre))
+                        + this.stores.amountOf(h, cast<int>(Good.CopperOre))
+                        + this.stores.amountOf(h, cast<int>(Good.Coal)) > Simulation.WANT) {
+                        want = 8;
+                    }
+                    if (want > bestScore) {
+                        bestScore = want;
+                        best = pb;
+                    }
+                }
                 // A workshop with an empty bench beats going out to the field: it is nearer, the
                 // work is worth more, and somebody has already decided the village needs it.
                 for (int cr in 1..Craft.count()) {
@@ -2501,6 +3322,12 @@ public bundle Agents {
                 if (craft == cast<int>(Craft.Weaving)) {
                     return cast<int>(Job.Weaver);
                 }
+                if (craft == cast<int>(Craft.Tilling)) {
+                    return cast<int>(Job.Farmer);
+                }
+                if (craft == cast<int>(Craft.Lettering)) {
+                    return cast<int>(Job.Scholar);
+                }
                 return cast<int>(Job.Idle);
             }
 
@@ -2516,6 +3343,12 @@ public bundle Agents {
                 }
                 if (job == cast<int>(Job.Weaver)) {
                     return cast<int>(Craft.Weaving);
+                }
+                if (job == cast<int>(Job.Farmer)) {
+                    return cast<int>(Craft.Tilling);
+                }
+                if (job == cast<int>(Job.Scholar)) {
+                    return cast<int>(Craft.Lettering);
                 }
                 return cast<int>(Craft.NoCraft);
             }
@@ -3281,13 +4114,33 @@ public bundle Agents {
                 // in the last one has an era ladder too short to matter. The asymmetry between
                 // neighbours is what the slice exists for.
                 mutable int[] byEra = new int[Simulation.LAST_ERA + 1]();
-                for (int c in 0..this.ncomm) {
-                    if (this.cpop[c] > 0) {
-                        byEra[this.era[c]] = byEra[this.era[c]] + 1;
+                for (int nat in 0..this.realm.limit()) {
+                    if (this.realm.alive(nat)) {
+                        int e = this.realm.eraOf(nat);
+                        byEra[e] = byEra[e] + 1;
                     }
                 }
                 System.IO.Console.println($"  eras: tribal {byEra[1]} | medieval {byEra[2]} | industrial {byEra[3]} | modern {byEra[4]} || {this.invented} invented, {this.learned} learned from a neighbour");
                 delete byEra;
+                // The polities, and the shape of them. A world whose nations are all bands is a
+                // world where nothing came together; one with a handful of empires and no bands
+                // left is one where nothing can any longer come apart.
+                int alive = this.realm.living();
+                int bands = this.realm.countOfRank(cast<int>(Rank.Band));
+                int chiefs = this.realm.countOfRank(cast<int>(Rank.Chiefdom));
+                int kings = this.realm.countOfRank(cast<int>(Rank.Kingdom));
+                int empires = this.realm.countOfRank(cast<int>(Rank.Empire));
+                System.IO.Console.println($"  nations: {alive} living || {bands} bands, {chiefs} chiefdoms, {kings} kingdoms, {empires} empires || {this.annexed} towns changed hands, {this.extinct} peoples ended");
+                System.IO.Console.println($"  expansion: {this.hived} villages hived off ({this.hivedFolk} people), {this.colonies} colonies sent out ({this.colonists} settlers, {this.planted} arrived, {this.strayed} turned back), {this.joined} places merged");
+                System.IO.Console.println($"  prospecting: {this.dug} tracts opened, {this.struck} working faces found");
+                int top = this.realm.biggest();
+                if (top >= 0) {
+                    int tp = this.realm.peopleOf(top);
+                    int tt = this.realm.townsOf(top);
+                    int tl = this.realm.landOf(top);
+                    int te = this.realm.eraOf(top);
+                    System.IO.Console.println($"  the largest: nation {top} -- {tp} people over {tt} towns and {tl} blocks, era {te}");
+                }
                 if (places > 0) {
                     System.IO.Console.println($"  culture over {places} places (all began at 50):");
                     System.IO.Console.println($"    bold {lo[0]}..{hi[0]} mean {sum[0] / places} | social {lo[1]}..{hi[1]} mean {sum[1] / places} | greed {lo[2]}..{hi[2]} mean {sum[2] / places}");

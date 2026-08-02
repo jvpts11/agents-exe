@@ -1,0 +1,249 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.World.Grid;
+import Agents.World.WorldGen;
+import Agents.World.Builds;
+import Agents.World.BuildingKind;
+import Agents.World.Craft;
+import Agents.World.Ground;
+import Agents.World.Good;
+import Agents.World.Goods;
+import Agents.World.NodeField;
+import Agents.World.Nodes;
+import Agents.World.Harvest;
+program AgentsExe;
+
+// The catalogue, checked against itself.
+//
+// Every one of these would be a silent hole rather than a crash: a kind whose recipe was never
+// filled in reads as a building that makes Nothing out of Nothing, gets built, gets staffed, and
+// produces nothing for ever -- and the only symptom is a line in the goods ledger that stays at
+// zero, which is exactly what nineteen goods were doing before this wave. A table filled in by hand
+// wants a test that reads it back.
+
+public bundle Agents {
+    public namespace Checks {
+
+        public class Catalog {
+            [Tag(name: "catalog")]
+            [Test]
+            public static method every_kind_is_filled_in() returns void {
+                mutable int nameless = 0;
+                mutable int meshless = 0;
+                mutable int k = 1;
+                while (k < BuildingKind.count()) {
+                    if (Builds.name(k).equals("NoBuilding")) {
+                        nameless = nameless + 1;
+                    }
+                    if (Builds.mesh(k).equals("NoBuilding")) {
+                        meshless = meshless + 1;
+                    }
+                    k = k + 1;
+                }
+                Test.checking("no building kind was left out of the table");
+                Test.assertEqual(nameless, 0);
+                Test.checking("and every one of them knows what to draw with");
+                Test.assertEqual(meshless, 0);
+                return;
+            }
+
+            // A building somebody works in has to belong to a trade, or nobody will ever be assigned
+            // to it: the job selector walks CRAFTS, so a workshop with no craft is a workshop that
+            // gets built, stands finished, and is never once entered.
+            [Tag(name: "catalog")]
+            [Test]
+            public static method every_staffed_building_belongs_to_a_trade() returns void {
+                mutable int orphan = 0;
+                mutable int handless = 0;
+                mutable int k = 1;
+                while (k < BuildingKind.count()) {
+                    if (Builds.staffed(k)) {
+                        if (Builds.craft(k) == cast<int>(Craft.NoCraft)) {
+                            orphan = orphan + 1;
+                        }
+                        if (Builds.hands(k) <= 0) {
+                            handless = handless + 1;
+                        }
+                    }
+                    k = k + 1;
+                }
+                Test.checking("no workshop is outside every trade");
+                Test.assertEqual(orphan, 0);
+                Test.checking("and every one of them has room for somebody");
+                Test.assertEqual(handless, 0);
+                return;
+            }
+
+            // The point of the wave: a good the catalogue names and nothing makes is a dead end in
+            // the economy. Sand is the one exception and it is deliberate -- nothing in the world
+            // places sand, so the glassworks would be a building nobody could ever supply, and a
+            // building that stalls for ever is worse than one that does not exist.
+            [Tag(name: "catalog")]
+            [Test]
+            public static method every_good_has_something_that_makes_it() returns void {
+                mutable int[] made = new int[Goods.count()]();
+                mutable int k = 1;
+                while (k < BuildingKind.count()) {
+                    int out = Builds.out(k);
+                    if (out > 0) {
+                        made[out] = made[out] + 1;
+                    }
+                    k = k + 1;
+                }
+                // Everything a node yields is "made" by going out and getting it.
+                mutable int nk = 1;
+                while (nk < Nodes.count()) {
+                    int y = Nodes.gives(nk);
+                    if (y > 0) {
+                        made[y] = made[y] + 1;
+                    }
+                    nk = nk + 1;
+                }
+                made[cast<int>(Good.RawMeat)] = made[cast<int>(Good.RawMeat)] + 1;   // the hunt
+                made[cast<int>(Good.Hide)] = made[cast<int>(Good.Hide)] + 1;
+                // The one acknowledged hole, named rather than waved through: nothing in the world
+                // places SAND, so a glassworks would be a workshop that can never start, and a
+                // workshop that stalls for ever is worse than one that does not exist. Asserting
+                // the exact pair means a THIRD good going dark still turns this red -- a blanket
+                // allowance would have quietly covered for it.
+                mutable int dead = 0;
+                mutable int unexpected = 0;
+                mutable int g = 1;
+                while (g < Goods.count()) {
+                    if (made[g] == 0) {
+                        dead = dead + 1;
+                        if (g != cast<int>(Good.Sand) && g != cast<int>(Good.Glass)) {
+                            unexpected = unexpected + 1;
+                        }
+                    }
+                    g = g + 1;
+                }
+                delete made;
+                Test.checking("nothing but sand and glass is impossible to obtain");
+                Test.assertEqual(unexpected, 0);
+                Test.checking("and that pair is still exactly two");
+                Test.assertEqual(dead, 2);
+                return;
+            }
+
+            // Every input of every recipe has to be makeable too, or the chain dead-ends one rung
+            // further along instead of at the top -- which is harder to see and just as broken.
+            [Tag(name: "catalog")]
+            [Test]
+            public static method no_recipe_asks_for_something_impossible() returns void {
+                mutable int[] made = new int[Goods.count()]();
+                mutable int k = 1;
+                while (k < BuildingKind.count()) {
+                    int out = Builds.out(k);
+                    if (out > 0) {
+                        made[out] = made[out] + 1;
+                    }
+                    k = k + 1;
+                }
+                mutable int nk = 1;
+                while (nk < Nodes.count()) {
+                    int y = Nodes.gives(nk);
+                    if (y > 0) {
+                        made[y] = made[y] + 1;
+                    }
+                    nk = nk + 1;
+                }
+                made[cast<int>(Good.RawMeat)] = made[cast<int>(Good.RawMeat)] + 1;
+                made[cast<int>(Good.Hide)] = made[cast<int>(Good.Hide)] + 1;
+                mutable int broken = 0;
+                k = 1;
+                while (k < BuildingKind.count()) {
+                    int a = Builds.in1(k);
+                    int b = Builds.in2(k);
+                    if (a > 0 && made[a] == 0) {
+                        broken = broken + 1;
+                    }
+                    if (b > 0 && made[b] == 0) {
+                        broken = broken + 1;
+                    }
+                    k = k + 1;
+                }
+                delete made;
+                Test.checking("no workshop waits on an input nothing in the world produces");
+                Test.assertEqual(broken, 0);
+                return;
+            }
+
+            // Husbandry is the only chain whose input is ground, so it is the only one that may have
+            // no in1 -- anything else with an empty recipe is a `put` somebody forgot.
+            [Tag(name: "catalog")]
+            [Test]
+            public static method only_husbandry_makes_something_out_of_nothing() returns void {
+                mutable int wrong = 0;
+                mutable int k = 1;
+                while (k < BuildingKind.count()) {
+                    if (Builds.out(k) > 0 && Builds.in1(k) == cast<int>(Good.Nothing)) {
+                        if (Builds.site(k) == cast<int>(Ground.Anywhere)) {
+                            wrong = wrong + 1;
+                        }
+                    }
+                    k = k + 1;
+                }
+                Test.checking("nothing conjures a good out of thin air except a field");
+                Test.assertEqual(wrong, 0);
+                return;
+            }
+        }
+
+        // Prospecting, on its own, on a small world -- so the mechanism is checked without waiting
+        // twenty generations to see whether anybody happened to take up the trade.
+        public class Prospecting {
+            [Tag(name: "world")]
+            [Test]
+            public static method a_working_face_appears_only_after_the_ground_is_opened() returns void {
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(640, 360);
+                NodeField* nf = g.surface();
+                // Both classes: a seam may be metal or it may be stone, and `openSeam` opens either
+                // -- counting only one of them is how the first version of this test read a hundred
+                // and fourteen where a hundred and sixty-eight had been opened.
+                int before = nf.totalOf(cast<int>(Harvest.Mine))
+                           + nf.totalOf(cast<int>(Harvest.Quarry));
+                // Open the whole world. Nothing else in the game does this -- a prospector opens a
+                // disc of eight cells at a time -- but it is the only way to ask the question
+                // "could this ever be worked" rather than "did somebody happen to walk there".
+                mutable int opened = 0;
+                mutable int y = 0;
+                while (y < 360) {
+                    mutable int x = 0;
+                    while (x < 640) {
+                        if (nf.openSeam(x, y) != 0) {
+                            opened = opened + 1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                int after = nf.totalOf(cast<int>(Harvest.Mine))
+                          + nf.totalOf(cast<int>(Harvest.Quarry));
+                Test.checking("the world was born with hidden working faces in it");
+                Test.assertAtLeast(opened, 1);
+                Test.checking("and none of them counted for anything until they were opened");
+                Test.assertEqual(after - before, opened);
+                // Opening the same ground twice must not conjure a second seam out of the first.
+                mutable int again = 0;
+                y = 0;
+                while (y < 360) {
+                    mutable int x = 0;
+                    while (x < 640) {
+                        if (nf.openSeam(x, y) != 0) {
+                            again = again + 1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                Test.checking("a seam already opened cannot be opened again");
+                Test.assertEqual(again, 0);
+                delete g;
+                return;
+            }
+        }
+    }
+}
