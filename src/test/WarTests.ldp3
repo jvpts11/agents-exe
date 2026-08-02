@@ -1,0 +1,181 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.Sim.Armies;
+import Agents.Sim.Muster;
+import Agents.Sim.Simulation;
+import Agents.World.Builds;
+import Agents.World.BuildingKind;
+import Agents.World.Good;
+program AgentsExe;
+
+// War, asked as arithmetic.
+//
+// The arc tests next door answer "did anybody go to war", which is a question about fifty thousand
+// people and takes six minutes to ask. Everything here is a rule -- what a wall is worth, when a
+// muster gives up, what a slot does when the army in it stands down -- and a rule can be checked
+// on a table of sixty-four rows in no time at all. The two are different questions and both are
+// worth asking; this file is the cheap half.
+
+public bundle Agents {
+    public namespace Checks {
+
+        public class Warring {
+
+            // The slot bookkeeping. Every other rule in the war model reads `alive`, `open` and
+            // `stateOf`, so if these three disagree with each other nothing above them can be right.
+            [Tag(name: "war")]
+            [Test]
+            public static method a_slot_is_free_before_and_after_but_not_during() returns void {
+                Armies* h = new Armies(4) on heap;
+                Test.checking("nothing is in the field to begin with");
+                Test.assertEqual(h.inTheField(), 0);
+                int a = h.open();
+                Test.checking("and a slot is going spare");
+                Test.assertTrue(a >= 0);
+                h.call(a, 7, 3, 9, 1234);
+                Test.checking("calling one out fills the slot");
+                Test.assertTrue(h.alive(a));
+                Test.assertEqual(h.inTheField(), 1);
+                Test.checking("a called army is gathering, not marching");
+                Test.assertEqual(h.stateOf(a), cast<int>(Muster.Gathering));
+                Test.checking("and it remembers whose it is, where from and what for");
+                Test.assertEqual(h.nationOf(a), 7);
+                Test.assertEqual(h.musterOf(a), 3);
+                Test.assertEqual(h.targetOf(a), 9);
+                Test.assertEqual(h.generalOf(a), 1234);
+                Test.checking("the same slot is not offered twice");
+                Test.assertTrue(h.open() != a);
+                h.disband(a);
+                Test.checking("standing down empties it again");
+                Test.assertTrue(!h.alive(a));
+                Test.assertEqual(h.inTheField(), 0);
+                Test.checking("and hands the slot back");
+                Test.assertEqual(h.open(), a);
+                delete h;
+                return;
+            }
+
+            // The clock is per state, not per army. A siege that has sat for three hundred censuses
+            // and then storms the wall must not be judged on the three hundred it spent waiting --
+            // every phase gets its own patience, and that is what `held` is for.
+            [Tag(name: "war")]
+            [Test]
+            public static method every_phase_gets_its_own_clock() returns void {
+                Armies* h = new Armies(2) on heap;
+                h.call(0, 1, 2, 3, 4);
+                Test.checking("a fresh army has waited no time at all");
+                Test.assertEqual(h.heldFor(0), 0);
+                mutable int t = 0;
+                while (t < 5) {
+                    h.tick(0);
+                    t = t + 1;
+                }
+                Test.checking("and the clock runs while it stays put");
+                Test.assertEqual(h.heldFor(0), 5);
+                h.setState(0, cast<int>(Muster.Marching));
+                Test.checking("changing what it is doing resets the clock");
+                Test.assertEqual(h.heldFor(0), 0);
+                Test.assertEqual(h.stateOf(0), cast<int>(Muster.Marching));
+                // Setting the state it is already in must NOT reset it, or an army re-confirmed
+                // every census would sit in front of a wall for ever and no siege would ever lift.
+                h.tick(0);
+                h.tick(0);
+                h.setState(0, cast<int>(Muster.Marching));
+                Test.checking("but re-confirming the same order does not");
+                Test.assertEqual(h.heldFor(0), 2);
+                delete h;
+                return;
+            }
+
+            // Siege work accumulates and a stood-down army takes none of it with it. Without this a
+            // recycled slot would arrive in front of a fresh wall with the last siege's progress
+            // already banked, and towns would fall the moment they were looked at.
+            [Tag(name: "war")]
+            [Test]
+            public static method a_recycled_slot_starts_its_siege_from_nothing() returns void {
+                Armies* h = new Armies(2) on heap;
+                h.call(0, 1, 2, 3, 4);
+                h.press(0, 100);
+                h.press(0, 60);
+                Test.checking("pressing a wall adds up");
+                Test.assertEqual(h.siegeOf(0), 160);
+                h.disband(0);
+                h.call(0, 5, 6, 7, 8);
+                Test.checking("and the next army in the slot inherits none of it");
+                Test.assertEqual(h.siegeOf(0), 0);
+                Test.checking("nor the last one's strength");
+                Test.assertEqual(h.strengthOf(0), 0);
+                delete h;
+                return;
+            }
+
+            [Tag(name: "war")]
+            [Test]
+            public static method the_field_counts_only_what_is_in_it() returns void {
+                Armies* h = new Armies(8) on heap;
+                h.call(0, 1, 1, 2, 3);
+                h.call(1, 2, 4, 5, 6);
+                h.call(2, 3, 7, 8, 9);
+                h.setState(1, cast<int>(Muster.Besieging));
+                h.setState(2, cast<int>(Muster.Besieging));
+                Test.checking("three were called out");
+                Test.assertEqual(h.inTheField(), 3);
+                Test.checking("two of them are sitting in front of a wall");
+                Test.assertEqual(h.countOfState(cast<int>(Muster.Besieging)), 2);
+                Test.checking("and one is still gathering");
+                Test.assertEqual(h.countOfState(cast<int>(Muster.Gathering)), 1);
+                h.disband(1);
+                Test.checking("standing one down leaves two");
+                Test.assertEqual(h.inTheField(), 2);
+                Test.checking("and one before a wall");
+                Test.assertEqual(h.countOfState(cast<int>(Muster.Besieging)), 1);
+                delete h;
+                return;
+            }
+
+            // The escalation is the point. A stake fence buys an afternoon and a keep buys long
+            // enough that the army outside starves first -- if the ladder were flat, reaching the
+            // third era would buy a town nothing and there would be no reason to want it.
+            [Tag(name: "war")]
+            [Test]
+            public static method the_wall_a_town_can_build_climbs_with_its_era() returns void {
+                int one = Builds.bestWall(1);
+                int two = Builds.bestWall(2);
+                int three = Builds.bestWall(3);
+                Test.checking("every era from the first has something to hide behind");
+                Test.assertTrue(one >= 0);
+                Test.assertTrue(two >= 0);
+                Test.assertTrue(three >= 0);
+                Test.checking("a tribal people can raise a stake fence");
+                Test.assertEqual(one, cast<int>(BuildingKind.Palisade));
+                Test.checking("the second era buys stone");
+                Test.assertEqual(two, cast<int>(BuildingKind.Rampart));
+                Test.checking("and the third a keep");
+                Test.assertEqual(three, cast<int>(BuildingKind.Keep));
+                Test.checking("and each is worth strictly more than the one before");
+                Test.assertTrue(Builds.wall(two) > Builds.wall(one));
+                Test.assertTrue(Builds.wall(three) > Builds.wall(two));
+                return;
+            }
+
+            // A wall makes nothing, and everything else in the catalogue is scored on what it makes.
+            // If a wall ever picked up a craft it would be scored as a workshop with no output and
+            // never built at all -- which is exactly how it behaved before it was scored apart.
+            [Tag(name: "war")]
+            [Test]
+            public static method nothing_that_holds_a_wall_also_holds_a_trade() returns void {
+                mutable int walls = 0;
+                for (int k in 0..BuildingKind.count()) {
+                    if (Builds.wall(k) > 0) {
+                        walls = walls + 1;
+                        Test.checking($"{Builds.name(k)} makes nothing");
+                        Test.assertEqual(Builds.out(k), cast<int>(Good.Nothing));
+                    }
+                }
+                Test.checking("and the catalogue has walls in it at all");
+                Test.assertAtLeast(walls, 3);
+                return;
+            }
+        }
+    }
+}

@@ -182,6 +182,21 @@ public bundle Agents {
             // The ground people move over, and how it changes because they moved over it. Not a
             // map anybody draws: a road here is a record of where the traffic already was.
             private mutable Ways* paths;
+            // War above the raid. An army is a thing a NATION owns: it musters, it marches, it
+            // sits down in front of a wall, and it is the only way ground changes hands.
+            private mutable Armies* host;
+            private mutable int[] cwall;       // how much wall each town has standing
+            private mutable int[] carmy;       // the army besieging it, or -1
+            private mutable int[] cbarr;       // barracks working in it
+            // A conquered town keeps the language its people speak, which is the whole reason
+            // conquest is worth doing carefully. Held per SETTLEMENT and not per nation, because
+            // after a conquest the two disagree -- and that disagreement is the thing a ruler has
+            // to spend something to fix.
+            private mutable int[] ctongue;
+            private mutable int[] cheld;       // censuses since it was taken, or 0
+            private mutable long conquests;
+            private mutable long revolts;
+            private mutable long converted;
             private mutable Nations* realm;
             private mutable int[] cnat;        // settlement -> nation
             // A colony that has been decided on but not yet walked to. Until its people are
@@ -193,6 +208,7 @@ public bundle Agents {
             private mutable int[] csettle;     // censuses left to get there
             private mutable int[] cmother;     // who sent them, so a failed expedition can go home
             private mutable int settler;       // whose turn it is to think about it
+            private mutable int warlord;       // and whose turn it is to think about a war
             private mutable long colonies;
             private mutable long colonists;
             private mutable long planted;      // expeditions that reached their ground
@@ -446,6 +462,19 @@ public bundle Agents {
                 // come to answer to. The count of living nations FALLS over an arc while each of
                 // them gets bigger, which is the shape history actually has.
                 this.paths = new Ways(grid.width(), grid.height()) on heap;
+                this.host = new Armies(64) on heap;
+                this.cwall = new int[this.ncomm]();
+                this.carmy = new int[this.ncomm]();
+                this.cbarr = new int[this.ncomm]();
+                this.ctongue = new int[this.ncomm]();
+                this.cheld = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    this.carmy[c] = 0 - 1;
+                    this.ctongue[c] = c;         // every band begins speaking its own
+                }
+                this.conquests = 0;
+                this.revolts = 0;
+                this.converted = 0;
                 this.realm = new Nations(this.ncomm) on heap;
                 this.cnat = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
@@ -460,6 +489,7 @@ public bundle Agents {
                     this.cmother[c] = 0 - 1;
                 }
                 this.settler = 0;
+                this.warlord = 0;
                 this.colonies = 0;
                 this.colonists = 0;
                 this.planted = 0;
@@ -537,6 +567,12 @@ public bundle Agents {
                 delete this.culture;
                 delete this.deeds;
                 delete this.paths;
+                delete this.host;
+                delete this.cwall;
+                delete this.carmy;
+                delete this.cbarr;
+                delete this.ctongue;
+                delete this.cheld;
                 delete this.realm;
                 delete this.cnat;
                 delete this.csiteX;
@@ -597,6 +633,10 @@ public bundle Agents {
                 return this.realm.eraOf(this.cnat[comm]);
             }
 
+            public method communityCount() returns int {
+                return this.ncomm;
+            }
+
             public method populationOf(int comm) returns int {
                 if (comm < 0 || comm >= this.ncomm) {
                     return 0;
@@ -617,6 +657,46 @@ public bundle Agents {
 
             public method ways() returns Ways* {
                 return this.paths;
+            }
+
+            public method armies() returns Armies* {
+                return this.host;
+            }
+
+            // What a town speaks, which after a conquest is not what its nation speaks. Held per
+            // settlement precisely so the two can disagree.
+            public method tongueOf(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0 - 1;
+                }
+                return this.ctongue[comm];
+            }
+
+            // Censuses since it was taken by force, or 0 if it was never taken or has been won over.
+            public method heldOf(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0;
+                }
+                return this.cheld[comm];
+            }
+
+            public method wallOf(int comm) returns int {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return 0;
+                }
+                return this.cwall[comm];
+            }
+
+            public method conquestCount() returns long {
+                return this.conquests;
+            }
+
+            public method revoltCount() returns long {
+                return this.revolts;
+            }
+
+            public method convertCount() returns long {
+                return this.converted;
             }
 
             // Which nation holds this ground, or -1. The border is not drawn anywhere: it is the
@@ -743,6 +823,415 @@ public bundle Agents {
                 delete lessons;
                 return;
             }
+
+            // ---- war ----
+            //
+            // A nation that wants a town, an army that walks to it, a wall that makes it take time,
+            // and a border that finally moves. All of it once a census, in one pass over the
+            // armies -- there are sixty-four slots in the world, so this is a rounding error beside
+            // the sweep over fifty thousand people that precedes it.
+            private method campaign() returns void {
+                this.readWalls();
+                for (int a in 0..this.host.limit()) {
+                    if (this.host.alive(a)) {
+                        this.marchOn(a);
+                    }
+                }
+                this.declareWar();
+                this.unrest();
+                return;
+            }
+
+            // What every town has standing between itself and an army, and which army is sitting
+            // in front of it. One pass over the building table.
+            private method readWalls() returns void {
+                for (int c in 0..this.ncomm) {
+                    this.cwall[c] = 0;
+                    this.carmy[c] = 0 - 1;
+                    this.cbarr[c] = 0;
+                }
+                for (int b in 0..this.town.count()) {
+                    if (this.town.isGone(b) || !this.town.isWorking(b)) {
+                        continue;
+                    }
+                    int k = this.town.kindOf(b);
+                    int hold = Builds.wall(k);
+                    if (hold <= 0) {
+                        continue;
+                    }
+                    int c = this.town.ownerOf(b);
+                    if (c >= 0 && c < this.ncomm) {
+                        this.cwall[c] = this.cwall[c] + hold;
+                        if (k == cast<int>(BuildingKind.Barracks)) {
+                            this.cbarr[c] = this.cbarr[c] + 1;
+                        }
+                    }
+                }
+                for (int a in 0..this.host.limit()) {
+                    if (this.host.stateOf(a) == cast<int>(Muster.Besieging)
+                        || this.host.stateOf(a) == cast<int>(Muster.Storming)) {
+                        int t = this.host.targetOf(a);
+                        if (t >= 0 && t < this.ncomm) {
+                            this.carmy[t] = a;
+                        }
+                    }
+                }
+                return;
+            }
+
+            // Somebody decides. This is the difference between a war and a raid: a raid needs
+            // nobody's permission, and a war needs a seat, a grievance and a man to lead it.
+            //
+            // One nation a census, taken in turn, exactly like colonising -- and for the same
+            // reason. "Who should I go to war with" is an expensive question and it is asked once
+            // per WORLD per second.
+            private method declareWar() returns void {
+                int nn = this.realm.limit();
+                mutable int tries = 0;
+                while (tries < nn) {
+                    this.warlord = this.warlord + 1;
+                    if (this.warlord >= nn) {
+                        this.warlord = 0;
+                    }
+                    tries = tries + 1;
+                    int nat = this.warlord;
+                    if (!this.realm.alive(nat)
+                        || this.realm.rankOf(nat) < cast<int>(Rank.Kingdom)) {
+                        continue;                // a chiefdom raids; it does not campaign
+                    }
+                    int seat = this.realm.seatOf(nat);
+                    if (seat < 0 || this.cpop[seat] < Simulation.VILLAGE) {
+                        continue;
+                    }
+                    // An army eats. A nation that cannot feed its own capital does not send five
+                    // hundred people to sit in a field.
+                    if (this.stores.foodOf(seat) < this.cpop[seat] * Simulation.LARDER) {
+                        continue;
+                    }
+                    if (this.armyOf(nat) >= 0) {
+                        continue;                // one in the field at a time
+                    }
+                    // What it wants: the nearest town of somebody it has a grudge against. The
+                    // grudge is the raid's own memory -- so a war is what a feud becomes once one
+                    // side is big enough to finish it, which is exactly the escalation the raid
+                    // could never provide on its own.
+                    int want = this.warAim(nat, seat);
+                    if (want < 0) {
+                        continue;
+                    }
+                    int lead = this.raiseGeneral(seat);
+                    if (lead < 0) {
+                        continue;
+                    }
+                    int a = this.host.open();
+                    if (a < 0) {
+                        return;
+                    }
+                    this.host.call(a, nat, seat, want, lead);
+                    this.folk.setRole(lead, cast<int>(Role.General));
+                    this.folk.setJob(lead, cast<int>(Job.General));
+                    return;
+                }
+                return;
+            }
+
+            // The town this nation is going for, or -1. Somewhere it has a feud with, near enough
+            // to reach, and not already somebody's siege.
+            private method warAim(int nat, int seat) returns int {
+                mutable int best = 0 - 1;
+                mutable float bestD = 0.0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0 || this.cnat[c] == nat) {
+                        continue;
+                    }
+                    if (this.carmy[c] >= 0) {
+                        continue;
+                    }
+                    // A grievance, in either direction. Somebody raided us, or we have been raiding
+                    // them and it is time to stop carrying the grain home one load at a time.
+                    boolean quarrel = this.craider[seat] == c || this.cfoe[seat] == c
+                                   || this.craider[c] == seat || this.cfoe[c] == seat;
+                    if (!quarrel) {
+                        continue;
+                    }
+                    float dx = this.ccx[c] - this.ccx[seat];
+                    float dy = this.ccy[c] - this.ccy[seat];
+                    float d = dx * dx + dy * dy;
+                    if (d > cast<float>(Simulation.WAR_REACH * Simulation.WAR_REACH)) {
+                        continue;
+                    }
+                    if (best < 0 || d < bestD) {
+                        best = c;
+                        bestD = d;
+                    }
+                }
+                return best;
+            }
+
+            // Whoever this town would follow. The most established grown person in it who is not
+            // already its chief -- a nation does not send the man who holds it together.
+            private method raiseGeneral(int seat) returns int {
+                int n = this.folk.limit();
+                mutable int best = 0 - 1;
+                mutable int bestV = 0;
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.isAdult(i)
+                        && this.folk.homeOf(i) == seat && i != this.chief[seat]) {
+                        int v = this.folk.influenceOf(i) + this.folk.boldnessOf(i) / 4;
+                        if (v > bestV) {
+                            bestV = v;
+                            best = i;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return best;
+            }
+
+            private method armyOf(int nat) returns int {
+                for (int a in 0..this.host.limit()) {
+                    if (this.host.alive(a) && this.host.nationOf(a) == nat) {
+                        return a;
+                    }
+                }
+                return 0 - 1;
+            }
+
+            // One army, one census.
+            private method marchOn(int a) returns void {
+                this.host.tick(a);
+                int nat = this.host.nationOf(a);
+                int t = this.host.targetOf(a);
+                int lead = this.host.generalOf(a);
+                // An army without a general is a crowd. Without a target it is a crowd in a field.
+                if (t < 0 || t >= this.ncomm || this.cpop[t] <= 0 || !this.realm.alive(nat)) {
+                    this.standDown(a);
+                    return;
+                }
+                if (lead < 0 || !this.folk.alive(lead)) {
+                    // The general is dead. Somebody else steps up if there is anybody, and if there
+                    // is not, the army goes home -- which is what an army without a head does.
+                    int heir = this.raiseGeneral(this.host.musterOf(a));
+                    if (heir < 0) {
+                        this.standDown(a);
+                        return;
+                    }
+                    this.host.setGeneral(a, heir);
+                    this.folk.setRole(heir, cast<int>(Role.General));
+                    this.folk.setJob(heir, cast<int>(Job.General));
+                    return;
+                }
+                int under = this.countUnder(a, lead);
+                this.host.setStrength(a, under);
+                int s = this.host.stateOf(a);
+                if (s == cast<int>(Muster.Gathering)) {
+                    if (under >= Simulation.HOST) {
+                        this.host.setState(a, cast<int>(Muster.Marching));
+                    } else if (this.host.heldFor(a) > Simulation.MUSTER_WAIT) {
+                        this.standDown(a);       // nobody came
+                    }
+                    return;
+                }
+                float dx = this.ccx[t] - this.folk.xAt(lead);
+                float dy = this.ccy[t] - this.folk.yAt(lead);
+                boolean there = dx * dx + dy * dy
+                              < cast<float>(Simulation.SIEGE_LINE * Simulation.SIEGE_LINE);
+                if (s == cast<int>(Muster.Marching)) {
+                    if (there) {
+                        this.host.setState(a, cast<int>(Muster.Besieging));
+                    } else if (this.host.heldFor(a) > Simulation.MARCH_WAIT) {
+                        this.standDown(a);
+                    }
+                    return;
+                }
+                if (s == cast<int>(Muster.Besieging)) {
+                    if (!there || under < Simulation.HOST / 3) {
+                        this.standDown(a);       // starved out, or bled out
+                        return;
+                    }
+                    // Sitting in front of it does two things: it breaks the wall down, and it eats
+                    // the fields. A town with no wall falls at once; a town with a keep outlasts
+                    // the army in front of it, which is what a keep is FOR.
+                    this.host.press(a, under);
+                    this.stores.seize(t, this.stores.richest(t), under / 4 + 1);
+                    if (this.host.siegeOf(a) >= this.cwall[t]) {
+                        this.host.setState(a, cast<int>(Muster.Storming));
+                    } else if (this.host.heldFor(a) > Simulation.SIEGE_WAIT) {
+                        this.standDown(a);
+                    }
+                    return;
+                }
+                if (s == cast<int>(Muster.Storming)) {
+                    this.takeTown(a, nat, t);
+                    return;
+                }
+                this.standDown(a);
+                return;
+            }
+
+            // Soldiers within a general's reach. This is the FORMATION: an army is the people who
+            // are actually standing around the man leading it, so one that has strung itself across
+            // the country is weak wherever it is, exactly as it should be.
+            private method countUnder(int a, int lead) returns int {
+                int n = this.folk.limit();
+                float gx = this.folk.xAt(lead);
+                float gy = this.folk.yAt(lead);
+                float span = cast<float>(Simulation.RANKS * Simulation.RANKS);
+                int nat = this.host.nationOf(a);
+                mutable int c = 0;
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.jobOf(i) == cast<int>(Job.Raider)) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm && this.cnat[h] == nat) {
+                            float dx = this.folk.xAt(i) - gx;
+                            float dy = this.folk.yAt(i) - gy;
+                            if (dx * dx + dy * dy < span) {
+                                c = c + 1;
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                return c;
+            }
+
+            // The border moves.
+            //
+            // Everything the town is stays: its people, its buildings, its culture and -- the part
+            // that matters -- its LANGUAGE. Nobody is displaced and nobody forgets who they are,
+            // which is why a conquest is the beginning of a problem rather than the end of one.
+            private method takeTown(int a, int nat, int t) returns void {
+                int was = this.cnat[t];
+                if (was == nat) {
+                    this.standDown(a);
+                    return;
+                }
+                this.cnat[t] = nat;
+                this.realm.annex(nat, was);
+                // Nothing is torn down. The town keeps its buildings, its fields and its town hall,
+                // because a conquest is a change of flag and not a demolition -- the ONLY thing that
+                // changed is the line on the map. That is also why it is a problem afterwards.
+                this.cheld[t] = 1;               // and the clock on holding it starts
+                int had = this.chief[t];         // whoever they listened to is not in charge now
+                if (had >= 0 && this.folk.alive(had)) {
+                    this.folk.setRole(had, cast<int>(Role.None));
+                }
+                this.chief[t] = 0 - 1;
+                this.conquests = this.conquests + 1;
+                this.annexed = this.annexed + 1;
+                int lead = this.host.generalOf(a);
+                if (lead >= 0 && this.folk.alive(lead)) {
+                    this.folk.earn(lead, 40);    // taking a city is the largest thing anybody does
+                }
+                this.standDown(a);
+                return;
+            }
+
+            private method standDown(int a) returns void {
+                int lead = this.host.generalOf(a);
+                if (lead >= 0 && this.folk.alive(lead)) {
+                    this.folk.setRole(lead, cast<int>(Role.None));
+                    this.folk.setJob(lead, cast<int>(Job.Idle));
+                }
+                this.host.disband(a);
+                return;
+            }
+
+            // What a conquered town does about it.
+            //
+            // A people that still speaks its own language under somebody else's flag is a problem
+            // that does not go away by being ignored, and that is the incentive: a ruler can leave
+            // them alone and live with the risk, or spend on making them his. Neither is free, and
+            // that choice is the whole reason conquest is interesting rather than a counter going
+            // up.
+            private method unrest() returns void {
+                for (int c in 0..this.ncomm) {
+                    if (this.cheld[c] <= 0) {
+                        continue;
+                    }
+                    // A place with nobody left in it is not held by anybody. A siege eats the fields
+                    // and the storming kills people, so a town CAN empty out shortly after being
+                    // taken -- and when it does, the flag on it means nothing and has to come down,
+                    // or the world carries a subject population of nought for the rest of the run.
+                    if (this.cpop[c] <= 0) {
+                        this.cheld[c] = 0;
+                        continue;
+                    }
+                    this.cheld[c] = this.cheld[c] + 1;
+                    int nat = this.cnat[c];
+                    if (this.ctongue[c] == this.realm.tongueOf(nat)) {
+                        this.cheld[c] = 0;       // they are his people now; nothing left to hold
+                        continue;
+                    }
+                    // Conversion is bought, not decreed. A ruler pays in the one thing a subject
+                    // town cannot argue with -- grain -- and it takes as long as it takes.
+                    int seat = this.realm.seatOf(nat);
+                    if (seat >= 0 && seat != c
+                        && this.stores.foodOf(seat) > this.cpop[seat] * Simulation.LARDER * 2) {
+                        this.stores.take(seat, this.stores.richest(seat), Simulation.CONVERT_COST);
+                        this.stores.add(c, cast<int>(Good.Grain), Simulation.CONVERT_COST / 2);
+                        if (this.cheld[c] > Simulation.CONVERT_TIME) {
+                            this.ctongue[c] = this.realm.tongueOf(nat);
+                            this.converted = this.converted + 1;
+                            this.cheld[c] = 0;
+                        }
+                        continue;
+                    }
+                    // Nobody is spending anything on them, and they remember. The longer it goes
+                    // on the likelier it is that one morning they simply stop answering.
+                    int odds = this.cheld[c] / 8;
+                    if (cast<int>(LandMath.hash01(this.seed ^ 0x51B3, c, this.tick) * 1000.0)
+                        < odds) {
+                        this.breakAway(c);
+                    }
+                }
+                return;
+            }
+
+            // A town that has had enough. It becomes its own nation again, speaking what it always
+            // spoke -- which is why the language was worth keeping per settlement.
+            private method breakAway(int c) returns void {
+                int free = this.realm.open();
+                if (free < 0) {
+                    return;
+                }
+                int was = this.cnat[c];
+                this.realm.raise(free, this.ctongue[c], was, this.tick, this.realm.eraOf(was));
+                this.cnat[c] = free;
+                this.cheld[c] = 0;
+                this.craided[c] = Simulation.GRUDGE;
+                this.craider[c] = this.realm.seatOf(was);
+                this.revolts = this.revolts + 1;
+                return;
+            }
+
+            // How far a nation will campaign, how many make an army, and how long each phase gets
+            // before the thing falls apart. Every one of these is a patience: an army is people
+            // standing in a field eating, and the only reason a siege ever ends is that somebody
+            // runs out of it first.
+            public static int WAR_REACH = 400;
+            public static int HOST = 24;
+            public static int RANKS = 40;
+            // How close the line sits. Twelve cells is INSIDE the town's own claim, and that is
+            // deliberate: sitting there is what makes `foeNear` fire on both sides, so a siege costs
+            // lives through exactly the machinery a village brawl already used. There is no separate
+            // battle code anywhere in this file, and there should not be.
+            public static int SIEGE_LINE = 12;
+            // How many a single barracks keeps standing. Small on purpose: a standing soldier eats
+            // without producing, so a town that lines them up instead of feeding itself starves,
+            // and the catalogue should let it make that mistake without forcing it.
+            public static int KEPT = 6;
+            public static int MUSTER_WAIT = 90;
+            public static int MARCH_WAIT = 400;
+            public static int SIEGE_WAIT = 300;
+
+            // What it costs to make a conquered people yours, and how long it takes. Paid every
+            // census out of the capital's own stores, so an empire that overreaches finds it
+            // cannot hold what it took.
+            public static int CONVERT_COST = 12;
+            public static int CONVERT_TIME = 600;
 
             // Everything that is true of a POLITY, read off the settlements that answer to it.
             //
@@ -1172,6 +1661,8 @@ public bundle Agents {
                             this.workHunt(i);
                         } else if (jb == cast<int>(Job.Prospector)) {
                             this.workProspect(i);
+                        } else if (jb == cast<int>(Job.General)) {
+                            this.workLead(i);
                         } else if (this.craftOfJob(jb) != cast<int>(Craft.NoCraft)) {
                             this.workCraft(i);
                         } else {
@@ -1327,7 +1818,11 @@ public bundle Agents {
                         continue;
                     }
                     boolean wandering = this.folk.actOf(i) == cast<int>(Act.Wander);
-                    if (this.folk.actOf(i) != cast<int>(Act.WalkTo) && !wandering) {
+                    // Marching is walking. It is a separate act only so that the renderer and the
+                    // detail window can tell an army crossing the country from a woodcutter going
+                    // to a tree, and so that a soldier on the road is not mistaken for one idle.
+                    boolean marching = this.folk.actOf(i) == cast<int>(Act.March);
+                    if (this.folk.actOf(i) != cast<int>(Act.WalkTo) && !wandering && !marching) {
                         i = i + 1;
                         continue;
                     }
@@ -1704,6 +2199,8 @@ public bundle Agents {
                 // being consistently one second old beats being right about some fields and wrong
                 // about others.
                 this.realmCensus();
+                // And then the wars, which need the nations settled to know who is whose.
+                this.campaign();
                 this.wayOut();
                 this.quarrel();
                 return;
@@ -2112,6 +2609,10 @@ public bundle Agents {
                 this.csiteX[d] = fx;
                 this.csiteY[d] = fy;
                 this.cmother[d] = mother;
+                // The people who walk out take their language with them, which is why a colony and
+                // its mother are the same people and a conquered town is not.
+                this.ctongue[d] = this.ctongue[mother];
+                this.cheld[d] = 0;
                 return;
             }
 
@@ -2660,6 +3161,31 @@ public bundle Agents {
                         && this.copen[c * Craft.count() + craft] >= 0) {
                         continue;
                     }
+                    // A wall makes nothing, so it has no output to be short of. What a town is
+                    // short of here is the confidence to sleep, and it reads that off whether
+                    // anybody is currently coming for it: a grudge, or an army already in sight.
+                    // A place nobody threatens builds no wall, which is why the map shows you
+                    // where the borders that matter are without anybody drawing one.
+                    if (Builds.wall(k) > 0) {
+                        if (this.cwall[c] >= Builds.wall(k)) {
+                            continue;            // it already has as good or better
+                        }
+                        mutable int fear = 0;
+                        if (this.craided[c] > 0) {
+                            fear = this.craided[c];
+                        }
+                        if (this.carmy[c] >= 0) {
+                            fear = fear + 400;   // there is an army outside; this is not a drill
+                        }
+                        if (fear <= 0) {
+                            continue;
+                        }
+                        if (fear > bestScore) {
+                            bestScore = fear;
+                            best = k;
+                        }
+                        continue;
+                    }
                     mutable int worth = 0;
                     if (Builds.study(k) > 0) {
                         // A place of learning is bounded by the people who can sit in it, and by
@@ -2994,13 +3520,32 @@ public bundle Agents {
                 // the trade empties again when the quarrel does. Being raided is worth more hands
                 // than raiding: an attacker chooses the day, a defender does not.
                 if (job == cast<int>(Job.Raider)) {
+                    mutable int arms = 0;
                     if (this.craided[c] > 0) {
-                        return adults / 4;
+                        arms = adults / 4;
+                    } else if (this.cfoe[c] >= 0) {
+                        arms = adults / 8;
                     }
-                    if (this.cfoe[c] >= 0) {
-                        return adults / 8;
+                    // The muster. A town with no quarrel of its own still sends people when its
+                    // NATION calls, and that is the whole difference between a country and a
+                    // collection of villages -- it is why an army is ever bigger than one village's
+                    // grudge, and it is the only reason a place at peace ever arms at all.
+                    if (this.armyOf(this.cnat[c]) >= 0) {
+                        int levy = adults / 5;
+                        if (levy > arms) {
+                            arms = levy;
+                        }
                     }
-                    return 0;
+                    // A barracks keeps some under arms whether or not there is anybody to fight --
+                    // the first standing soldiers in the world, and the reason a place that has one
+                    // is never caught with nobody holding a spear.
+                    if (this.cbarr[c] > 0) {
+                        int kept = this.cbarr[c] * Simulation.KEPT;
+                        if (kept > arms) {
+                            arms = kept;
+                        }
+                    }
+                    return arms;
                 }
                 mutable int q = adults / 6;
                 // Except that a hungry place puts most of its hands on food. A flat share of the
@@ -3527,10 +4072,18 @@ public bundle Agents {
                 // timber, and a village that has decided to raid does not do it instead of finishing
                 // the roof it is standing under.
                 int rb = cast<int>(Job.Raider);
-                if ((this.cfoe[h] >= 0 || this.craided[h] > 0)
+                boolean called = this.armyOf(this.cnat[h]) >= 0;
+                if ((this.cfoe[h] >= 0 || this.craided[h] > 0 || called)
                     && this.ctrade[h * nj + rb] < this.quotaFor(h, rb)) {
-                    if (100 > bestScore) {
-                        bestScore = 100;
+                    // A muster outranks a feud. When the nation calls, a village that was minding
+                    // its own quarrel sends people anyway -- which is what having a nation MEANS,
+                    // and the only reason an army is ever bigger than one village's grudge.
+                    mutable int arms = 100;
+                    if (called) {
+                        arms = 130;
+                    }
+                    if (arms > bestScore) {
+                        bestScore = arms;
                         best = rb;
                     }
                 }
@@ -3793,6 +4346,21 @@ public bundle Agents {
                     this.folk.setAct(i, cast<int>(Act.Fight));
                     return;
                 }
+                // The muster. If this person's nation has called an army out, that outranks the
+                // village's own quarrel: they walk to the GENERAL, not to whoever their neighbours
+                // are feuding with. This is where an army comes from -- there is no recruiting and
+                // nobody is conscripted, it is simply that everyone who took up arms is heading for
+                // the same man, and standing near him is what `countUnder` calls being in an army.
+                int mine = this.armyOf(this.cnat[h]);
+                if (mine >= 0) {
+                    int lead = this.host.generalOf(mine);
+                    if (lead >= 0 && this.folk.alive(lead) && lead != i) {
+                        this.folk.setTarget(i, cast<int>(this.folk.xAt(lead)),
+                                               cast<int>(this.folk.yAt(lead)));
+                        this.folk.setAct(i, cast<int>(Act.March));
+                        return;
+                    }
+                }
                 int foe = this.cfoe[h];
                 if (foe < 0 || this.cpop[foe] <= 0) {
                     this.folk.setJob(i, cast<int>(Job.Idle));
@@ -4012,6 +4580,40 @@ public bundle Agents {
             public static int PAVE_ERA = 3;
             public static int PAVE_STONE = 4;
             public static int PAVE_REACH = 10;
+
+            // A general walks to the town his nation wants, and everybody who has taken up arms
+            // walks to HIM. That is the whole of the formation: an army is the people standing
+            // around the man leading it, so it holds together by everybody having the same
+            // destination rather than by anybody being told to keep a line.
+            private method workLead(int i) returns void {
+                mutable int mine = 0 - 1;
+                for (int a in 0..this.host.limit()) {
+                    if (this.host.alive(a) && this.host.generalOf(a) == i) {
+                        mine = a;
+                    }
+                }
+                if (mine < 0) {
+                    this.folk.setJob(i, cast<int>(Job.Idle));
+                    this.folk.setRole(i, cast<int>(Role.None));
+                    return;
+                }
+                int t = this.host.targetOf(mine);
+                if (t < 0 || this.busy(i)) {
+                    return;
+                }
+                // Once he is in front of it he STOPS. A general who kept re-issuing the same order
+                // every time he thought would stand there twitching, and worse, would drag the whole
+                // formation a step at a time as everybody re-aimed at him.
+                float dx = this.ccx[t] - this.folk.xAt(i);
+                float dy = this.ccy[t] - this.folk.yAt(i);
+                if (dx * dx + dy * dy < cast<float>(Simulation.SIEGE_LINE * Simulation.SIEGE_LINE)) {
+                    this.folk.setThinkAt(i, this.tick + 40);
+                    return;
+                }
+                this.folk.setTarget(i, cast<int>(this.ccx[t]), cast<int>(this.ccy[t]));
+                this.folk.setAct(i, cast<int>(Act.March));
+                return;
+            }
 
             // Working inside one. A craftsman does not travel to a resource -- the resource has
             // already been carried home by somebody else, which is the whole point of the store
@@ -4495,6 +5097,8 @@ public bundle Agents {
                 System.IO.Console.println($"  expansion: {this.hived} villages hived off ({this.hivedFolk} people), {this.colonies} colonies sent out ({this.colonists} settlers, {this.planted} arrived, {this.strayed} turned back), {this.joined} places merged");
                 System.IO.Console.println($"  prospecting: {this.dug} tracts opened, {this.struck} working faces found");
                 System.IO.Console.println($"  kit: {this.tooled} tools taken up, {this.wornOut} worn through || {this.armed} armed, {this.mailed} in mail");
+                this.host.report();
+                System.IO.Console.println($"  conquest: {this.conquests} towns taken by force, {this.converted} won over, {this.revolts} broke away");
                 this.paths.report();
                 int top = this.realm.biggest();
                 if (top >= 0) {

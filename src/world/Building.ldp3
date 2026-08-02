@@ -77,6 +77,17 @@ public bundle Agents {
             // good that sits on a shelf. This is where the iron chain finally arrives somewhere:
             // up to here a village could smelt all the iron in the hill and have nothing to show
             // for it but a number.
+            // ---- what a town puts between itself and an army ----
+            //
+            // A wall makes nothing and houses nobody, and it is the only thing in the catalogue
+            // that changes what happens to the town rather than what comes out of it. Before this
+            // a raid and a war were the same event: somebody walked in. A wall is what makes a
+            // siege a thing that takes TIME, and time is what turns a raid into a war.
+            Palisade,        // era I  -- a stake fence
+            Rampart,         // era II -- stone, and the reason a siege exists at all
+            Keep,            // era III
+            Watchtower,      // sees them coming
+            Barracks,        // where soldiers are kept, and the only way a place has any
             Toolmaker,       // Wood + Stone -> Tools, the stone-age version
             Toolsmith,       // Plank + IronIngot -> Tools, twice as many for the same hour
             Weaponsmith,     // IronIngot + Plank -> Weapon
@@ -154,6 +165,9 @@ public bundle Agents {
             // smelting forever -- so this is a floor and never a window.
             private static mutable int[] ERA;
             private static mutable int[] ROOF;      // people it houses, 0 for anything that works
+            // How much of an army's work this soaks up before the town is open. Zero for anything
+            // that is not a wall, which is everything else in the catalogue.
+            private static mutable int[] WALL;
 
             onClassLoad {
                 int n = BuildingKind.count();
@@ -176,6 +190,7 @@ public bundle Agents {
                 Builds.SECS = new float[n]();
                 Builds.ERA = new int[n]();
                 Builds.ROOF = new int[n]();
+                Builds.WALL = new int[n]();
                 mutable int i = 0;
                 while (i < n) {
                     Builds.NAME[i] = "NoBuilding";
@@ -410,6 +425,41 @@ public bundle Agents {
                 Builds.STUDY[cast<int>(BuildingKind.School)] = 110;
                 Builds.STUDY[cast<int>(BuildingKind.University)] = 180;
 
+                // ---- the wall ----
+                //
+                // Every one of these makes nothing. They are scored apart from the rest for that
+                // reason: a want is a shortfall of some good, and safety is not a good. What a town
+                // is short of here is the confidence to sleep, and it reads that off whether
+                // anybody is currently coming for it.
+                Builds.put(cast<int>(BuildingKind.Palisade), "Palisade", cast<int>(Craft.NoCraft),
+                           40, 8, 0, none, 0, none, 0, none, 0, 0.0);
+                Builds.put(cast<int>(BuildingKind.Rampart), "Rampart", cast<int>(Craft.NoCraft),
+                           30, 90, 0, none, 0, none, 0, none, 0, 0.0);
+                Builds.put(cast<int>(BuildingKind.Keep), "Keep", cast<int>(Craft.NoCraft),
+                           80, 200, 0, none, 0, none, 0, none, 0, 0.0);
+                Builds.put(cast<int>(BuildingKind.Watchtower), "Watchtower", cast<int>(Craft.NoCraft),
+                           45, 30, 0, none, 0, none, 0, none, 0, 0.0);
+                Builds.put(cast<int>(BuildingKind.Barracks), "Barracks", cast<int>(Craft.NoCraft),
+                           60, 40, 0, none, 0, none, 0, none, 0, 0.0);
+                Builds.MESH[cast<int>(BuildingKind.Rampart)] = "WallStraight";
+                Builds.ERA[cast<int>(BuildingKind.Palisade)] = 1;
+                Builds.ERA[cast<int>(BuildingKind.Rampart)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Keep)] = 3;
+                Builds.ERA[cast<int>(BuildingKind.Watchtower)] = 2;
+                Builds.ERA[cast<int>(BuildingKind.Barracks)] = 2;
+                Builds.MAT[cast<int>(BuildingKind.Rampart)] = cast<int>(Good.Brick);
+                Builds.MATN[cast<int>(BuildingKind.Rampart)] = 20;
+                Builds.MAT[cast<int>(BuildingKind.Keep)] = cast<int>(Good.Brick);
+                Builds.MATN[cast<int>(BuildingKind.Keep)] = 50;
+                // A stake fence buys an afternoon; a rampart buys a season; a keep buys long enough
+                // that the army in front of it starts to starve first. That escalation is what
+                // makes the second and third eras worth reaching for a place with enemies.
+                Builds.WALL[cast<int>(BuildingKind.Palisade)] = 60;
+                Builds.WALL[cast<int>(BuildingKind.Rampart)] = 260;
+                Builds.WALL[cast<int>(BuildingKind.Keep)] = 700;
+                Builds.WALL[cast<int>(BuildingKind.Watchtower)] = 80;
+                Builds.WALL[cast<int>(BuildingKind.Barracks)] = 40;
+
                 // What a tribal village can put up at all. The catalogue's Era I list is shelter,
                 // gathering and the two crafts that need no metal -- so a place that has discovered
                 // nothing can fire clay and smoke fish and must invent its way to everything else.
@@ -472,6 +522,25 @@ public bundle Agents {
 
             public static method roof(int ord) returns int {
                 return Builds.ROOF[ord];
+            }
+
+            // How much of a besieger's work this soaks up, or 0.
+            public static method wall(int ord) returns int {
+                return Builds.WALL[ord];
+            }
+
+            // The best wall a people of this era knows how to raise. Same shape as `bestRoof`, and
+            // the same rule from the catalogue: a new era widens the menu and retires nothing.
+            public static method bestWall(int era) returns int {
+                mutable int best = cast<int>(BuildingKind.NoBuilding);
+                for (int k in 1..BuildingKind.count()) {
+                    if (Builds.WALL[k] > 0 && Builds.ERA[k] <= era) {
+                        if (best < 0 || Builds.WALL[k] > Builds.WALL[best]) {
+                            best = k;
+                        }
+                    }
+                }
+                return best;
             }
 
             public static method houses(int ord) returns boolean {

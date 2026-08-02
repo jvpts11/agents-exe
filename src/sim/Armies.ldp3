@@ -1,0 +1,217 @@
+import System.IO.Console;
+
+// War at the scale of a nation, above the raiding that was already here.
+//
+// The two are different things and both are true. A hungry village with nerve takes from the
+// village next door -- that is the raid, it needs no leader and no plan, and it is where violence
+// in this world starts. What it can never do is take the PLACE: a raider carries a load home and
+// the border is exactly where it was. A country that wants a city has to muster, march, sit down
+// in front of a wall and stay there, and that needs somebody to decide it and somebody to lead it.
+//
+// So an army is not a big raid. It is a thing a NATION owns, with a general at the head of it and
+// one town as its object, and it is the only way ground changes hands.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Sim {
+
+        public enum Muster {
+            Idle,            // the slot is free
+            Gathering,       // called out; soldiers are walking to the muster
+            Marching,        // on the road to the town it wants
+            Besieging,       // sat down in front of it, eating its fields and breaking its wall
+            Storming,        // the wall is down and they are inside
+            Homeward         // beaten, or finished, and going home
+        }
+
+        public class Armies {
+            private mutable int cap;
+            private mutable int[] nat;        // whose army
+            private mutable int[] lord;       // the general, as an agent, or -1
+            private mutable int[] muster;     // the town it was called out of
+            private mutable int[] target;     // and the town it wants
+            private mutable byte[] state;
+            private mutable int[] strength;   // soldiers under it, counted at census
+            private mutable int[] siege;      // work put into the wall in front of it
+            private mutable int[] held;       // censuses in this state
+            private mutable long called;
+            private mutable long marched;
+            private mutable long stormed;
+            private mutable long broken;
+
+            public constructor Armies(int capacity) {
+                this.cap = capacity;
+                this.nat = new int[capacity]();
+                this.lord = new int[capacity]();
+                this.muster = new int[capacity]();
+                this.target = new int[capacity]();
+                this.state = new byte[capacity]();
+                this.strength = new int[capacity]();
+                this.siege = new int[capacity]();
+                this.held = new int[capacity]();
+                for (int i in 0..capacity) {
+                    this.nat[i] = 0 - 1;
+                    this.lord[i] = 0 - 1;
+                    this.muster[i] = 0 - 1;
+                    this.target[i] = 0 - 1;
+                    this.state[i] = cast<byte>(cast<int>(Muster.Idle));
+                }
+                this.called = 0;
+                this.marched = 0;
+                this.stormed = 0;
+                this.broken = 0;
+            }
+
+            public destructor ~Armies() returns void {
+                delete this.nat;
+                delete this.lord;
+                delete this.muster;
+                delete this.target;
+                delete this.state;
+                delete this.strength;
+                delete this.siege;
+                delete this.held;
+            }
+
+            public method limit() returns int {
+                return this.cap;
+            }
+
+            public method alive(int a) returns boolean {
+                return this.stateOf(a) != cast<int>(Muster.Idle);
+            }
+
+            public method stateOf(int a) returns int {
+                return cast<int>(this.state[a]) & 255;
+            }
+
+            public method nationOf(int a) returns int {
+                return this.nat[a];
+            }
+
+            public method generalOf(int a) returns int {
+                return this.lord[a];
+            }
+
+            public method targetOf(int a) returns int {
+                return this.target[a];
+            }
+
+            public method musterOf(int a) returns int {
+                return this.muster[a];
+            }
+
+            public method strengthOf(int a) returns int {
+                return this.strength[a];
+            }
+
+            public method siegeOf(int a) returns int {
+                return this.siege[a];
+            }
+
+            public method heldFor(int a) returns int {
+                return this.held[a];
+            }
+
+            public method open() returns int {
+                for (int i in 0..this.cap) {
+                    if (this.stateOf(i) == cast<int>(Muster.Idle)) {
+                        return i;
+                    }
+                }
+                return 0 - 1;
+            }
+
+            // Call one out. A nation with a seat, a grievance and somebody worth following.
+            public method call(int a, int nation, int seat, int want, int general) returns void {
+                this.nat[a] = nation;
+                this.muster[a] = seat;
+                this.target[a] = want;
+                this.lord[a] = general;
+                this.state[a] = cast<byte>(cast<int>(Muster.Gathering));
+                this.strength[a] = 0;
+                this.siege[a] = 0;
+                this.held[a] = 0;
+                this.called = this.called + 1;
+                return;
+            }
+
+            public method setState(int a, int s) returns void {
+                if (this.stateOf(a) != s) {
+                    this.held[a] = 0;
+                }
+                this.state[a] = cast<byte>(s);
+                if (s == cast<int>(Muster.Marching)) {
+                    this.marched = this.marched + 1;
+                }
+                if (s == cast<int>(Muster.Storming)) {
+                    this.stormed = this.stormed + 1;
+                }
+                return;
+            }
+
+            public method setGeneral(int a, int who) returns void {
+                this.lord[a] = who;
+                return;
+            }
+
+            public method setStrength(int a, int n) returns void {
+                this.strength[a] = n;
+                return;
+            }
+
+            public method press(int a, int by) returns void {
+                this.siege[a] = this.siege[a] + by;
+                return;
+            }
+
+            public method tick(int a) returns void {
+                this.held[a] = this.held[a] + 1;
+                return;
+            }
+
+            // Stand down. An army whose general is dead, whose target is gone, or that has sat in
+            // front of a wall longer than it can feed itself, simply stops being an army.
+            public method disband(int a) returns void {
+                if (this.stateOf(a) != cast<int>(Muster.Idle)) {
+                    this.broken = this.broken + 1;
+                }
+                this.state[a] = cast<byte>(cast<int>(Muster.Idle));
+                this.nat[a] = 0 - 1;
+                this.lord[a] = 0 - 1;
+                this.target[a] = 0 - 1;
+                this.muster[a] = 0 - 1;
+                this.strength[a] = 0;
+                this.siege[a] = 0;
+                return;
+            }
+
+            public method inTheField() returns int {
+                mutable int c = 0;
+                for (int i in 0..this.cap) {
+                    if (this.alive(i)) {
+                        c = c + 1;
+                    }
+                }
+                return c;
+            }
+
+            public method countOfState(int s) returns int {
+                mutable int c = 0;
+                for (int i in 0..this.cap) {
+                    if (this.stateOf(i) == s) {
+                        c = c + 1;
+                    }
+                }
+                return c;
+            }
+
+            public method report() returns void {
+                int now = this.inTheField();
+                int sieges = this.countOfState(cast<int>(Muster.Besieging));
+                System.IO.Console.println($"  armies: {this.called} called out, {this.marched} marched, {this.stormed} stormed a wall, {this.broken} stood down || {now} in the field now, {sieges} sitting before a wall");
+                return;
+            }
+        }
+    }
+}

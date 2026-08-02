@@ -8,6 +8,7 @@ import Agents.Sim.Stores;
 import Agents.Sim.Buildings;
 import Agents.Sim.Nations;
 import Agents.Sim.Rank;
+import Agents.Sim.Armies;
 import Agents.World.Builds;
 program AgentsExe;
 
@@ -494,6 +495,78 @@ public bundle Agents {
                 Test.assertEqual(ahead, 0);
                 Test.checking("and nobody has climbed past the last rung");
                 Test.assertAtMost(realm.bestEra(), 4);
+                return;
+            }
+
+            // Whatever is in the field at the end of an arc has to be coherent. Two generations is
+            // rarely long enough for anybody to reach the rank that lets them campaign, so most runs
+            // pass these vacuously -- and that is fine: the day one of them does not is the day a
+            // real defect shows up, which is the only thing an invariant is for. What must never
+            // happen is an army with no head, or a country besieging itself.
+            [Tag(name: "sim")]
+            [Test]
+            public static method no_army_is_leaderless_or_at_war_with_itself() returns void {
+                Armies* host = Arc.sim.armies();
+                AgentTable* folk = Arc.folk;
+                mutable int headless = 0;
+                mutable int civilWar = 0;
+                mutable int aimless = 0;
+                mutable int a = 0;
+                while (a < host.limit()) {
+                    if (host.alive(a)) {
+                        int lead = host.generalOf(a);
+                        if (lead < 0 || !folk.alive(lead)) {
+                            headless = headless + 1;
+                        }
+                        int t = host.targetOf(a);
+                        if (t < 0) {
+                            aimless = aimless + 1;
+                        } else if (Arc.sim.nationOf(t) == host.nationOf(a)) {
+                            civilWar = civilWar + 1;
+                        }
+                    }
+                    a = a + 1;
+                }
+                Test.checking("every army in the field has somebody at the head of it");
+                Test.assertEqual(headless, 0);
+                Test.checking("and something it is going for");
+                Test.assertEqual(aimless, 0);
+                Test.checking("and nobody is besieging their own country");
+                Test.assertEqual(civilWar, 0);
+                return;
+            }
+
+            // The border moved and nothing else did. A conquered town keeps its people and keeps its
+            // language, so the ONLY way `held` is set on a place is if that place still exists and
+            // still disagrees with the flag over it -- the disagreement being the whole point.
+            [Tag(name: "sim")]
+            [Test]
+            public static method a_town_taken_by_force_still_has_its_own_people() returns void {
+                Nations* realm = Arc.sim.nations();
+                mutable int emptied = 0;
+                mutable int alreadyTheirs = 0;
+                mutable int c = 0;
+                while (c < Arc.sim.communityCount()) {
+                    if (Arc.sim.heldOf(c) > 0) {
+                        if (Arc.sim.populationOf(c) <= 0) {
+                            emptied = emptied + 1;
+                        }
+                        int nat = Arc.sim.nationOf(c);
+                        if (nat >= 0 && Arc.sim.tongueOf(c) == realm.tongueOf(nat)) {
+                            alreadyTheirs = alreadyTheirs + 1;
+                        }
+                    }
+                    c = c + 1;
+                }
+                Test.checking("nobody was displaced by a conquest");
+                Test.assertEqual(emptied, 0);
+                Test.checking("and a town still being held has not already been won over");
+                Test.assertEqual(alreadyTheirs, 0);
+                // Books have to balance: every town flying somebody else's flag was taken by
+                // somebody, and every one that stopped was either won over or broke away.
+                Test.checking("no more towns were converted or revolted than were ever taken");
+                Test.assertAtMost(cast<int>(Arc.sim.convertCount() + Arc.sim.revoltCount()),
+                                  cast<int>(Arc.sim.conquestCount()));
                 return;
             }
 
