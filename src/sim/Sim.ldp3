@@ -218,6 +218,14 @@ public bundle Agents {
             private mutable int[] nrailTo;
             private mutable int[] nrailAt;
             private mutable long railed;
+            // Which army each nation has in the field, or -1. A lookup, not a search.
+            //
+            // `armyOf` walks sixty-four slots, and it was being called from `quotaFor` -- which runs
+            // for several trades for every person who thinks, eleven and a half million times in a
+            // two-generation arc. Nearly a billion iterations to answer a question with one answer
+            // per nation per census. Filled in `readWalls`, beside the other things read off the
+            // world once and then only looked up.
+            private mutable int[] nhost;
             // A conquered town keeps the language its people speak, which is the whole reason
             // conquest is worth doing carefully. Held per SETTLEMENT and not per nation, because
             // after a conquest the two disagree -- and that disagreement is the thing a ruler has
@@ -517,8 +525,10 @@ public bundle Agents {
                 this.trafficked = 0;
                 this.nrailTo = new int[this.ncomm]();
                 this.nrailAt = new int[this.ncomm]();
+                this.nhost = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
                     this.nrailTo[c] = 0 - 1;
+                    this.nhost[c] = 0 - 1;
                 }
                 this.railed = 0;
                 this.ctongue = new int[this.ncomm]();
@@ -636,6 +646,7 @@ public bundle Agents {
                 delete this.ccargo;
                 delete this.nrailTo;
                 delete this.nrailAt;
+                delete this.nhost;
                 delete this.ctongue;
                 delete this.cheld;
                 delete this.realm;
@@ -1057,6 +1068,17 @@ public bundle Agents {
                     this.cwall[c] = 0;
                     this.carmy[c] = 0 - 1;
                     this.cbarr[c] = 0;
+                    this.nhost[c] = 0 - 1;
+                }
+                // Whose armies are out, read once. Sixty-four slots, not sixty-four slots per
+                // person per decision.
+                for (int a in 0..this.host.limit()) {
+                    if (this.host.alive(a)) {
+                        int an = this.host.nationOf(a);
+                        if (an >= 0 && an < this.ncomm) {
+                            this.nhost[an] = a;
+                        }
+                    }
                 }
                 for (int b in 0..this.town.count()) {
                     if (this.town.isGone(b) || !this.town.isWorking(b)) {
@@ -1204,6 +1226,16 @@ public bundle Agents {
                     i = i + 1;
                 }
                 return best;
+            }
+
+            // The army a nation has out, as a LOOKUP. Everything that asks per person per decision
+            // asks this; `armyOf` below is the search that fills it, and only the census may call
+            // it -- once, in `readWalls`, beside the walls and the barracks.
+            private method mustering(int nat) returns int {
+                if (nat < 0 || nat >= this.ncomm) {
+                    return 0 - 1;
+                }
+                return this.nhost[nat];
             }
 
             private method armyOf(int nat) returns int {
@@ -3877,6 +3909,31 @@ public bundle Agents {
                     this.ccaravan[c] = 0 - 1;
                     this.ccargo[c] = 0;
                 }
+                // WHAT EVERY PLACE IS SHORT OF, ONCE.
+                //
+                // The pair loop below asked `shortOf` per (town, destination), and `shortOf` walks
+                // the whole building catalogue on every call for its prospective term -- a hundred
+                // and thirty towns by a hundred and thirty destinations by fifty-three kinds is
+                // nine hundred thousand iterations a census, and a two-generation arc runs seven
+                // hundred of them. It was six hundred and forty-five million iterations to answer
+                // a question that has one answer per place.
+                //
+                // Measured: the short arc went from sixty-one seconds to the number in the commit
+                // message. Identical behaviour -- nothing in `shortOf` changes while this pass runs,
+                // so reading it once and reading it seventeen thousand times give the same routes.
+                //
+                // This is the mistake this file warns about in three separate comments, made in a
+                // method whose own header says "asked once a census per town, never per carter".
+                // Writing the rule down is not the same as following it.
+                mutable int[] gap = new int[this.ncomm * ng]();
+                for (int d in 0..this.ncomm) {
+                    if (this.cpop[d] <= 0) {
+                        continue;
+                    }
+                    for (int g in 1..ng) {
+                        gap[d * ng + g] = this.shortOf(d, g);
+                    }
+                }
                 for (int c in 0..this.ncomm) {
                     if (this.cpop[c] <= 0) {
                         continue;
@@ -3913,9 +3970,9 @@ public bundle Agents {
                             > cast<float>(Simulation.TRADE_REACH * Simulation.TRADE_REACH)) {
                             continue;
                         }
-                        int gap = this.shortOf(d, good);
-                        if (gap > need) {
-                            need = gap;
+                        int want = gap[d * ng + good];
+                        if (want > need) {
+                            need = want;
                             to = d;
                         }
                     }
@@ -3925,6 +3982,7 @@ public bundle Agents {
                     this.ccaravan[c] = to;
                     this.ccargo[c] = good;
                 }
+                delete gap;
                 return;
             }
 
@@ -4535,7 +4593,7 @@ public bundle Agents {
                     // NATION calls, and that is the whole difference between a country and a
                     // collection of villages -- it is why an army is ever bigger than one village's
                     // grudge, and it is the only reason a place at peace ever arms at all.
-                    if (this.armyOf(this.cnat[c]) >= 0) {
+                    if (this.mustering(this.cnat[c]) >= 0) {
                         int levy = adults / 5;
                         if (levy > arms) {
                             arms = levy;
@@ -5116,7 +5174,7 @@ public bundle Agents {
                 // timber, and a village that has decided to raid does not do it instead of finishing
                 // the roof it is standing under.
                 int rb = cast<int>(Job.Raider);
-                boolean called = this.armyOf(this.cnat[h]) >= 0;
+                boolean called = this.mustering(this.cnat[h]) >= 0;
                 if ((this.cfoe[h] >= 0 || this.craided[h] > 0 || called)
                     && this.ctrade[h * nj + rb] < this.quotaFor(h, rb)) {
                     // A muster outranks a feud. When the nation calls, a village that was minding
@@ -5405,7 +5463,7 @@ public bundle Agents {
                 // are feuding with. This is where an army comes from -- there is no recruiting and
                 // nobody is conscripted, it is simply that everyone who took up arms is heading for
                 // the same man, and standing near him is what `countUnder` calls being in an army.
-                int mine = this.armyOf(this.cnat[h]);
+                int mine = this.mustering(this.cnat[h]);
                 if (mine >= 0) {
                     int lead = this.host.generalOf(mine);
                     if (lead >= 0 && this.folk.alive(lead) && lead != i) {
