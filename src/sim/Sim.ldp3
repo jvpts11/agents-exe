@@ -157,6 +157,9 @@ public bundle Agents {
             private mutable long feuds;        // censuses spent with somebody to fight
             private mutable long raids;        // warriors who reached an enemy village
             private mutable long plunder;      // goods carried home off somebody else's shelves
+            private mutable long wed;          // couples the world put together
+            private mutable long sacked;       // towns beaten by an army that could not keep them
+            private mutable long captured;     // people who lost and did not die of it
             private mutable long deathsWar;
             // Killed by the ground, the weather or the fire -- deaths nobody chose, which is a
             // different fact about a world from deaths somebody did.
@@ -503,6 +506,9 @@ public bundle Agents {
                 this.feuds = 0;
                 this.raids = 0;
                 this.plunder = 0;
+                this.wed = 0;
+                this.sacked = 0;
+                this.captured = 0;
                 this.deathsWar = 0;
                 this.deathsWorld = 0;
                 this.crimes = 0;
@@ -1001,6 +1007,18 @@ public bundle Agents {
 
             public method handedOn() returns long {
                 return this.passed;
+            }
+
+            public method couplesMade() returns long {
+                return this.wed;
+            }
+
+            public method townsSacked() returns long {
+                return this.sacked;
+            }
+
+            public method peopleCaptured() returns long {
+                return this.captured;
             }
 
             public method handedToASon() returns long {
@@ -1619,6 +1637,11 @@ public bundle Agents {
             public static int BOND_PER_LOAD = 4;
             public static int BOND_PER_RAID = 0 - 6;
             public static int BOND_PER_TOWN = 0 - 150;
+            // Being sacked is not being annexed, and it is not a border raid either. It sits where
+            // it belongs between the two: worse than a stolen granary, better than losing the town.
+            public static int BOND_PER_SACK = 0 - 40;
+            public static int SACK_SHARE = 2;             // half of everything on every shelf
+            public static int WEIGHT_PER_CAPTIVE = 12;    // how much army it takes to escort one
 
             // Soldiers within a general's reach. This is the FORMATION: an army is the people who
             // are actually standing around the man leading it, so one that has strung itself across
@@ -1692,16 +1715,183 @@ public bundle Agents {
             private method storm(int a, int nat, int t, int power, int hold) returns int {
                 mutable int fell = 0;
                 if (power > hold) {
-                    // Taken. The cost is proportional to what stood in the way, and it is paid in
-                    // the people who did the standing on both sides.
+                    // Won. The cost is proportional to what stood in the way, and it is paid in the
+                    // people who did the standing on both sides.
                     fell = this.bleed(t, nat, hold / 3 + 1, power / 6 + 1);
-                    this.takeTown(a, nat, t);
+                    // AND WINNING IS NOT THE SAME AS KEEPING.
+                    //
+                    // Every won assault in this world annexed the town, which made beating a place
+                    // and governing it the same act -- so a country could win its way clear across a
+                    // continent and hold every step of it, and the map became a colour rather than a
+                    // country. Whether your army can break a town and whether your country can rule
+                    // it are two different questions, and only one of them was ever asked.
+                    //
+                    // The second one already has an answer in this world: `unrest` spends its whole
+                    // life on the cost of holding a place that does not want you, and a place you
+                    // cannot even reach is the extreme of that. So a general takes a town for his
+                    // country when his country is NEAR IT, and otherwise takes what it has instead.
+                    // And the survivors are marched off before the army disbands, because after it
+                    // disbands there is nobody to march them.
+                    this.haul(a, t, power);
+                    if (this.canHold(nat, t)) {
+                        this.takeTown(a, nat, t);
+                    } else {
+                        this.sack(a, nat, t);
+                    }
                     return fell;
                 }
                 // Thrown back. The wall they broke stays broken -- the siege work is not undone --
                 // but the men are gone and the will with them.
                 fell = this.bleed(t, nat, power / 4 + 1, hold / 8 + 1);
                 return fell;
+            }
+
+            // COUPLES, which this world has never had.
+            //
+            // Fatherhood was a town-level fact: the census found the single most-regarded man in a
+            // place and every child conceived there was his. So everybody born in a village was
+            // everybody else's half-sibling -- and the succession leans on `isSiblingOf`, which
+            // therefore meant no more than "born here, about the same time". A house cannot descend
+            // through a world where everybody is kin to everybody.
+            //
+            // Pairing is a CENSUS question, like every other question about a village, and it costs
+            // one pass: walk the living once, and where a town already has somebody waiting, the two
+            // of them are a couple from then on. Who waits first is who the pass reaches first,
+            // which is who was born first -- so people pair roughly by age without anybody sorting
+            // anything, and the ones left over stay unpaired until the next grown person appears.
+            private method betroth() returns void {
+                mutable int[] waitM = new int[this.ncomm]();
+                mutable int[] waitF = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    waitM[c] = 0 - 1;
+                    waitF[c] = 0 - 1;
+                }
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.isAdult(i)
+                        && this.folk.spouseLive(i) < 0) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm) {
+                            if (this.folk.isFemale(i)) {
+                                if (waitM[h] >= 0) {
+                                    this.folk.wed(i, waitM[h]);
+                                    this.wed = this.wed + 1;
+                                    waitM[h] = 0 - 1;
+                                } else {
+                                    waitF[h] = i;
+                                }
+                            } else {
+                                if (waitF[h] >= 0) {
+                                    this.folk.wed(i, waitF[h]);
+                                    this.wed = this.wed + 1;
+                                    waitF[h] = 0 - 1;
+                                } else {
+                                    waitM[h] = i;
+                                }
+                            }
+                        }
+                    }
+                    i = i + 1;
+                }
+                delete waitM;
+                delete waitF;
+                return;
+            }
+
+            // Whether a country could GOVERN a place, which is a different question from whether its
+            // army can beat one. The answer is the plainest one there is: has it got anywhere of its
+            // own within a march. A flag planted where nothing of yours can reach is a line on a map
+            // and not a country, and a general standing in that town knows it.
+            // The radius is the CARAVAN's and not the army's, and the difference is the whole point.
+            // Marching somewhere and administering it are different distances: WAR_REACH is how far
+            // a host will walk to hit you, and holding a place at exactly that range would make
+            // governing precisely as easy as attacking, so a won assault would annex every time and
+            // nothing would have changed. A country holds what its carts reach.
+            private method canHold(int nat, int t) returns boolean {
+                float span = cast<float>(Simulation.TRADE_REACH * Simulation.TRADE_REACH);
+                for (int c in 0..this.ncomm) {
+                    if (c == t || this.cnat[c] != nat || this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    float dx = this.ccx[c] - this.ccx[t];
+                    float dy = this.ccy[c] - this.ccy[t];
+                    if (dx * dx + dy * dy <= span) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // THE PEOPLE WHO LOST AND DID NOT DIE OF IT.
+            //
+            // Every fight in this world ended in a body count and nothing else, which is not what
+            // happens when a town is broken open: the ones still standing are marched off. A captive
+            // is neither a corpse nor a citizen -- they are somebody else's population now, and the
+            // whole transaction moves grown workers from the loser to the winner without anybody
+            // being born or dying, which is a thing war did and this world could not represent.
+            //
+            // Who gets taken is read off what they were carrying, like everything else here: a man
+            // with a weapon in his hands fought and is counted among the fallen; the ones rounded up
+            // are the ones who were never soldiers. And how many is a question of escort -- an army
+            // can only march home with so many people it has to watch -- so it is a fraction of the
+            // army's own weight and not of the town's size.
+            private method haul(int a, int t, int power) returns int {
+                int lead = this.host.generalOf(a);
+                if (lead < 0 || !this.folk.alive(lead)) {
+                    return 0;
+                }
+                int home = this.folk.homeOf(lead);
+                if (home < 0 || home >= this.ncomm || home == t || this.cpop[home] <= 0) {
+                    return 0;
+                }
+                int room = power / Simulation.WEIGHT_PER_CAPTIVE;
+                if (room <= 0) {
+                    return 0;
+                }
+                int n = this.folk.limit();
+                mutable int took = 0;
+                mutable int i = 0;
+                while (i < n && took < room) {
+                    if (this.folk.alive(i) && this.folk.isAdult(i)
+                        && this.folk.homeOf(i) == t
+                        && this.mettle(i) == Simulation.WEIGHT_LEVY) {
+                        this.vacate(i, t);
+                        this.folk.setHome(i, home);
+                        this.folk.setTarget(i, cast<int>(this.ccx[home]),
+                                            cast<int>(this.ccy[home]));
+                        this.folk.setJob(i, cast<int>(Job.Idle));
+                        this.captured = this.captured + 1;
+                        took = took + 1;
+                    }
+                    i = i + 1;
+                }
+                return took;
+            }
+
+            // The town was broken open and the flag stayed where it was.
+            //
+            // This is the outcome a war could not have before, and it is the one most wars actually
+            // end in: the army takes everything off the shelves, the survivors remember it for as
+            // long as they remember any blow, and everybody goes home. The country gains nothing on
+            // the map and a great deal on its own shelves -- which is exactly why a war fought far
+            // away is worth fighting and still does not make you bigger.
+            private method sack(int a, int nat, int t) returns void {
+                int carried = this.stores.ransack(t, Simulation.SACK_SHARE);
+                this.plunder = this.plunder + cast<long>(carried);
+                this.sacked = this.sacked + 1;
+                int was = this.cnat[t];
+                if (was >= 0 && was != nat) {
+                    this.realm.warm(nat, was, Simulation.BOND_PER_SACK);
+                }
+                this.craided[t] = Simulation.GRUDGE;
+                this.craider[t] = nat;
+                int lead = this.host.generalOf(a);
+                if (lead >= 0 && this.folk.alive(lead)) {
+                    this.folk.earn(lead, 12);    // a fraction of what taking it outright is worth
+                }
+                this.standDown(a);
+                return;
             }
 
             // Men die on both sides. `attackers` and `defenders` are how many are struck down;
@@ -3033,9 +3223,21 @@ public bundle Agents {
                             // through it. One array read -- the census already worked out who a
                             // village regards, which in a world with no courtship in it is the
                             // only honest answer to the question.
-                            int home = this.folk.homeOf(i);
-                            if (home >= 0 && home < this.ncomm) {
-                                this.folk.setSire(i, this.cmate[home]);
+                            // BY HER PARTNER, when she has one -- which is the whole difference
+                            // between a village where every child has the same father and a village
+                            // with families in it. A woman with nobody falls back on the town's
+                            // reading, exactly as before: this changes WHOSE child it is and never
+                            // whether there is one, because gating conception on a partner would
+                            // move the birth rate, and every change that moved a magnitude in this
+                            // campaign has had to be reverted.
+                            int man = this.folk.spouseLive(i);
+                            if (man >= 0) {
+                                this.folk.setSire(i, man);
+                            } else {
+                                int home = this.folk.homeOf(i);
+                                if (home >= 0 && home < this.ncomm) {
+                                    this.folk.setSire(i, this.cmate[home]);
+                                }
                             }
                             if (!this.busy(i)) {
                                 this.folk.setAct(i, cast<int>(Act.Court));
@@ -4131,6 +4333,7 @@ public bundle Agents {
                 for (int c in 0..this.ncomm) {
                     this.cmate[c] = sireI[c];
                 }
+                this.betroth();
                 for (int c in 0..this.ncomm) {
                     int sitting = this.chief[c];
                     // Whoever the seat descends FROM, which is not the same as whoever is in it: a
@@ -7900,6 +8103,7 @@ public bundle Agents {
                     }
                 }
                 System.IO.Console.println($"  war: {this.feuds} community-seconds at war, {fighting} places at war now | {this.raids} blows struck, {this.deathsWar} killed, {this.plunder} carried off somebody else's shelves");
+                System.IO.Console.println($"  spoils: {this.sacked} towns sacked and left standing, {this.captured} marched home as captives");
                 mutable int levy = 0;
                 mutable int armed = 0;
                 mutable int mailed = 0;

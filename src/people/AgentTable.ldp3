@@ -160,7 +160,10 @@ public bundle Agents {
             // person. Two ints per row and the world can finally say who anybody's mother was.
             private mutable int[] serial;
             private mutable int nextSerial;
+            // Who somebody is with. The row AND the serial, because a partner who dies has their row
+            // handed to the next child born and a marriage must not survive into a stranger.
             private mutable int[] spouse;
+            private mutable int[] spouseSer;
             private mutable int[] mother;
             private mutable int[] motherSer;
             private mutable int[] father;
@@ -214,6 +217,7 @@ public bundle Agents {
                 this.influence = new byte[cap]();
                 this.nerve = new byte[cap]();
                 this.spouse = new int[cap]();
+                this.spouseSer = new int[cap]();
                 this.mother = new int[cap]();
                 this.motherSer = new int[cap]();
                 this.father = new int[cap]();
@@ -264,6 +268,7 @@ public bundle Agents {
                 delete this.influence;
                 delete this.nerve;
                 delete this.spouse;
+                delete this.spouseSer;
                 delete this.mother;
                 delete this.motherSer;
                 delete this.father;
@@ -349,6 +354,7 @@ public bundle Agents {
                 this.motherSer[i] = 0;
                 this.fatherSer[i] = 0;
                 this.spouse[i] = 0 - 1;
+                this.spouseSer[i] = 0;
                 this.mother[i] = 0 - 1;
                 this.father[i] = 0 - 1;
                 this.gest[i] = 0.0;
@@ -856,6 +862,43 @@ public bundle Agents {
             // The row and the serial have to agree: an index on its own says "somebody is standing
             // where my mother stood", which after a death and a birth is a different person
             // entirely. Every consumer of kinship in this world goes through these two.
+            // TWO PEOPLE, AND NOT A TOWN.
+            //
+            // `spouse` has been in this table since the first slice: allocated, cleared at every
+            // birth, and never once written or read. Nothing in the world was ever between two named
+            // people -- every social fact was a fact about a village -- and the cost of that showed
+            // up in the one place it could not hide: fatherhood. The census picked the single
+            // most-regarded man in a town and made him the father of every child conceived there, so
+            // everybody born in a village was everybody else's half-sibling, and "brother" -- which
+            // the succession now leans on -- meant nothing more than "born here, about the same
+            // time". A dynasty cannot descend through a world where everyone is kin.
+            public method wed(int i, int j) returns void {
+                if (i < 0 || j < 0 || i >= this.cap || j >= this.cap || i == j) {
+                    return;
+                }
+                this.spouse[i] = j;
+                this.spouseSer[i] = this.serial[j];
+                this.spouse[j] = i;
+                this.spouseSer[j] = this.serial[i];
+                return;
+            }
+
+            // The partner, if they are still alive and still the same person. Same guard as a
+            // parent: a row is not an identity, a row and a serial together are.
+            public method spouseLive(int i) returns int {
+                if (i < 0 || i >= this.cap) {
+                    return 0 - 1;
+                }
+                int s = this.spouse[i];
+                if (s < 0 || s >= this.cap || !this.alive(s)) {
+                    return 0 - 1;
+                }
+                if (this.serial[s] != this.spouseSer[i]) {
+                    return 0 - 1;
+                }
+                return s;
+            }
+
             public method motherLive(int i) returns int {
                 int m = this.mother[i];
                 if (m < 0 || m >= this.cap || !this.alive(m)) {
