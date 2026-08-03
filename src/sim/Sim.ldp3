@@ -197,6 +197,8 @@ public bundle Agents {
                                                // carter walks to, read once a census like the rest
             private mutable int[] cdrink;      // heads this place can keep in water
             private mutable boolean[] cfresh;  // is there a river or a lake at hand at all
+            private mutable int[] ccare;       // heads it can nurse
+            private mutable int[] cfilth;      // and how hard it is to stay well here, per thousand
             // The two authorities a place has besides the one in charge. An elder is whoever has
             // lived longest and is believed about what this place is; a priest is whoever spends
             // their days at the shrine. Neither is elected and neither can be appointed -- both are
@@ -278,6 +280,7 @@ public bundle Agents {
             private mutable long stalled;      // batches that could not start for want of an input
             private mutable long housed;       // housing plots marked out
             private mutable long watered;      // waterworks marked out
+            private mutable long tended;       // and places raised against sickness
             private mutable long rebuilt;      // plots torn up and raised again bigger
             private mutable long pulled;       // workshops nobody needed any more, pulled down
             private mutable long raised;       // buildings finished
@@ -286,6 +289,8 @@ public bundle Agents {
             private mutable long births;
             private mutable long deathsOld;
             private mutable long deathsHunger;
+            private mutable long deathsIll;    // and the ones the place itself killed
+            private mutable long fellIll;
             // The number this slice exists to produce: seconds spent walking against seconds spent
             // working. On a map thirty-two times the original's it is the one that says whether a
             // person can make a living within a walk of home, or whether the whole economy has to
@@ -518,6 +523,8 @@ public bundle Agents {
                 this.cportb = new int[this.ncomm]();
                 this.cdrink = new int[this.ncomm]();
                 this.cfresh = new boolean[this.ncomm]();
+                this.ccare = new int[this.ncomm]();
+                this.cfilth = new int[this.ncomm]();
                 this.celder = new int[this.ncomm]();
                 this.cpriest = new int[this.ncomm]();
                 this.ctchief = new int[this.ncomm]();
@@ -581,6 +588,7 @@ public bundle Agents {
                 this.stalled = 0;
                 this.housed = 0;
                 this.watered = 0;
+                this.tended = 0;
                 this.rebuilt = 0;
                 this.pulled = 0;
                 this.raised = 0;
@@ -591,6 +599,8 @@ public bundle Agents {
                 this.births = 0;
                 this.deathsOld = 0;
                 this.deathsHunger = 0;
+                this.deathsIll = 0;
+                this.fellIll = 0;
                 this.walkTicks = 0;
                 this.wanderTicks = 0;
                 this.workTicks = 0;
@@ -656,6 +666,8 @@ public bundle Agents {
                 delete this.cportb;
                 delete this.cdrink;
                 delete this.cfresh;
+                delete this.ccare;
+                delete this.cfilth;
                 delete this.celder;
                 delete this.cpriest;
                 delete this.ctchief;
@@ -1100,6 +1112,7 @@ public bundle Agents {
                     } else {
                         this.cdrink[c] = 0;
                     }
+                    this.ccare[c] = 0;
                     this.nhost[c] = 0 - 1;
                 }
                 // Whose armies are out, read once. Sixty-four slots, not sixty-four slots per
@@ -1120,7 +1133,8 @@ public bundle Agents {
                     int hold = Builds.wall(k);
                     int reach = Builds.port(k);
                     int drink = Builds.water(k);
-                    if (hold <= 0 && reach <= 0 && drink <= 0) {
+                    int care = Builds.care(k);
+                    if (hold <= 0 && reach <= 0 && drink <= 0 && care <= 0) {
                         continue;
                     }
                     int c = this.town.ownerOf(b);
@@ -1128,6 +1142,7 @@ public bundle Agents {
                         this.cwall[c] = this.cwall[c] + hold;
                         // Two wells water twice as many people, unlike two harbours.
                         this.cdrink[c] = this.cdrink[c] + drink;
+                        this.ccare[c] = this.ccare[c] + care;
                         // A second harbour does not double how far a boat sails, so the town keeps
                         // the longest reach it has rather than the sum of them. Whether anything is
                         // tied up at it is a separate question, asked by `sails` where the routes
@@ -1142,6 +1157,29 @@ public bundle Agents {
                             this.cbarr[c] = this.cbarr[c] + 1;
                         }
                     }
+                }
+                // HOW HARD IT IS TO STAY WELL HERE, once a census per town.
+                //
+                // Two things, and both are things the town did to itself. People sleeping on top of
+                // one another pass everything around, so crowding is the first term; and water
+                // nobody has cleaned is the second, which is what a treatment works is FOR and the
+                // only reason the fourth era of the water line is worth its cement.
+                //
+                // A place with room to spare and clean water is a place where sickness is a private
+                // misfortune. A place with neither is where a plague comes from.
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        this.cfilth[c] = 0;
+                        continue;
+                    }
+                    mutable int f = 0;
+                    if (this.croom[c] < this.cpop[c]) {
+                        f = (this.cpop[c] - this.croom[c]) * 1000 / this.cpop[c];
+                    }
+                    if (this.cdrink[c] < this.cpop[c]) {
+                        f = f + (this.cpop[c] - this.cdrink[c]) * 1000 / this.cpop[c];
+                    }
+                    this.cfilth[c] = f;
                 }
                 for (int a in 0..this.host.limit()) {
                     if (this.host.stateOf(a) == cast<int>(Muster.Besieging)
@@ -2591,6 +2629,14 @@ public bundle Agents {
             // makes food a constraint instead of decoration.
             public static int HUNGRY_AT = 5;
             public static int STARVE_AT = 25;
+            // Sickness, read against the same six-minute life. Checked every nine seconds, so about
+            // forty chances in a lifetime; a fully filthy town (nobody roofed, nobody watered) reads
+            // two thousand and gives roughly one chance in ten each time, and twelve points kill.
+            // So the worst place in the world is dangerous and not certain death, and the difference
+            // between a good town and a bad one is a difference in how long people live in it.
+            public static float ILL_EVERY = 9.0;
+            public static float CATCH_IT = 0.00005;   // per point of filth, per check
+            public static int SICKEN_AT = 12;
             // How long a short act holds somebody.
             //
             // MEASURED, because the first guess was not free. At two seconds against a six-minute
@@ -2622,6 +2668,7 @@ public bundle Agents {
                 float t = this.clock;
                 boolean hungrier = cast<int>(t / Simulation.HUNGER_EVERY) > cast<int>((t - dt) / Simulation.HUNGER_EVERY);
                 boolean wearier = cast<int>(t / Simulation.TIRED_EVERY) > cast<int>((t - dt) / Simulation.TIRED_EVERY);
+                boolean sickening = cast<int>(t / Simulation.ILL_EVERY) > cast<int>((t - dt) / Simulation.ILL_EVERY);
                 int n = this.folk.limit();
                 mutable int i = 0;
                 while (i < n) {
@@ -2653,6 +2700,40 @@ public bundle Agents {
                         this.vacate(i, this.folk.homeOf(i));
                         this.folk.kill(i);
                         this.deathsHunger = this.deathsHunger + 1;
+                        i = i + 1;
+                        continue;
+                    }
+                    // SICKNESS, WHICH IS THE ONE THING HERE THAT COMES FROM OUTSIDE.
+                    //
+                    // Hunger and tiredness are the body's own clocks and everybody has them. This
+                    // one is a fact about the PLACE: how crowded it is and whether anybody cleaned
+                    // the water. So a person doing everything right still falls ill if their town is
+                    // a bad town to live in, and that is the whole difference between a need and a
+                    // condition.
+                    //
+                    // On the same whole-point cadence as hunger, and drawn on the frame counter so
+                    // all twenty steps inside a second do not get handed the same number.
+                    if (sickening) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm) {
+                            int filth = this.cfilth[h];
+                            if (filth > 0
+                                && LandMath.hash01(this.seed ^ 0x51CC, i, this.frames)
+                                   < cast<float>(filth) * Simulation.CATCH_IT) {
+                                this.folk.setIll(i, this.folk.illOf(i) + 1);
+                                this.fellIll = this.fellIll + 1;
+                            }
+                            // And the town nurses whoever it has room to nurse. A bathhouse is not
+                            // medicine, but a place that washes is a place fewer people die in.
+                            if (this.folk.illOf(i) > 0 && this.ccare[h] >= this.cpop[h]) {
+                                this.folk.setIll(i, this.folk.illOf(i) - 2);
+                            }
+                        }
+                    }
+                    if (this.folk.illOf(i) >= Simulation.SICKEN_AT) {
+                        this.vacate(i, this.folk.homeOf(i));
+                        this.folk.kill(i);
+                        this.deathsIll = this.deathsIll + 1;
                         i = i + 1;
                         continue;
                     }
@@ -3934,6 +4015,9 @@ public bundle Agents {
                 if (this.considerWater(c)) {
                     return;
                 }
+                if (this.considerCare(c)) {
+                    return;
+                }
                 mutable int best = cast<int>(BuildingKind.NoBuilding);
                 mutable int bestScore = 0;
                 // THE BAR THE WINNER HAS TO CLEAR, AND WHY IT IS NOT ONE NUMBER.
@@ -4997,6 +5081,45 @@ public bundle Agents {
                 }
                 if (this.markNear(c, best)) {
                     this.watered = this.watered + 1;
+                    return true;
+                }
+                return false;
+            }
+
+            // AND THEN SOMETHING AGAINST BEING ILL, once there is a roof and a drink.
+            //
+            // Third in the order and not first, because that is the order the wants actually come
+            // in: a place with nobody under a roof has a crowding problem it will not cure with a
+            // bathhouse, and the bathhouse it would have built instead is the roof it did not.
+            // Sickness here is downstream of crowding and dirty water by construction, so the two
+            // things that answer it come first and this catches what is left.
+            //
+            // Gated on somebody actually being ill. A healthy town builds nothing, which is why a
+            // world with clean water and room to spare never sees an apothecary -- and that is the
+            // right answer rather than a missing one.
+            private method considerCare(int c) returns boolean {
+                if (this.cfilth[c] <= 0) {
+                    return false;
+                }
+                if (this.ccare[c] >= this.cpop[c]) {
+                    return false;
+                }
+                int best = Builds.bestCare(this.eraOf(c));
+                if (best == cast<int>(BuildingKind.NoBuilding)) {
+                    return false;
+                }
+                if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(best))) {
+                    return false;
+                }
+                if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(best))) {
+                    return false;
+                }
+                if (Builds.matCost(best) != cast<int>(Good.Nothing)
+                    && !this.stores.has(c, Builds.matCost(best), Builds.matCostN(best))) {
+                    return false;
+                }
+                if (this.markNear(c, best)) {
+                    this.tended = this.tended + 1;
                     return true;
                 }
                 return false;
@@ -6399,6 +6522,19 @@ public bundle Agents {
                 return this.watered;
             }
 
+            // Sickness: how many it has touched, how many it has taken, and how filthy a place is.
+            public method tookIll() returns long {
+                return this.fellIll;
+            }
+
+            public method deathsFromIllness() returns long {
+                return this.deathsIll;
+            }
+
+            public method filthOf(int c) returns int {
+                return this.cfilth[c];
+            }
+
             // Towns with a harbour standing, and how much has crossed water rather than country.
             public method portCount() returns int {
                 mutable int n = 0;
@@ -6750,6 +6886,15 @@ public bundle Agents {
                     }
                 }
                 System.IO.Console.println($"  water: {dry} places with no river at hand | {thirsty} short of water | {inland} people without | {this.watered} works marked out");
+                mutable int ailing = 0;
+                mutable int q = 0;
+                while (q < this.folk.limit()) {
+                    if (this.folk.alive(q) && this.folk.illOf(q) > 0) {
+                        ailing = ailing + 1;
+                    }
+                    q = q + 1;
+                }
+                System.IO.Console.println($"  sickness: {this.fellIll} took ill, {this.deathsIll} died of it, {ailing} ailing now | {this.tended} places raised against it");
                 System.IO.Console.println($"  rail: {lines} lines begun, {this.railed} cells of track laid");
                 // THE number of the culture slice. Every community started at fifty on every axis,
                 // so the spread at the end is entirely the work its people did coming back at them
