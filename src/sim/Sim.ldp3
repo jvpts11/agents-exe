@@ -1204,6 +1204,8 @@ public bundle Agents {
                         return;
                     }
                     this.host.call(a, nat, seat, want, lead);
+                    // Called out with its heart full. Everything after this spends it.
+                    this.host.hearten(a, Simulation.HEART_FULL);
                     this.folk.setRole(lead, cast<int>(Role.General));
                     this.folk.setJob(lead, cast<int>(Job.General));
                     return;
@@ -1350,20 +1352,83 @@ public bundle Agents {
                     // the army in front of it, which is what a keep is FOR.
                     this.host.press(a, under);
                     this.stores.seize(t, this.stores.richest(t), under / 4 + 1);
+                    // AND IT COSTS THEM THE WILL TO BE THERE.
+                    //
+                    // A siege used to end after SIEGE_WAIT censuses whatever had happened, and a
+                    // number of turns is not a reason. Standing in a field a long way from home
+                    // spends something every day; the keep that outlasts what is in front of it has
+                    // won by doing nothing, and now the world says so in the same units as the
+                    // fighting does.
+                    this.host.dishearten(a, Simulation.HEART_VIGIL);
+                    if (this.host.heartOf(a) <= 0) {
+                        this.host.noteRout(a);
+                        this.standDown(a);
+                        return;
+                    }
                     if (this.host.siegeOf(a) >= this.cwall[t]) {
                         this.host.setState(a, cast<int>(Muster.Storming));
-                    } else if (this.host.heldFor(a) > Simulation.SIEGE_WAIT) {
-                        this.standDown(a);
                     }
                     return;
                 }
                 if (s == cast<int>(Muster.Storming)) {
-                    this.takeTown(a, nat, t);
+                    // THE ASSAULT IS A FIGHT AND NOT A FORMALITY.
+                    //
+                    // Storming used to be a state that always ended in the town changing hands: the
+                    // wall came down and the place was taken, so a garrison was worth nothing and
+                    // every siege that got this far won. Now the men inside get a say. A town's
+                    // defence is everybody grown in it at whatever they are carrying, so a big
+                    // place is hard to take even undefended by walls, and a small one with an
+                    // armoury is harder than its size.
+                    //
+                    // Both sides lose men in proportion to what they faced, which is what makes
+                    // conquest expensive and why a country cannot simply roll over its neighbours
+                    // one after another without ever stopping.
+                    int hold = this.garrison(t);
+                    int loss = this.storm(a, nat, t, under, hold);
+                    if (loss > 0) {
+                        this.host.dishearten(a, loss * Simulation.HEART_PER_LOSS);
+                    }
+                    if (this.host.heartOf(a) <= 0 && this.host.alive(a)) {
+                        this.host.noteRout(a);
+                        this.standDown(a);
+                    }
                     return;
                 }
                 this.standDown(a);
                 return;
             }
+
+            // WHAT A SOLDIER IS, READ OFF WHAT THEY ARE CARRYING.
+            //
+            // There is no troop-type field and there should not be one. A man with nothing is a
+            // levy dragged off a field; a man with a spear is a soldier; a man with a spear and mail
+            // is worth several of either, and everybody knows which he is by looking at him. Every
+            // other standing in this world is read off the world the same way -- a chief is whoever
+            // is listened to, an elder is whoever has lived longest -- and a stored rank would be
+            // wrong within the minute at six minutes a life.
+            //
+            // It is also what armour is FOR. Three hundred suits of mail were made in an arc and
+            // changed nothing, because a headcount cannot tell one man from another. Now a small
+            // army of armoured men beats a big one of farmers, which is the entire reason a country
+            // bothers with an armoury.
+            private method mettle(int i) returns int {
+                if (this.folk.hasKit(i, AgentTable.K_ARMOUR)) {
+                    return Simulation.WEIGHT_MAILED;
+                }
+                if (this.folk.hasKit(i, AgentTable.K_WEAPON)) {
+                    return Simulation.WEIGHT_ARMED;
+                }
+                return Simulation.WEIGHT_LEVY;
+            }
+
+            public static int WEIGHT_LEVY = 1;
+            public static int WEIGHT_ARMED = 3;
+            public static int WEIGHT_MAILED = 7;
+            // What a town can put up in its own defence: everybody grown, at whatever they carry,
+            // because a townsman with a hoe still gets in the way.
+            public static int HEART_FULL = 100;
+            public static int HEART_VIGIL = 3;     // the cost of one census stood in a field
+            public static int HEART_PER_LOSS = 6;  // and of one man not coming back
 
             // Soldiers within a general's reach. This is the FORMATION: an army is the people who
             // are actually standing around the man leading it, so one that has strung itself across
@@ -1383,13 +1448,83 @@ public bundle Agents {
                             float dx = this.folk.xAt(i) - gx;
                             float dy = this.folk.yAt(i) - gy;
                             if (dx * dx + dy * dy < span) {
-                                c = c + 1;
+                                // Weighed rather than counted. Same loop, same cost, and the
+                                // difference between a mob and an army.
+                                c = c + this.mettle(i);
                             }
                         }
                     }
                     i = i + 1;
                 }
                 return c;
+            }
+
+            // What a town can put in the way of an army. Everybody grown who lives there, at
+            // whatever they carry -- a farmer with a hoe is not a soldier but he is not nothing
+            // either, and a town that armed itself is a different proposition entirely.
+            private method garrison(int t) returns int {
+                int n = this.folk.limit();
+                mutable int hold = 0;
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.homeOf(i) == t && this.folk.isAdult(i)) {
+                        hold = hold + this.mettle(i);
+                    }
+                    i = i + 1;
+                }
+                return hold;
+            }
+
+            // The assault itself. Returns what the attacker lost.
+            //
+            // Weight against weight, with the storming side paying for every point the defence had:
+            // an army that walks into a town twice its strength is destroyed, one that walks into a
+            // village a tenth its size barely notices. Nobody rolls dice for this -- the world is
+            // deterministic on a seed and a battle is not the place to break that.
+            private method storm(int a, int nat, int t, int power, int hold) returns int {
+                mutable int fell = 0;
+                if (power > hold) {
+                    // Taken. The cost is proportional to what stood in the way, and it is paid in
+                    // the people who did the standing on both sides.
+                    fell = this.bleed(t, nat, hold / 3 + 1, power / 6 + 1);
+                    this.takeTown(a, nat, t);
+                    return fell;
+                }
+                // Thrown back. The wall they broke stays broken -- the siege work is not undone --
+                // but the men are gone and the will with them.
+                fell = this.bleed(t, nat, power / 4 + 1, hold / 8 + 1);
+                return fell;
+            }
+
+            // Men die on both sides. `attackers` and `defenders` are how many are struck down;
+            // returns how many of the ATTACKING side fell, because that is what morale is spent on.
+            private method bleed(int t, int nat, int attackers, int defenders) returns int {
+                int n = this.folk.limit();
+                mutable int killedIn = 0;
+                mutable int killedOut = 0;
+                mutable int i = 0;
+                while (i < n) {
+                    if (killedIn >= defenders && killedOut >= attackers) {
+                        i = n;
+                    } else {
+                        if (this.folk.alive(i) && this.folk.isAdult(i)) {
+                            int h = this.folk.homeOf(i);
+                            if (h == t && killedIn < defenders) {
+                                this.folk.kill(i);
+                                this.deathsWar = this.deathsWar + 1;
+                                killedIn = killedIn + 1;
+                            } else if (h >= 0 && h < this.ncomm && this.cnat[h] == nat
+                                       && this.folk.jobOf(i) == cast<int>(Job.Raider)
+                                       && killedOut < attackers) {
+                                this.folk.kill(i);
+                                this.deathsWar = this.deathsWar + 1;
+                                killedOut = killedOut + 1;
+                            }
+                        }
+                        i = i + 1;
+                    }
+                }
+                return killedOut;
             }
 
             // The border moves.
@@ -6240,6 +6375,15 @@ public bundle Agents {
                 return this.births;
             }
 
+            // Armies that gave up rather than ran out of clock, and the fighting weight of a man.
+            public method routedArmies() returns long {
+                return this.host.routedCount();
+            }
+
+            public method mettleOf(int i) returns int {
+                return this.mettle(i);
+            }
+
             // Places that cannot keep everybody in drinking water, and works raised against it.
             public method thirstyCount() returns int {
                 mutable int n = 0;
@@ -6510,6 +6654,23 @@ public bundle Agents {
                     }
                 }
                 System.IO.Console.println($"  war: {this.feuds} community-seconds at war, {fighting} places at war now | {this.raids} blows struck, {this.deathsWar} killed, {this.plunder} carried off somebody else's shelves");
+                mutable int levy = 0;
+                mutable int armed = 0;
+                mutable int mailed = 0;
+                mutable int p = 0;
+                while (p < this.folk.limit()) {
+                    if (this.folk.alive(p) && this.folk.jobOf(p) == cast<int>(Job.Raider)) {
+                        if (this.folk.hasKit(p, AgentTable.K_ARMOUR)) {
+                            mailed = mailed + 1;
+                        } else if (this.folk.hasKit(p, AgentTable.K_WEAPON)) {
+                            armed = armed + 1;
+                        } else {
+                            levy = levy + 1;
+                        }
+                    }
+                    p = p + 1;
+                }
+                System.IO.Console.println($"  troops: {levy} levies, {armed} with a weapon, {mailed} in mail || {this.host.routedCount()} armies went home having had enough");
                 // What is left standing, against what the world started with. A resource that only
                 // goes down is being liquidated, and this is where that shows.
                 NodeField* nf = this.g.surface();
