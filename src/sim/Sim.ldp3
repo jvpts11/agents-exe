@@ -282,6 +282,7 @@ public bundle Agents {
             private mutable long watered;      // waterworks marked out
             private mutable long tended;       // and places raised against sickness
             private mutable long dealt;        // loads that crossed a border and warmed one
+            private mutable int leanest;       // the worst the land ever got, in the hundred
             private mutable long rebuilt;      // plots torn up and raised again bigger
             private mutable long pulled;       // workshops nobody needed any more, pulled down
             private mutable long raised;       // buildings finished
@@ -591,6 +592,7 @@ public bundle Agents {
                 this.watered = 0;
                 this.tended = 0;
                 this.dealt = 0;
+                this.leanest = 1000;
                 this.rebuilt = 0;
                 this.pulled = 0;
                 this.raised = 0;
@@ -2704,6 +2706,10 @@ public bundle Agents {
                 boolean hungrier = cast<int>(t / Simulation.HUNGER_EVERY) > cast<int>((t - dt) / Simulation.HUNGER_EVERY);
                 boolean wearier = cast<int>(t / Simulation.TIRED_EVERY) > cast<int>((t - dt) / Simulation.TIRED_EVERY);
                 boolean sickening = cast<int>(t / Simulation.ILL_EVERY) > cast<int>((t - dt) / Simulation.ILL_EVERY);
+                int now = this.season();
+                if (now < this.leanest) {
+                    this.leanest = now;
+                }
                 int n = this.folk.limit();
                 mutable int i = 0;
                 while (i < n) {
@@ -5066,6 +5072,41 @@ public bundle Agents {
                 return false;
             }
 
+            // THE TIME OF YEAR, as a hundredth of a normal harvest.
+            //
+            // This world had no seasons at all: food was as easy in one second as in any other, so
+            // a granary was a place to put a surplus rather than the thing that gets a village
+            // through to spring, and the whole reason for storing anything was missing.
+            //
+            // A year is ninety seconds against a six-minute life, so somebody sees four of them --
+            // which is the right feel at this scale: a season is a thing that happens to you several
+            // times, not once. The curve runs from forty in deep winter to a hundred and sixty at
+            // harvest, so a good year is four times a bad one and a village that did not put
+            // anything by is in trouble every fourth minute of its life.
+            //
+            // Read off the world clock and nothing else, so it is the same number everywhere at
+            // once: this is a world with one sun in it, and a famine is something that happens to
+            // everybody at the same time. That is what makes trade between countries worth having
+            // rather than an arbitrage nobody would notice.
+            public method season() returns int {
+                float year = this.clock / Simulation.YEAR;
+                float phase = year - cast<float>(cast<int>(year));
+                // A triangle rather than a sine: cheap, and the shape of a growing season is closer
+                // to a ramp than to a wave anyway.
+                mutable float up = phase * 2.0;
+                if (phase > 0.5) {
+                    up = (1.0 - phase) * 2.0;
+                }
+                return 40 + cast<int>(up * 120.0);
+            }
+
+            public static float YEAR = 90.0;
+
+            // The worst the land got over the whole run, for the report and the tests.
+            public method leanestSeason() returns int {
+                return this.leanest;
+            }
+
             // Is there fresh water within a short walk of this place? The sea does not count and the
             // reason is the oldest one there is: you cannot drink it.
             //
@@ -6418,7 +6459,18 @@ public bundle Agents {
                 if (a2 != cast<int>(Good.Nothing)) {
                     this.stores.take(h, a2, Builds.n2(k));
                 }
-                this.stores.add(h, Builds.out(k), Builds.nout(k));
+                // WHAT COMES OFF THE LAND DEPENDS ON THE TIME OF YEAR; what comes off a bench does
+                // not. A smith works the same in February as in August and a field does not, and
+                // that difference is the entire reason a granary exists -- so it is applied to the
+                // tilling craft and to nothing else.
+                mutable int made = Builds.nout(k);
+                if (Builds.craft(k) == cast<int>(Craft.Tilling)) {
+                    made = made * this.season() / 100;
+                    if (made < 1) {
+                        made = 1;      // even a hard winter yields something, or nobody would sow
+                    }
+                }
+                this.stores.add(h, Builds.out(k), made);
                 this.crafted = this.crafted + 1;
                 this.folk.earn(i, 1);
                 this.folk.setAct(i, cast<int>(Act.Idle));
@@ -6943,6 +6995,8 @@ public bundle Agents {
                     q = q + 1;
                 }
                 System.IO.Console.println($"  sickness: {this.fellIll} took ill, {this.deathsIll} died of it, {ailing} ailing now | {this.tended} places raised against it");
+                int years = cast<int>(this.clock / Simulation.YEAR);
+                System.IO.Console.println($"  seasons: {years} years turned | the land is yielding {this.season()} in the hundred as this ends | {this.leanest} was the worst it got");
                 System.IO.Console.println($"  rail: {lines} lines begun, {this.railed} cells of track laid");
                 // THE number of the culture slice. Every community started at fifty on every axis,
                 // so the spread at the end is entirely the work its people did coming back at them
