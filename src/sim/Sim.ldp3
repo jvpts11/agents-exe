@@ -4339,12 +4339,20 @@ public bundle Agents {
                 // method whose own header says "asked once a census per town, never per carter".
                 // Writing the rule down is not the same as following it.
                 mutable int[] gap = new int[this.ncomm * ng]();
+                // And the worst anybody is short of each good, in the same pass. This is what makes
+                // "carry what is wanted" affordable: the answer is the same for every sender, so it
+                // is computed once a census rather than once per town per good.
+                mutable int[] worst = new int[ng]();
                 for (int d in 0..this.ncomm) {
                     if (this.cpop[d] <= 0) {
                         continue;
                     }
                     for (int g in 1..ng) {
-                        gap[d * ng + g] = this.shortOf(d, g);
+                        int lack = this.shortOf(d, g);
+                        gap[d * ng + g] = lack;
+                        if (lack > worst[g]) {
+                            worst[g] = lack;
+                        }
                     }
                 }
                 for (int c in 0..this.ncomm) {
@@ -4362,18 +4370,44 @@ public bundle Agents {
                     if (!this.sails(c) && this.realm.townsOf(nat) < Simulation.TRADE_TOWNS) {
                         continue;
                     }
-                    // What we have most spare of, keeping a floor back: a place that empties its
-                    // own shelves to be generous starves, and a caravan is not charity.
+                    // A CARAVAN CARRIES WHAT IS WANTED, NOT WHAT IS PILED UP.
+                    //
+                    // It used to take whatever the sending town had MOST spare of, and that is why
+                    // the deep end of every chain stayed where it was made. A town with fifteen
+                    // hundred iron ingots also has five thousand grain, so grain won the cart every
+                    // census for ever, iron sat in two towns out of a hundred and eighty-two, and a
+                    // weaponsmith -- which needs iron in the same place as the men who want the
+                    // weapons -- could not be built anywhere. Three separate systems were finished
+                    // and inert behind this one line: weapons, armour, and every treaty that was
+                    // waiting on trade to cross a border.
+                    //
+                    // Now it is the good whose SHORTFALL SOMEWHERE ELSE is largest, bounded by what
+                    // we can actually spare. Cheap, and deliberately so: the world's worst gap per
+                    // good is one pass over towns and goods per CENSUS, not per town -- the mistake
+                    // this method's own header warns about, made once already and not again.
+                    //
+                    // ⚠️ This is a re-try of a variant that was measured and REVERTED (see
+                    // ECONOMY_MEASUREMENTS row 5), and it is legitimate only because the reason it
+                    // failed is gone: smithies died last time because a workshop needed sixty units
+                    // of unmet want to be worth building, and it now needs one batch.
                     mutable int good = 0;
-                    mutable int spare = 0;
+                    mutable int worth = 0;
                     for (int g in 1..ng) {
                         int over = this.stores.amountOf(c, g) - this.cwant[c * ng + g]
                                  - Simulation.KEEP_BACK;
-                        if (over > spare) {
-                            spare = over;
+                        if (over <= 0) {
+                            continue;
+                        }
+                        mutable int useful = worst[g];
+                        if (over < useful) {
+                            useful = over;      // we cannot send what we have not got
+                        }
+                        if (useful > worth) {
+                            worth = useful;
                             good = g;
                         }
                     }
+                    int spare = worth;
                     if (good <= 0) {
                         continue;
                     }
@@ -4414,6 +4448,7 @@ public bundle Agents {
                     this.ccargo[c] = good;
                 }
                 delete gap;
+                delete worst;
                 return;
             }
 
