@@ -4241,6 +4241,36 @@ public bundle Agents {
             // Nothing is spent here. Marking out a site costs nothing but the decision; the timber
             // and stone come out of the store when the builders have actually raised it, so a plan
             // can never eat a village's winter.
+            // The finest place of learning this village could raise TODAY -- highest study within
+            // its era that it has the timber, the stone and the material for. Affordability is what
+            // makes it a ladder rather than a cliff: a hamlet cannot pay for a library, so its
+            // answer is the shrine, and it climbs as it grows without anybody writing the steps
+            // down. Asked once a census per place, alongside everything else that is.
+            private method bestLoreFor(int c) returns int {
+                int era = this.eraOf(c);
+                mutable int best = cast<int>(BuildingKind.NoBuilding);
+                for (int k in 1..BuildingKind.count()) {
+                    if (Builds.study(k) <= 0 || Builds.era(k) > era) {
+                        continue;
+                    }
+                    if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(k))) {
+                        continue;
+                    }
+                    if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(k))) {
+                        continue;
+                    }
+                    if (Builds.matCost(k) != cast<int>(Good.Nothing)
+                        && !this.stores.has(c, Builds.matCost(k), Builds.matCostN(k))) {
+                        continue;
+                    }
+                    if (best == cast<int>(BuildingKind.NoBuilding)
+                        || Builds.study(k) > Builds.study(best)) {
+                        best = k;
+                    }
+                }
+                return best;
+            }
+
             private method considerBuilding(int c) returns void {
                 if (this.cseat[c] < 0) {
                     // The seat, free at founding, at the middle of where the people actually are.
@@ -4320,6 +4350,22 @@ public bundle Agents {
                 // any more than a roof is -- and a roof was already decided before this loop, for
                 // exactly that reason. So the order is: a roof, then a threat, then being cut off,
                 // and only then the auction between workshops, which really are comparable.
+                // A PLACE OF LEARNING IS A LADDER, and it was the one ladder in the catalogue that
+                // nobody climbed.
+                //
+                // Every learning kind scored identically -- worth is the spare food, the bar is
+                // WANT, for a shrine and for a university alike -- so the winner was decided by the
+                // order of the enum, and Shrine is the first name in it. Measured over every arc
+                // ever run: one thousand one hundred and sixty-eight shrines, and NOT ONE temple,
+                // scriptorium, library, school or university anywhere in the world. And the era
+                // ladder runs on learning, so four eras of history were built on top of the
+                // cheapest hut of the lot.
+                //
+                // Roofs, water and care are all read as ladders already -- bestRoof, bestWater,
+                // bestCare -- and this is the fourth of the same shape. The finest one the place can
+                // actually PAY for, so a hamlet still gets its shrine and a city gets its library
+                // without either of them being told a number.
+                int lorePick = this.bestLoreFor(c);
                 mutable int bestBar = Simulation.WANT;
                 mutable int wallPick = cast<int>(BuildingKind.NoBuilding);
                 mutable int wallFear = 0;
@@ -4453,6 +4499,9 @@ public bundle Agents {
                     }
                     mutable int worth = 0;
                     mutable int bar = Simulation.WANT;
+                    if (Builds.study(k) > 0 && k != lorePick) {
+                        continue;                    // a finer one is standing within its means
+                    }
                     if (Builds.study(k) > 0) {
                         // A place of learning is bounded by the people who can sit in it, and by
                         // nothing else -- what it makes is knowledge, and no shelf fills up.
