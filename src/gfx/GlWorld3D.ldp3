@@ -15,6 +15,8 @@ import Agents.Sim.Simulation;
 import Agents.Sim.Wildlife;
 import Agents.Sim.Meter;
 import Agents.Sim.Phase;
+import Agents.Sim.Fleet;
+import Agents.Sim.Lane;
 import Agents.World.Species;
 import Agents.World.Beasts;
 import System.Memory;
@@ -159,6 +161,12 @@ public bundle Agents {
             private mutable MeshAtlas* vehicles;
             private mutable int cartModel;
             private mutable int wagonModel;
+            private mutable int bargeModel;
+            private mutable int sailModel;
+            private mutable int steamModel;
+            private mutable int locoModel;
+            private mutable int railcarModel;
+            private mutable int planeModel;
             private mutable int[] hullModel;    // era -> Barge / Sailship / Steamship
             private mutable int wayVersion;     // what the last bake saw, so a new road rebakes
             private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
@@ -300,6 +308,12 @@ public bundle Agents {
                 this.toolModel = new int[1]();
                 this.cartModel = 0 - 1;
                 this.wagonModel = 0 - 1;
+                this.bargeModel = 0 - 1;
+                this.sailModel = 0 - 1;
+                this.steamModel = 0 - 1;
+                this.locoModel = 0 - 1;
+                this.railcarModel = 0 - 1;
+                this.planeModel = 0 - 1;
                 this.hullModel = new int[1]();
                 this.dPropC = new int[1]();
                 this.dNodeA = new int[1]();
@@ -1954,6 +1968,38 @@ public bundle Agents {
             // or a seam with their hands. So a cart appears exactly where the simulation already has
             // a caravan, and nowhere else; the wagon is the same job once a people has the second
             // era to build one.
+            // WHICH HULL A VESSEL IS, read off its lane and the age that sent it.
+            //
+            // A barge is what a second-age people puts on the water, a sailship what it learns next
+            // and a steamship what the third age makes of the same journey. The rail and the air
+            // have one each, because there is only one way to do either.
+            private method vesselModel(int v) returns int {
+                if (this.sim == null || this.vehicles == null) {
+                    return 0 - 1;
+                }
+                Fleet* f = this.sim.fleet();
+                int which = f.laneOf(v);
+                if (which == cast<int>(Lane.Air)) {
+                    return this.planeModel;
+                }
+                if (which == cast<int>(Lane.Rail)) {
+                    if (f.eraOf(v) >= 4) {
+                        return this.railcarModel;
+                    }
+                    return this.locoModel;
+                }
+                if (which == cast<int>(Lane.Water)) {
+                    if (f.eraOf(v) >= 4) {
+                        return this.steamModel;
+                    }
+                    if (f.eraOf(v) >= 3) {
+                        return this.sailModel;
+                    }
+                    return this.bargeModel;
+                }
+                return 0 - 1;
+            }
+
             private method drawnModel(int i) returns int {
                 if (this.vehicles == null || this.sim == null) {
                     return 0 - 1;
@@ -2093,6 +2139,14 @@ public bundle Agents {
                 this.vehicles = art;
                 this.cartModel = art.ordOf("Cart");
                 this.wagonModel = art.ordOf("Wagon");
+                // The six that are not things a person pulls. They GO, and until the fleet existed
+                // there was nothing for them to be.
+                this.bargeModel = art.ordOf("Barge");
+                this.sailModel = art.ordOf("Sailship");
+                this.steamModel = art.ordOf("Steamship");
+                this.locoModel = art.ordOf("Locomotive");
+                this.railcarModel = art.ordOf("Railcar");
+                this.planeModel = art.ordOf("Airliner");
                 this.hullModel = new int[4]();
                 this.hullModel[0] = art.ordOf("Barge");
                 this.hullModel[1] = art.ordOf("Barge");

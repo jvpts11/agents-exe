@@ -168,6 +168,8 @@ public bundle Agents {
             private mutable long feuds;        // censuses spent with somebody to fight
             private mutable long raids;        // warriors who reached an enemy village
             private mutable long plunder;      // goods carried home off somebody else's shelves
+            private mutable Fleet* ships;      // everything crossing that is not a person
+            private mutable int[] arrived;     // slots that made port this tick
             private mutable long wed;          // couples the world put together
             private mutable long grudges;      // people who came to blame one named other person
             private mutable long exiled;       // and who left rather than live under him
@@ -241,8 +243,10 @@ public bundle Agents {
             private mutable int[] carmy;       // the army besieging it, or -1
             private mutable int[] cbarr;       // barracks working in it
             private mutable int[] cport;       // how far over water this town can reach, or 0
-            private mutable int[] cportb;      // the harbour building itself, or -1: the quay a
+            private mutable int[] cportb;
+                                               // the harbour building itself, or -1: the quay a
                                                // carter walks to, read once a census like the rest
+            private mutable int[] cair;        // runways, which are a lane of their own
             private mutable int[] cdrink;      // heads this place can keep in water
             private mutable boolean[] cfresh;  // is there a river or a lake at hand at all
             // Waterworks STANDING, which is a different question from heads watered and is asked by
@@ -600,6 +604,7 @@ public bundle Agents {
                 this.cbarr = new int[this.ncomm]();
                 this.cport = new int[this.ncomm]();
                 this.cportb = new int[this.ncomm]();
+                this.cair = new int[this.ncomm]();
                 this.cdrink = new int[this.ncomm]();
                 this.cfresh = new boolean[this.ncomm]();
                 this.cwells = new int[this.ncomm]();
@@ -609,6 +614,11 @@ public bundle Agents {
                 // empty, and reaching for `clear()` before this line ran was a null dereference that
                 // took an arc down with an access violation and no message at all.
                 this.fates = new Fates(this.ncomm) on heap;
+                // One hull per town is generous and bounded: a world of a hundred and sixty towns
+                // cannot have more than a hundred and sixty things under way, which is the same
+                // shape as one caravan per town and for the same reason.
+                this.ships = new Fleet(this.ncomm) on heap;
+                this.arrived = new int[this.ncomm]();
                 this.ctraded = new long[Goods.count()]();
                 this.cmate = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
@@ -762,12 +772,15 @@ public bundle Agents {
                 delete this.cbarr;
                 delete this.cport;
                 delete this.cportb;
+                delete this.cair;
                 delete this.cdrink;
                 delete this.cfresh;
                 delete this.cwells;
                 delete this.cwatch;
                 delete this.ccare;
                 delete this.fates;
+                delete this.ships;
+                delete this.arrived;
                 delete this.ctraded;
                 delete this.cmate;
                 delete this.cfilth;
@@ -841,6 +854,110 @@ public bundle Agents {
             // forty people fires bricks on the day it is founded because the kingdom that sent it
             // knows how -- which is the whole practical difference between a country and a scatter
             // of villages that each had to invent everything for itself.
+            // EVERYTHING THAT CROSSES WITHOUT SOMEBODY CARRYING IT.
+            //
+            // Called once a census, beside the caravan routes and for the same reason: "who needs
+            // what I have spare" is the expensive question in this file and it is answered per town,
+            // never per vessel per tick.
+            //
+            // A town launches when it has a lane, a hull the lane wants, something spare, and
+            // nothing already on that lane. The lane it uses is the FASTEST one it has, which is the
+            // entire reason anybody ever laid a rail or cut a runway: the sea reaches places a road
+            // cannot, the rail is three times a barge, and the air is again what the rail is.
+            private method dispatch() returns void {
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    int to = this.ccaravan[c];
+                    if (to < 0 || to >= this.ncomm || this.cpop[to] <= 0 || to == c) {
+                        continue;
+                    }
+                    if (this.ships.busy(c, to)) {
+                        continue;                    // one hull to a lane; the last is still out
+                    }
+                    // Which lane, best first. A town with an airport does not send a barge.
+                    int air = cast<int>(BuildingKind.Airport);
+                    mutable int which = cast<int>(Lane.NoLane);
+                    if (this.cair[c] > 0 && this.cair[to] > 0) {
+                        which = cast<int>(Lane.Air);
+                    } else if (this.railHere(c) && this.railHere(to)) {
+                        which = cast<int>(Lane.Rail);
+                    } else if (this.shipsBySea(c)) {
+                        which = cast<int>(Lane.Water);
+                    }
+                    if (which == cast<int>(Lane.NoLane)) {
+                        continue;                    // the road is the only way, and it has a carter
+                    }
+                    // WHAT IT TAKES is what the caravan was already going to take. A vessel never
+                    // invents a demand -- it travels one the census has already worked out, which
+                    // is why this whole method costs a loop over towns and not a second economy.
+                    int good = this.ccargo[c];
+                    if (good <= 0) {
+                        continue;
+                    }
+                    int load = this.stores.seize(c, good, Simulation.HOLD);
+                    if (load <= 0) {
+                        continue;
+                    }
+                    this.ships.launch(which, c, to, this.ccx[c], this.ccy[c],
+                                      this.ccx[to], this.ccy[to], good, load, this.eraOf(c));
+                }
+                return;
+            }
+
+            // How much a hull takes at a time. A vessel is worth having because it carries what a
+            // person cannot -- otherwise the road would do, and this whole table would be scenery.
+            public static int HOLD = 60;
+
+            // Move everything under way, and unload whatever made port. The fleet carries and this
+            // pays: a table that both moves things and touches a store is a table two things can go
+            // wrong in at once.
+            private method steam(float dt) returns void {
+                int n = this.ships.advance(dt, this.arrived);
+                for (int k in 0..n) {
+                    int v = this.arrived[k];
+                    int to = this.ships.bound(v);
+                    int good = this.ships.cargoOf(v);
+                    int amt = this.ships.loadOf(v);
+                    if (to >= 0 && to < this.ncomm && this.cpop[to] > 0 && amt > 0) {
+                        this.stores.stow(to, good, amt);
+                        this.shipped = this.shipped + cast<long>(amt);
+                    }
+                    this.ships.moor(v);
+                }
+                return;
+            }
+
+            public method fleet() returns Fleet* {
+                return this.ships;
+            }
+
+            // WHAT MOVES A LOAD OUT OF THIS TOWN, asked by the renderer.
+            //
+            // A carter and his cart have been drawn since the road existed. The sea lane and the
+            // railway carry goods too and have never had anything in them: eight vehicle meshes --
+            // barge, sailship, steamship, locomotive, railcar, airliner -- were cut for this game
+            // and none of them has ever been on screen. The lane is real, the vessel was missing.
+            public method shipsBySea(int comm) returns boolean {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return false;
+                }
+                return this.sails(comm) && this.ccaravan[comm] >= 0
+                    && this.sails(this.ccaravan[comm]);
+            }
+
+            public method railHere(int comm) returns boolean {
+                if (comm < 0 || comm >= this.ncomm) {
+                    return false;
+                }
+                int nat = this.cnat[comm];
+                if (nat < 0 || nat >= this.ncomm) {
+                    return false;
+                }
+                return this.nrailTo[nat] == comm || this.realm.seatOf(nat) == comm;
+            }
+
             public method eraOf(int comm) returns int {
                 if (comm < 0 || comm >= this.ncomm) {
                     return 1;
@@ -1347,6 +1464,7 @@ public bundle Agents {
                     this.carmy[c] = 0 - 1;
                     this.cbarr[c] = 0;
                     this.cport[c] = 0;
+                    this.cair[c] = 0;
                     this.cportb[c] = 0 - 1;
                     // WHAT THE GROUND GIVES FOR NOTHING.
                     //
@@ -1411,6 +1529,12 @@ public bundle Agents {
                         if (reach > this.cport[c]) {
                             this.cport[c] = reach;
                             this.cportb[c] = b;
+                        }
+                        // A runway is counted the same way, and separately: the air lane is not a
+                        // better harbour, it is a different lane, and a town can have one without
+                        // the other.
+                        if (k == cast<int>(BuildingKind.Airport)) {
+                            this.cair[c] = this.cair[c] + 1;
                         }
                         // Read off the catalogue rather than off one name, so a second kind of
                         // garrison later needs no line here.
@@ -3538,6 +3662,9 @@ public bundle Agents {
                 // it is settled which towns exist and who they answer to -- the same reason the
                 // nations themselves are read after hiving, absorbing and colonising.
                 this.caravanRoutes();
+                // And everything that crosses without a person in it, on the routes the line above
+                // has just worked out. The vessel never invents a demand; it travels one.
+                this.dispatch();
                 this.railway();
                 // And then the wars, which need the nations settled to know who is whose.
                 this.campaign();
@@ -8175,6 +8302,10 @@ public bundle Agents {
                     this.meter.lap(cast<int>(Phase.Census));
                 }
                 this.g.surface().regrow(dt);
+                // Hulls move on the clock like people do, not on the census -- a barge halfway
+                // across is halfway across, and a lane that only advanced once a census would
+                // teleport its cargo.
+                this.steam(dt);
                 // And the paths fade, for the same reason the woods grow back: without it every
                 // cell anybody ever crossed is a road for ever, and after an arc the map is a
                 // brown smear instead of a network. A route still in use is topped up far faster
@@ -8398,6 +8529,7 @@ public bundle Agents {
                 System.IO.Console.println($"  war: {this.feuds} community-seconds at war, {fighting} places at war now | {this.raids} blows struck, {this.deathsWar} killed, {this.plunder} carried off somebody else's shelves");
                 System.IO.Console.println($"  spoils: {this.sacked} towns sacked and left standing, {this.captured} marched home as captives");
                 System.IO.Console.println($"  bonds: {this.wed} couples, {this.grudges} grudges against a named person, {this.exiled} who left rather than live under one");
+                this.ships.report();
                 mutable int levy = 0;
                 mutable int armed = 0;
                 mutable int mailed = 0;
