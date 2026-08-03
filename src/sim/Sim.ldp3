@@ -1910,10 +1910,21 @@ public bundle Agents {
                     this.realm.warm(nat, was, Simulation.BOND_PER_SACK);
                 }
                 this.craided[t] = Simulation.GRUDGE;
-                this.craider[t] = nat;
                 int lead = this.host.generalOf(a);
+                // A grudge needs an ADDRESS, and `craider` holds a town rather than a flag -- every
+                // other writer of it puts a community there, and the feud logic compares it against
+                // community indices. The man who led them home is where they came from; failing
+                // that, the seat of the country that sent them.
+                mutable int from = 0 - 1;
                 if (lead >= 0 && this.folk.alive(lead)) {
+                    from = this.folk.homeOf(lead);
                     this.folk.earn(lead, 12);    // a fraction of what taking it outright is worth
+                }
+                if (from < 0 || from >= this.ncomm) {
+                    from = this.realm.seatOf(nat);
+                }
+                if (from >= 0 && from < this.ncomm && from != t) {
+                    this.craider[t] = from;
                 }
                 this.standDown(a);
                 return;
@@ -5574,6 +5585,35 @@ public bundle Agents {
                         this.cwant[c * ng + wp] = this.cwant[c * ng + wp] + wants;
                         this.cwant[c * ng + ar] = this.cwant[c * ng + ar] + wants;
                     }
+                    // AND HUNGER, which is the last want in the world that could not travel.
+                    //
+                    // The roof, the tool and the spear were all read at the moment somebody asked
+                    // about their one good, and the comment below says exactly why that was wrong: a
+                    // want that exists only at the instant it is read cannot imply anything about the
+                    // good beneath it. All three were moved here. FOOD WAS LEFT BEHIND, and it is the
+                    // biggest want in the world.
+                    //
+                    // That is the whole of the flour deadlock. `shortOf` hands every edible good the
+                    // same hunger gap at read time, so bread is wanted precisely as much as grain --
+                    // but the want is never in `cwant`, so it never explodes, so nothing ever wants
+                    // the FLOUR bread is made of, so no windmill is raised, so no bakery can be, and
+                    // twelve grain never becomes fifteen bread. Two food buildings in the catalogue
+                    // that no village has ever built in the history of this world.
+                    //
+                    // MOVED and not copied. The per-good want is identical to what `shortOf` was
+                    // handing out -- one hunger, one gap, same rate, same units -- and the only new
+                    // thing in the world is that it can now reach the good below it. This campaign
+                    // has reverted five changes for making a want BIGGER; this one makes a want
+                    // TRAVEL, which is the shape that has worked every time.
+                    int eats = this.cpop[c] * 10 / cast<int>(Simulation.HUNGER_EVERY + 1.0);
+                    if (eats > this.cfed[c]) {
+                        int gap = eats - this.cfed[c];
+                        for (int g in 1..ng) {
+                            if (Goods.edible(g)) {
+                                this.cwant[c * ng + g] = this.cwant[c * ng + g] + gap;
+                            }
+                        }
+                    }
                 }
                 // And then the explosion itself, one level per round, breadth first.
                 //
@@ -5645,14 +5685,13 @@ public bundle Agents {
                     // building saw the whole shortfall alone; counted as a stock, no amount of
                     // building ever answered it. Both were measured, and both ended with a village
                     // of nothing but pastures.
-                    int eats = this.cpop[c] * 10 / cast<int>(Simulation.HUNGER_EVERY + 1.0);
-                    // No multiplier on it. Scaling the food gap by the larder made it eight times
-                    // any other want in the world, so a village that was one pasture short of fed
-                    // still wanted a pasture more than it wanted the sawmill it had no planks for.
-                    // Wants are compared against each other, so they have to be in the same units.
-                    if (eats > this.cfed[c]) {
-                        want = want + eats - this.cfed[c];
-                    }
+                    //
+                    // The gap itself is no longer added HERE. It is seeded into `cwant` with the
+                    // roof, the tool and the spear, for the reason all three of those were moved:
+                    // a want read at the instant somebody asks about one good cannot imply anything
+                    // about the good beneath it, and food was the last one still doing that. Same
+                    // rate, same units, same number -- it simply arrives already exploded, so
+                    // wanting bread finally means wanting flour and wanting flour means a windmill.
                     return want;                 // a rate answered by a rate: no stock term here
                 }
                 // A village is always building something, and everything is built out of these two.
