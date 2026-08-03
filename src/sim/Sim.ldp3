@@ -192,6 +192,9 @@ public bundle Agents {
             private mutable int[] cwall;       // how much wall each town has standing
             private mutable int[] carmy;       // the army besieging it, or -1
             private mutable int[] cbarr;       // barracks working in it
+            private mutable int[] cport;       // how far over water this town can reach, or 0
+            private mutable int[] cportb;      // the harbour building itself, or -1: the quay a
+                                               // carter walks to, read once a census like the rest
             // The two authorities a place has besides the one in charge. An elder is whoever has
             // lived longest and is believed about what this place is; a priest is whoever spends
             // their days at the shrine. Neither is elected and neither can be appointed -- both are
@@ -211,6 +214,7 @@ public bundle Agents {
             private mutable int[] ccargo;
             private mutable long caravans;
             private mutable long trafficked;
+            private mutable long shipped;      // of that, what crossed water rather than country
             // The one thing in this world nobody decides for themselves. A railway is not worn by
             // feet and it is not laid by whoever happens to be standing there with spare stone: it
             // is a LINE between two towns, and only something that answers for both ends can want
@@ -507,6 +511,8 @@ public bundle Agents {
                 this.cwall = new int[this.ncomm]();
                 this.carmy = new int[this.ncomm]();
                 this.cbarr = new int[this.ncomm]();
+                this.cport = new int[this.ncomm]();
+                this.cportb = new int[this.ncomm]();
                 this.celder = new int[this.ncomm]();
                 this.cpriest = new int[this.ncomm]();
                 this.ctchief = new int[this.ncomm]();
@@ -523,6 +529,7 @@ public bundle Agents {
                 this.tradeChiefs = 0;
                 this.caravans = 0;
                 this.trafficked = 0;
+                this.shipped = 0;
                 this.nrailTo = new int[this.ncomm]();
                 this.nrailAt = new int[this.ncomm]();
                 this.nhost = new int[this.ncomm]();
@@ -639,6 +646,8 @@ public bundle Agents {
                 delete this.cwall;
                 delete this.carmy;
                 delete this.cbarr;
+                delete this.cport;
+                delete this.cportb;
                 delete this.celder;
                 delete this.cpriest;
                 delete this.ctchief;
@@ -1068,6 +1077,8 @@ public bundle Agents {
                     this.cwall[c] = 0;
                     this.carmy[c] = 0 - 1;
                     this.cbarr[c] = 0;
+                    this.cport[c] = 0;
+                    this.cportb[c] = 0 - 1;
                     this.nhost[c] = 0 - 1;
                 }
                 // Whose armies are out, read once. Sixty-four slots, not sixty-four slots per
@@ -1086,12 +1097,19 @@ public bundle Agents {
                     }
                     int k = this.town.kindOf(b);
                     int hold = Builds.wall(k);
-                    if (hold <= 0) {
+                    int reach = Builds.port(k);
+                    if (hold <= 0 && reach <= 0) {
                         continue;
                     }
                     int c = this.town.ownerOf(b);
                     if (c >= 0 && c < this.ncomm) {
                         this.cwall[c] = this.cwall[c] + hold;
+                        // A second harbour does not double how far a boat sails, so the town keeps
+                        // the longest reach it has rather than the sum of them.
+                        if (reach > this.cport[c]) {
+                            this.cport[c] = reach;
+                            this.cportb[c] = b;
+                        }
                         if (k == cast<int>(BuildingKind.Barracks)) {
                             this.cbarr[c] = this.cbarr[c] + 1;
                         }
@@ -3845,6 +3863,33 @@ public bundle Agents {
                         }
                         continue;
                     }
+                    // A harbour makes nothing either, so it is scored apart like the wall -- but on
+                    // the opposite question. A wall is worth what the town fears; a port is worth
+                    // what the town cannot GET.
+                    //
+                    // The signal is already computed once a census and costs nothing to read: a
+                    // town with no caravan destination has nobody within a cart's reach who is
+                    // short of what it has spare. That is what being cut off means, and it is
+                    // exactly the town for whom the water is the only road. A town in the middle of
+                    // a well-connected country reads the same shortfalls and builds nothing,
+                    // because the carts already answer them.
+                    if (Builds.port(k) > 0) {
+                        if (this.cport[c] >= Builds.port(k)) {
+                            continue;                // it already reaches as far
+                        }
+                        if (this.ccaravan[c] >= 0) {
+                            continue;                // the roads are answering it
+                        }
+                        mutable int cutOff = 0;
+                        for (int g in 1..Goods.count()) {
+                            cutOff = cutOff + this.shortOf(c, g);
+                        }
+                        if (cutOff > bestScore) {
+                            bestScore = cutOff;
+                            best = k;
+                        }
+                        continue;
+                    }
                     mutable int worth = 0;
                     if (Builds.study(k) > 0) {
                         // A place of learning is bounded by the people who can sit in it, and by
@@ -3939,8 +3984,15 @@ public bundle Agents {
                         continue;
                     }
                     int nat = this.cnat[c];
-                    if (this.realm.townsOf(nat) < Simulation.TRADE_TOWNS) {
-                        continue;                    // one town has nobody to send anything to
+                    // A port trades with FOREIGNERS, which is the whole difference between a road
+                    // and a sea lane. Overland a caravan only ever goes to another town under the
+                    // same flag -- a cart crossing a border is a raid waiting to happen -- so a
+                    // country of one town has nobody to send to and stops here. A harbour does not
+                    // care whose flag flies on the far side, so a single-town island is exactly the
+                    // place a port is worth most, and it is the first route in this world that
+                    // crosses a border without an army attached to it.
+                    if (this.cport[c] <= 0 && this.realm.townsOf(nat) < Simulation.TRADE_TOWNS) {
+                        continue;
                     }
                     // What we have most spare of, keeping a floor back: a place that empties its
                     // own shelves to be generous starves, and a caravan is not charity.
@@ -3961,13 +4013,24 @@ public bundle Agents {
                     mutable int to = 0 - 1;
                     mutable int need = 0;
                     for (int d in 0..this.ncomm) {
-                        if (d == c || this.cpop[d] <= 0 || this.cnat[d] != nat) {
+                        if (d == c || this.cpop[d] <= 0) {
                             continue;
+                        }
+                        // Two harbours are neighbours however far apart they are and whoever they
+                        // answer to; everything else is a cart on a road inside one country.
+                        boolean sea = this.cport[c] > 0 && this.cport[d] > 0;
+                        if (!sea && this.cnat[d] != nat) {
+                            continue;
+                        }
+                        mutable int span = Simulation.TRADE_REACH;
+                        if (sea && this.cport[c] < this.cport[d]) {
+                            span = this.cport[c];      // the shorter of the two boats
+                        } else if (sea) {
+                            span = this.cport[d];
                         }
                         float dx = this.ccx[d] - this.ccx[c];
                         float dy = this.ccy[d] - this.ccy[c];
-                        if (dx * dx + dy * dy
-                            > cast<float>(Simulation.TRADE_REACH * Simulation.TRADE_REACH)) {
+                        if (dx * dx + dy * dy > cast<float>(span * span)) {
                             continue;
                         }
                         int want = gap[d * ng + good];
@@ -4103,8 +4166,24 @@ public bundle Agents {
                     if (to < 0 || to >= this.ncomm || this.cpop[to] <= 0) {
                         to = h;                      // nowhere to take it; carry it back home
                     }
-                    float dx = this.ccx[to] - this.folk.xAt(i);
-                    float dy = this.ccy[to] - this.folk.yAt(i);
+                    // A CARTER DOES NOT WALK ON WATER.
+                    //
+                    // Where both ends have a harbour the far town may be on another continent, so
+                    // the leg a person does is the one they can do: to the quay in their own place.
+                    // The load goes on from there, and the crossing is the boat's, not theirs --
+                    // this world models the people who carry things, and a ship's crew is not among
+                    // them. So the sea lane is honest about what it is: goods appear at the far
+                    // port because a vessel took them, and nobody is animated walking over the sea.
+                    mutable float tx = this.ccx[to];
+                    mutable float ty = this.ccy[to];
+                    boolean sailing = to != h && this.cport[h] > 0 && this.cport[to] > 0
+                                   && this.cportb[h] >= 0;
+                    if (sailing) {
+                        tx = cast<float>(this.town.xAt(this.cportb[h]));
+                        ty = cast<float>(this.town.yAt(this.cportb[h]));
+                    }
+                    float dx = tx - this.folk.xAt(i);
+                    float dy = ty - this.folk.yAt(i);
                     if (dx * dx + dy * dy < 4.0) {
                         int amt = this.folk.carryAmtOf(i);
                         this.stores.stow(to, this.folk.carryKindOf(i), amt);
@@ -4116,8 +4195,11 @@ public bundle Agents {
                         // The one moment in the world worth its own act: a caravan that has walked
                         // across a country setting its load down at the far end.
                         this.folk.setAct(i, cast<int>(Act.Deposit));
+                        if (sailing) {
+                            this.shipped = this.shipped + cast<long>(amt);
+                        }
                     } else {
-                        this.folk.setTarget(i, cast<int>(this.ccx[to]), cast<int>(this.ccy[to]));
+                        this.folk.setTarget(i, cast<int>(tx), cast<int>(ty));
                         this.folk.setAct(i, cast<int>(Act.WalkTo));
                     }
                     return;
@@ -4497,6 +4579,11 @@ public bundle Agents {
                     return this.g.hasFlag(x, y, Grid.FLAG_COAST)
                         || this.g.hasFlag(x, y, Grid.FLAG_RIVER)
                         || this.g.hasFlag(x, y, Grid.FLAG_LAKE);
+                }
+                // The sea and nothing else. A jetty on a lake is a jetty to nowhere, and the whole
+                // worth of a harbour is the far side of the water having somebody on it.
+                if (ground == cast<int>(Ground.Coast)) {
+                    return this.g.hasFlag(x, y, Grid.FLAG_COAST);
                 }
                 if (ground == cast<int>(Ground.Rock)) {
                     return b == cast<int>(Biome.Hills) || b == cast<int>(Biome.Mountain)
@@ -5955,6 +6042,37 @@ public bundle Agents {
                 return this.births;
             }
 
+            // Towns with a harbour standing, and how much has crossed water rather than country.
+            public method portCount() returns int {
+                mutable int n = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] > 0 && this.cport[c] > 0) {
+                        n = n + 1;
+                    }
+                }
+                return n;
+            }
+
+            public method shippedUnits() returns long {
+                return this.shipped;
+            }
+
+            // Routes whose far end flies another flag. Overland this is always zero by construction;
+            // a harbour is the only thing that makes it anything else.
+            public method foreignRoutes() returns int {
+                mutable int n = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    int d = this.ccaravan[c];
+                    if (d >= 0 && d < this.ncomm && this.cnat[d] != this.cnat[c]) {
+                        n = n + 1;
+                    }
+                }
+                return n;
+            }
+
             public method step(float dt) returns void {
                 this.frames = this.frames + 1;
                 this.clock = this.clock + dt;
@@ -6226,7 +6344,22 @@ public bundle Agents {
                         lines = lines + 1;
                     }
                 }
+                mutable int ports = 0;
+                mutable int overseas = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    if (this.cport[c] > 0) {
+                        ports = ports + 1;
+                    }
+                    int d = this.ccaravan[c];
+                    if (d >= 0 && d < this.ncomm && this.cnat[d] != this.cnat[c]) {
+                        overseas = overseas + 1;
+                    }
+                }
                 System.IO.Console.println($"  trade: {routes} routes running | {this.caravans} loads set out, {this.trafficked} units carried between towns");
+                System.IO.Console.println($"  sea: {ports} towns with a harbour | {overseas} routes cross a border | {this.shipped} units went by water");
                 System.IO.Console.println($"  rail: {lines} lines begun, {this.railed} cells of track laid");
                 // THE number of the culture slice. Every community started at fifty on every axis,
                 // so the spread at the end is entirely the work its people did coming back at them
