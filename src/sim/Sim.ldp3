@@ -205,6 +205,8 @@ public bundle Agents {
             private mutable Armies* host;
             // What the ground does to the people standing on it. See Fates.ldp3.
             private mutable Fates* fates;
+            // Units of each good ever set down at the far end of a route. Sixty longs.
+            private mutable long[] ctraded;
             private mutable int[] cwall;       // how much wall each town has standing
             private mutable int[] carmy;       // the army besieging it, or -1
             private mutable int[] cbarr;       // barracks working in it
@@ -555,6 +557,7 @@ public bundle Agents {
                 // empty, and reaching for `clear()` before this line ran was a null dereference that
                 // took an arc down with an access violation and no message at all.
                 this.fates = new Fates(this.ncomm) on heap;
+                this.ctraded = new long[Goods.count()]();
                 this.cfilth = new int[this.ncomm]();
                 this.celder = new int[this.ncomm]();
                 this.cpriest = new int[this.ncomm]();
@@ -705,6 +708,7 @@ public bundle Agents {
                 delete this.cwells;
                 delete this.ccare;
                 delete this.fates;
+                delete this.ctraded;
                 delete this.cfilth;
                 delete this.celder;
                 delete this.cpriest;
@@ -4664,9 +4668,21 @@ public bundle Agents {
                     float dy = ty - this.folk.yAt(i);
                     if (dx * dx + dy * dy < 4.0) {
                         int amt = this.folk.carryAmtOf(i);
-                        this.stores.stow(to, this.folk.carryKindOf(i), amt);
+                        int what = this.folk.carryKindOf(i);
+                        this.stores.stow(to, what, amt);
                         this.trafficked = this.trafficked + cast<long>(amt);
                         this.carried = this.carried + cast<long>(amt);
+                        // WHAT THE CARTS ACTUALLY CARRY, per good.
+                        //
+                        // Three changes in a row have now moved the trade figures around without
+                        // anybody being able to see what moved: total units carried is one number
+                        // over sixty goods, so grain and iron ore look identical in the report. The
+                        // question standing open -- whether ore reaches the towns with brick and
+                        // charcoal in them -- is not answerable from any line this program prints.
+                        // One counter per good, incremented where the load is set down.
+                        if (what > 0 && what < Goods.count()) {
+                            this.ctraded[what] = this.ctraded[what] + cast<long>(amt);
+                        }
                         this.folk.earn(i, 4);
                         // A LOAD THAT CROSSED A BORDER IS WORTH MORE THAN THE GOODS ON IT.
                         //
@@ -7304,6 +7320,32 @@ public bundle Agents {
                 }
                 System.IO.Console.println($"  troops: {levy} levies, {armed} with a weapon, {mailed} in mail || {this.host.routedCount()} armies went home having had enough");
                 System.IO.Console.println($"  standing between countries: {this.realm.friendships()} pairs at peace, {this.realm.alliances()} of them allied | {this.dealt} loads crossed a border");
+                // WHAT WAS ACTUALLY IN THE CARTS. Total units carried is one number over sixty
+                // goods, so grain and iron ore have always looked identical in this report -- and
+                // "does ore reach the towns that have brick and charcoal" is the question standing
+                // in front of the whole metal chain. The top ten, which is where the answer is.
+                mutable String cargo = "  carried, most to least:";
+                mutable long[] seen = new long[Goods.count()]();
+                for (int g in 0..Goods.count()) {
+                    seen[g] = this.ctraded[g];
+                }
+                for (int rank in 0..10) {
+                    mutable int top = 0 - 1;
+                    mutable long most = 0;
+                    for (int g in 1..Goods.count()) {
+                        if (seen[g] > most) {
+                            most = seen[g];
+                            top = g;
+                        }
+                    }
+                    if (top < 0) {
+                        break;
+                    }
+                    cargo = cargo + " " + Goods.name(top) + " " + most.toString() + " |";
+                    seen[top] = 0;
+                }
+                delete seen;
+                System.IO.Console.println(cargo);
                 // What the world did without being asked. Kept apart from war on purpose: a world
                 // where nobody has ever been killed by the ground they chose to live on is a world
                 // where choosing that ground was free.
