@@ -195,6 +195,8 @@ public bundle Agents {
             private mutable int[] cport;       // how far over water this town can reach, or 0
             private mutable int[] cportb;      // the harbour building itself, or -1: the quay a
                                                // carter walks to, read once a census like the rest
+            private mutable int[] cdrink;      // heads this place can keep in water
+            private mutable boolean[] cfresh;  // is there a river or a lake at hand at all
             // The two authorities a place has besides the one in charge. An elder is whoever has
             // lived longest and is believed about what this place is; a priest is whoever spends
             // their days at the shrine. Neither is elected and neither can be appointed -- both are
@@ -275,6 +277,7 @@ public bundle Agents {
             private mutable long crafted;      // batches finished
             private mutable long stalled;      // batches that could not start for want of an input
             private mutable long housed;       // housing plots marked out
+            private mutable long watered;      // waterworks marked out
             private mutable long rebuilt;      // plots torn up and raised again bigger
             private mutable long pulled;       // workshops nobody needed any more, pulled down
             private mutable long raised;       // buildings finished
@@ -513,6 +516,8 @@ public bundle Agents {
                 this.cbarr = new int[this.ncomm]();
                 this.cport = new int[this.ncomm]();
                 this.cportb = new int[this.ncomm]();
+                this.cdrink = new int[this.ncomm]();
+                this.cfresh = new boolean[this.ncomm]();
                 this.celder = new int[this.ncomm]();
                 this.cpriest = new int[this.ncomm]();
                 this.ctchief = new int[this.ncomm]();
@@ -575,6 +580,7 @@ public bundle Agents {
                 this.crafted = 0;
                 this.stalled = 0;
                 this.housed = 0;
+                this.watered = 0;
                 this.rebuilt = 0;
                 this.pulled = 0;
                 this.raised = 0;
@@ -648,6 +654,8 @@ public bundle Agents {
                 delete this.cbarr;
                 delete this.cport;
                 delete this.cportb;
+                delete this.cdrink;
+                delete this.cfresh;
                 delete this.celder;
                 delete this.cpriest;
                 delete this.ctchief;
@@ -1079,6 +1087,19 @@ public bundle Agents {
                     this.cbarr[c] = 0;
                     this.cport[c] = 0;
                     this.cportb[c] = 0 - 1;
+                    // WHAT THE GROUND GIVES FOR NOTHING.
+                    //
+                    // A village beside a river drinks and never thinks about it; that is why the
+                    // natural supply is unbounded rather than a number. What a dry site costs is
+                    // everything below -- the well, then the catcher, then the aqueduct it cannot
+                    // have because there is no river to reach. Geography stops being scenery at
+                    // exactly this line.
+                    this.cfresh[c] = this.freshAt(c);
+                    if (this.cfresh[c]) {
+                        this.cdrink[c] = this.cpop[c];
+                    } else {
+                        this.cdrink[c] = 0;
+                    }
                     this.nhost[c] = 0 - 1;
                 }
                 // Whose armies are out, read once. Sixty-four slots, not sixty-four slots per
@@ -1098,12 +1119,15 @@ public bundle Agents {
                     int k = this.town.kindOf(b);
                     int hold = Builds.wall(k);
                     int reach = Builds.port(k);
-                    if (hold <= 0 && reach <= 0) {
+                    int drink = Builds.water(k);
+                    if (hold <= 0 && reach <= 0 && drink <= 0) {
                         continue;
                     }
                     int c = this.town.ownerOf(b);
                     if (c >= 0 && c < this.ncomm) {
                         this.cwall[c] = this.cwall[c] + hold;
+                        // Two wells water twice as many people, unlike two harbours.
+                        this.cdrink[c] = this.cdrink[c] + drink;
                         // A second harbour does not double how far a boat sails, so the town keeps
                         // the longest reach it has rather than the sum of them. Whether anything is
                         // tied up at it is a separate question, asked by `sails` where the routes
@@ -3772,6 +3796,9 @@ public bundle Agents {
                 if (this.considerHousing(c)) {
                     return;
                 }
+                if (this.considerWater(c)) {
+                    return;
+                }
                 mutable int best = cast<int>(BuildingKind.NoBuilding);
                 mutable int bestScore = 0;
                 // THE BAR THE WINNER HAS TO CLEAR, AND WHY IT IS NOT ONE NUMBER.
@@ -4773,6 +4800,73 @@ public bundle Agents {
                 return false;
             }
 
+            // Is there fresh water within a short walk of this place? The sea does not count and the
+            // reason is the oldest one there is: you cannot drink it.
+            //
+            // Read on a lattice rather than every cell -- a river is many cells wide in the walk
+            // that matters, so sampling every fourth one finds it and costs a sixteenth. Once a
+            // census per town, never per person.
+            private method freshAt(int c) returns boolean {
+                int cx = cast<int>(this.ccx[c]);
+                int cy = cast<int>(this.ccy[c]);
+                mutable int dy = 0 - Simulation.FRESH_REACH;
+                while (dy <= Simulation.FRESH_REACH) {
+                    mutable int dx = 0 - Simulation.FRESH_REACH;
+                    while (dx <= Simulation.FRESH_REACH) {
+                        int x = cx + dx;
+                        int y = cy + dy;
+                        if (x >= 0 && y >= 0 && x < this.g.width() && y < this.g.height()) {
+                            if (this.g.hasFlag(x, y, Grid.FLAG_RIVER)
+                                || this.g.hasFlag(x, y, Grid.FLAG_LAKE)) {
+                                return true;
+                            }
+                        }
+                        dx = dx + 4;
+                    }
+                    dy = dy + 4;
+                }
+                return false;
+            }
+
+            // How far somebody will walk for a drink before the village decides to bring the water
+            // to itself instead.
+            public static int FRESH_REACH = 24;
+
+            // WATER COMES BEFORE A TRADE, for the same reason a roof does.
+            //
+            // A place with more mouths than it can keep in water has one want and it is not a
+            // brewery. This is shaped like considerHousing and not like a workshop because that is
+            // what a well IS: it makes room for people rather than a good, exactly as a hut does.
+            //
+            // Where it bites is dry ground. A village on a river never enters this method at all;
+            // a village on the steppe answers it every census until it has dug enough. That is the
+            // asymmetry the whole line exists for -- it puts a price on ground that looked free,
+            // and it is why the second era is worth reaching for a people who settled badly.
+            private method considerWater(int c) returns boolean {
+                if (this.cdrink[c] >= this.cpop[c]) {
+                    return false;
+                }
+                int best = Builds.bestWater(this.eraOf(c), this.cfresh[c]);
+                if (best == cast<int>(BuildingKind.NoBuilding)) {
+                    return false;
+                }
+                if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(best))) {
+                    return false;
+                }
+                if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(best))) {
+                    return false;
+                }
+                if (Builds.matCost(best) != cast<int>(Good.Nothing)
+                    && !this.stores.has(c, Builds.matCost(best), Builds.matCostN(best))) {
+                    return false;
+                }
+                if (this.markNear(c, best)) {
+                    this.watered = this.watered + 1;
+                    return true;
+                }
+                return false;
+            }
+
             // Enough of an input piling up to be worth a workshop.
             public static int WANT = 60;
 
@@ -5035,6 +5129,22 @@ public bundle Agents {
                 if (room > 1.0) {
                     room = 1.0;
                 }
+                // AND HOW MUCH WATER THERE IS, by the same argument.
+                //
+                // Food was made the ceiling because a stand-in for "the real limit" had to become
+                // the real limit; water is the other half of that sentence and was simply missing.
+                // A town of eight hundred drawing on one well is not a town of eight hundred for
+                // long, and the number that says so is the same number that says it is not fed.
+                //
+                // The two multiply rather than either winning, because they are not alternatives:
+                // a place with full granaries and one well is held back by the well, and it is held
+                // back exactly as hard as a place with water and no bread.
+                float drink = cast<float>(this.cdrink[h]) / cast<float>(this.cpop[h] + 1);
+                mutable float wet = drink;
+                if (wet > 1.0) {
+                    wet = 1.0;
+                }
+                room = room * wet;
                 if (room <= 0.0) {
                     return false;
                 }
@@ -6130,6 +6240,21 @@ public bundle Agents {
                 return this.births;
             }
 
+            // Places that cannot keep everybody in drinking water, and works raised against it.
+            public method thirstyCount() returns int {
+                mutable int n = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] > 0 && this.cdrink[c] < this.cpop[c]) {
+                        n = n + 1;
+                    }
+                }
+                return n;
+            }
+
+            public method waterworksMarked() returns long {
+                return this.watered;
+            }
+
             // Towns with a harbour standing, and how much has crossed water rather than country.
             public method portCount() returns int {
                 mutable int n = 0;
@@ -6448,6 +6573,22 @@ public bundle Agents {
                 }
                 System.IO.Console.println($"  trade: {routes} routes running | {this.caravans} loads set out, {this.trafficked} units carried between towns");
                 System.IO.Console.println($"  sea: {ports} towns with a harbour | {overseas} routes cross a border | {this.shipped} units went by water");
+                mutable int dry = 0;
+                mutable int thirsty = 0;
+                mutable int inland = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    if (!this.cfresh[c]) {
+                        dry = dry + 1;
+                    }
+                    if (this.cdrink[c] < this.cpop[c]) {
+                        thirsty = thirsty + 1;
+                        inland = inland + this.cpop[c] - this.cdrink[c];
+                    }
+                }
+                System.IO.Console.println($"  water: {dry} places with no river at hand | {thirsty} short of water | {inland} people without | {this.watered} works marked out");
                 System.IO.Console.println($"  rail: {lines} lines begun, {this.railed} cells of track laid");
                 // THE number of the culture slice. Every community started at fifty on every axis,
                 // so the spread at the end is entirely the work its people did coming back at them
