@@ -5,6 +5,7 @@ import Agents.World.WorldGen;
 import Agents.World.NodeField;
 import Agents.World.Nodes;
 import Agents.World.Harvest;
+import Agents.World.Good;
 program AgentsExe;
 
 // What the world is made of, and what happens to it when people use it.
@@ -190,6 +191,104 @@ public bundle Agents {
                 }
                 Test.checking("the ore is still gone");
                 Test.assertEqual(Woods.standing(cast<int>(Harvest.Mine)), 0);
+                return;
+            }
+
+            // A TRADE IS NOT A THING, and this is the test that says so.
+            //
+            // Every village in the world worked its quarriers hard -- three thousand of them in a
+            // measured arc -- and between them they brought home a million and a half units of stone
+            // and three thousand of clay, because "quarry" was one word for five different holes in
+            // the ground and the nearest of them is a stone quarry three times out of four. Brick is
+            // fired clay and a smithy costs twelve brick, so the whole metal half of the world was
+            // downstream of that one conflation.
+            [Tag(name: "world")]
+            [Test]
+            public static method a_trade_brings_home_more_than_one_thing() returns void {
+                Test.checking("a quarrier can fetch more than stone");
+                Test.assertAtLeast(Nodes.goodsIn(cast<int>(Harvest.Quarry)), 2);
+                Test.checking("and a miner more than iron");
+                Test.assertAtLeast(Nodes.goodsIn(cast<int>(Harvest.Mine)), 2);
+                mutable boolean clay = false;
+                for (int i in 0..Nodes.goodsIn(cast<int>(Harvest.Quarry))) {
+                    if (Nodes.goodAt(cast<int>(Harvest.Quarry), i) == cast<int>(Good.Clay)) {
+                        clay = true;
+                    }
+                }
+                Test.checking("clay is one of the things a quarrier can be sent for");
+                Test.assertTrue(clay);
+                return;
+            }
+
+            // The finer map has to agree with the coarser one, or a village walks to a block that
+            // has nothing in it. Summing a class's goods over a block must give the class's own
+            // count -- which is the invariant that catches a maintenance point somebody forgot when
+            // a seam is opened, worked out, or grows back.
+            [Tag(name: "world")]
+            [Test]
+            public static method the_two_maps_of_the_world_agree() returns void {
+                NodeField* f = Woods.world.surface();
+                mutable int checked = 0;
+                for (int by in 0..f.blockRows()) {
+                    for (int bx in 0..f.blockCols()) {
+                        for (int hc in 1..Harvest.count()) {
+                            int whole = f.inBlock(bx, by, hc);
+                            mutable int parts = 0;
+                            for (int i in 0..Nodes.goodsIn(hc)) {
+                                parts = parts + f.inBlockGood(bx, by, Nodes.goodAt(hc, i));
+                            }
+                            if (whole != parts) {
+                                Test.checking($"block {bx},{by} class {hc}: the two maps disagree");
+                                Test.assertEqual(parts, whole);
+                                return;
+                            }
+                            if (whole > 0) {
+                                checked = checked + 1;
+                            }
+                        }
+                    }
+                }
+                Test.checking("the check actually looked at blocks with work in them");
+                Test.assertAtLeast(checked, 10);
+                return;
+            }
+
+            // And it still agrees after the world has been used. A worked-out seam and a felled
+            // wood both have to come off BOTH maps.
+            [Tag(name: "world")]
+            [Test]
+            public static method the_two_maps_still_agree_after_a_century() returns void {
+                NodeField* f = Woods.world.surface();
+                mutable int i = 0;
+                while (i < f.size()) {
+                    if (f.kindAt(i) > 0 && i % 3 == 0) {
+                        f.harvest(i, 32767);
+                    }
+                    i = i + 1;
+                }
+                mutable int t = 0;
+                while (t < 2400) {
+                    f.regrow(1.0);
+                    t = t + 1;
+                }
+                for (int by in 0..f.blockRows()) {
+                    for (int bx in 0..f.blockCols()) {
+                        for (int hc in 1..Harvest.count()) {
+                            int whole = f.inBlock(bx, by, hc);
+                            mutable int parts = 0;
+                            for (int gi in 0..Nodes.goodsIn(hc)) {
+                                parts = parts + f.inBlockGood(bx, by, Nodes.goodAt(hc, gi));
+                            }
+                            if (whole != parts) {
+                                Test.checking($"block {bx},{by} class {hc} drifted apart in use");
+                                Test.assertEqual(parts, whole);
+                                return;
+                            }
+                        }
+                    }
+                }
+                Test.checking("the two maps still agree after felling and regrowth");
+                Test.assertTrue(true);
                 return;
             }
         }

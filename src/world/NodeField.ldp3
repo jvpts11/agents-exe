@@ -53,6 +53,14 @@ public bundle Agents {
             // stump. A block is where the WORK is, and people spread out inside it on their own. It
             // is kept live by `harvest`, so it never lies.
             private mutable int[] blockHave;
+            // And the same map one notch finer: live nodes per block per GOOD.
+            //
+            // The class map answers "is there quarrying here", which turned out to be the wrong
+            // question. A quarry class covers stone, marble, clay, sand and salt, so a village that
+            // needed clay was sent to whichever face of the five was nearest -- three times out of
+            // four a stone quarry -- and clay, sand and salt were never brought home anywhere in the
+            // world. Two and a half megabytes buys the question the villagers were actually asking.
+            private mutable int[] blockGood;
             private mutable int bw;
             private mutable int bh;
             private mutable int bplane;        // bw * bh, the stride between Harvest classes
@@ -78,6 +86,7 @@ public bundle Agents {
                 this.bh = (h + 15) / 16;
                 this.bplane = this.bw * this.bh;
                 this.blockHave = new int[this.bplane * Harvest.count()]();
+                this.blockGood = new int[this.bplane * Good.count()]();
                 this.renewAt = 0;
                 this.renewDebt = 0.0;
                 this.renewSweeps = 0;
@@ -93,6 +102,7 @@ public bundle Agents {
                 delete this.rowStart;
                 delete this.cellFirst;
                 delete this.blockHave;
+                delete this.blockGood;
             }
 
             public method size() returns int {
@@ -234,6 +244,9 @@ public bundle Agents {
                 for (int b in 0..this.bplane * Harvest.count()) {
                     this.blockHave[b] = 0;
                 }
+                for (int bg in 0..this.bplane * Good.count()) {
+                    this.blockGood[bg] = 0;
+                }
                 for (int j in 0..this.n) {
                     int k = cast<int>(this.kind[j]) & 255;
                     if (k != 0 && cast<int>(this.qty[j]) > 0) {
@@ -241,6 +254,11 @@ public bundle Agents {
                         if (hc != cast<int>(Harvest.Nothing)) {
                             int b = hc * this.bplane + this.blockOf(j);
                             this.blockHave[b] = this.blockHave[b] + 1;
+                            int gd = Nodes.gives(k);
+                            if (gd != cast<int>(Good.Nothing)) {
+                                int gb = gd * this.bplane + this.blockOf(j);
+                                this.blockGood[gb] = this.blockGood[gb] + 1;
+                            }
                         }
                     }
                 }
@@ -304,6 +322,24 @@ public bundle Agents {
                     return 0;
                 }
                 return this.blockHave[hclass * this.bplane + by * this.bw + bx];
+            }
+
+            // Live nodes yielding one particular GOOD in the block. Same map, asked the way the
+            // people asking it actually think: not "is there mining here" but "is there COAL here".
+            public method inBlockGood(int bx, int by, int good) returns int {
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return 0;
+                }
+                return this.blockGood[good * this.bplane + by * this.bw + bx];
+            }
+
+            // Whole-world stock of one good still standing in the ground.
+            public method totalOfGood(int good) returns int {
+                mutable int t = 0;
+                for (int b in 0..this.bplane) {
+                    t = t + this.blockGood[good * this.bplane + b];
+                }
+                return t;
             }
 
             // Whole-world stock of one Harvest class, which is what says whether a resource is being
@@ -421,6 +457,11 @@ public bundle Agents {
                     if (hc != cast<int>(Harvest.Nothing)) {
                         int b = hc * this.bplane + this.blockOf(i);
                         this.blockHave[b] = this.blockHave[b] - 1;
+                        int gd = Nodes.gives(k);
+                        if (gd != cast<int>(Good.Nothing)) {
+                            int gb = gd * this.bplane + this.blockOf(i);
+                            this.blockGood[gb] = this.blockGood[gb] - 1;
+                        }
                     }
                     // A picked bush is not a destroyed bush. Forage and fishing are FLOWS -- the
                     // berries come back, the shoal swims back -- so the node stays where it is with
@@ -470,6 +511,11 @@ public bundle Agents {
                             int hc = Nodes.work(k);
                             int b = hc * this.bplane + this.blockOf(i);
                             this.blockHave[b] = this.blockHave[b] + 1;
+                            int gd = Nodes.gives(k);
+                            if (gd != cast<int>(Good.Nothing)) {
+                                int gb = gd * this.bplane + this.blockOf(i);
+                                this.blockGood[gb] = this.blockGood[gb] + 1;
+                            }
                             return k;
                         }
                     }
@@ -533,6 +579,11 @@ public bundle Agents {
                 this.kind[i] = cast<byte>(was);
                 this.qty[i] = cast<short>(Nodes.baseQty(was));
                 this.blockHave[plane + b] = here + 1;
+                int gd = Nodes.gives(was);
+                if (gd != cast<int>(Good.Nothing)) {
+                    int gb = gd * this.bplane + b;
+                    this.blockGood[gb] = this.blockGood[gb] + 1;
+                }
                 return;
             }
 
@@ -618,6 +669,11 @@ public bundle Agents {
                     if (have == 0 && now > 0) {
                         int b = hc * this.bplane + this.blockOf(i);
                         this.blockHave[b] = this.blockHave[b] + 1;
+                        int gd = Nodes.gives(k);
+                        if (gd != cast<int>(Good.Nothing)) {
+                            int gb = gd * this.bplane + this.blockOf(i);
+                            this.blockGood[gb] = this.blockGood[gb] + 1;
+                        }
                     }
                 }
                 return;

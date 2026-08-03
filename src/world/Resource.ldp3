@@ -136,6 +136,10 @@ public bundle Agents {
             // on the ground into a link in docs/ECONOMY.md's first chain.
             private static mutable int[] YIELD;
             private static mutable int[] WORK;
+            // The distinct goods each Harvest class can yield, derived from the two tables above.
+            // Flat, hclass * Good.count() + i, with the live length beside it.
+            private static mutable int[] CLASS_GOODS;
+            private static mutable int[] CLASS_N;
 
             onClassLoad {
                 int n = NodeKind.count();
@@ -257,6 +261,49 @@ public bundle Agents {
                           cast<int>(Good.Oil), mine);
                 Nodes.put(cast<int>(NodeKind.RareEarth), "RareEarth", nodes, ore, true, 200,
                           cast<int>(Good.RareEarth), mine);
+
+                // WHAT EACH TRADE CAN ACTUALLY BRING HOME, and why one name for it was not enough.
+                //
+                // A quarrier fetches stone, marble, CLAY, sand or salt; a miner fetches iron, copper,
+                // tin, gold, silver, COAL, sulfur, oil, gems or rare earth. The rest of the world
+                // knew a trade by one good apiece -- stone for the quarry, iron for the mine -- and
+                // that one name was doing two jobs it could not do: it decided how badly a village
+                // wanted quarriers, and it decided which hole they walked to.
+                //
+                // So a village that wanted CLAY to fire brick asked itself how short of STONE it was,
+                // answered "not very", and put nobody on the pit. If it did send a quarrier anyway,
+                // he went to the nearest face of the class, which is a stone quarry three times out
+                // of four. Clay never came home, so no kiln, so no brick -- and a smithy is twelve
+                // brick to raise. One smithy in a world of a hundred and thirty towns, iron at three
+                // hundred and sixty units, no armoury anywhere, nobody armed in twenty generations.
+                // Sand and glass, salt, coal, marble and tin were dead in the same sentence.
+                //
+                // Derived here rather than written down, so a new vein added to the catalogue above
+                // is reachable the moment it exists.
+                int nh = Harvest.count();
+                int ngd = Good.count();
+                Nodes.CLASS_N = new int[nh]();
+                Nodes.CLASS_GOODS = new int[nh * ngd]();
+                mutable int kd = 1;
+                while (kd < n) {
+                    int hcv = Nodes.WORK[kd];
+                    int gv = Nodes.YIELD[kd];
+                    if (hcv != cast<int>(Harvest.Nothing) && gv != cast<int>(Good.Nothing)) {
+                        mutable boolean seen = false;
+                        mutable int s = 0;
+                        while (s < Nodes.CLASS_N[hcv]) {
+                            if (Nodes.CLASS_GOODS[hcv * ngd + s] == gv) {
+                                seen = true;
+                            }
+                            s = s + 1;
+                        }
+                        if (!seen) {
+                            Nodes.CLASS_GOODS[hcv * ngd + Nodes.CLASS_N[hcv]] = gv;
+                            Nodes.CLASS_N[hcv] = Nodes.CLASS_N[hcv] + 1;
+                        }
+                    }
+                    kd = kd + 1;
+                }
             }
 
             private static method put(int ord, String name, int atlas, int klass, boolean bury,
@@ -332,6 +379,17 @@ public bundle Agents {
 
             public static method isTree(int ord) returns boolean {
                 return Nodes.WORK[ord] == cast<int>(Harvest.Timber);
+            }
+
+            // How many different goods this trade can bring home, and which they are. This is the
+            // fact a village needs to decide whether it wants a quarrier at all, and which face he
+            // walks to when it does.
+            public static method goodsIn(int hclass) returns int {
+                return Nodes.CLASS_N[hclass];
+            }
+
+            public static method goodAt(int hclass, int i) returns int {
+                return Nodes.CLASS_GOODS[hclass * Good.count() + i];
             }
         }
     }
