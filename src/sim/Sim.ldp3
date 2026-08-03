@@ -44,6 +44,17 @@ program AgentsExe;
 public bundle Agents {
     public namespace Sim {
 
+        // The four things a town builds FOR ITS PEOPLE rather than for its trade or its war, each
+        // ranked by its own column in the building catalogue. They share a ladder because they share
+        // a defect: every one of them used to name the finest kind the ERA allowed and then decline
+        // to build anything at all when the shelves could not cover it.
+        public enum Comfort {
+            Learning,
+            Roof,
+            Drink,
+            Healing
+        }
+
         public class Simulation {
             private mutable Grid* g;
             private mutable AgentTable* folk;
@@ -1733,7 +1744,7 @@ public bundle Agents {
                     // And the survivors are marched off before the army disbands, because after it
                     // disbands there is nobody to march them.
                     this.haul(a, t, power);
-                    if (this.canHold(nat, t)) {
+                    if (this.canHold(nat, t, power, hold)) {
                         this.takeTown(a, nat, t);
                     } else {
                         this.sack(a, nat, t);
@@ -1803,12 +1814,26 @@ public bundle Agents {
             // army can beat one. The answer is the plainest one there is: has it got anywhere of its
             // own within a march. A flag planted where nothing of yours can reach is a line on a map
             // and not a country, and a general standing in that town knows it.
-            // The radius is the CARAVAN's and not the army's, and the difference is the whole point.
-            // Marching somewhere and administering it are different distances: WAR_REACH is how far
-            // a host will walk to hit you, and holding a place at exactly that range would make
-            // governing precisely as easy as attacking, so a won assault would annex every time and
-            // nothing would have changed. A country holds what its carts reach.
-            private method canHold(int nat, int t) returns boolean {
+            // Two conditions, and the SECOND one is the one that fires.
+            //
+            // The first is reach, and the radius is the caravan's rather than the army's on purpose:
+            // marching somewhere and administering it are different distances, and holding at war
+            // reach would make governing exactly as easy as attacking. But it was measured, and on
+            // its own it decided nothing -- not one town in a whole arc was left standing, because
+            // in a world this size a country nearly always has something within a cart's journey.
+            // A threshold outside the range its quantity occupies is a rule that does not exist,
+            // which is the fifth time this campaign has run into that and the first time it was
+            // caught before it cost an arc.
+            //
+            // The second is STRENGTH, and it is the honest one anyway. An army that took a town by
+            // a hair has nothing left to garrison it with; one that walked over a village barely
+            // noticed. So a crushing win takes the town and a narrow win takes the shelves -- which
+            // is what actually happened in most of the wars this world is imitating, and it needs no
+            // number nobody chose: it is the same two weights the assault was already decided on.
+            private method canHold(int nat, int t, int power, int hold) returns boolean {
+                if (power <= hold * 2) {
+                    return false;                    // won, but barely: no men to spare for a flag
+                }
                 float span = cast<float>(Simulation.TRADE_REACH * Simulation.TRADE_REACH);
                 for (int c in 0..this.ncomm) {
                     if (c == t || this.cnat[c] != nat || this.cpop[c] <= 0) {
@@ -4567,25 +4592,77 @@ public bundle Agents {
             // answer is the shrine, and it climbs as it grows without anybody writing the steps
             // down. Asked once a census per place, alongside everything else that is.
             private method bestLoreFor(int c) returns int {
+                return this.finestFor(c, cast<int>(Comfort.Learning), true);
+            }
+
+            // Whether a town could pay for a thing today, which is a question asked of four
+            // different ladders and was written out four times.
+            private method canAfford(int c, int k) returns boolean {
+                if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(k))) {
+                    return false;
+                }
+                if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(k))) {
+                    return false;
+                }
+                if (Builds.matCost(k) != cast<int>(Good.Nothing)
+                    && !this.stores.has(c, Builds.matCost(k), Builds.matCostN(k))) {
+                    return false;
+                }
+                return true;
+            }
+
+            // THE FINEST THING OF A KIND A TOWN CAN ACTUALLY PAY FOR -- and this is where era three
+            // and era four went.
+            //
+            // The catalogue's ladders (`bestRoof`, `bestWater`, `bestCare`) answer a question about
+            // KNOWLEDGE: the finest waterworks a people of this era knows how to build. That is the
+            // right question for a catalogue and the wrong one to build from, and the difference
+            // cost this world two entire ages. A town that reached era three asked for a water tower
+            // -- ten iron ingots, in a world where iron did not exist -- could not pay, built
+            // NOTHING, and went on drinking from a well it never dug. Same for the roof, where era
+            // three means a tenement, and the sick-house, where it means a hospital. Advancing made
+            // a town worse off than staying put, and the census showed it: six hundred wells and not
+            // one tower, a hundred and eighty apothecaries and one hospital, and of era four --
+            // cannery, university, water treatment, modern hospital, residential tower -- not a
+            // single building of any kind, ever.
+            //
+            // The learning ladder hit this first and was fixed alone; this is the same fix made
+            // once, for all of them. Walk the whole menu the era allows, keep the best the shelves
+            // can cover, and a rich town gets its tower while a poor one still gets its well.
+            private method finestFor(int c, int want, boolean afford) returns int {
                 int era = this.eraOf(c);
                 mutable int best = cast<int>(BuildingKind.NoBuilding);
+                mutable int bestWorth = 0;
                 for (int k in 1..BuildingKind.count()) {
-                    if (Builds.study(k) <= 0 || Builds.era(k) > era) {
+                    // An if-chain and not a switch, which this world learned the hard way in the
+                    // four minutes it took the suite to notice: LDP3's switch falls through, so
+                    // every arm ran on into the default and every comfort ladder returned nothing.
+                    // Nobody sank a well, nobody caught rain, nobody taught anybody anything.
+                    mutable int worth = 0;
+                    if (want == cast<int>(Comfort.Learning)) {
+                        worth = Builds.study(k);
+                    } else if (want == cast<int>(Comfort.Roof)) {
+                        worth = Builds.roof(k);
+                    } else if (want == cast<int>(Comfort.Drink)) {
+                        worth = Builds.water(k);
+                    } else if (want == cast<int>(Comfort.Healing)) {
+                        worth = Builds.care(k);
+                    }
+                    if (worth <= 0 || Builds.era(k) > era) {
                         continue;
                     }
-                    if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(k))) {
+                    // An aqueduct has to reach a river, and a place with no water in sight cannot
+                    // have one however rich it is. That is the one constraint that is about the
+                    // GROUND rather than the shelves, and it is why settling badly costs something.
+                    if (!this.cfresh[c] && Builds.site(k) == cast<int>(Ground.Waterside)) {
                         continue;
                     }
-                    if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(k))) {
+                    if (afford && !this.canAfford(c, k)) {
                         continue;
                     }
-                    if (Builds.matCost(k) != cast<int>(Good.Nothing)
-                        && !this.stores.has(c, Builds.matCost(k), Builds.matCostN(k))) {
-                        continue;
-                    }
-                    if (best == cast<int>(BuildingKind.NoBuilding)
-                        || Builds.study(k) > Builds.study(best)) {
+                    if (best == cast<int>(BuildingKind.NoBuilding) || worth > bestWorth) {
                         best = k;
+                        bestWorth = worth;
                     }
                 }
                 return best;
@@ -5785,23 +5862,16 @@ public bundle Agents {
             // and a place that is merely large look different -- the first is dense and tall, the
             // second is a scatter of huts -- and the difference is visible without a single number.
             private method considerHousing(int c) returns boolean {
-                int best = Builds.bestRoof(this.eraOf(c));
-                if (best == cast<int>(BuildingKind.NoBuilding)) {
-                    return false;
-                }
                 if (this.croom[c] >= this.cpop[c]) {
                     return false;
                 }
-                if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(best))) {
-                    return false;
-                }
-                if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(best))) {
-                    return false;
-                }
-                if (Builds.matCost(best) != cast<int>(Good.Nothing)
-                    && !this.stores.has(c, Builds.matCost(best), Builds.matCostN(best))) {
-                    // A village that has learned to raise houses but has no sawmill goes on living
-                    // in huts, and wanting planks. That want is the sawmill's whole reason to be.
+                // The finest roof the shelves can cover, not the finest the era knows about. A
+                // village that has learned to raise houses but has no sawmill goes on living in
+                // huts and wanting planks -- that want is the sawmill's whole reason to be -- and a
+                // town that has reached the age of the tenement without the brick for one goes on
+                // building houses instead of building nothing at all, which is what it used to do.
+                int best = this.finestFor(c, cast<int>(Comfort.Roof), true);
+                if (best == cast<int>(BuildingKind.NoBuilding)) {
                     return false;
                 }
                 if (this.cworst[c] >= 0 && this.cworstRoom[c] < Builds.roof(best)) {
@@ -6171,18 +6241,8 @@ public bundle Agents {
                 if (this.cdrink[c] >= this.cpop[c]) {
                     return false;
                 }
-                int best = Builds.bestWater(this.eraOf(c), this.cfresh[c]);
+                int best = this.finestFor(c, cast<int>(Comfort.Drink), true);
                 if (best == cast<int>(BuildingKind.NoBuilding)) {
-                    return false;
-                }
-                if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(best))) {
-                    return false;
-                }
-                if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(best))) {
-                    return false;
-                }
-                if (Builds.matCost(best) != cast<int>(Good.Nothing)
-                    && !this.stores.has(c, Builds.matCost(best), Builds.matCostN(best))) {
                     return false;
                 }
                 if (this.markNear(c, best)) {
@@ -6210,18 +6270,8 @@ public bundle Agents {
                 if (this.ccare[c] >= this.cpop[c]) {
                     return false;
                 }
-                int best = Builds.bestCare(this.eraOf(c));
+                int best = this.finestFor(c, cast<int>(Comfort.Healing), true);
                 if (best == cast<int>(BuildingKind.NoBuilding)) {
-                    return false;
-                }
-                if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(best))) {
-                    return false;
-                }
-                if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(best))) {
-                    return false;
-                }
-                if (Builds.matCost(best) != cast<int>(Good.Nothing)
-                    && !this.stores.has(c, Builds.matCost(best), Builds.matCostN(best))) {
                     return false;
                 }
                 if (this.markNear(c, best)) {
