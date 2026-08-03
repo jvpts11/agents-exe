@@ -93,6 +93,8 @@ public bundle Agents {
             // building table. The other half of "worth is want" -- the half a store cannot answer,
             // because a shelf knows what is on it and not what anybody is waiting for.
             private mutable int[] cwant;
+            // And the half of it a bench that ALREADY EXISTS is waiting for. See the census.
+            private mutable int[] cbench;
             // And what its food buildings between them put on the table in a shift. Apart from
             // `cwant` because hunger is ONE want however many different things answer it.
             private mutable int[] cfed;
@@ -442,6 +444,7 @@ public bundle Agents {
                 this.cworkY = new int[this.ncomm * nh]();
                 this.cworkG = new int[this.ncomm * nh]();
                 this.cwant = new int[this.ncomm * Goods.count()]();
+                this.cbench = new int[this.ncomm * Goods.count()]();
                 this.cfed = new int[this.ncomm]();
                 this.clesson = new int[this.ncomm]();
                 this.cdigX = new int[this.ncomm]();
@@ -671,6 +674,7 @@ public bundle Agents {
                 delete this.cworkY;
                 delete this.cworkG;
                 delete this.cwant;
+                delete this.cbench;
                 delete this.cfed;
                 delete this.clesson;
                 delete this.cdigX;
@@ -2988,6 +2992,14 @@ public bundle Agents {
                 // And what those buildings are waiting for. Read here, before anybody decides what
                 // to build next, because what a place should build is what it is short of.
                 this.town.wants(this.cwant, this.cfed, this.ncomm, Goods.count());
+                // WHAT A BENCH THAT EXISTS IS WAITING FOR, kept apart from what the place merely
+                // aspires to. `wants` reads the workshops that are STANDING; `explode` below then
+                // adds everything those wants imply four levels down, including the inputs of
+                // workshops nobody has built. Both are needed and they answer different questions,
+                // and one of them was answering both.
+                for (int s in 0..this.ncomm * Goods.count()) {
+                    this.cbench[s] = this.cwant[s];
+                }
                 this.explode();
                 this.town.learning(this.clesson, this.ncomm);
                 // Where a community IS, taken as where its people are. Nobody planted a flag: the
@@ -4537,7 +4549,24 @@ public bundle Agents {
                     mutable int good = 0;
                     mutable int worth = 0;
                     for (int g in 1..ng) {
-                        int over = this.stores.amountOf(c, g) - this.cwant[c * ng + g]
+                        // WHAT A PLACE KEEPS BACK IS WHAT ITS BENCHES ARE WAITING FOR, and not
+                        // everything it has ever aspired to.
+                        //
+                        // Measured, with a per-good census of what the carts actually carried: the
+                        // ten biggest cargoes in the world were fish, wood, milk, egg, grain,
+                        // stone, dried meat, berries, raw meat and cheese. NOT ONE manufactured or
+                        // mined good moves anywhere. Iron ore is dug in eight towns and brick is
+                        // fired in thirty-five, and the ore never travels, so a town with brick and
+                        // charcoal and no seam can never smelt.
+                        //
+                        // The reason is `cwant`: it is exploded demand, so a town that has ore and
+                        // no brick still "wants" its ore -- it wants a smithy, which implies
+                        // ingots, which implies ore -- for a smithy it has no brick to build and
+                        // never will. That aspiration eats the whole surplus, so the good stays
+                        // where it can do nothing and never reaches the place that could use it.
+                        // A want the town cannot act on was blocking the good from the town that
+                        // can, which is this campaign's shape exactly.
+                        int over = this.stores.amountOf(c, g) - this.cbench[c * ng + g]
                                  - Simulation.KEEP_BACK;
                         if (over <= 0) {
                             continue;
