@@ -163,6 +163,7 @@ public bundle Agents {
             private mutable long deathsWorld;
             private mutable long hived;        // villages founded by a place outgrowing its ground
             private mutable long hivedFolk;    // and how many walked out in those parties
+            private mutable long uprooted;     // children who went with a parent instead of being left
             private mutable long fled;         // people who left a place that could not feed them
             private mutable long joined;       // villages that grew into a bigger neighbour
             private mutable long joinedFolk;
@@ -513,6 +514,7 @@ public bundle Agents {
                 }
                 this.hived = 0;
                 this.hivedFolk = 0;
+                this.uprooted = 0;
                 this.fled = 0;
                 this.joined = 0;
                 this.joinedFolk = 0;
@@ -3725,8 +3727,37 @@ public bundle Agents {
                     }
                     i = i + 1;
                 }
-                this.cpop[d] = took;
-                this.cpop[seat] = this.cpop[seat] - took;
+                // AND THEIR CHILDREN, which is what makes it a founding rather than a work party.
+                //
+                // The loop above takes ADULTS -- a colony needs hands, and a hamlet's worth of them
+                // is the bound. So every founding in the history of this world split every family
+                // in it: a woman walked three days to new ground and her children stayed behind in
+                // the capital, belonging to nobody. Nothing could see it until people had parents
+                // that survived being looked up.
+                //
+                // A child goes where its parent went. It is not counted against the hamlet bound,
+                // because a child is not a pair of hands -- it is the reason there will be some.
+                mutable int young = 0;
+                mutable int k = 0;
+                while (k < n) {
+                    if (this.folk.alive(k) && !this.folk.isAdult(k)
+                        && this.folk.homeOf(k) == seat) {
+                        int mum = this.folk.motherLive(k);
+                        int dad = this.folk.fatherLive(k);
+                        boolean withMum = mum >= 0 && this.folk.homeOf(mum) == d;
+                        boolean withDad = dad >= 0 && this.folk.homeOf(dad) == d;
+                        if (withMum || withDad) {
+                            this.folk.setHome(k, d);
+                            this.folk.setTarget(k, cast<int>(sx), cast<int>(sy));
+                            this.folk.setAct(k, cast<int>(Act.WalkTo));
+                            young = young + 1;
+                        }
+                    }
+                    k = k + 1;
+                }
+                this.cpop[d] = took + young;
+                this.cpop[seat] = this.cpop[seat] - took - young;
+                this.uprooted = this.uprooted + cast<long>(young);
                 // Provisions for the road, off the capital's shelves. Not counted as eaten and not
                 // counted as grown -- it is the same food, on somebody's back.
                 int fare = this.stores.richest(seat);
@@ -7695,7 +7726,7 @@ public bundle Agents {
                         }
                     }
                 }
-                System.IO.Console.println($"  expansion: {this.hived} villages hived off ({this.hivedFolk} people), {this.colonies} colonies sent out ({this.colonists} settlers, {this.planted} arrived, {this.strayed} turned back), {this.joined} places merged");
+                System.IO.Console.println($"  expansion: {this.hived} villages hived off ({this.hivedFolk} people), {this.colonies} colonies sent out ({this.colonists} settlers and {this.uprooted} of their children, {this.planted} arrived, {this.strayed} turned back), {this.joined} places merged");
                 System.IO.Console.println($"  prospecting: {this.dug} tracts opened, {this.struck} working faces found");
                 System.IO.Console.println($"  kit: {this.tooled} tools taken up, {this.wornOut} worn through || {this.armed} armed, {this.mailed} in mail");
                 this.host.report();
