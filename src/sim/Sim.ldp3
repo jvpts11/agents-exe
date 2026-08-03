@@ -169,6 +169,8 @@ public bundle Agents {
             private mutable long raids;        // warriors who reached an enemy village
             private mutable long plunder;      // goods carried home off somebody else's shelves
             private mutable long wed;          // couples the world put together
+            private mutable long grudges;      // people who came to blame one named other person
+            private mutable long exiled;       // and who left rather than live under him
             private mutable long sacked;       // towns beaten by an army that could not keep them
             private mutable long captured;     // people who lost and did not die of it
             private mutable long deathsWar;
@@ -518,6 +520,8 @@ public bundle Agents {
                 this.raids = 0;
                 this.plunder = 0;
                 this.wed = 0;
+                this.grudges = 0;
+                this.exiled = 0;
                 this.sacked = 0;
                 this.captured = 0;
                 this.deathsWar = 0;
@@ -1022,6 +1026,14 @@ public bundle Agents {
 
             public method couplesMade() returns long {
                 return this.wed;
+            }
+
+            public method grudgesHeld() returns long {
+                return this.grudges;
+            }
+
+            public method drivenOutByAFoe() returns long {
+                return this.exiled;
             }
 
             // WHY A TOWN DID NOT BUILD THE THING, said out loud.
@@ -1869,6 +1881,10 @@ public bundle Agents {
                             if (this.folk.isFemale(i)) {
                                 if (waitM[h] >= 0) {
                                     this.folk.wed(i, waitM[h]);
+                                    // A partner is the one person somebody certainly owes, which
+                                    // makes a marriage the other honest source of a named bond.
+                                    this.folk.befriend(i, waitM[h]);
+                                    this.folk.befriend(waitM[h], i);
                                     this.wed = this.wed + 1;
                                     waitM[h] = 0 - 1;
                                 } else {
@@ -1877,6 +1893,8 @@ public bundle Agents {
                             } else {
                                 if (waitF[h] >= 0) {
                                     this.folk.wed(i, waitF[h]);
+                                    this.folk.befriend(i, waitF[h]);
+                                    this.folk.befriend(waitF[h], i);
                                     this.wed = this.wed + 1;
                                     waitF[h] = 0 - 1;
                                 } else {
@@ -4255,6 +4273,28 @@ public bundle Agents {
                 if (this.cleave[h] <= 0) {
                     return false;                    // this place has let go of enough for one day
                 }
+                // NOBODY STAYS SOMEWHERE THEIR ENEMY IS IN CHARGE.
+                //
+                // This is what a grudge is FOR. A named enemy that nothing ever reads is a number
+                // in a table, and this world has been careful not to add those -- so the one thing
+                // a person can do about the man who caught them stealing, or the man who robbed
+                // them, is leave when he ends up speaking for the place. It costs no census work:
+                // the seat is already known and the memory is one array read.
+                //
+                // Checked BEFORE hunger, because a man who leaves over a quarrel is not starving --
+                // that is the whole difference between the two reasons anybody ever moves.
+                int enemy = this.folk.foeLive(i);
+                if (enemy >= 0 && this.chief[h] == enemy && this.cflee[h] >= 0) {
+                    this.cleave[h] = this.cleave[h] - 1;
+                    this.vacate(i, h);
+                    this.folk.setHome(i, this.cflee[h]);
+                    this.folk.setTarget(i, cast<int>(this.ccx[this.cflee[h]]),
+                                        cast<int>(this.ccy[this.cflee[h]]));
+                    this.folk.setAct(i, cast<int>(Act.Flee));
+                    this.fled = this.fled + 1;
+                    this.exiled = this.exiled + 1;
+                    return true;
+                }
                 // Halfway to dying of it, not merely hungry. The first version asked for HUNGRY_AT,
                 // which is the point where somebody starts wanting lunch -- so at the first empty
                 // granary anywhere the entire world got up and walked, a hundred and thirty thousand
@@ -6105,6 +6145,17 @@ public bundle Agents {
                     this.folk.earn(i, 0 - 2);
                     this.folk.frightened(i);
                     this.caught = this.caught + 1;
+                    // AND SOMEBODY SAW HIM DO IT.
+                    //
+                    // A theft is one of the two moments in this world where two people are named at
+                    // once, so it is one of the two places a grudge can honestly begin. The man
+                    // whose town he robbed is whoever speaks for it, and he remembers the face.
+                    int spoke = this.chief[mark];
+                    if (spoke >= 0 && this.folk.alive(spoke) && spoke != i) {
+                        this.folk.antagonise(spoke, i);
+                        this.folk.antagonise(i, spoke);
+                        this.grudges = this.grudges + 1;
+                    }
                     if (!this.busy(i)) {
                         this.folk.setAct(i, cast<int>(Act.Flee));
                     }
@@ -8346,6 +8397,7 @@ public bundle Agents {
                 }
                 System.IO.Console.println($"  war: {this.feuds} community-seconds at war, {fighting} places at war now | {this.raids} blows struck, {this.deathsWar} killed, {this.plunder} carried off somebody else's shelves");
                 System.IO.Console.println($"  spoils: {this.sacked} towns sacked and left standing, {this.captured} marched home as captives");
+                System.IO.Console.println($"  bonds: {this.wed} couples, {this.grudges} grudges against a named person, {this.exiled} who left rather than live under one");
                 mutable int levy = 0;
                 mutable int armed = 0;
                 mutable int mailed = 0;

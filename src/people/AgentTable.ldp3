@@ -174,6 +174,21 @@ public bundle Agents {
             // handed to the next child born and a marriage must not survive into a stranger.
             private mutable int[] spouse;
             private mutable int[] spouseSer;
+            // ONE FRIEND AND ONE ENEMY, and no more than that on purpose.
+            //
+            // Fifty thousand people is two and a half billion pairs, so a general web of who likes
+            // whom is not a thing this world can hold. What it CAN hold is the person somebody would
+            // name if you asked -- the one they owe and the one they blame -- which is one slot each
+            // and the same row-and-serial guard the marriage needs.
+            //
+            // A slot is only ever written by an event that already names two people, because those
+            // are the only moments this simulation has where a relationship could honestly form: a
+            // birth names a mother and a sire, a marriage names a couple, a theft names a thief and
+            // the town that lost, and a battle names a general and the seat he broke.
+            private mutable int[] friend;
+            private mutable int[] friendSer;
+            private mutable int[] foe;
+            private mutable int[] foeSer;
             private mutable int[] mother;
             private mutable int[] motherSer;
             private mutable int[] father;
@@ -228,6 +243,10 @@ public bundle Agents {
                 this.nerve = new byte[cap]();
                 this.spouse = new int[cap]();
                 this.spouseSer = new int[cap]();
+                this.friend = new int[cap]();
+                this.friendSer = new int[cap]();
+                this.foe = new int[cap]();
+                this.foeSer = new int[cap]();
                 this.mother = new int[cap]();
                 this.motherSer = new int[cap]();
                 this.father = new int[cap]();
@@ -279,6 +298,10 @@ public bundle Agents {
                 delete this.nerve;
                 delete this.spouse;
                 delete this.spouseSer;
+                delete this.friend;
+                delete this.friendSer;
+                delete this.foe;
+                delete this.foeSer;
                 delete this.mother;
                 delete this.motherSer;
                 delete this.father;
@@ -365,6 +388,10 @@ public bundle Agents {
                 this.fatherSer[i] = 0;
                 this.spouse[i] = 0 - 1;
                 this.spouseSer[i] = 0;
+                this.friend[i] = 0 - 1;
+                this.friendSer[i] = 0;
+                this.foe[i] = 0 - 1;
+                this.foeSer[i] = 0;
                 this.mother[i] = 0 - 1;
                 this.father[i] = 0 - 1;
                 this.gest[i] = 0.0;
@@ -907,6 +934,58 @@ public bundle Agents {
                     return 0 - 1;
                 }
                 return s;
+            }
+
+            // A DEBT AND A GRUDGE, each pointing at one person.
+            //
+            // Written only by events that already name two people, and read the same way a parent
+            // is: a row plus a serial, so a slot cannot quietly transfer to whoever inherits the
+            // row. Setting one overwrites the last -- somebody has one person they owe and one
+            // they blame, and the newest wins, which is roughly how a memory that size works.
+            public method befriend(int i, int j) returns void {
+                if (i < 0 || j < 0 || i >= this.cap || j >= this.cap || i == j) {
+                    return;
+                }
+                this.friend[i] = j;
+                this.friendSer[i] = this.serial[j];
+                return;
+            }
+
+            public method antagonise(int i, int j) returns void {
+                if (i < 0 || j < 0 || i >= this.cap || j >= this.cap || i == j) {
+                    return;
+                }
+                this.foe[i] = j;
+                this.foeSer[i] = this.serial[j];
+                return;
+            }
+
+            public method friendLive(int i) returns int {
+                if (i < 0 || i >= this.cap) {
+                    return 0 - 1;
+                }
+                int f = this.friend[i];
+                if (f < 0 || f >= this.cap || !this.alive(f)) {
+                    return 0 - 1;
+                }
+                if (this.serial[f] != this.friendSer[i]) {
+                    return 0 - 1;
+                }
+                return f;
+            }
+
+            public method foeLive(int i) returns int {
+                if (i < 0 || i >= this.cap) {
+                    return 0 - 1;
+                }
+                int f = this.foe[i];
+                if (f < 0 || f >= this.cap || !this.alive(f)) {
+                    return 0 - 1;
+                }
+                if (this.serial[f] != this.foeSer[i]) {
+                    return 0 - 1;
+                }
+                return f;
             }
 
             public method motherLive(int i) returns int {
