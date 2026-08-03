@@ -178,6 +178,11 @@ public bundle Agents {
             private mutable long risen;        // roles that came into being
             private mutable long passed;       // and were handed on when the holder died
             private mutable long inherited;    // of those, the ones a son took from his father
+            // Who last sat in each village's seat, and the serial that says it was really him. Read
+            // by the census that fills the seat again: a line of descent needs a predecessor, and
+            // the moment of death is the moment that fact would otherwise be lost.
+            private mutable int[] clast;
+            private mutable int[] clastSer;
             private mutable long followed;     // decisions swayed by a chief
             private mutable long resisted;
             // What a community IS, as five weights, and it is not a table of anybody's opinions --
@@ -531,9 +536,13 @@ public bundle Agents {
                 this.hunted = 0;
                 this.meter = new Meter() on heap;
                 this.chief = new int[this.ncomm]();
+                this.clast = new int[this.ncomm]();
+                this.clastSer = new int[this.ncomm]();
                 this.lean = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
                     this.chief[c] = 0 - 1;
+                    this.clast[c] = 0 - 1;
+                    this.clastSer[c] = 0;
                     this.lean[c] = cast<int>(Job.Idle);
                 }
                 this.risen = 0;
@@ -708,6 +717,8 @@ public bundle Agents {
                 delete this.wild;
                 delete this.meter;
                 delete this.chief;
+                delete this.clast;
+                delete this.clastSer;
                 delete this.lean;
                 delete this.culture;
                 delete this.deeds;
@@ -3872,6 +3883,24 @@ public bundle Agents {
             // so it can see who has the most standing and hand the role to them -- and hand it on
             // again when they die, which at six minutes a life is often. That is what makes a
             // succession an event rather than a script.
+            // Whoever the seat belongs to for the purpose of descent: the sitting chief while there
+            // is one, and otherwise the last man to hold it. The serial is what makes the second
+            // half safe -- a dead chief's row is on the free list, and without checking the name he
+            // was given his successor would be picked from the children of whoever moved in.
+            private method lastLord(int c) returns int {
+                if (this.chief[c] >= 0) {
+                    return this.chief[c];
+                }
+                int was = this.clast[c];
+                if (was < 0 || !this.folk.alive(was)) {
+                    return was;              // dead, and that is exactly who a son inherits from
+                }
+                if (this.folk.serialOf(was) != this.clastSer[c]) {
+                    return 0 - 1;            // the row is somebody else now
+                }
+                return was;
+            }
+
             private method hearWho() returns void {
                 int n = this.folk.limit();
                 mutable int[] bestI = new int[this.ncomm]();
@@ -3933,10 +3962,10 @@ public bundle Agents {
                                 cartV[h] = v;
                                 cartI[h] = i;
                             }
-                            // The best-regarded of the sitting chief's own children, which is what
-                            // a hereditary succession needs and what nothing in this world could
-                            // answer until people had a father as well as a mother.
-                            if (this.folk.isChildOf(i, this.chief[h]) && v > heirV[h]) {
+                            // The best-regarded child of whoever LAST sat in this seat -- the
+                            // sitting chief if there is one, and otherwise the man who just died,
+                            // which is exactly the case a succession is.
+                            if (this.folk.isChildOf(i, this.lastLord(h)) && v > heirV[h]) {
                                 heirV[h] = v;
                                 heirI[h] = i;
                             }
@@ -3952,14 +3981,18 @@ public bundle Agents {
                     this.cmate[c] = sireI[c];
                 }
                 for (int c in 0..this.ncomm) {
-                    int had = this.chief[c];
-                    boolean vacant = had < 0 || !this.folk.alive(had)
-                                  || this.folk.homeOf(had) != c;
+                    int sitting = this.chief[c];
+                    // Whoever the seat descends FROM, which is not the same as whoever is in it: a
+                    // chief who has just died has already been cleared out of `chief`, and he is
+                    // exactly the man a son inherits from.
+                    int had = this.lastLord(c);
+                    boolean vacant = sitting < 0 || !this.folk.alive(sitting)
+                                  || this.folk.homeOf(sitting) != c;
                     if (this.cpop[c] < Simulation.VILLAGE) {
                         // A band is too small to need anybody in charge. If it had a chief and has
                         // shrunk below a village, the role goes away with the reason for it.
-                        if (had >= 0 && this.folk.alive(had)) {
-                            this.folk.setRole(had, cast<int>(Role.None));
+                        if (sitting >= 0 && this.folk.alive(sitting)) {
+                            this.folk.setRole(sitting, cast<int>(Role.None));
                         }
                         this.chief[c] = 0 - 1;
                         this.lean[c] = cast<int>(Job.Idle);
@@ -4105,6 +4138,15 @@ public bundle Agents {
                     return;
                 }
                 if (this.chief[from] == i) {
+                    // WHO IT WAS, kept for the census that has to fill the seat.
+                    //
+                    // Clearing the seat the moment the holder dies is right -- a dead man is not
+                    // still the chief -- but it threw away the only fact a succession needs. A
+                    // measured arc: eleven thousand chiefs ROSE and not one office was HANDED ON,
+                    // because by the time anybody looked there had never been a predecessor, and
+                    // the hereditary line written one commit earlier could not fire once.
+                    this.clast[from] = i;
+                    this.clastSer[from] = this.folk.serialOf(i);
                     this.chief[from] = 0 - 1;
                 }
                 if (this.celder[from] == i) {
