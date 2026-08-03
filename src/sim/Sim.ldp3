@@ -1217,7 +1217,8 @@ public bundle Agents {
                     int reach = Builds.port(k);
                     int drink = Builds.water(k);
                     int care = Builds.care(k);
-                    if (hold <= 0 && reach <= 0 && drink <= 0 && care <= 0) {
+                    int kept = Builds.keeps(k);
+                    if (hold <= 0 && reach <= 0 && drink <= 0 && care <= 0 && kept <= 0) {
                         continue;
                     }
                     int c = this.town.ownerOf(b);
@@ -1239,9 +1240,9 @@ public bundle Agents {
                             this.cport[c] = reach;
                             this.cportb[c] = b;
                         }
-                        if (k == cast<int>(BuildingKind.Barracks)) {
-                            this.cbarr[c] = this.cbarr[c] + 1;
-                        }
+                        // Read off the catalogue rather than off one name, so a second kind of
+                        // garrison later needs no line here.
+                        this.cbarr[c] = this.cbarr[c] + kept;
                     }
                 }
                 // HOW HARD IT IS TO STAY WELL HERE, once a census per town.
@@ -4371,6 +4372,8 @@ public bundle Agents {
                 mutable int wallFear = 0;
                 mutable int portPick = cast<int>(BuildingKind.NoBuilding);
                 mutable int portCut = 0;
+                mutable int keepPick = cast<int>(BuildingKind.NoBuilding);
+                mutable int keepGap = 0;
                 for (int k in 1..BuildingKind.count()) {
                     // A WALL IS THE ONE BUILDING THAT MAKES NOTHING AND IS STILL WORTH RAISING.
                     //
@@ -4385,7 +4388,15 @@ public bundle Agents {
                     // measured arc with rope in a hundred and three towns and not one quay anywhere.
                     // Twice now, in the same `if`, for the same reason: this test asks "does it
                     // produce" when what it means is "is it in the catalogue for a reason".
-                    if (!Builds.staffed(k) && Builds.wall(k) <= 0 && Builds.port(k) <= 0) {
+                    // AND THE BARRACKS WALKED INTO IT A THIRD TIME. It makes nothing either, so it
+                    // was given a wall value of forty purely to get past this line -- and that put
+                    // it on the wall ladder, where a sixty-point palisade outranks it for ever. A
+                    // measured arc: not one barracks anywhere in the world, in a world with war in
+                    // it. Three different buildings have now been thrown out by this one test for
+                    // the same reason, which is that it asks "does it produce" when it means "is it
+                    // in the catalogue for a reason".
+                    if (!Builds.staffed(k) && Builds.wall(k) <= 0 && Builds.port(k) <= 0
+                        && Builds.keeps(k) <= 0) {
                         continue;
                     }
                     if (Builds.era(k) > this.eraOf(c)) {
@@ -4470,6 +4481,26 @@ public bundle Agents {
                         }
                         continue;
                     }
+                    // A BARRACKS IS NOT A WALL AND NOT A WORKSHOP: it is capacity, like a well.
+                    //
+                    // A well is worth the heads it can keep in water, an infirmary the heads it can
+                    // nurse, and a barracks the men it can keep standing. What a place is short of
+                    // is the difference between the men it wants under arms and the men it can hold
+                    // there -- and a village nobody threatens, whose country is calling nobody,
+                    // wants none and builds none, which is the right answer rather than a missing
+                    // one.
+                    if (Builds.keeps(k) > 0) {
+                        int want = this.quotaFor(c, cast<int>(Job.Raider));
+                        if (want <= this.cbarr[c]) {
+                            continue;                // it already holds as many as it wants
+                        }
+                        int gap = want - this.cbarr[c];
+                        if (gap > keepGap) {
+                            keepGap = gap;
+                            keepPick = k;
+                        }
+                        continue;
+                    }
                     // A harbour makes nothing either, so it is scored apart like the wall -- but on
                     // the opposite question. A wall is worth what the town fears; a port is worth
                     // what the town cannot GET.
@@ -4550,6 +4581,13 @@ public bundle Agents {
                 }
                 if (portPick != cast<int>(BuildingKind.NoBuilding) && portCut >= Simulation.WANT) {
                     this.markNear(c, portPick);
+                    return;
+                }
+                // Then somewhere to keep the men it has decided it wants under arms. Below the wall
+                // and below being cut off, above every workshop: a place that has resolved to arm
+                // and has nowhere to keep a garrison is answering a decision it already made.
+                if (keepPick != cast<int>(BuildingKind.NoBuilding) && keepGap > 0) {
+                    this.markNear(c, keepPick);
                     return;
                 }
                 if (best == cast<int>(BuildingKind.NoBuilding) || bestScore < bestBar) {
@@ -5764,11 +5802,10 @@ public bundle Agents {
                     // A barracks keeps some under arms whether or not there is anybody to fight --
                     // the first standing soldiers in the world, and the reason a place that has one
                     // is never caught with nobody holding a spear.
-                    if (this.cbarr[c] > 0) {
-                        int kept = this.cbarr[c] * Simulation.KEPT;
-                        if (kept > arms) {
-                            arms = kept;
-                        }
+                    // `cbarr` is MEN now, not buildings -- the catalogue says how many each keeps,
+                    // so two different garrisons can hold different numbers without a rule here.
+                    if (this.cbarr[c] > arms) {
+                        arms = this.cbarr[c];
                     }
                     return arms;
                 }
