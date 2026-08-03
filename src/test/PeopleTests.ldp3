@@ -194,6 +194,69 @@ public bundle Agents {
                 Folk.people.kill(c);
                 return;
             }
+
+            // A ROW IS NOT A PERSON, and kinship is the place that matters most.
+            //
+            // The free list is what lets fifty thousand people run a million births through four
+            // thousand rows, and it means an index kept across a death names whoever was born into
+            // the slot afterwards. `mother` was a bare index, so a child whose mother died and
+            // whose mother's row was reused had a living stranger for a parent -- invisible only
+            // because nothing in the world read the field. It reads it now.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_dead_mother_does_not_become_somebody_else() returns void {
+                int mum = Folk.people.spawn(10.0, 10.0, 0);
+                Test.checking("the test got a mother");
+                Test.assertAtLeast(mum, 0);
+                int kid = Folk.people.bear(mum, 42, 1);
+                Test.checking("and a child of hers");
+                Test.assertAtLeast(kid, 0);
+                Test.checking("whose mother is who it should be");
+                Test.assertEqual(Folk.people.motherLive(kid), mum);
+
+                Folk.people.kill(mum);
+                Test.checking("a dead mother is not a living mother");
+                Test.assertEqual(Folk.people.motherLive(kid), 0 - 1);
+
+                // The free list hands the same row straight back out. Before the serial, THIS is
+                // the moment the child silently acquired a new parent.
+                int stranger = Folk.people.spawn(20.0, 20.0, 0);
+                Test.checking("the row really was recycled -- otherwise this proves nothing");
+                Test.assertEqual(stranger, mum);
+                Test.checking("and the child does not inherit whoever moved in");
+                Test.assertEqual(Folk.people.motherLive(kid), 0 - 1);
+                Test.checking("nor is the newcomer that child's parent");
+                Test.assertTrue(!Folk.people.isChildOf(kid, stranger));
+                Folk.people.kill(stranger);
+                Folk.people.kill(kid);
+                return;
+            }
+
+            // A father, which this world recorded for nobody: the field existed, was set to -1 at
+            // birth, and nothing ever wrote it.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_child_has_two_parents() returns void {
+                int mum = Folk.people.spawn(12.0, 12.0, 0);
+                int dad = Folk.people.spawn(13.0, 12.0, 0);
+                Test.checking("the test got both parents");
+                Test.assertAtLeast(mum, 0);
+                Test.assertAtLeast(dad, 0);
+                Folk.people.setSire(mum, dad);
+                int kid = Folk.people.bear(mum, 42, 2);
+                Test.checking("the child knows its father");
+                Test.assertEqual(Folk.people.fatherLive(kid), dad);
+                Test.checking("and its father knows it");
+                Test.assertTrue(Folk.people.isChildOf(kid, dad));
+                Test.checking("and a pregnancy is spent once, not handed to every later child");
+                int again = Folk.people.bear(mum, 42, 3);
+                Test.assertEqual(Folk.people.fatherLive(again), 0 - 1);
+                Folk.people.kill(kid);
+                Folk.people.kill(again);
+                Folk.people.kill(dad);
+                Folk.people.kill(mum);
+                return;
+            }
         }
     }
 }

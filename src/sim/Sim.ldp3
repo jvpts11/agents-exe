@@ -175,6 +175,7 @@ public bundle Agents {
             private mutable int[] lean;        // the Job the chief's temperament pushes toward
             private mutable long risen;        // roles that came into being
             private mutable long passed;       // and were handed on when the holder died
+            private mutable long inherited;    // of those, the ones a son took from his father
             private mutable long followed;     // decisions swayed by a chief
             private mutable long resisted;
             // What a community IS, as five weights, and it is not a table of anybody's opinions --
@@ -207,6 +208,11 @@ public bundle Agents {
             private mutable Fates* fates;
             // Units of each good ever set down at the far end of a route. Sixty longs.
             private mutable long[] ctraded;
+            // The man a child born in this place is likeliest to be by. There is no courtship in
+            // this world and inventing one to fill a field would be a system nobody asked for; what
+            // there IS is standing, and standing is what a village reads about a man. Picked once a
+            // census with everything else, so a conception costs one array read.
+            private mutable int[] cmate;
             private mutable int[] cwall;       // how much wall each town has standing
             private mutable int[] carmy;       // the army besieging it, or -1
             private mutable int[] cbarr;       // barracks working in it
@@ -529,6 +535,7 @@ public bundle Agents {
                 }
                 this.risen = 0;
                 this.passed = 0;
+                this.inherited = 0;
                 this.followed = 0;
                 this.resisted = 0;
                 this.culture = new int[this.ncomm * 5]();
@@ -558,6 +565,10 @@ public bundle Agents {
                 // took an arc down with an access violation and no message at all.
                 this.fates = new Fates(this.ncomm) on heap;
                 this.ctraded = new long[Goods.count()]();
+                this.cmate = new int[this.ncomm]();
+                for (int c in 0..this.ncomm) {
+                    this.cmate[c] = 0 - 1;
+                }
                 this.cfilth = new int[this.ncomm]();
                 this.celder = new int[this.ncomm]();
                 this.cpriest = new int[this.ncomm]();
@@ -709,6 +720,7 @@ public bundle Agents {
                 delete this.ccare;
                 delete this.fates;
                 delete this.ctraded;
+                delete this.cmate;
                 delete this.cfilth;
                 delete this.celder;
                 delete this.cpriest;
@@ -2895,6 +2907,16 @@ public bundle Agents {
                     if ((i + this.frames) % 20 == 0) {
                         if (this.mayConceive(i, dt * 20.0)) {
                             this.folk.conceive(i, Simulation.TERM);
+                            // And BY SOMEBODY. A child had a mother and never a father: the field
+                            // was set to -1 at birth and nothing in the world ever wrote it, so
+                            // half of everybody's kin was missing and no line could descend
+                            // through it. One array read -- the census already worked out who a
+                            // village regards, which in a world with no courtship in it is the
+                            // only honest answer to the question.
+                            int home = this.folk.homeOf(i);
+                            if (home >= 0 && home < this.ncomm) {
+                                this.folk.setSire(i, this.cmate[home]);
+                            }
                             if (!this.busy(i)) {
                                 this.folk.setAct(i, cast<int>(Act.Court));
                             }
@@ -3851,6 +3873,16 @@ public bundle Agents {
                 mutable int[] holyV = new int[this.ncomm]();
                 mutable int[] cartI = new int[this.ncomm]();
                 mutable int[] cartV = new int[this.ncomm]();
+                // THE CHIEF'S OWN CHILD, and the man a child in this place is likeliest to be by.
+                //
+                // Both come out of the same sweep as everything else, for the same reason: they are
+                // facts about a PLACE, one read of each row answers them for every place at once,
+                // and asking either of them where it is needed -- per succession, per conception --
+                // would be the woodcutter's mistake in a new coat for the fifth time.
+                mutable int[] heirI = new int[this.ncomm]();
+                mutable int[] heirV = new int[this.ncomm]();
+                mutable int[] sireI = new int[this.ncomm]();
+                mutable int[] sireV = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
                     bestI[c] = 0 - 1;
                     bestV[c] = 0 - 1;
@@ -3860,6 +3892,10 @@ public bundle Agents {
                     holyV[c] = 0 - 1;
                     cartI[c] = 0 - 1;
                     cartV[c] = 0 - 1;
+                    heirI[c] = 0 - 1;
+                    heirV[c] = 0 - 1;
+                    sireI[c] = 0 - 1;
+                    sireV[c] = 0 - 1;
                 }
                 mutable int i = 0;
                 while (i < n) {
@@ -3885,9 +3921,23 @@ public bundle Agents {
                                 cartV[h] = v;
                                 cartI[h] = i;
                             }
+                            // The best-regarded of the sitting chief's own children, which is what
+                            // a hereditary succession needs and what nothing in this world could
+                            // answer until people had a father as well as a mother.
+                            if (this.folk.isChildOf(i, this.chief[h]) && v > heirV[h]) {
+                                heirV[h] = v;
+                                heirI[h] = i;
+                            }
+                            if (!this.folk.isFemale(i) && v > sireV[h]) {
+                                sireV[h] = v;
+                                sireI[h] = i;
+                            }
                         }
                     }
                     i = i + 1;
+                }
+                for (int c in 0..this.ncomm) {
+                    this.cmate[c] = sireI[c];
                 }
                 for (int c in 0..this.ncomm) {
                     int had = this.chief[c];
@@ -3906,7 +3956,27 @@ public bundle Agents {
                     if (!vacant) {
                         continue;                          // still living, still theirs
                     }
-                    int heir = bestI[c];
+                    mutable int heir = bestI[c];
+                    mutable boolean byBlood = false;
+                    // A CROWN GOES TO A SON, AND A BAND'S REGARD DOES NOT.
+                    //
+                    // Every succession in this world was the same event: whoever had earned most
+                    // took over. That is right for a band of people who follow whoever is worth
+                    // following, and it is exactly wrong for a kingdom -- a hereditary line is what
+                    // makes a dynasty a thing that can exist at all, and without it a nation is a
+                    // rolling meritocracy that no amount of history can accumulate into a house.
+                    //
+                    // So the rule is read off the rank the world already computes: a Band or a
+                    // Chiefdom heeds whoever is worth heeding, and anything above passes to the
+                    // dead chief's best-regarded living child if there is one. Nothing is declared
+                    // -- the same trick as rank itself.
+                    int nat = this.cnat[c];
+                    if (had >= 0 && heirI[c] >= 0 && nat >= 0 && nat < this.ncomm
+                        && this.realm.alive(nat)
+                        && this.realm.rankOf(nat) >= cast<int>(Rank.Kingdom)) {
+                        heir = heirI[c];
+                        byBlood = true;
+                    }
                     if (heir < 0 || bestV[c] <= 0) {
                         continue;                          // nobody has done anything worth heeding
                     }
@@ -3917,6 +3987,9 @@ public bundle Agents {
                         this.risen = this.risen + 1;
                     } else {
                         this.passed = this.passed + 1;
+                        if (byBlood) {
+                            this.inherited = this.inherited + 1;
+                        }
                     }
                 }
                 // The other two. Neither is elected and neither can be appointed -- an elder is
@@ -3991,6 +4064,10 @@ public bundle Agents {
                 delete holyV;
                 delete cartI;
                 delete cartV;
+                delete heirI;
+                delete heirV;
+                delete sireI;
+                delete sireV;
                 return;
             }
 
@@ -7370,7 +7447,7 @@ public bundle Agents {
                 if (said > 0) {
                     heed = cast<int>(this.followed * cast<long>(1000) / said);
                 }
-                System.IO.Console.println($"  chiefs: {seated} seated | {this.risen} rose, {this.passed} handed on | {heed}/1000 of those spoken to went along ({this.followed} of {said})");
+                System.IO.Console.println($"  chiefs: {seated} seated | {this.risen} rose, {this.passed} handed on, {this.inherited} of them to a son | {heed}/1000 of those spoken to went along ({this.followed} of {said})");
                 mutable int elders = 0;
                 mutable int priests = 0;
                 for (int c in 0..this.ncomm) {

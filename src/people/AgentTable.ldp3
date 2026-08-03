@@ -141,9 +141,26 @@ public bundle Agents {
             private mutable byte[] ambition;
             private mutable byte[] influence;
             // kin
+            //
+            // A ROW IS NOT A PERSON. Rows are recycled -- that free list is the whole reason this
+            // table can run fifty thousand people through a million births -- so an index kept from
+            // one lifetime into another names whoever was born into the slot afterwards. `mother`
+            // and `father` were exactly that, and nothing in the world read them, which is the only
+            // reason nobody had noticed a child inheriting a stranger for a parent.
+            //
+            // So every person gets a SERIAL, handed out once and never reused, and a kin link
+            // carries the serial it meant. The link is live only while the row still holds that
+            // person. Two ints per row and the world can finally say who anybody's mother was.
+            private mutable int[] serial;
+            private mutable int nextSerial;
             private mutable int[] spouse;
             private mutable int[] mother;
+            private mutable int[] motherSer;
             private mutable int[] father;
+            private mutable int[] fatherSer;
+            // Who a pregnancy is by, remembered from the moment it starts until the child is born.
+            private mutable int[] sire;
+            private mutable int[] sireSer;
             private mutable float[] gest;      // seconds of pregnancy left, 0 = not
             // scheduling
             private mutable int[] nextThink;
@@ -190,7 +207,13 @@ public bundle Agents {
                 this.influence = new byte[cap]();
                 this.spouse = new int[cap]();
                 this.mother = new int[cap]();
+                this.motherSer = new int[cap]();
                 this.father = new int[cap]();
+                this.fatherSer = new int[cap]();
+                this.sire = new int[cap]();
+                this.sireSer = new int[cap]();
+                this.serial = new int[cap]();
+                this.nextSerial = 1;
                 this.gest = new float[cap]();
                 this.nextThink = new int[cap]();
             }
@@ -233,7 +256,12 @@ public bundle Agents {
                 delete this.influence;
                 delete this.spouse;
                 delete this.mother;
+                delete this.motherSer;
                 delete this.father;
+                delete this.fatherSer;
+                delete this.sire;
+                delete this.sireSer;
+                delete this.serial;
                 delete this.gest;
                 delete this.nextThink;
             }
@@ -299,6 +327,15 @@ public bundle Agents {
                 this.lonely[i] = cast<byte>(0);
                 this.ill[i] = cast<byte>(0);
                 this.influence[i] = cast<byte>(0);
+                // A NAME OF ONE'S OWN, handed out once and never reused. Every kin link in this
+                // world is checked against it, so a recycled row cannot inherit somebody else's
+                // children.
+                this.serial[i] = this.nextSerial;
+                this.nextSerial = this.nextSerial + 1;
+                this.sire[i] = 0 - 1;
+                this.sireSer[i] = 0;
+                this.motherSer[i] = 0;
+                this.fatherSer[i] = 0;
                 this.spouse[i] = 0 - 1;
                 this.mother[i] = 0 - 1;
                 this.father[i] = 0 - 1;
@@ -776,6 +813,59 @@ public bundle Agents {
                 return this.mother[i];
             }
 
+            // The name nobody else will ever have.
+            public method serialOf(int i) returns int {
+                return this.serial[i];
+            }
+
+            // A KIN LINK THAT IS STILL TRUE, or -1.
+            //
+            // The row and the serial have to agree: an index on its own says "somebody is standing
+            // where my mother stood", which after a death and a birth is a different person
+            // entirely. Every consumer of kinship in this world goes through these two.
+            public method motherLive(int i) returns int {
+                int m = this.mother[i];
+                if (m < 0 || m >= this.cap || !this.alive(m)) {
+                    return 0 - 1;
+                }
+                if (this.serial[m] != this.motherSer[i]) {
+                    return 0 - 1;
+                }
+                return m;
+            }
+
+            public method fatherLive(int i) returns int {
+                int f = this.father[i];
+                if (f < 0 || f >= this.cap || !this.alive(f)) {
+                    return 0 - 1;
+                }
+                if (this.serial[f] != this.fatherSer[i]) {
+                    return 0 - 1;
+                }
+                return f;
+            }
+
+            // Is `who` a living parent of `i`? The one question the world actually asks.
+            public method isChildOf(int i, int who) returns boolean {
+                if (who < 0) {
+                    return false;
+                }
+                return this.motherLive(i) == who || this.fatherLive(i) == who;
+            }
+
+            // Whose child a pregnancy is, set where it starts and read where it ends. A woman
+            // carries this for the whole term, so a father who dies before the birth is still the
+            // father -- the serial says so and the row does not have to.
+            public method setSire(int i, int who) returns void {
+                this.sire[i] = who;
+                if (who >= 0 && who < this.cap) {
+                    this.sireSer[i] = this.serial[who];
+                } else {
+                    this.sireSer[i] = 0;
+                }
+                return;
+            }
+
             // A child of this mother: born where she stands, into her community, carrying her
             // temperament with a little drift -- which is the only way culture has of getting from
             // one generation to the next when nobody lives longer than six minutes.
@@ -796,6 +886,13 @@ public bundle Agents {
                 this.setLife(i, 300.0 + lv * 120.0, female, false);
                 this.age[i] = 0.0;
                 this.mother[i] = mum;
+                this.motherSer[i] = this.serial[mum];
+                // And a father, which this world has never recorded. Half of everybody's kin was
+                // missing: the field existed, was set to -1 at birth, and nothing ever wrote it.
+                this.father[i] = this.sire[mum];
+                this.fatherSer[i] = this.sireSer[mum];
+                this.sire[mum] = 0 - 1;
+                this.sireSer[mum] = 0;
                 return i;
             }
 
