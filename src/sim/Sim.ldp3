@@ -281,6 +281,7 @@ public bundle Agents {
             private mutable long housed;       // housing plots marked out
             private mutable long watered;      // waterworks marked out
             private mutable long tended;       // and places raised against sickness
+            private mutable long dealt;        // loads that crossed a border and warmed one
             private mutable long rebuilt;      // plots torn up and raised again bigger
             private mutable long pulled;       // workshops nobody needed any more, pulled down
             private mutable long raised;       // buildings finished
@@ -589,6 +590,7 @@ public bundle Agents {
                 this.housed = 0;
                 this.watered = 0;
                 this.tended = 0;
+                this.dealt = 0;
                 this.rebuilt = 0;
                 this.pulled = 0;
                 this.raised = 0;
@@ -1270,6 +1272,16 @@ public bundle Agents {
                     if (!quarrel) {
                         continue;
                     }
+                    // NOBODY MARCHES ON A FRIEND.
+                    //
+                    // A grudge used to be the whole of foreign policy: it sent an army, the army
+                    // went home, the grudge stayed and another army came. Nothing anybody did could
+                    // make it better. Now a border that has carried enough trade is worth more than
+                    // the quarrel across it, and the country stays home -- which is the first time
+                    // two peoples here have ever settled anything without one of them losing.
+                    if (this.realm.bondOf(nat, this.cnat[c]) >= Nations.BOND_PEACE) {
+                        continue;
+                    }
                     // Cousins fight, but not over an old grudge. Somebody who speaks a dialect of
                     // your language, whose grandparents came over the same ground as yours, has to
                     // be raiding you NOW to be worth marching on -- while a stranger is worth it on
@@ -1467,6 +1479,12 @@ public bundle Agents {
             public static int HEART_FULL = 100;
             public static int HEART_VIGIL = 3;     // the cost of one census stood in a field
             public static int HEART_PER_LOSS = 6;  // and of one man not coming back
+            // What a border does to a friendship. A load across it warms by a little, so it takes
+            // scores of them to reach peace and one conquest to undo it -- which is the right ratio:
+            // trust is slow and a burnt town is not.
+            public static int BOND_PER_LOAD = 4;
+            public static int BOND_PER_RAID = 0 - 6;
+            public static int BOND_PER_TOWN = 0 - 150;
 
             // Soldiers within a general's reach. This is the FORMATION: an army is the people who
             // are actually standing around the man leading it, so one that has strung itself across
@@ -1578,6 +1596,11 @@ public bundle Agents {
                 }
                 this.cnat[t] = nat;
                 this.realm.annex(nat, was);
+                // And it is remembered. One town taken undoes what scores of caravans built, which
+                // is the ratio that makes trade a slow way to a friend and conquest a fast way to an
+                // enemy -- and it is why a country that keeps taking towns finds nobody will deal
+                // with it, which is a consequence it never had before.
+                this.realm.warm(nat, was, Simulation.BOND_PER_TOWN);
                 // Nothing is torn down. The town keeps its buildings, its fields and its town hall,
                 // because a conquest is a change of flag and not a demolition -- the ONLY thing that
                 // changed is the line on the map. That is also why it is a problem afterwards.
@@ -4529,6 +4552,18 @@ public bundle Agents {
                         this.trafficked = this.trafficked + cast<long>(amt);
                         this.carried = this.carried + cast<long>(amt);
                         this.folk.earn(i, 4);
+                        // A LOAD THAT CROSSED A BORDER IS WORTH MORE THAN THE GOODS ON IT.
+                        //
+                        // This is the only warming term in the world, and it is deliberately the
+                        // one thing that already happens rather than a new act somebody performs.
+                        // Two countries that trade stop being worth marching on, so the sea lanes
+                        // opened a slice ago turn out to be what ends wars -- and a country with no
+                        // coast and no neighbours it can reach stays exactly as belligerent as it
+                        // always was, which is the right answer rather than a missing one.
+                        if (this.cnat[to] != this.cnat[h]) {
+                            this.realm.warm(this.cnat[h], this.cnat[to], Simulation.BOND_PER_LOAD);
+                            this.dealt = this.dealt + 1;
+                        }
                         this.folk.setCarry(i, 0, 0);
                         this.folk.setBound(i, 0 - 1);
                         // The one moment in the world worth its own act: a caravan that has walked
@@ -6819,6 +6854,7 @@ public bundle Agents {
                     p = p + 1;
                 }
                 System.IO.Console.println($"  troops: {levy} levies, {armed} with a weapon, {mailed} in mail || {this.host.routedCount()} armies went home having had enough");
+                System.IO.Console.println($"  standing between countries: {this.realm.friendships()} pairs at peace, {this.realm.alliances()} of them allied | {this.dealt} loads crossed a border");
                 // What is left standing, against what the world started with. A resource that only
                 // goes down is being liquidated, and this is where that shows.
                 NodeField* nf = this.g.surface();

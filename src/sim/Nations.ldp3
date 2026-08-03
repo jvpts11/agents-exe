@@ -62,6 +62,19 @@ public bundle Agents {
             // The biggest town seen so far this count, so the capital falls out of ONE pass over
             // the settlements instead of the caller sorting anything.
             private mutable int[] best;
+            // WHAT TWO COUNTRIES THINK OF EACH OTHER -- the only thing they have ever been able to
+            // do to one another here that is not violence.
+            //
+            // Until now the answer to "how do these two get on" was war or nothing: a grudge sent an
+            // army, the army went home, the grudge stayed, and another army came. Nothing anybody
+            // did could make it better, so a border once soured was soured for ever and the map was
+            // a ratchet that only ever tightened.
+            //
+            // One number per pair, negative for a grievance and positive for a friendship, moved by
+            // things that ALREADY HAPPEN: a raid sours it, a town taken sours it badly, and a
+            // caravan that crosses a border warms it. Which means the sea lanes opened for trade
+            // turn out to be the thing that ends wars -- a loop this world did not have.
+            private mutable int[] bond;
 
             public constructor Nations(int capacity) {
                 this.cap = capacity;
@@ -81,6 +94,10 @@ public bundle Agents {
                 this.drift = new int[capacity]();
                 this.trunk = new int[capacity]();
                 this.hue = new int[capacity]();
+                // One row per country, one column per country. A hundred and eighty nations is
+                // thirty-two thousand cells, which is a hundred and thirty kilobytes and a lookup
+                // rather than a search -- the same trade this file makes everywhere else.
+                this.bond = new int[capacity * capacity]();
                 this.best = new int[capacity]();
                 for (int i in 0..capacity) {
                     this.seat[i] = 0 - 1;
@@ -109,10 +126,71 @@ public bundle Agents {
                 delete this.trunk;
                 delete this.hue;
                 delete this.best;
+                delete this.bond;
             }
 
             public method limit() returns int {
                 return this.cap;
+            }
+
+            // How two countries get on. Symmetric, because a grievance is not one-sided in any way
+            // that matters here -- somebody who has been raided and somebody who has been raiding
+            // both know there is a quarrel.
+            public method bondOf(int a, int b) returns int {
+                if (a < 0 || b < 0 || a >= this.cap || b >= this.cap || a == b) {
+                    return 0;
+                }
+                return this.bond[a * this.cap + b];
+            }
+
+            public method warm(int a, int b, int by) returns void {
+                if (a < 0 || b < 0 || a >= this.cap || b >= this.cap || a == b) {
+                    return;
+                }
+                mutable int v = this.bond[a * this.cap + b] + by;
+                if (v > Nations.BOND_CAP) {
+                    v = Nations.BOND_CAP;
+                }
+                if (v < 0 - Nations.BOND_CAP) {
+                    v = 0 - Nations.BOND_CAP;
+                }
+                this.bond[a * this.cap + b] = v;
+                this.bond[b * this.cap + a] = v;
+                return;
+            }
+
+            // Bounded, so a long peace cannot make a country unattackable for ever and a long feud
+            // cannot become unforgivable. Both are recoverable, which is what makes the map stop
+            // being a ratchet.
+            public static int BOND_CAP = 400;
+            // Above this two countries will not march on each other. Below the negative of it they
+            // are at each other's throats without needing a fresh excuse.
+            public static int BOND_PEACE = 120;
+            public static int BOND_ALLIED = 300;
+
+            // How many pairs are friendly enough to be called an alliance. One pass, for the report.
+            public method alliances() returns int {
+                mutable int n = 0;
+                for (int a in 0..this.cap) {
+                    for (int b in a + 1..this.cap) {
+                        if (this.bond[a * this.cap + b] >= Nations.BOND_ALLIED) {
+                            n = n + 1;
+                        }
+                    }
+                }
+                return n;
+            }
+
+            public method friendships() returns int {
+                mutable int n = 0;
+                for (int a in 0..this.cap) {
+                    for (int b in a + 1..this.cap) {
+                        if (this.bond[a * this.cap + b] >= Nations.BOND_PEACE) {
+                            n = n + 1;
+                        }
+                    }
+                }
+                return n;
             }
 
             // A nation exists while somebody lives under it. There is no dissolution ceremony: a
