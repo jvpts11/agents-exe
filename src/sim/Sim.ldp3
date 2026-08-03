@@ -234,6 +234,12 @@ public bundle Agents {
             // night the thatch goes up. The same building answering a second question it was never
             // built for is the whole reason the water layer earns its place twice.
             private mutable int[] cwells;
+            // Eyes on the store, which is what decides whether a thief is seen. Not the same number
+            // as the wall: a wall stops an army and a watch catches a hungry neighbour.
+            private mutable int[] cwatch;
+            private mutable long crimes;       // times somebody reached for a neighbour's shelf
+            private mutable long thefts;       // and got away with it
+            private mutable long caught;       // and did not
             private mutable int[] ccare;       // heads it can nurse
             private mutable int[] cfilth;      // and how hard it is to stay well here, per thousand
             // The two authorities a place has besides the one in charge. An elder is whoever has
@@ -499,6 +505,9 @@ public bundle Agents {
                 this.plunder = 0;
                 this.deathsWar = 0;
                 this.deathsWorld = 0;
+                this.crimes = 0;
+                this.thefts = 0;
+                this.caught = 0;
                 for (int c in 0..this.ncomm) {
                     this.cfoe[c] = 0 - 1;
                     this.craider[c] = 0 - 1;
@@ -573,6 +582,7 @@ public bundle Agents {
                 this.cdrink = new int[this.ncomm]();
                 this.cfresh = new boolean[this.ncomm]();
                 this.cwells = new int[this.ncomm]();
+                this.cwatch = new int[this.ncomm]();
                 this.ccare = new int[this.ncomm]();
                 // Built here rather than beside the other counters above: a fresh table is already
                 // empty, and reaching for `clear()` before this line ran was a null dereference that
@@ -734,6 +744,7 @@ public bundle Agents {
                 delete this.cdrink;
                 delete this.cfresh;
                 delete this.cwells;
+                delete this.cwatch;
                 delete this.ccare;
                 delete this.fates;
                 delete this.ctraded;
@@ -955,6 +966,20 @@ public bundle Agents {
             // Offices that changed hands when the holder died, and the ones a son took. Read by the
             // suite: this pair went to nought within an hour of the hereditary line being written,
             // and only a number in a twenty-minute report caught it.
+            // Crime, in three numbers, because a mechanism with an unreachable half is decoration
+            // and this codebase has shipped that twice.
+            public method crimesTried() returns long {
+                return this.crimes;
+            }
+
+            public method theftsDone() returns long {
+                return this.thefts;
+            }
+
+            public method thievesCaught() returns long {
+                return this.caught;
+            }
+
             // Calamities of every kind the world has seen, for the suite and the report.
             public method disastersSeen() returns int {
                 return this.fates.everStruck();
@@ -1215,6 +1240,7 @@ public bundle Agents {
                     }
                     this.ccare[c] = 0;
                     this.cwells[c] = 0;
+                    this.cwatch[c] = 0;
                     this.nhost[c] = 0 - 1;
                 }
                 // Whose armies are out, read once. Sixty-four slots, not sixty-four slots per
@@ -1237,12 +1263,16 @@ public bundle Agents {
                     int drink = Builds.water(k);
                     int care = Builds.care(k);
                     int kept = Builds.keeps(k);
-                    if (hold <= 0 && reach <= 0 && drink <= 0 && care <= 0 && kept <= 0) {
+                    int eyes = Builds.watches(k);
+                    if (hold <= 0 && reach <= 0 && drink <= 0 && care <= 0 && kept <= 0
+                        && eyes <= 0) {
                         continue;
                     }
                     int c = this.town.ownerOf(b);
                     if (c >= 0 && c < this.ncomm) {
                         this.cwall[c] = this.cwall[c] + hold;
+                        // Eyes add up: two towers see more than one, unlike a harbour's reach.
+                        this.cwatch[c] = this.cwatch[c] + eyes;
                         // Two wells water twice as many people, unlike two harbours.
                         this.cdrink[c] = this.cdrink[c] + drink;
                         if (drink > 0) {
@@ -2908,6 +2938,24 @@ public bundle Agents {
                             }
                         } else {
                             this.hungryTicks = this.hungryTicks + 1;
+                            // AND THIS IS WHERE CRIME BELONGS.
+                            //
+                            // A person reaches for food and there is none. Thirty-two million times
+                            // an arc, and until now the only thing that ever happened next was that
+                            // they went on being hungry until it killed them. Starve or flee were
+                            // the only two answers this world had; theft is the third one people
+                            // actually take, and it was missing.
+                            //
+                            // Not from their own shelf -- a store is the village's and taking from
+                            // it is not a crime. From the NEIGHBOUR the census already worked out
+                            // is reachable, which is the one town this place can get to, and the
+                            // reason a hungry region bleeds its richer neighbour dry.
+                            //
+                            // Staggered like everything else that would otherwise be asked thirty
+                            // million times, and it costs two array reads for everybody it skips.
+                            if ((i + this.frames) % 32 == 0) {
+                                this.pilfer(i, hh);
+                            }
                         }
                     }
                     // WEARINESS DID NOTHING AT ALL, and the arithmetic says so plainly: tiredness
@@ -5534,6 +5582,76 @@ public bundle Agents {
             // once: this is a world with one sun in it, and a famine is something that happens to
             // everybody at the same time. That is what makes trade between countries worth having
             // rather than an arbitrage nobody would notice.
+            // A HUNGRY PERSON TAKES WHAT IS NOT THEIRS, and somebody may be looking.
+            //
+            // Everything here is a fact the world already holds: that this person is hungry and
+            // their own shelf is bare, which is what got us into this method; which neighbouring
+            // town is reachable, worked out once a census by the caravan pass; whether that town
+            // has food; and how many eyes it keeps on its store.
+            //
+            // Being caught costs standing and nothing else. A world where a starving man is killed
+            // for taking a loaf is a world nobody watches twice, and the honest consequence is the
+            // one the codebase already models: influence is what a person is worth to their
+            // village, and a thief is worth less.
+            //
+            // AND IT SOURS THINGS. Stealing across a border is the mirror of the caravan that warms
+            // one -- the same bond, moved the other way, by a thing that already happens rather
+            // than by a new act called diplomacy.
+            private method pilfer(int i, int home) returns void {
+                if (home < 0 || home >= this.ncomm) {
+                    return;
+                }
+                int mark = this.ccaravan[home];
+                if (mark < 0 || mark >= this.ncomm || mark == home) {
+                    return;                          // nowhere within reach to take it from
+                }
+                if (this.stores.foodOf(mark) <= Simulation.KEEP_BACK) {
+                    return;                          // they have nothing spare either
+                }
+                this.crimes = this.crimes + 1;
+                // SEEN, OR NOT -- and the first draft of this had only buildings looking, so in a
+                // world two generations old, where nobody has raised a tower yet, not one thief was
+                // ever caught. The suite said so on the first run, which is the whole reason it
+                // asks whether BOTH halves of a mechanism are reachable.
+                //
+                // People see. A city of eight hundred notices a stranger at its granary and a
+                // hamlet of forty does not, and that is true from the first minute of the world
+                // rather than from whenever somebody can afford stonework. The tower is what a
+                // place adds ON TOP of having neighbours.
+                int eyes = this.cwatch[mark];
+                mutable int odds = eyes * 12 + this.cpop[mark] / 40;
+                if (odds > 80) {
+                    odds = 80;
+                }
+                if (cast<int>(LandMath.hash01(this.seed ^ 0x7A1F, i, this.tick) * 100.0) < odds) {
+                    this.folk.earn(i, 0 - 2);
+                    this.caught = this.caught + 1;
+                    if (!this.busy(i)) {
+                        this.folk.setAct(i, cast<int>(Act.Flee));
+                    }
+                    return;
+                }
+                int got = this.stores.eat(mark, 1);
+                if (got <= 0) {
+                    return;
+                }
+                this.folk.setHunger(i, 0);
+                this.thefts = this.thefts + 1;
+                this.meals = this.meals + cast<long>(got);
+                if (!this.busy(i)) {
+                    this.folk.setAct(i, cast<int>(Act.Carry));
+                }
+                // A theft across a border is a caravan run backwards.
+                if (this.cnat[mark] != this.cnat[home]) {
+                    this.realm.warm(this.cnat[home], this.cnat[mark], Simulation.BOND_PER_THEFT);
+                }
+                return;
+            }
+
+            // What being robbed costs two countries. Smaller than a raid and bigger than nothing:
+            // one loaf is not a war, and a season of them is why a border goes cold.
+            public static int BOND_PER_THEFT = 0 - 2;
+
             // A CALAMITY SOMEBODY CHOSE, which is the same calamity the world chooses.
             //
             // The ambient roll stays exactly as it is -- the ground goes on doing this without being
@@ -7728,7 +7846,10 @@ public bundle Agents {
                 // What the world did without being asked. Kept apart from war on purpose: a world
                 // where nobody has ever been killed by the ground they chose to live on is a world
                 // where choosing that ground was free.
-                System.IO.Console.println($"  the world's own hand: {this.fates.timesOf(cast<int>(Calamity.Eruption))} eruptions, {this.fates.timesOf(cast<int>(Calamity.Quake))} quakes, {this.fates.timesOf(cast<int>(Calamity.Fire))} fires, {this.fates.timesOf(cast<int>(Calamity.Flood))} floods, {this.fates.timesOf(cast<int>(Calamity.Storm))} storms");
+                // WHAT HUNGER DOES WHEN THE SHELF IS BARE. Starve or flee were the only two
+                // answers this world had; this is the third, and the watch is what answers it.
+                System.IO.Console.println($"  crime: {this.crimes} reached for a neighbour's shelf | {this.thefts} got away with it, {this.caught} were seen");
+                System.IO.Console.println($"  the world's own hand:{this.fates.timesOf(cast<int>(Calamity.Eruption))} eruptions, {this.fates.timesOf(cast<int>(Calamity.Quake))} quakes, {this.fates.timesOf(cast<int>(Calamity.Fire))} fires, {this.fates.timesOf(cast<int>(Calamity.Flood))} floods, {this.fates.timesOf(cast<int>(Calamity.Storm))} storms");
                 System.IO.Console.println($"    it killed {this.fates.everKilled()} and took down {this.fates.everWrecked()} buildings || fire alone: {this.fates.tollOf(cast<int>(Calamity.Fire))} dead, {this.fates.wreckedOf(cast<int>(Calamity.Fire))} burned");
                 // What is left standing, against what the world started with. A resource that only
                 // goes down is being liquidated, and this is where that shows.
