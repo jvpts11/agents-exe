@@ -36,6 +36,15 @@ public bundle Agents {
             private mutable float[] batch;      // seconds into the current batch
             private mutable long[] made;        // batches finished, per building
             private mutable int[] idle;         // censuses running with nobody working it
+            // Which way the door faces: 0 south (+y), 1 east (+x), 2 north (-y), 3 west (-x).
+            //
+            // Cardinal and not eight-way on purpose. Every building mesh is a box with its door
+            // decalled on the +Y wall, and in a world drawn on a square grid a house standing at
+            // forty-five degrees reads as a mistake rather than as character. Four is enough for a
+            // village to face its own common, which is the entire point: a street of houses all
+            // turned the same arbitrary way is the thing that made every settlement look stamped
+            // out rather than built.
+            private mutable byte[] face;
             // Bumped by anything that changes what the map SHOWS. The renderer used to watch the
             // count, which was true while buildings only ever appeared; now that one can be pulled
             // down or rebuilt as something taller without the count moving, the count is a stale
@@ -55,6 +64,7 @@ public bundle Agents {
                 this.batch = new float[capacity]();
                 this.made = new long[capacity]();
                 this.idle = new int[capacity]();
+                this.face = new byte[capacity]();
                 this.stamp = 0;
             }
 
@@ -69,6 +79,7 @@ public bundle Agents {
                 delete this.batch;
                 delete this.made;
                 delete this.idle;
+                delete this.face;
             }
 
             public method count() returns int {
@@ -85,7 +96,11 @@ public bundle Agents {
 
             // Mark out a site. Nothing is spent yet: the cost comes out of the store when the
             // builders have actually raised it, so a village cannot lose its wood to a plan.
-            public method mark(int x, int y, int k, int comm) returns int {
+            //
+            // (towardX, towardY) is what the door should look at -- in practice the middle of the
+            // settlement, so a village grows facing its own common the way a real one does, and the
+            // further out a house is built the more clearly it is turned inward.
+            public method mark(int x, int y, int k, int comm, int towardX, int towardY) returns int {
                 if (this.n >= this.cap) {
                     return 0 - 1;
                 }
@@ -101,8 +116,44 @@ public bundle Agents {
                 this.batch[i] = 0.0;
                 this.made[i] = 0;
                 this.idle[i] = 0;
+                this.face[i] = cast<byte>(Buildings.facing(x, y, towardX, towardY));
                 this.stamp = this.stamp + 1;
                 return i;
+            }
+
+            // The cardinal direction from (x,y) toward (tx,ty): whichever axis the two are further
+            // apart on wins, so a house due east of the common faces west and one on the diagonal
+            // picks the longer leg. A building standing ON the point it should look at -- the town
+            // hall, which is the middle of the settlement -- keeps the default and faces south,
+            // which is also the direction the camera looks from.
+            public static method facing(int x, int y, int tx, int ty) returns int {
+                int dx = tx - x;
+                int dy = ty - y;
+                mutable int ax = dx;
+                if (ax < 0) {
+                    ax = 0 - ax;
+                }
+                mutable int ay = dy;
+                if (ay < 0) {
+                    ay = 0 - ay;
+                }
+                if (ax == 0 && ay == 0) {
+                    return 0;
+                }
+                if (ax > ay) {
+                    if (dx > 0) {
+                        return 1;
+                    }
+                    return 3;
+                }
+                if (dy > 0) {
+                    return 0;
+                }
+                return 2;
+            }
+
+            public method faceOf(int i) returns int {
+                return cast<int>(this.face[i]) & 255;
             }
 
             public method xAt(int i) returns int {

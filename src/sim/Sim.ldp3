@@ -334,10 +334,28 @@ public bundle Agents {
             // Who claims each 16-cell block, or -1. A community's land is the ground its people
             // stand on, spread outward by how far they go to work -- so the shape of a country is
             // read off fifty thousand positions rather than drawn as a disk of a size somebody
-            // chose. `claimHold` is the running majority vote that settles a contested block and
-            // `claimEdge` is the previous ring, so the spread cannot race across the map in one pass.
-            private mutable int[] claim;
-            private mutable int[] claimHold;
+            // chose. `claimEdge` is the previous ring, so the spread cannot race across the map in
+            // one pass.
+            //
+            // TERRITORY IS STICKY, and it has to be. The first version threw the whole field away
+            // every census and re-derived it from who happened to be standing where at that instant,
+            // by a streaming majority vote -- which is not a majority at all when three villages
+            // share a block, but whoever survived the cancellations in the order the rows came out
+            // of a table that recycles a row every time somebody is born. Watching the map, the
+            // borders never stopped moving: a country's whole frontier redrew itself several times a
+            // second because a handful of people crossed a line. Nobody's border does that.
+            //
+            // So the instantaneous vote is now only EVIDENCE. `claimCore` is who actually holds the
+            // block and `claimHold` is how firmly; agreeing evidence strengthens the holder and
+            // disagreeing evidence wears it down, and the block changes hands only when the wearing
+            // reaches zero. One person walking through cannot move a border; a village genuinely
+            // spreading into its neighbour's ground still can, and takes a few censuses over it.
+            private mutable int[] claim;        // core plus the worked ring: what is drawn
+            private mutable int[] claimCore;    // who stands there, settled over time
+            private mutable int[] claimHold;    // how firmly the core holds it
+            private mutable int[] claimVote;    // this census's evidence, per block
+            private mutable int[] claimTally;   // scratch for the within-census vote
+            private mutable int[] claimWas;     // what was drawn last census, to notice a real change
             private mutable int[] claimEdge;
             private mutable int claimW;
             private mutable int claimH;
@@ -564,10 +582,16 @@ public bundle Agents {
                 this.claimW = (grid.width() + 15) / 16;
                 this.claimH = (grid.height() + 15) / 16;
                 this.claim = new int[this.claimW * this.claimH]();
+                this.claimCore = new int[this.claimW * this.claimH]();
                 this.claimHold = new int[this.claimW * this.claimH]();
+                this.claimVote = new int[this.claimW * this.claimH]();
+                this.claimTally = new int[this.claimW * this.claimH]();
+                this.claimWas = new int[this.claimW * this.claimH]();
                 this.claimEdge = new int[this.claimW * this.claimH]();
                 for (int b in 0..this.claimW * this.claimH) {
                     this.claim[b] = 0 - 1;
+                    this.claimCore[b] = 0 - 1;
+                    this.claimWas[b] = 0 - 1;
                 }
                 this.claimAge = 0;
                 this.rate = 1.0;
@@ -761,7 +785,11 @@ public bundle Agents {
                 delete this.craided;
                 delete this.craider;
                 delete this.claim;
+                delete this.claimCore;
                 delete this.claimHold;
+                delete this.claimVote;
+                delete this.claimTally;
+                delete this.claimWas;
                 delete this.claimEdge;
                 delete this.wild;
                 delete this.meter;
@@ -2710,8 +2738,8 @@ public bundle Agents {
             private method restake() returns void {
                 int nb = this.claimW * this.claimH;
                 for (int b in 0..nb) {
-                    this.claim[b] = 0 - 1;
-                    this.claimHold[b] = 0;
+                    this.claimVote[b] = 0 - 1;
+                    this.claimTally[b] = 0;
                 }
                 // Who is standing where, settled by majority. A running vote rather than a count per
                 // community per block: a tally would be a quarter of a million cells wide and this
@@ -2726,18 +2754,48 @@ public bundle Agents {
                             int by = cast<int>(this.folk.yAt(i)) / 16;
                             if (bx >= 0 && by >= 0 && bx < this.claimW && by < this.claimH) {
                                 int at = by * this.claimW + bx;
-                                if (this.claim[at] == h) {
-                                    this.claimHold[at] = this.claimHold[at] + 1;
-                                } else if (this.claimHold[at] == 0) {
-                                    this.claim[at] = h;
-                                    this.claimHold[at] = 1;
+                                if (this.claimVote[at] == h) {
+                                    this.claimTally[at] = this.claimTally[at] + 1;
+                                } else if (this.claimTally[at] == 0) {
+                                    this.claimVote[at] = h;
+                                    this.claimTally[at] = 1;
                                 } else {
-                                    this.claimHold[at] = this.claimHold[at] - 1;
+                                    this.claimTally[at] = this.claimTally[at] - 1;
                                 }
                             }
                         }
                     }
                     i = i + 1;
+                }
+                // That vote is only this instant's evidence, and this instant is worth very little:
+                // the same block polled a second apart can name a different community because six
+                // people crossed a line. It is folded into a HOLDING that remembers, so that what is
+                // drawn is who has been there rather than who is there right now.
+                for (int b in 0..nb) {
+                    int v = this.claimVote[b];
+                    if (v < 0) {
+                        // Nobody standing here at all. Let go slowly -- a village whose people are
+                        // all out in the fields this second has not abandoned its ground.
+                        if (this.claimHold[b] > 0) {
+                            this.claimHold[b] = this.claimHold[b] - 1;
+                        }
+                        if (this.claimHold[b] == 0) {
+                            this.claimCore[b] = 0 - 1;
+                        }
+                    } else if (this.claimCore[b] == v) {
+                        if (this.claimHold[b] < Simulation.CLAIM_GRIP) {
+                            this.claimHold[b] = this.claimHold[b] + 1;
+                        }
+                    } else {
+                        this.claimHold[b] = this.claimHold[b] - 1;
+                        if (this.claimHold[b] <= 0) {
+                            this.claimCore[b] = v;
+                            this.claimHold[b] = 1;
+                        }
+                    }
+                }
+                for (int b in 0..nb) {
+                    this.claim[b] = this.claimCore[b];
                 }
                 // And then it spreads to the ground they work but do not sleep on. One ring a pass,
                 // read from the last pass so a claim cannot race across the map in a single census.
@@ -2765,7 +2823,20 @@ public bundle Agents {
                         }
                     }
                 }
-                this.claimAge = this.claimAge + 1;
+                // The version is bumped only when the map genuinely LOOKS different. It used to be
+                // bumped unconditionally, so the renderer tore down and rebuilt every border quad in
+                // view on every census whether or not one block had moved -- and once the field went
+                // still, that work would have been entirely invisible.
+                mutable boolean moved = false;
+                for (int b in 0..nb) {
+                    if (this.claimWas[b] != this.claim[b]) {
+                        this.claimWas[b] = this.claim[b];
+                        moved = true;
+                    }
+                }
+                if (moved) {
+                    this.claimAge = this.claimAge + 1;
+                }
                 // Wildlife is told the same thing, once, and treats settled ground as no longer
                 // habitat. Fourteen thousand writes a second against a billion and a half distance
                 // tests a frame is the whole reason it is done this way round.
@@ -3285,31 +3356,76 @@ public bundle Agents {
                     // ARRIVE, and arriving is an outcome. Restricting it to the near tier left
                     // three thousand journeys a minute abandoned off screen and none on it.
                     //
-                    // What a level of detail may actually skip is turning to face the way you walk,
-                    // which nobody can see from outside the window and which changes nothing.
+                    // Facing is not a detail level either, and that was the third: it was computed
+                    // only for people near the camera, into a field the renderer never read, so
+                    // nobody in this world has ever faced anywhere. It is two stores. Everybody
+                    // gets them.
+                    mutable float fx = ux;
+                    mutable float fy = uy;
                     if (!this.walkable(cast<int>(nx), cast<int>(ny))) {
                         if (this.walkable(cast<int>(nx), cy)) {
                             ny = y;
+                            fy = 0.0;
+                            fx = 1.0;
+                            if (ux < 0.0) {
+                                fx = 0.0 - 1.0;
+                            }
                         } else if (this.walkable(cx, cast<int>(ny))) {
                             nx = x;
+                            fx = 0.0;
+                            fy = 1.0;
+                            if (uy < 0.0) {
+                                fy = 0.0 - 1.0;
+                            }
                         } else {
-                            nx = x;
-                            ny = y;
+                            // A CONCAVE CORNER. Both axes are walls, so sliding has nowhere left to
+                            // go and this used to stand still until the patience timer gave up --
+                            // which is exactly what somebody watching sees as "agents get stuck in
+                            // corners": not a pause, a person pressed into a notch of cliff
+                            // vibrating against it for twenty seconds and then forgetting where
+                            // they were going.
+                            //
+                            // A corner is escaped by going ALONG it, not through it, so try both
+                            // perpendiculars to the blocked heading and take whichever is open. The
+                            // choice between them is settled by the row index rather than by which
+                            // is nearer the goal: nearer-the-goal is what walked into the notch,
+                            // and it would walk straight back in. An arbitrary but STABLE hand --
+                            // this person always goes left, that one always right -- means the two
+                            // of them do not both re-enter the same trap, and means a given person
+                            // commits to one way round instead of dithering at the mouth of it.
+                            mutable float ax = 0.0 - uy;
+                            mutable float ay = ux;
+                            if ((i & 1) == 1) {
+                                ax = uy;
+                                ay = 0.0 - ux;
+                            }
+                            mutable float ox = x + ax * span;
+                            mutable float oy = y + ay * span;
+                            if (this.walkable(cast<int>(ox), cast<int>(oy))) {
+                                nx = ox;
+                                ny = oy;
+                                fx = ax;
+                                fy = ay;
+                            } else {
+                                ox = x - ax * span;
+                                oy = y - ay * span;
+                                if (this.walkable(cast<int>(ox), cast<int>(oy))) {
+                                    nx = ox;
+                                    ny = oy;
+                                    fx = 0.0 - ax;
+                                    fy = 0.0 - ay;
+                                } else {
+                                    // Walled in on all four sides. Nothing to do but keep the old
+                                    // heading and let patience end the journey.
+                                    nx = x;
+                                    ny = y;
+                                    fx = 0.0;
+                                    fy = 0.0;
+                                }
+                            }
                         }
                     }
-                    if (this.nearby(cx, cy)) {
-                        mutable int d = 0;
-                        if (ux >= 0.0 && uy >= 0.0) {
-                            d = 1;
-                        } else if (ux >= 0.0) {
-                            d = 2;
-                        } else if (uy >= 0.0) {
-                            d = 0;
-                        } else {
-                            d = 3;
-                        }
-                        this.folk.setDir(i, d);
-                    }
+                    this.folk.setFacing(i, fx, fy);
                     this.folk.setPos(i, nx, ny);
                     // A CROSSING wears the ground, not a tick of standing on it.
                     //
@@ -5040,7 +5156,8 @@ public bundle Agents {
                 if (this.cseat[c] < 0) {
                     // The seat, free at founding, at the middle of where the people actually are.
                     int b = this.town.mark(cast<int>(this.ccx[c]), cast<int>(this.ccy[c]),
-                                           cast<int>(BuildingKind.TownHall), c);
+                                           cast<int>(BuildingKind.TownHall), c,
+                                           cast<int>(this.ccx[c]), cast<int>(this.ccy[c]));
                     if (b >= 0) {
                         this.town.raise(b, Buildings.RAISE);
                         this.cseat[c] = b;
@@ -6183,7 +6300,8 @@ public bundle Agents {
                         // on trust and reported three hundred thousand plots marked out against
                         // four thousand rows -- the counter was measuring how often the world had
                         // run out of room, and calling it building.
-                        int b = this.town.mark(px, py, k, c);
+                        int b = this.town.mark(px, py, k, c, cast<int>(this.ccx[c]),
+                                               cast<int>(this.ccy[c]));
                         if (b < 0) {
                             return false;
                         }
@@ -7123,6 +7241,10 @@ public bundle Agents {
             }
 
             public static int WORK_BLOCKS = 3;           // 16-cell blocks a COMMUNITY looks over: 48 cells
+            // How many censuses of contested evidence it takes to move a border. Six: long enough
+            // that people walking about cannot shift a frontier, short enough that a village really
+            // pushing into its neighbour's ground gets there within the life of one generation.
+            public static int CLAIM_GRIP = 6;
             public static int REACH = 6;                 // cells a person searches where they stand
             // A WORK SESSION, not a grab. At five seconds a load the trade was seventy-one per cent
             // walking -- and the wood was only seven or eight cells away, so the map was never the
@@ -8466,6 +8588,108 @@ public bundle Agents {
                     i = i + 1;
                 }
                 return bad;
+            }
+
+            // THE WHOLE WORLD, IN ONE PARSEABLE BLOCK.
+            //
+            // The report below is written for a person reading one arc. This is written for a
+            // machine reading SIX, which is a different job and needs a different shape: one fact
+            // per line, `A|key|value`, no prose and nothing that has to be read to be compared.
+            // Six seeds side by side is the only way this campaign can tell a dead mechanism from a
+            // world that happened not to use one -- a lesson that cost a day and a measured noise
+            // floor where the seed alone moved a headcount by twelve times.
+            //
+            // Everything here is a fact the simulation already holds. Nothing is computed for the
+            // audit that the world does not otherwise know, so the audit cannot disagree with the
+            // game it is auditing.
+            public method audit() returns void {
+                System.IO.Console.println("AUDIT-BEGIN");
+                System.IO.Console.println($"A|seed|{this.seed}");
+                System.IO.Console.println($"A|alive|{this.folk.count()}");
+                System.IO.Console.println($"A|born|{this.births}");
+                System.IO.Console.println($"A|died.old|{this.deathsOld}");
+                System.IO.Console.println($"A|died.hunger|{this.deathsHunger}");
+                System.IO.Console.println($"A|died.illness|{this.deathsIll}");
+                System.IO.Console.println($"A|died.war|{this.deathsWar}");
+                System.IO.Console.println($"A|died.world|{this.deathsWorld}");
+                mutable int living = 0;
+                mutable int kings = 0;
+                mutable int best = 1;
+                mutable int atBest = 0;
+                for (int n in 0..this.realm.limit()) {
+                    if (!this.realm.alive(n)) {
+                        continue;
+                    }
+                    living = living + 1;
+                    if (this.realm.rankOf(n) >= cast<int>(Rank.Kingdom)) {
+                        kings = kings + 1;
+                    }
+                    int e = this.realm.eraOf(n);
+                    if (e > best) {
+                        best = e;
+                        atBest = 0;
+                    }
+                    if (e == best) {
+                        atBest = atBest + 1;
+                    }
+                }
+                System.IO.Console.println($"A|nations|{living}");
+                System.IO.Console.println($"A|kingdoms|{kings}");
+                System.IO.Console.println($"A|era.best|{best}");
+                System.IO.Console.println($"A|era.atBest|{atBest}");
+                System.IO.Console.println($"A|widest|{this.realm.mostTowns()}");
+                // Every good by what the world actually made of it. A zero here that is zero in all
+                // six worlds is a dead good; a zero in one is a world without a seam.
+                for (int g in 1..Goods.count()) {
+                    System.IO.Console.println($"A|good.{Goods.name(g)}|{this.stores.producedOf(g)}");
+                }
+                // Every kind by how many stand, same reading.
+                for (int k in 1..BuildingKind.count()) {
+                    System.IO.Console.println($"A|built.{Builds.name(k)}|{this.town.countOfKind(k)}");
+                }
+                // Every trade by how many follow it -- where a profession that exists in the enum
+                // and nowhere in the world becomes visible.
+                mutable int[] jobs = new int[Job.count()]();
+                int jn = this.folk.limit();
+                mutable int ji = 0;
+                while (ji < jn) {
+                    if (this.folk.alive(ji) && this.folk.isAdult(ji)) {
+                        int jj = this.folk.jobOf(ji);
+                        if (jj >= 0 && jj < Job.count()) {
+                            jobs[jj] = jobs[jj] + 1;
+                        }
+                    }
+                    ji = ji + 1;
+                }
+                for (int j in 0..Job.count()) {
+                    System.IO.Console.println($"A|job.{j}|{jobs[j]}");
+                }
+                delete jobs;
+                // And every mechanism this campaign built, so one that fires in no world at all is
+                // visible as such rather than as an absence nobody thought to look for.
+                System.IO.Console.println($"A|mech.crimes|{this.crimes}");
+                System.IO.Console.println($"A|mech.thefts|{this.thefts}");
+                System.IO.Console.println($"A|mech.caught|{this.caught}");
+                System.IO.Console.println($"A|mech.grudges|{this.grudges}");
+                System.IO.Console.println($"A|mech.exiled|{this.exiled}");
+                System.IO.Console.println($"A|mech.couples|{this.wed}");
+                System.IO.Console.println($"A|mech.conquests|{this.conquests}");
+                System.IO.Console.println($"A|mech.sacked|{this.sacked}");
+                System.IO.Console.println($"A|mech.captured|{this.captured}");
+                System.IO.Console.println($"A|mech.served|{this.settled}");
+                System.IO.Console.println($"A|mech.freed|{this.loosed}");
+                System.IO.Console.println($"A|mech.hullsTaken|{this.taken}");
+                System.IO.Console.println($"A|mech.sailings|{this.ships.sailings()}");
+                System.IO.Console.println($"A|mech.arrivals|{this.ships.arrivals()}");
+                System.IO.Console.println($"A|mech.tonnage|{this.ships.tonnage()}");
+                System.IO.Console.println($"A|mech.disasters|{this.disastersSeen()}");
+                System.IO.Console.println($"A|mech.chiefsPassed|{this.passed}");
+                System.IO.Console.println($"A|mech.plunder|{this.plunder}");
+                System.IO.Console.println($"A|mech.raids|{this.raids}");
+                System.IO.Console.println($"A|mech.colonies|{this.hived}");
+                System.IO.Console.println($"A|mech.fled|{this.fled}");
+                System.IO.Console.println("AUDIT-END");
+                return;
             }
 
             public method report() returns void {

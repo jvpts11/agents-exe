@@ -114,7 +114,38 @@ public bundle Agents {
                     }
                 }
                 // Default: the interactive true-3D world (free orbit camera).
-                Main.renderGlWorld();
+                //
+                // A SEED, so the real game can be run six times on six maps at once. Until now the
+                // world a player sees was hardwired to 42, which is fine for one window and useless
+                // for the only test that matters -- the whole thing, renderer included, on ground
+                // it has never seen. Any argument that is not a known command is read as a seed.
+                mutable int seed = 42;
+                if (args.length() > 0) {
+                    mutable Scanner sc = new Scanner(args[0]) on heap;
+                    if (sc.hasNext()) {
+                        int got = sc.nextInt();
+                        if (got != 0) {
+                            seed = got;
+                        }
+                    }
+                    delete sc;
+                }
+                // AND THE SPEED IT STARTS AT. The 1-6 keys already exist, but a window launched to
+                // be watched and audited for an hour cannot be asked to have somebody press a key
+                // in it -- and pressing that key in one of six windows only ever meant walking
+                // round to the other five.
+                mutable float pace = 1.0;
+                if (args.length() > 1) {
+                    mutable Scanner ps = new Scanner(args[1]) on heap;
+                    if (ps.hasNext()) {
+                        int got = ps.nextInt();
+                        if (got > 0) {
+                            pace = Main.paceOf(got);
+                        }
+                    }
+                    delete ps;
+                }
+                Main.renderGlWorld(seed, pace);
                 return;
             }
 
@@ -235,7 +266,29 @@ public bundle Agents {
             // The interactive true-3D world: generate, bake into a VBO (LOD stride so the whole
             // 2560x1080 fits), then an inspection camera loop -- left-drag or arrows rotate/tilt (tilt
             // gimbal-locked between horizontal and top-down), wheel or +/- zoom, WASD pan, ESC quits.
-            private static method renderGlWorld() returns void {
+            // The six gears, by the number printed on the key that selects them. One argument that
+            // means the same thing as the key you would have pressed beats a second scale nobody
+            // can hold in their head next to the first.
+            private static method paceOf(int gear) returns float {
+                if (gear <= 1) {
+                    return 1.0;
+                }
+                if (gear == 2) {
+                    return 2.0;
+                }
+                if (gear == 3) {
+                    return 5.0;
+                }
+                if (gear == 4) {
+                    return 20.0;
+                }
+                if (gear == 5) {
+                    return 60.0;
+                }
+                return 300.0;
+            }
+
+            private static method renderGlWorld(int seed, float pace) returns void {
                 int w = 2560;
                 int h = 1440;
                 System.IO.Console.println("agents.exe: generating the world...");
@@ -243,7 +296,7 @@ public bundle Agents {
                 // are what makes a world worth playing, and three seeds in twelve produce one they
                 // reject -- one continent and five scraps, or fourteen islands. Six tries is ample:
                 // nine in twelve pass on the first roll.
-                Grid* g = WorldGen.acceptable(42, 0, 0.0 - 1.0, 0, w, h, 6, true);
+                Grid* g = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, w, h, 6, true);
                 String root = Main.assetRoot();
                 if (root.length() == 0) {
                     System.IO.Console.println("assets/models not found next to the executable.");
@@ -266,12 +319,13 @@ public bundle Agents {
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
                 AgentTable* folk = new AgentTable(50000) on heap;
-                folk.seedWorld(g, 50000, 100, 42);
+                folk.seedWorld(g, 50000, 100, seed);
                 folk.report();
                 r.setPeople(folk, peopleMesh);
                 MeshAtlas* buildMesh = MeshAtlas.loadNamed(root, "buildings.index");
                 MeshAtlas* faunaMesh = MeshAtlas.loadNamed(root, "fauna.index");
-                Simulation* sim = new Simulation(g, folk, 42) on heap;
+                Simulation* sim = new Simulation(g, folk, seed) on heap;
+                sim.setRate(pace);
                 r.setTown(sim.buildings(), buildMesh);
                 r.setSim(sim);
                 r.setWays(sim.ways(), MeshAtlas.loadNamed(root, "ways.index"));
@@ -396,6 +450,11 @@ public bundle Agents {
                 // reads.
                 r.frameMeter().report("frame");
                 sim.clockMeter().report("clock");
+                // AND THE WHOLE WORLD, in the same parseable block the headless arc emits. The
+                // point of running the real game six times is that everything is in the loop --
+                // renderer, window, input, meshes -- so the audit has to come off THAT run and not
+                // off a mode built beside it.
+                sim.audit();
                 delete text;
                 delete hud;
                 delete sim;
@@ -912,6 +971,7 @@ public bundle Agents {
                 }
                 long ms = watch.elapsedMillis();
                 sim.report();
+                sim.audit();
                 // AND WHY THE BIGGEST TOWN IN THE WORLD DID NOT BUILD THE REST OF THE CATALOGUE.
                 //
                 // Two chains are dead for reasons that can only be guessed at from outside the

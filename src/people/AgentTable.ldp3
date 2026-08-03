@@ -90,7 +90,16 @@ public bundle Agents {
             private mutable byte[] job;
             private mutable byte[] role;
             private mutable byte[] flags;
-            private mutable byte[] dir;
+            // WHICH WAY THIS PERSON IS FACING, as a unit vector rather than a compass point.
+            //
+            // This was one byte holding a quadrant, and in that shape it was written by the walk
+            // step and read by nobody at all -- the renderer never asked, so for the whole life of
+            // this project fifty thousand people crossed a continent all facing the same way. Two
+            // floats instead of one byte is four hundred kilobytes at full population, and it buys
+            // a heading the renderer can turn a mesh by without a trig call per person per frame,
+            // and a smooth one: a quadrant snaps through ninety degrees, a vector does not.
+            private mutable float[] hx;
+            private mutable float[] hy;
             // what it is doing
             private mutable byte[] task;
             private mutable float[] taskTimer;
@@ -220,7 +229,8 @@ public bundle Agents {
                 this.job = new byte[cap]();
                 this.role = new byte[cap]();
                 this.flags = new byte[cap]();
-                this.dir = new byte[cap]();
+                this.hx = new float[cap]();
+                this.hy = new float[cap]();
                 this.task = new byte[cap]();
                 this.taskTimer = new float[cap]();
                 this.journey = new float[cap]();
@@ -276,7 +286,8 @@ public bundle Agents {
                 delete this.job;
                 delete this.role;
                 delete this.flags;
-                delete this.dir;
+                delete this.hx;
+                delete this.hy;
                 delete this.task;
                 delete this.taskTimer;
                 delete this.journey;
@@ -361,7 +372,8 @@ public bundle Agents {
                 this.job[i] = cast<byte>(cast<int>(Job.Idle));
                 this.role[i] = cast<byte>(cast<int>(Role.None));
                 this.flags[i] = cast<byte>(AgentTable.F_ALIVE);
-                this.dir[i] = cast<byte>(0);
+                this.hx[i] = 0.0;
+                this.hy[i] = 1.0;
                 this.task[i] = cast<byte>(cast<int>(Act.Idle));
                 this.taskTimer[i] = 0.0;
                 this.targetNode[i] = 0 - 1;
@@ -824,13 +836,27 @@ public bundle Agents {
                 return;
             }
 
-            public method setDir(int i, int d) returns void {
-                this.dir[i] = cast<byte>(d);
+            // Face this way. The vector must already be of unit length -- the walk step has one in
+            // hand for free, since it divided by the distance to move at all, and asking for it
+            // normalised here would put a square root in the hottest loop in the simulation to
+            // recompute a number the caller just threw away. A zero vector -- somebody who did not
+            // move this tick -- leaves the old heading alone, which is what keeps a person who
+            // stops to work from snapping round to face north.
+            public method setFacing(int i, float ux, float uy) returns void {
+                if (ux == 0.0 && uy == 0.0) {
+                    return;
+                }
+                this.hx[i] = ux;
+                this.hy[i] = uy;
                 return;
             }
 
-            public method dirOf(int i) returns int {
-                return cast<int>(this.dir[i]) & 255;
+            public method headXOf(int i) returns float {
+                return this.hx[i];
+            }
+
+            public method headYOf(int i) returns float {
+                return this.hy[i];
             }
 
             public method thinkAtOf(int i) returns int {
@@ -1348,12 +1374,14 @@ public bundle Agents {
                 // does not die all at once -- a founding population that was born on the same tick
                 // would empty the map in one breath six minutes in.
                 this.age[i] = LandMath.hash01(s, n * 7 + 8, 23) * this.lifespan[i];
-                this.dir[i] = cast<byte>(cast<int>(LandMath.hash01(s, n * 7 + 9, 29) * 4.0));
+                float turn = LandMath.hash01(s, n * 7 + 9, 29) * 6.2831853;
+                this.hx[i] = LandMath.sin(turn);
+                this.hy[i] = LandMath.cos(turn);
                 return;
             }
 
             public method report() returns void {
-                int bytes = 65;
+                int bytes = 72;
                 System.IO.Console.println($"agents: {this.live} alive of {this.cap} rows, {this.live * bytes / 1048576} MB of table");
                 return;
             }

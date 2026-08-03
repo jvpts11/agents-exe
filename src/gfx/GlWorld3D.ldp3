@@ -997,6 +997,16 @@ public bundle Agents {
             private method emitMeshShadow(MeshAtlas* a, address buf, int w, int pord, float wx,
                                           float wy, float z, float scale, float gr, float gg,
                                           float gb, boolean perCell) returns int {
+                return this.emitMeshShadowTurned(a, buf, w, pord, wx, wy, z, scale, gr, gg, gb,
+                                                 perCell, 1.0, 0.0);
+            }
+
+            // The shadow of a body that is facing somewhere. A shadow that did not turn with its
+            // caster would be the tell that gave the whole trick away.
+            private method emitMeshShadowTurned(MeshAtlas* a, address buf, int w, int pord, float wx,
+                                                float wy, float z, float scale, float gr, float gg,
+                                                float gb, boolean perCell, float ca,
+                                                float sa) returns int {
                 int t0 = a.triStart[pord];
                 int tn = a.triCount[pord];
                 mutable int p = w;
@@ -1009,8 +1019,10 @@ public bundle Agents {
                     while (k < 3) {
                         int vi = vb + k;
                         float hz = a.pz[vi] * scale;
-                        ax = ax + a.px[vi] * scale + wx - hz * 0.368;
-                        ay = ay + a.py[vi] * scale + wy - hz * 0.579;
+                        float lx = a.px[vi] * scale;
+                        float ly = a.py[vi] * scale;
+                        ax = ax + lx * ca - ly * sa + wx - hz * 0.368;
+                        ay = ay + lx * sa + ly * ca + wy - hz * 0.579;
                         k = k + 1;
                     }
                     ax = ax / 3.0;
@@ -1031,9 +1043,11 @@ public bundle Agents {
                         while (k < 3) {
                             int vi = vb + k;
                             float hz = a.pz[vi] * scale;
+                            float lx = a.px[vi] * scale;
+                            float ly = a.py[vi] * scale;
                             p = this.wr(buf, p,
-                                        a.px[vi] * scale + wx - hz * 0.368,
-                                        a.py[vi] * scale + wy - hz * 0.579,
+                                        lx * ca - ly * sa + wx - hz * 0.368,
+                                        lx * sa + ly * ca + wy - hz * 0.579,
                                         zt, 0.0, 0.0, 1.0, gr, gg, gb);
                             k = k + 1;
                         }
@@ -1398,6 +1412,25 @@ public bundle Agents {
 
             private method emitMesh(MeshAtlas* a, address buf, int w, int pord, float wx, float wy,
                                     float wz, float scale, float shade) returns int {
+                return this.emitTurned(a, buf, w, pord, wx, wy, wz, scale, shade, 1.0, 0.0);
+            }
+
+            // THE SAME MESH, FACING SOMEWHERE.
+            //
+            // Every mesh in this world has been drawn at one fixed rotation since the renderer was
+            // written -- agents, buildings, carts, all of it. Fifty thousand people walked around a
+            // continent for the whole of this project facing the same compass point, and no test
+            // could ever have caught it, because a test reads numbers and this is a thing you have
+            // to LOOK at. It took six windows open at once and somebody watching one.
+            //
+            // The turn arrives as a cosine and a sine rather than an angle, because every caller
+            // already HAS a direction vector -- a person walks toward a tree, a cart is pointed
+            // along its road, a house faces its street -- and converting that to an angle and back
+            // is two transcendental calls per instance per frame for nothing. At fifty thousand
+            // instances a frame that is not a rounding error.
+            private method emitTurned(MeshAtlas* a, address buf, int w, int pord, float wx,
+                                      float wy, float wz, float scale, float shade,
+                                      float ca, float sa) returns int {
                 int t0 = a.triStart[pord];
                 int tn = a.triCount[pord];
                 mutable int p = w;
@@ -1411,9 +1444,15 @@ public bundle Agents {
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
-                        p = this.wr(buf, p, a.px[vi] * scale + wx, a.py[vi] * scale + wy,
+                        float lx = a.px[vi] * scale;
+                        float ly = a.py[vi] * scale;
+                        // The normal turns with the body, or somebody walking north is lit as
+                        // though they were still facing east.
+                        float bx = a.nx[vi];
+                        float by = a.ny[vi];
+                        p = this.wr(buf, p, lx * ca - ly * sa + wx, lx * sa + ly * ca + wy,
                                     a.pz[vi] * scale + wz,
-                                    a.nx[vi], a.ny[vi], a.nz[vi], r, g, b);
+                                    bx * ca - by * sa, bx * sa + by * ca, a.nz[vi], r, g, b);
                         k = k + 1;
                     }
                     t = t + 1;
@@ -2288,6 +2327,15 @@ public bundle Agents {
                                       float wx, float wy, float wz,
                                       float scale, float cr, float cg, float cb,
                                       float shade) returns int {
+                return this.emitTintedTurned(a, buf, w, mord, wx, wy, wz, scale,
+                                             cr, cg, cb, shade, 1.0, 0.0);
+            }
+
+            // And the same, facing somewhere -- this is the one every PERSON is drawn with.
+            private method emitTintedTurned(MeshAtlas* a, address buf, int w, int mord,
+                                            float wx, float wy, float wz,
+                                            float scale, float cr, float cg, float cb,
+                                            float shade, float ca, float sa) returns int {
                 int t0 = a.triStart[mord];
                 int tn = a.triCount[mord];
                 mutable int p = w;
@@ -2309,10 +2357,14 @@ public bundle Agents {
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
-                        p = this.wr(buf, p, a.px[vi] * scale + wx,
-                                    a.py[vi] * scale + wy,
+                        float lx = a.px[vi] * scale;
+                        float ly = a.py[vi] * scale;
+                        float bx = a.nx[vi];
+                        float by = a.ny[vi];
+                        p = this.wr(buf, p, lx * ca - ly * sa + wx,
+                                    lx * sa + ly * ca + wy,
                                     a.pz[vi] * scale + wz,
-                                    a.nx[vi], a.ny[vi], a.nz[vi],
+                                    bx * ca - by * sa, bx * sa + by * ca, a.nz[vi],
                                     r, g, b);
                         k = k + 1;
                     }
@@ -2399,48 +2451,92 @@ public bundle Agents {
                             float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
                             float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
-                            w = this.emitMeshShadow(this.people, this.abuf, w,
-                                                    this.bodyModel[this.folk.bodyOf(i)],
-                                                    fx * 2.0, fy * 2.0, topZ + 0.010, 0.30,
-                                                    gr, gg, gb, false);
-                            w = this.emitTinted(this.people, this.abuf, w,
-                                                this.bodyModel[this.folk.bodyOf(i)],
-                                                fx * 2.0, fy * 2.0, topZ, 0.30,
-                                                this.communityTint(c, 0), this.communityTint(c, 1),
-                                                this.communityTint(c, 2), shade);
+                            // WHICH WAY THIS PERSON IS FACING, turned straight into the cosine and
+                            // sine the emitters want. A mesh is modelled with +Y forward, and
+                            // rotating local +Y onto the heading (hx, hy) is exactly ca = hy and
+                            // sa = -hx -- so a heading IS the rotation, with no angle in between
+                            // and no trigonometry anywhere in this loop.
+                            float hx = this.folk.headXOf(i);
+                            float hy = this.folk.headYOf(i);
+                            float ca = hy;
+                            float sa = 0.0 - hx;
+                            int bm = this.bodyModel[this.folk.bodyOf(i)];
+                            // EVERY PERSON IN THIS WORLD IS A SPIRIT, not a body on legs -- so they
+                            // hover a little clear of the ground and breathe up and down, rather
+                            // than sliding along the dirt like a chess piece being pushed.
+                            //
+                            // The bob is a parabola over a wrapped phase, not a sine: LandMath.sin
+                            // range-reduces with a `while` loop, so at a clock that only ever counts
+                            // up it costs one iteration per two seconds the window has been open --
+                            // an hour in, that is five hundred subtractions per person per frame to
+                            // move somebody four centimetres.
+                            float ph = this.timeSec * 1.35 + cast<float>(i) * 0.37;
+                            float fr = ph - cast<float>(cast<int>(ph));
+                            float lift = 0.14 + fr * (1.0 - fr) * 4.0 * 0.07;
+                            float bodyZ = topZ + lift;
+                            float headZ = bodyZ + this.people.hiZ[bm] * 0.30;
+                            // The shadow stays ON THE GROUND while the body lifts off it. That gap
+                            // is the whole reason the float reads as floating instead of as a mesh
+                            // that has been nudged upwards.
+                            w = this.emitMeshShadowTurned(this.people, this.abuf, w, bm,
+                                                          fx * 2.0, fy * 2.0, topZ + 0.010, 0.30,
+                                                          gr, gg, gb, false, ca, sa);
+                            w = this.emitTintedTurned(this.people, this.abuf, w, bm,
+                                                      fx * 2.0, fy * 2.0, bodyZ, 0.30,
+                                                      this.communityTint(c, 0),
+                                                      this.communityTint(c, 1),
+                                                      this.communityTint(c, 2), shade, ca, sa);
                             // What they are holding. A TOOL goes at their side, in the hand; a load
                             // of something goes ON THE HEAD, which is how a person actually carries
                             // a basket and also the only place it can go on a two-unit cube without
                             // hiding the body. Armour is never drawn -- at this size a breastplate
                             // is three grey pixels, and what it changes is what a blow costs.
+                            //
+                            // Both sit where the BODY says they sit. The head used to be a constant
+                            // 1.72 measured against one of the four bodies, which put the load more
+                            // than a body's height into the air above a person 0.66 high -- read
+                            // from outside as a tiny speck floating over everybody's hat. The head
+                            // is now the model's own top, and the hand is at the model's own side,
+                            // turned with the body so a tool stays in the hand when they turn.
                             int held = this.heldModel(i);
                             if (held >= 0) {
                                 if (this.folk.carryAmtOf(i) > 0) {
-                                    w = this.emitMesh(this.items, this.abuf, w, held,
-                                                      fx * 2.0, fy * 2.0, topZ + 1.72, 0.55, shade);
+                                    w = this.emitTurned(this.items, this.abuf, w, held,
+                                                        fx * 2.0, fy * 2.0, headZ + 0.02, 0.72,
+                                                        shade, ca, sa);
                                 } else {
-                                    w = this.emitMesh(this.items, this.abuf, w, held,
-                                                      fx * 2.0 + 0.62, fy * 2.0, topZ + 0.30,
-                                                      0.55, shade);
+                                    // local (+0.62, +0.10): out to the right hand and a touch
+                                    // forward of the shoulder, rotated onto the heading.
+                                    w = this.emitTurned(this.items, this.abuf, w, held,
+                                                        fx * 2.0 + 0.62 * ca - 0.10 * sa,
+                                                        fy * 2.0 + 0.62 * sa + 0.10 * ca,
+                                                        bodyZ + this.people.hiZ[bm] * 0.30 * 0.45,
+                                                        0.62, shade, ca, sa);
                                 }
                             }
                             // The cart, behind them and on the ground. A carter is the only person
                             // in this world who hauls rather than carries, so this is the one place
                             // a vehicle belongs -- and it is drawn at the load's own scale so a
                             // caravan reads as a caravan from two zoom levels out.
+                            //
+                            // "Behind" is behind THEM, not behind on the x axis: minus the heading.
+                            // Drawn on the ground, not on the float -- the person hovers, the cart
+                            // has wheels.
                             int drawn = this.drawnModel(i);
                             if (drawn >= 0) {
-                                w = this.emitMesh(this.vehicles, this.abuf, w, drawn,
-                                                  fx * 2.0 - 0.90, fy * 2.0, topZ, 0.85, shade);
+                                w = this.emitTurned(this.vehicles, this.abuf, w, drawn,
+                                                    fx * 2.0 - hx * 0.90, fy * 2.0 - hy * 0.90,
+                                                    topZ, 0.85, shade, ca, sa);
                             }
                             // And the star, in the metal of what they lead. Gold over the ruler of
                             // a nation, silver over a city that is not its capital, bronze over the
                             // chief of a band -- one mesh, tinted, because the metal is a fact
-                            // about who is standing there.
+                            // about who is standing there. It does NOT turn with the body: a badge
+                            // of office reads the same from wherever you are looking.
                             int rank = this.rankOfAgent(i);
                             if (rank > 0) {
                                 w = this.emitTinted(this.items, this.abuf, w, this.starModel,
-                                                    fx * 2.0, fy * 2.0, topZ + 2.60, 0.75,
+                                                    fx * 2.0, fy * 2.0, headZ + 0.34, 0.75,
                                                     GlWorld3D.starR(rank), GlWorld3D.starG(rank),
                                                     GlWorld3D.starB(rank), 1.0);
                             }
@@ -2954,12 +3050,29 @@ public bundle Agents {
                         h = 0.15 + 0.55 * this.town.progressOf(i);
                     }
                     int c = this.town.ownerOf(i);
-                    w = this.emitTinted(this.housing, this.bbuf, w, m,
-                                        cast<float>(bx) * 2.0 + 1.0, cast<float>(by) * 2.0 + 1.0,
-                                        topZ, h,
-                                        this.communityTint(c, 0), this.communityTint(c, 1),
-                                        this.communityTint(c, 2),
-                                        this.shadeAt(bx, by, 1, lvl));
+                    // Turn it to face its door. A quarter turn is exactly a swap and a sign, so the
+                    // four cases are written out rather than trigonometry'd: 0 south is the mesh as
+                    // modelled, then east, north, west.
+                    mutable float ca = 1.0;
+                    mutable float sa = 0.0;
+                    int fc = this.town.faceOf(i);
+                    if (fc == 1) {
+                        ca = 0.0;
+                        sa = 1.0;
+                    } else if (fc == 2) {
+                        ca = 0.0 - 1.0;
+                        sa = 0.0;
+                    } else if (fc == 3) {
+                        ca = 0.0;
+                        sa = 0.0 - 1.0;
+                    }
+                    w = this.emitTintedTurned(this.housing, this.bbuf, w, m,
+                                              cast<float>(bx) * 2.0 + 1.0,
+                                              cast<float>(by) * 2.0 + 1.0,
+                                              topZ, h,
+                                              this.communityTint(c, 0), this.communityTint(c, 1),
+                                              this.communityTint(c, 2),
+                                              this.shadeAt(bx, by, 1, lvl), ca, sa);
                 }
                 this.gl.bindVertexArray(this.bvao);
                 this.gl.bindBuffer(GL.ARRAY_BUFFER, this.bvbo);
