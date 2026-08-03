@@ -171,6 +171,9 @@ public bundle Agents {
             private mutable Fleet* ships;      // everything crossing that is not a person
             private mutable int[] arrived;     // slots that made port this tick
             private mutable long wed;          // couples the world put together
+            private mutable long loosed;       // prisoners freed by their own people coming back
+            private mutable long taken;        // hulls taken at sea by somebody with a grudge
+            private mutable long settled;      // captives who served it out and became neighbours
             private mutable long grudges;      // people who came to blame one named other person
             private mutable long exiled;       // and who left rather than live under him
             private mutable long sacked;       // towns beaten by an army that could not keep them
@@ -524,6 +527,9 @@ public bundle Agents {
                 this.raids = 0;
                 this.plunder = 0;
                 this.wed = 0;
+                this.loosed = 0;
+                this.taken = 0;
+                this.settled = 0;
                 this.grudges = 0;
                 this.exiled = 0;
                 this.sacked = 0;
@@ -909,6 +915,69 @@ public bundle Agents {
             // How much a hull takes at a time. A vessel is worth having because it carries what a
             // person cannot -- otherwise the road would do, and this whole table would be scenery.
             public static int HOLD = 60;
+
+            // WAR AT SEA, which is the oldest kind there is and the only kind this world could not
+            // have until an hour ago.
+            //
+            // A fleet made the sea lane real, and a lane with cargo on it and no risk is free money
+            // -- so the far side of it is this: a town at war with the country a hull belongs to,
+            // whose own quay the hull passes close to, takes what is in the hold. No fleet actions,
+            // no admirals, no second army. Commerce raiding is what naval war actually WAS for most
+            // of history, and it is the version this world already has the pieces for: a hull with
+            // a position, a town with a position, and a grudge between two flags.
+            //
+            // Asked once a census over hulls times towns -- nine by a hundred and sixty is nothing,
+            // and asking it per tick would be the woodcutter's mistake in a new coat.
+            private method privateer() returns void {
+                int hulls = this.ships.limit();
+                float span = cast<float>(Simulation.PREY_REACH * Simulation.PREY_REACH);
+                for (int v in 0..hulls) {
+                    if (!this.ships.running(v)) {
+                        continue;
+                    }
+                    int owner = this.cnat[this.ships.bound(v)];
+                    if (owner < 0 || owner >= this.ncomm) {
+                        continue;
+                    }
+                    for (int c in 0..this.ncomm) {
+                        if (this.cpop[c] <= 0 || this.cport[c] <= 0) {
+                            continue;    // it takes a quay to put anything on the water
+                        }
+                        int hunter = this.cnat[c];
+                        if (hunter < 0 || hunter == owner) {
+                            continue;
+                        }
+                        // A grudge, and not merely a border. The bond between two flags is the
+                        // same number a caravan warms and a conquest sours, so a country nobody
+                        // has wronged does not go pirating and one that has been sacked does.
+                        if (this.realm.bondOf(hunter, owner) > Simulation.BOND_PER_SACK) {
+                            continue;
+                        }
+                        float dx = this.ships.xAt(v) - this.ccx[c];
+                        float dy = this.ships.yAt(v) - this.ccy[c];
+                        if (dx * dx + dy * dy > span) {
+                            continue;
+                        }
+                        int good = this.ships.cargoOf(v);
+                        int amt = this.ships.loadOf(v);
+                        if (amt > 0 && good > 0) {
+                            this.stores.stow(c, good, amt);
+                            this.plunder = this.plunder + cast<long>(amt);
+                            this.taken = this.taken + 1;
+                        }
+                        this.ships.moor(v);
+                        // And it is remembered on both sides, exactly as a raid on land is.
+                        this.realm.warm(owner, hunter, Simulation.BOND_PER_RAID);
+                        continue;
+                    }
+                }
+                return;
+            }
+
+            // How close a hull has to pass a hostile quay to be taken. A ship keeps to open water
+            // where it can, so this is short: it is the strait and the headland that are dangerous,
+            // which is also why anybody ever fought over one.
+            public static int PREY_REACH = 90;
 
             // Move everything under way, and unload whatever made port. The fleet carries and this
             // pays: a table that both moves things and touches a store is a table two things can go
@@ -1869,6 +1938,10 @@ public bundle Agents {
             // Being sacked is not being annexed, and it is not a border raid either. It sits where
             // it belongs between the two: worse than a stolen granary, better than losing the town.
             public static int BOND_PER_SACK = 0 - 40;
+            // How long being taken lasts. Twelve censuses is a good part of a six-minute life --
+            // long enough that a captive is a captive rather than a formality, short enough that
+            // an arc does not end as a world of prisoners.
+            public static int BONDAGE = 12;
             public static int SACK_SHARE = 2;             // half of everything on every shelf
             public static int WEIGHT_PER_CAPTIVE = 12;    // how much army it takes to escort one
 
@@ -2110,6 +2183,11 @@ public bundle Agents {
                         this.folk.setTarget(i, cast<int>(this.ccx[home]),
                                             cast<int>(this.ccy[home]));
                         this.folk.setJob(i, cast<int>(Job.Idle));
+                        // AND THEY ARE A PRISONER, not a new neighbour. They work -- that is what
+                        // they were taken for -- but they start no family and nobody listens to
+                        // them until the clock runs out, which is the difference between a captive
+                        // and somebody who simply moved house.
+                        this.folk.captive(i, Simulation.BONDAGE);
                         this.captured = this.captured + 1;
                         took = took + 1;
                     }
@@ -2200,6 +2278,22 @@ public bundle Agents {
                 }
                 this.cnat[t] = nat;
                 this.realm.annex(nat, was);
+                // AND WHOEVER WAS BEING HELD HERE IS LET GO.
+                //
+                // This is the only thing in the world that ends a captivity early, and it is the
+                // honest one: the flag over the place they are held in changes, so the people
+                // holding them are not in charge of it any more. It also gives a country a reason
+                // to go and take a town back that is not the ground -- there are people in it.
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.homeOf(i) == t
+                        && this.folk.isCaptive(i)) {
+                        this.folk.release(i);
+                        this.loosed = this.loosed + 1;
+                    }
+                    i = i + 1;
+                }
                 // And it is remembered. One town taken undoes what scores of caravans built, which
                 // is the ratio that makes trade a slow way to a friend and conquest a fast way to an
                 // enemy -- and it is why a country that keeps taking towns finds nobody will deal
@@ -3665,6 +3759,20 @@ public bundle Agents {
                 // And everything that crosses without a person in it, on the routes the line above
                 // has just worked out. The vessel never invents a demand; it travels one.
                 this.dispatch();
+                this.privateer();
+                // AND EVERY PRISONER SERVES ANOTHER CENSUS OF IT. One pass over the living, on the
+                // same clock the offices and the routes are decided on, because being held is a
+                // fact about a person that changes at exactly that rate.
+                int folkN = this.folk.limit();
+                mutable int p = 0;
+                while (p < folkN) {
+                    if (this.folk.alive(p) && this.folk.isCaptive(p)) {
+                        if (this.folk.serve(p)) {
+                            this.settled = this.settled + 1;
+                        }
+                    }
+                    p = p + 1;
+                }
                 this.railway();
                 // And then the wars, which need the nations settled to know who is whose.
                 this.campaign();
@@ -6962,6 +7070,12 @@ public bundle Agents {
                 if (!this.folk.isFemale(i) || !this.folk.isAdult(i) || this.folk.isPregnant(i)) {
                     return false;
                 }
+                // A PRISONER DOES NOT START A FAMILY. It is the plainest thing that separates
+                // being taken from having moved: somebody who belongs to a place makes the next
+                // generation of it, and somebody being held does not.
+                if (this.folk.isCaptive(i)) {
+                    return false;
+                }
                 if (this.folk.ageOf(i) > this.folk.lifespanOf(i) * Simulation.FERTILE_TO) {
                     return false;
                 }
@@ -8530,6 +8644,7 @@ public bundle Agents {
                 System.IO.Console.println($"  spoils: {this.sacked} towns sacked and left standing, {this.captured} marched home as captives");
                 System.IO.Console.println($"  bonds: {this.wed} couples, {this.grudges} grudges against a named person, {this.exiled} who left rather than live under one");
                 this.ships.report();
+                System.IO.Console.println($"  prisoners: {this.captured} taken, {this.settled} served it out and stayed, {this.loosed} freed when their own came back | {this.taken} hulls taken at sea");
                 mutable int levy = 0;
                 mutable int armed = 0;
                 mutable int mailed = 0;
