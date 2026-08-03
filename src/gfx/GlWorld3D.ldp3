@@ -154,6 +154,12 @@ public bundle Agents {
             private mutable int starModel;
             private mutable int[] goodModel;    // Good ordinal -> item atlas ordinal, or -1
             private mutable int[] toolModel;    // Job ordinal  -> item atlas ordinal, or -1
+            // What moves goods. Drawn where the simulation actually has one: a cart under a carter
+            // who is hauling, a hull at a quay that can put to sea.
+            private mutable MeshAtlas* vehicles;
+            private mutable int cartModel;
+            private mutable int wagonModel;
+            private mutable int[] hullModel;    // era -> Barge / Sailship / Steamship
             private mutable int wayVersion;     // what the last bake saw, so a new road rebakes
             private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
             private mutable int[] dNodeA;       // detail bake scratch: first node instance of each row
@@ -292,6 +298,9 @@ public bundle Agents {
                 this.starModel = 0 - 1;
                 this.goodModel = new int[1]();
                 this.toolModel = new int[1]();
+                this.cartModel = 0 - 1;
+                this.wagonModel = 0 - 1;
+                this.hullModel = new int[1]();
                 this.dPropC = new int[1]();
                 this.dNodeA = new int[1]();
                 this.dNodeB = new int[1]();
@@ -352,6 +361,7 @@ public bundle Agents {
                 delete this.dWayC;
                 delete this.goodModel;
                 delete this.toolModel;
+                delete this.hullModel;
                 delete this.dPropC;
                 delete this.dNodeA;
                 delete this.dNodeB;
@@ -1939,6 +1949,28 @@ public bundle Agents {
                 return 0 - 1;
             }
 
+            // What this person is PULLING, or -1. A carter with a load between two towns is the only
+            // person in this world who hauls rather than carries -- everybody else walks to a tree
+            // or a seam with their hands. So a cart appears exactly where the simulation already has
+            // a caravan, and nowhere else; the wagon is the same job once a people has the second
+            // era to build one.
+            private method drawnModel(int i) returns int {
+                if (this.vehicles == null || this.sim == null) {
+                    return 0 - 1;
+                }
+                if (this.folk.jobOf(i) != cast<int>(Job.Trader) || this.folk.carryAmtOf(i) <= 0) {
+                    return 0 - 1;
+                }
+                int h = this.folk.homeOf(i);
+                if (h < 0) {
+                    return this.cartModel;
+                }
+                if (this.sim.eraOf(h) >= 2) {
+                    return this.wagonModel;
+                }
+                return this.cartModel;
+            }
+
             // Which star, if any, floats over this person. 3 gold, 2 silver, 1 bronze, 0 none.
             //
             // Read off the world rather than stored: a leader is whoever a place currently listens
@@ -2030,6 +2062,26 @@ public bundle Agents {
                 this.toolModel[cast<int>(Job.Raider)] = art.ordOf("Sword");
                 this.toolModel[cast<int>(Job.General)] = art.ordOf("Sword");
                 this.toolModel[cast<int>(Job.Scholar)] = art.ordOf("Book");
+                return;
+            }
+
+            // The eight vehicle meshes had no reference anywhere in the program and vehicles.index
+            // was not even loaded. Five of them earn a place here; the other three do not yet.
+            //
+            // A cart and a wagon are drawn because a carter really is hauling between two towns, and
+            // a hull is drawn at a quay because that is where a boat that is not at sea IS. What is
+            // NOT drawn is a locomotive, a railcar or an airliner: this world lays track but nothing
+            // runs on it, and parking a train somewhere plausible would be the renderer telling a
+            // story the simulation is not living. They stay dark until something moves.
+            public method setVehicles(MeshAtlas* art) returns void {
+                this.vehicles = art;
+                this.cartModel = art.ordOf("Cart");
+                this.wagonModel = art.ordOf("Wagon");
+                this.hullModel = new int[4]();
+                this.hullModel[0] = art.ordOf("Barge");
+                this.hullModel[1] = art.ordOf("Barge");
+                this.hullModel[2] = art.ordOf("Sailship");
+                this.hullModel[3] = art.ordOf("Steamship");
                 return;
             }
 
@@ -2233,6 +2285,10 @@ public bundle Agents {
                             if (held >= 0) {
                                 tris = tris + this.items.triCount[held];
                             }
+                            int drawn = this.drawnModel(i);
+                            if (drawn >= 0) {
+                                tris = tris + this.vehicles.triCount[drawn];
+                            }
                             if (this.rankOfAgent(i) > 0) {
                                 tris = tris + this.items.triCount[this.starModel];
                             }
@@ -2297,6 +2353,15 @@ public bundle Agents {
                                                       fx * 2.0 + 0.62, fy * 2.0, topZ + 0.30,
                                                       0.55, shade);
                                 }
+                            }
+                            // The cart, behind them and on the ground. A carter is the only person
+                            // in this world who hauls rather than carries, so this is the one place
+                            // a vehicle belongs -- and it is drawn at the load's own scale so a
+                            // caravan reads as a caravan from two zoom levels out.
+                            int drawn = this.drawnModel(i);
+                            if (drawn >= 0) {
+                                w = this.emitMesh(this.vehicles, this.abuf, w, drawn,
+                                                  fx * 2.0 - 0.90, fy * 2.0, topZ, 0.85, shade);
                             }
                             // And the star, in the metal of what they lead. Gold over the ruler of
                             // a nation, silver over a city that is not its capital, bronze over the
