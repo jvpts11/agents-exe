@@ -1024,6 +1024,81 @@ public bundle Agents {
                 return this.wed;
             }
 
+            // WHY A TOWN DID NOT BUILD THE THING, said out loud.
+            //
+            // Two chains in this world are dead for reasons that can only be guessed at from the
+            // outside -- flour and wool -- and both guesses have now cost an arc apiece. The auction
+            // rejects a kind for one of eight reasons and then says nothing, so a chain that cannot
+            // start looks exactly like a chain nobody wants. This walks the same filters in the same
+            // order and prints which one bit, without deciding anything: it is a read of the world,
+            // not a rule in it.
+            //
+            // Called from the report, never from the census. Nothing here may change a field.
+            public method explain(int c) returns void {
+                if (c < 0 || c >= this.ncomm || this.cpop[c] <= 0) {
+                    System.IO.Console.println($"  town {c}: nobody lives there");
+                    return;
+                }
+                int era = this.eraOf(c);
+                System.IO.Console.println($"  town {c}: {this.cpop[c]} people, era {era}, seat {this.cseat[c]}, busy {this.cbusy[c]}");
+                for (int k in 1..BuildingKind.count()) {
+                    if (!Builds.staffed(k) && Builds.wall(k) <= 0 && Builds.port(k) <= 0
+                        && Builds.keeps(k) <= 0) {
+                        continue;                    // not a kind the auction ever considers
+                    }
+                    if (Builds.era(k) > era) {
+                        continue;                    // the quiet majority; not worth a line each
+                    }
+                    mutable String why = "";
+                    if (!this.stores.has(c, cast<int>(Good.Wood), Builds.woodCost(k))) {
+                        why = "no timber";
+                    } else if (!this.stores.has(c, cast<int>(Good.Stone), Builds.stoneCost(k))) {
+                        why = "no stone";
+                    } else if (Builds.matCost(k) != cast<int>(Good.Nothing)
+                               && !this.stores.has(c, Builds.matCost(k), Builds.matCostN(k))) {
+                        why = $"no {Goods.name(Builds.matCost(k))} to build it of";
+                    } else if (Builds.staffed(k)
+                               && this.cmade[c * Goods.count() + Builds.out(k)] >= 0) {
+                        why = "one of its trade already stands with an empty bench";
+                    } else if (Builds.in1(k) != cast<int>(Good.Nothing)
+                               && !this.stores.has(c, Builds.in1(k), Builds.n1(k))) {
+                        why = $"no {Goods.name(Builds.in1(k))} on the shelf to work";
+                    } else if (Builds.in2(k) != cast<int>(Good.Nothing)
+                               && !this.stores.has(c, Builds.in2(k), Builds.n2(k))) {
+                        why = $"no {Goods.name(Builds.in2(k))} on the shelf to work";
+                    }
+                    if (why.length() > 0) {
+                        System.IO.Console.println($"    {Builds.name(k)}: {why}");
+                        continue;
+                    }
+                    if (Builds.staffed(k)) {
+                        int out = Builds.out(k);
+                        int worth = this.shortOf(c, out);
+                        mutable int bar = Simulation.WANT;
+                        if (Builds.nout(k) > 0) {
+                            bar = Builds.nout(k);
+                        }
+                        System.IO.Console.println($"    {Builds.name(k)}: could be raised -- wants {worth} {Goods.name(out)} against a bar of {bar}");
+                    } else {
+                        System.IO.Console.println($"    {Builds.name(k)}: could be raised -- scored apart from the trades");
+                    }
+                }
+                return;
+            }
+
+            // The town with the most people in it, which is the one worth explaining.
+            public method busiestTownIndex() returns int {
+                mutable int best = 0 - 1;
+                mutable int most = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] > most) {
+                        most = this.cpop[c];
+                        best = c;
+                    }
+                }
+                return best;
+            }
+
             public method townsSacked() returns long {
                 return this.sacked;
             }
