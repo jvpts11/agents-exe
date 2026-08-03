@@ -10,6 +10,8 @@ import Agents.Sim.Buildings;
 import Agents.Sim.Nations;
 import Agents.Sim.Rank;
 import Agents.Sim.Armies;
+import Agents.Sim.Fates;
+import Agents.Sim.Calamity;
 import Agents.World.Builds;
 program AgentsExe;
 
@@ -910,6 +912,98 @@ public bundle Agents {
             public static method the_frame_budget_holds() returns void {
                 Test.checking("the worst frame stayed within a sane multiple of the budget");
                 Test.assertAtMost(Arc.sim.worstFrame(), 200000);
+                return;
+            }
+        }
+
+        // WHAT THE WORLD DOES WITHOUT BEING ASKED.
+        //
+        // Fates is asked questions here directly rather than through an arc, because what needs
+        // pinning is the SHAPE of the rule and not the weather of one century: a place standing on
+        // nothing in particular is only ever visited by fire, a place that has dug wells burns less
+        // often than one that has not, and a place that has just been struck is left alone for a
+        // while. None of the three is visible in a two-generation run, and all three are the
+        // difference between a hazard and a random number.
+        public class Calamities {
+
+            // `spans` censuses of one place, counting what found it. An arc is about seven thousand
+            // censuses, so a few hundred thousand here is a handful of centuries -- which is what an
+            // eruption is measured in and a fire is not.
+            private static method centuryOf(boolean vent, boolean shaky, boolean river,
+                                            boolean coast, int homes, int wells,
+                                            int want, int spans) returns int {
+                Fates fates = new Fates(4) on stack;
+                mutable int seen = 0;
+                for (int t in 0..spans) {
+                    int kind = fates.visit(1, vent, shaky, river, coast, homes, wells, 42, t);
+                    if (kind == want) {
+                        seen = seen + 1;
+                    }
+                }
+                return seen;
+            }
+
+            [Tag(name: "sim")]
+            [Test]
+            public static method the_ground_you_stand_on_is_the_hazard_you_get() returns void {
+                Test.checking("a town on flat dry ground is never buried by a mountain");
+                Test.assertEqual(Calamities.centuryOf(false, false, false, false, 40, 0,
+                                                      cast<int>(Calamity.Eruption), 200000), 0);
+                Test.checking("nor shaken by ground that does not move");
+                Test.assertEqual(Calamities.centuryOf(false, false, false, false, 40, 0,
+                                                      cast<int>(Calamity.Quake), 200000), 0);
+                Test.checking("nor flooded by a river it has not got");
+                Test.assertEqual(Calamities.centuryOf(false, false, false, false, 40, 0,
+                                                      cast<int>(Calamity.Flood), 200000), 0);
+                Test.checking("but a town under a volcano does get buried, given long enough");
+                Test.assertAtLeast(Calamities.centuryOf(true, false, false, false, 40, 0,
+                                                        cast<int>(Calamity.Eruption), 200000), 1);
+                return;
+            }
+
+            // The knot the whole water layer is tied with: a well was dug because people were
+            // thirsty, and the town that dug it also does not burn down. Nobody had to be told.
+            [Tag(name: "sim")]
+            [Test]
+            public static method a_town_with_water_burns_less() returns void {
+                int dry = Calamities.centuryOf(false, false, false, false, 120, 0,
+                                               cast<int>(Calamity.Fire), 40000);
+                int wet = Calamities.centuryOf(false, false, false, false, 120, 6,
+                                               cast<int>(Calamity.Fire), 40000);
+                Test.checking("a town with no water at all does burn");
+                Test.assertAtLeast(dry, 1);
+                Test.checking("and one with six cisterns burns less often");
+                Test.assertAtMost(wet, dry - 1);
+                return;
+            }
+
+            // A place does not lose everything twice in a fortnight. Without the rest, a bad roll
+            // is a town wiped off the map -- and a calamity nobody survives is one nobody watches
+            // the aftermath of.
+            [Tag(name: "sim")]
+            [Test]
+            public static method a_stricken_place_is_left_alone_for_a_while() returns void {
+                Fates fates = new Fates(4) on stack;
+                mutable int struckAt = 0 - 1;
+                mutable int t = 0;
+                while (t < 4000 && struckAt < 0) {
+                    if (fates.visit(1, true, true, true, true, 200, 0, 42, t)
+                        != cast<int>(Calamity.Nothing)) {
+                        struckAt = t;
+                    }
+                    t = t + 1;
+                }
+                Test.checking("an exposed place is struck at all");
+                Test.assertAtLeast(struckAt, 0);
+                mutable int again = 0;
+                for (int q in 0..200) {
+                    if (fates.visit(1, true, true, true, true, 200, 0, 42, struckAt + 1 + q)
+                        != cast<int>(Calamity.Nothing)) {
+                        again = again + 1;
+                    }
+                }
+                Test.checking("and then left alone");
+                Test.assertEqual(again, 0);
                 return;
             }
         }

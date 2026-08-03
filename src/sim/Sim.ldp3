@@ -1,5 +1,6 @@
 import System.IO.Console;
 import Agents.World.Grid;
+import Agents.World.Biome;
 import Agents.World.Biomes;
 import Agents.World.LandMath;
 import Agents.World.NodeField;
@@ -155,6 +156,9 @@ public bundle Agents {
             private mutable long raids;        // warriors who reached an enemy village
             private mutable long plunder;      // goods carried home off somebody else's shelves
             private mutable long deathsWar;
+            // Killed by the ground, the weather or the fire -- deaths nobody chose, which is a
+            // different fact about a world from deaths somebody did.
+            private mutable long deathsWorld;
             private mutable long hived;        // villages founded by a place outgrowing its ground
             private mutable long hivedFolk;    // and how many walked out in those parties
             private mutable long fled;         // people who left a place that could not feed them
@@ -199,6 +203,8 @@ public bundle Agents {
             // War above the raid. An army is a thing a NATION owns: it musters, it marches, it
             // sits down in front of a wall, and it is the only way ground changes hands.
             private mutable Armies* host;
+            // What the ground does to the people standing on it. See Fates.ldp3.
+            private mutable Fates* fates;
             private mutable int[] cwall;       // how much wall each town has standing
             private mutable int[] carmy;       // the army besieging it, or -1
             private mutable int[] cbarr;       // barracks working in it
@@ -207,6 +213,11 @@ public bundle Agents {
                                                // carter walks to, read once a census like the rest
             private mutable int[] cdrink;      // heads this place can keep in water
             private mutable boolean[] cfresh;  // is there a river or a lake at hand at all
+            // Waterworks STANDING, which is a different question from heads watered and is asked by
+            // the fire: a well is a hole people draw from, and a bucket chain is what it becomes the
+            // night the thatch goes up. The same building answering a second question it was never
+            // built for is the whole reason the water layer earns its place twice.
+            private mutable int[] cwells;
             private mutable int[] ccare;       // heads it can nurse
             private mutable int[] cfilth;      // and how hard it is to stay well here, per thousand
             // The two authorities a place has besides the one in charge. An elder is whoever has
@@ -470,6 +481,7 @@ public bundle Agents {
                 this.raids = 0;
                 this.plunder = 0;
                 this.deathsWar = 0;
+                this.deathsWorld = 0;
                 for (int c in 0..this.ncomm) {
                     this.cfoe[c] = 0 - 1;
                     this.craider[c] = 0 - 1;
@@ -537,7 +549,12 @@ public bundle Agents {
                 this.cportb = new int[this.ncomm]();
                 this.cdrink = new int[this.ncomm]();
                 this.cfresh = new boolean[this.ncomm]();
+                this.cwells = new int[this.ncomm]();
                 this.ccare = new int[this.ncomm]();
+                // Built here rather than beside the other counters above: a fresh table is already
+                // empty, and reaching for `clear()` before this line ran was a null dereference that
+                // took an arc down with an access violation and no message at all.
+                this.fates = new Fates(this.ncomm) on heap;
                 this.cfilth = new int[this.ncomm]();
                 this.celder = new int[this.ncomm]();
                 this.cpriest = new int[this.ncomm]();
@@ -685,7 +702,9 @@ public bundle Agents {
                 delete this.cportb;
                 delete this.cdrink;
                 delete this.cfresh;
+                delete this.cwells;
                 delete this.ccare;
+                delete this.fates;
                 delete this.cfilth;
                 delete this.celder;
                 delete this.cpriest;
@@ -1132,6 +1151,7 @@ public bundle Agents {
                         this.cdrink[c] = 0;
                     }
                     this.ccare[c] = 0;
+                    this.cwells[c] = 0;
                     this.nhost[c] = 0 - 1;
                 }
                 // Whose armies are out, read once. Sixty-four slots, not sixty-four slots per
@@ -1161,6 +1181,9 @@ public bundle Agents {
                         this.cwall[c] = this.cwall[c] + hold;
                         // Two wells water twice as many people, unlike two harbours.
                         this.cdrink[c] = this.cdrink[c] + drink;
+                        if (drink > 0) {
+                            this.cwells[c] = this.cwells[c] + 1;
+                        }
                         this.ccare[c] = this.ccare[c] + care;
                         // A second harbour does not double how far a boat sails, so the town keeps
                         // the longest reach it has rather than the sum of them. Whether anything is
@@ -2986,6 +3009,7 @@ public bundle Agents {
                         }
                         this.findGround(c);
                         this.considerBuilding(c);
+                        this.befall(c);
                     } else {
                         for (int hc in 0..Harvest.count()) {
                             this.cworkX[c * Harvest.count() + hc] = 0 - 1;
@@ -5223,6 +5247,156 @@ public bundle Agents {
             // to itself instead.
             public static int FRESH_REACH = 24;
 
+            // Is there a mouth of the earth within a walk of here? A vent the generator marked, or
+            // ground the biome map calls volcanic -- the same lattice stride the water search uses,
+            // and for the same reason: a village is an area, not a point.
+            private method ventAt(int c) returns boolean {
+                int cx = cast<int>(this.ccx[c]);
+                int cy = cast<int>(this.ccy[c]);
+                mutable int dy = 0 - Simulation.VENT_REACH;
+                while (dy <= Simulation.VENT_REACH) {
+                    mutable int dx = 0 - Simulation.VENT_REACH;
+                    while (dx <= Simulation.VENT_REACH) {
+                        int x = cx + dx;
+                        int y = cy + dy;
+                        if (x >= 0 && y >= 0 && x < this.g.width() && y < this.g.height()) {
+                            if (this.g.hasFlag(x, y, Grid.FLAG_VENT)
+                                || this.g.biomeAt(x, y) == cast<int>(Biome.Volcanic)) {
+                                return true;
+                            }
+                        }
+                        dx = dx + 4;
+                    }
+                    dy = dy + 4;
+                }
+                return false;
+            }
+
+            // Ground that has been folded, and so is ground that can still move. Read at the centre
+            // rather than searched: a town in the hills is in the hills.
+            private method brokenAt(int c) returns boolean {
+                int cx = cast<int>(this.ccx[c]);
+                int cy = cast<int>(this.ccy[c]);
+                if (cx < 0 || cy < 0 || cx >= this.g.width() || cy >= this.g.height()) {
+                    return false;
+                }
+                int b = this.g.biomeAt(cx, cy);
+                return b == cast<int>(Biome.Hills) || b == cast<int>(Biome.Mountain)
+                    || b == cast<int>(Biome.AlpineMeadow) || b == cast<int>(Biome.SnowPeak)
+                    || b == cast<int>(Biome.Volcanic) || b == cast<int>(Biome.Badlands);
+            }
+
+            // How far a village looks for the mountain that might kill it. Wider than the water
+            // search: a village does not have to be able to WALK to a volcano to be under it.
+            public static int VENT_REACH = 40;
+
+            // THE WORLD'S OWN HAND, once a census per place.
+            //
+            // Fates decides what happens and this decides who it happens to -- the same split as
+            // every catalogue in this codebase, and it is what keeps a calamity from being a
+            // hard-coded lump of arithmetic buried in the census.
+            private method befall(int c) returns void {
+                if (this.cpop[c] <= 0 || this.csettle[c] > 0) {
+                    return;                 // an expedition on the road is nobody's town yet
+                }
+                // How much town there is to burn, read off the roof the census already counted.
+                int roofs = this.croom[c] / 4;
+                int kind = this.fates.visit(c, this.ventAt(c), this.brokenAt(c), this.cfresh[c],
+                                            this.stores.amountOf(c, cast<int>(Good.Boat)) > 0,
+                                            roofs, this.cwells[c], this.seed, this.tick);
+                if (kind == cast<int>(Calamity.Nothing)) {
+                    return;
+                }
+                mutable int down = 0;
+                mutable int dead = 0;
+                if (kind == cast<int>(Calamity.Eruption)) {
+                    // It does not care what a building was for. Everything within reach of the
+                    // mouth, and a quarter of the people who were in it.
+                    down = this.level(c, 40, false);
+                    dead = this.perish(c, 4);
+                    this.spoil(c, 2);
+                } else if (kind == cast<int>(Calamity.Quake)) {
+                    // A quake takes the walls down and leaves the plot. That is why it is a `recast`
+                    // and not a demolition: the village rebuilds what it had, on the ground it had
+                    // it on, and the cost is the years of work rather than the place itself.
+                    down = this.level(c, 24, true);
+                    dead = this.perish(c, 30);
+                } else if (kind == cast<int>(Calamity.Fire)) {
+                    down = this.level(c, 12, false);
+                    dead = this.perish(c, 50);
+                    this.spoil(c, 3);
+                } else if (kind == cast<int>(Calamity.Flood)) {
+                    // Water takes the granary before it takes the roof.
+                    down = this.level(c, 5, true);
+                    dead = this.perish(c, 60);
+                    this.spoil(c, 2);
+                } else {
+                    // A storm takes what was floating in it.
+                    int hulls = this.stores.amountOf(c, cast<int>(Good.Boat));
+                    this.stores.take(c, cast<int>(Good.Boat), hulls);
+                    dead = this.perish(c, 80);
+                }
+                this.fates.cost(kind, dead, down);
+                return;
+            }
+
+            // Pull down up to `most` of a place's buildings, nearest the middle first in the only
+            // sense that matters here -- the order the table holds them, which is the order they
+            // were raised. `keepPlot` recasts instead of demolishing: the ground stays claimed and
+            // the village rebuilds what stood there.
+            private method level(int c, int most, boolean keepPlot) returns int {
+                mutable int down = 0;
+                mutable int b = 0;
+                while (b < this.town.count() && down < most) {
+                    if (!this.town.isGone(b) && this.town.ownerOf(b) == c
+                        && this.town.kindOf(b) != cast<int>(BuildingKind.TownHall)) {
+                        if (keepPlot) {
+                            this.town.recast(b, this.town.kindOf(b));
+                        } else {
+                            this.town.demolish(b);
+                        }
+                        down = down + 1;
+                    }
+                    b = b + 1;
+                }
+                return down;
+            }
+
+            // One in `oneIn` of the people at home. Walked over the whole table because that is
+            // where people are -- and only ever on the census where something actually happened,
+            // which over a full arc is a few hundred passes rather than one a second.
+            private method perish(int c, int oneIn) returns int {
+                mutable int dead = 0;
+                mutable int seen = 0;
+                mutable int i = 0;
+                while (i < this.folk.limit()) {
+                    if (this.folk.alive(i) && this.folk.homeOf(i) == c) {
+                        if (seen % oneIn == 0) {
+                            this.vacate(i, c);
+                            this.folk.kill(i);
+                            this.deathsWorld = this.deathsWorld + 1;
+                            dead = dead + 1;
+                        }
+                        seen = seen + 1;
+                    }
+                    i = i + 1;
+                }
+                return dead;
+            }
+
+            // A share of everything on the shelves, gone. Not the whole store: a place that loses
+            // everything it has starves to death rather than recovering, and a calamity that ends
+            // the town is a calamity nobody ever sees the aftermath of.
+            private method spoil(int c, int part) returns void {
+                for (int g in 1..Goods.count()) {
+                    int had = this.stores.amountOf(c, g);
+                    if (had > 0) {
+                        this.stores.take(c, g, had / part);
+                    }
+                }
+                return;
+            }
+
             // WATER COMES BEFORE A TRADE, for the same reason a roof does.
             //
             // A place with more mouths than it can keep in water has one want and it is not a
@@ -6905,7 +7079,7 @@ public bundle Agents {
                 System.IO.Console.println($"sim: t={cast<int>(this.clock)}s over {this.frames} frames | arrivals {this.arrivals} | stuck {this.stuckTotal}");
                 System.IO.Console.println($"  think: {perFrame}/frame average, worst {this.worstThink} (budget {this.budget}) | demand {demand}/s vs capacity {capacity}/s");
                 System.IO.Console.println($"  people standing off walkable ground: {this.offLand()}");
-                System.IO.Console.println($"  life: {this.folk.count()} alive | {this.births} born, {this.deathsOld} of old age, {this.deathsHunger} starved, {this.deathsWar} killed");
+                System.IO.Console.println($"  life: {this.folk.count()} alive | {this.births} born, {this.deathsOld} of old age, {this.deathsHunger} starved, {this.deathsIll} of illness, {this.deathsWar} killed, {this.deathsWorld} taken by the world");
                 // THE number of this slice. Walking is pure cost -- it produces nothing -- so the
                 // share of it says whether the map is a place people can live in or a distance they
                 // spend their lives crossing. Everything about how big a community is, how far a
@@ -7076,6 +7250,11 @@ public bundle Agents {
                 }
                 System.IO.Console.println($"  troops: {levy} levies, {armed} with a weapon, {mailed} in mail || {this.host.routedCount()} armies went home having had enough");
                 System.IO.Console.println($"  standing between countries: {this.realm.friendships()} pairs at peace, {this.realm.alliances()} of them allied | {this.dealt} loads crossed a border");
+                // What the world did without being asked. Kept apart from war on purpose: a world
+                // where nobody has ever been killed by the ground they chose to live on is a world
+                // where choosing that ground was free.
+                System.IO.Console.println($"  the world's own hand: {this.fates.timesOf(cast<int>(Calamity.Eruption))} eruptions, {this.fates.timesOf(cast<int>(Calamity.Quake))} quakes, {this.fates.timesOf(cast<int>(Calamity.Fire))} fires, {this.fates.timesOf(cast<int>(Calamity.Flood))} floods, {this.fates.timesOf(cast<int>(Calamity.Storm))} storms");
+                System.IO.Console.println($"    it killed {this.fates.everKilled()} and took down {this.fates.everWrecked()} buildings || fire alone: {this.fates.tollOf(cast<int>(Calamity.Fire))} dead, {this.fates.wreckedOf(cast<int>(Calamity.Fire))} burned");
                 // What is left standing, against what the world started with. A resource that only
                 // goes down is being liquidated, and this is where that shows.
                 NodeField* nf = this.g.surface();
