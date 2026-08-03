@@ -1105,7 +1105,11 @@ public bundle Agents {
                     if (c >= 0 && c < this.ncomm) {
                         this.cwall[c] = this.cwall[c] + hold;
                         // A second harbour does not double how far a boat sails, so the town keeps
-                        // the longest reach it has rather than the sum of them.
+                        // the longest reach it has rather than the sum of them. Whether anything is
+                        // tied up at it is a separate question, asked by `sails` where the routes
+                        // are drawn -- the quay is what the town HAS, and the boat is what makes it
+                        // reach. Conflating the two would have a town with a harbour and no hull
+                        // deciding it needed a second harbour.
                         if (reach > this.cport[c]) {
                             this.cport[c] = reach;
                             this.cportb[c] = b;
@@ -3931,6 +3935,13 @@ public bundle Agents {
                 return;
             }
 
+            // Can this place actually put to sea? A quay it built, and a hull tied up at it. Asked
+            // where routes are drawn, which is once a census per town.
+            private method sails(int c) returns boolean {
+                return this.cport[c] > 0
+                    && this.stores.amountOf(c, cast<int>(Good.Boat)) > 0;
+            }
+
             // How much of a good this place wants and has not got.
             //
             // Three sources, and every one of them scales with how many people are here, which is
@@ -3991,7 +4002,7 @@ public bundle Agents {
                     // care whose flag flies on the far side, so a single-town island is exactly the
                     // place a port is worth most, and it is the first route in this world that
                     // crosses a border without an army attached to it.
-                    if (this.cport[c] <= 0 && this.realm.townsOf(nat) < Simulation.TRADE_TOWNS) {
+                    if (!this.sails(c) && this.realm.townsOf(nat) < Simulation.TRADE_TOWNS) {
                         continue;
                     }
                     // What we have most spare of, keeping a floor back: a place that empties its
@@ -4018,7 +4029,7 @@ public bundle Agents {
                         }
                         // Two harbours are neighbours however far apart they are and whoever they
                         // answer to; everything else is a cart on a road inside one country.
-                        boolean sea = this.cport[c] > 0 && this.cport[d] > 0;
+                        boolean sea = this.sails(c) && this.sails(d);
                         if (!sea && this.cnat[d] != nat) {
                             continue;
                         }
@@ -4176,7 +4187,7 @@ public bundle Agents {
                     // port because a vessel took them, and nobody is animated walking over the sea.
                     mutable float tx = this.ccx[to];
                     mutable float ty = this.ccy[to];
-                    boolean sailing = to != h && this.cport[h] > 0 && this.cport[to] > 0
+                    boolean sailing = to != h && this.sails(h) && this.sails(to)
                                    && this.cportb[h] >= 0;
                     if (sailing) {
                         tx = cast<float>(this.town.xAt(this.cportb[h]));
@@ -4353,6 +4364,13 @@ public bundle Agents {
                     // everybody under the flag who has taken up a spear -- which is the shape the
                     // muster already uses to decide who arms in the first place. Same fact, read at
                     // the level it is actually true at.
+                    // A quay wants a hull. Nothing else in the world wants a boat, so without this
+                    // the shipwright has no output anybody is short of and the yard is never raised
+                    // -- the harbour would stand there being a word.
+                    if (this.cport[c] > 0) {
+                        int bt = cast<int>(Good.Boat);
+                        this.cwant[c * ng + bt] = this.cwant[c * ng + bt] + 1;
+                    }
                     int arms = this.ctrade[c * Job.count() + cast<int>(Job.Raider)];
                     mutable int wants = arms;
                     if (this.realm.seatOf(this.cnat[c]) == c) {
