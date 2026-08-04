@@ -39,6 +39,17 @@ public bundle Agents {
             // because a paved road that nobody uses is still paved -- it is a decision that was
             // made, not a habit that is being kept up, and the two decay differently.
             private mutable byte[] laid;
+            // WHETHER THERE IS ROOM HERE FOR A ROAD, as opposed to a footpath.
+            //
+            // A track squeezed against a cliff is a real thing and stays; a full ROAD pressed up
+            // against a mountain is not, and it was the thing hiding the terrain -- a brown lane
+            // running along every rock face, wide enough to read as ground rather than as a route,
+            // so the mountain behind it stopped being visible at all. It also funnels: with the
+            // rock on one side there is one lane and everybody is in it.
+            //
+            // Zero means room, which is what a fresh array says, so a Ways nobody tells about the
+            // land behaves exactly as it did before.
+            private mutable byte[] cramped;
             private mutable int sweepAt;         // where the fading sweep resumes
             private mutable float sweepDebt;
             private mutable long worn;           // cells that became a trail
@@ -52,6 +63,7 @@ public bundle Agents {
                 this.h = height;
                 this.tread = new byte[width * height]();
                 this.laid = new byte[width * height]();
+                this.cramped = new byte[width * height]();
                 this.sweepAt = 0;
                 this.sweepDebt = 0.0;
                 this.worn = 0;
@@ -64,6 +76,7 @@ public bundle Agents {
             public destructor ~Ways() returns void {
                 delete this.tread;
                 delete this.laid;
+                delete this.cramped;
             }
 
             public method width() returns int {
@@ -102,11 +115,47 @@ public bundle Agents {
                 }
                 int i = y * this.w + x;
                 int t = cast<int>(this.tread[i]) & 255;
-                if (t < 255) {
-                    this.tread[i] = cast<byte>(t + 1);
+                if (t >= 255) {
+                    return;
                 }
+                // A CELL WITH NO ROOM NEVER BECOMES A ROAD, however many people cross it. It goes
+                // on collecting footfall up to the width of a track and stops one short of the
+                // width of a lane -- which is what "a path squeezed against a cliff" looks like,
+                // and it is a different thing from "a road that happens to run past one".
+                if (t + 1 >= Ways.ROAD_AT && this.cramped[i] != 0) {
+                    return;
+                }
+                this.tread[i] = cast<byte>(t + 1);
                 return;
             }
+
+            // Say that this cell has a mountain, a cliff or the sea too near for a lane. Filled
+            // once, by whoever holds the land -- Ways knows about footfall and deliberately not
+            // about terrain, and a road rule that had to consult a biome on the hottest path in the
+            // simulation would be paying for that lookup fifty thousand times a frame.
+            public method setCramped(int x, int y, boolean tight) returns void {
+                if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
+                    return;
+                }
+                mutable byte v = 0;
+                if (tight) {
+                    v = 1;
+                }
+                this.cramped[y * this.w + x] = v;
+                return;
+            }
+
+            public method isCramped(int x, int y) returns boolean {
+                if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
+                    return false;
+                }
+                return this.cramped[y * this.w + x] != 0;
+            }
+
+            // How wide a lane needs to be clear on either side before it is a road and not a track.
+            // Two cells: a cart and somebody walking beside it, which is what the cart mesh in this
+            // world actually is.
+            public static int ROAD_ROOM = 2;
 
             public method treadAt(int x, int y) returns int {
                 if (x < 0 || y < 0 || x >= this.w || y >= this.h) {

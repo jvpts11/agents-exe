@@ -218,6 +218,22 @@ public bundle Agents {
             private mutable float[] gest;      // seconds of pregnancy left, 0 = not
             // scheduling
             private mutable int[] nextThink;
+            // GOING ROUND SOMETHING.
+            //
+            // Walking was a straight line at the target with a slide along whatever it hit, and a
+            // slide only ever escapes a CONVEX obstacle -- a rock, the corner of a wall. Against a
+            // concave one, a bay or an ice shelf or the inside of a mountain arc, there is no
+            // tangent that leads out: the walker slides until the tangent turns and then oscillates
+            // there until patience gives up. That is the line of soldiers strung along the ice in
+            // João's window, and it was not them giving up on going round -- nothing in them ever
+            // knew how to go round.
+            //
+            // `navMode` is DIRECT or FOLLOW, and `navHitD` is how far off the goal was at the
+            // moment the wall was hit. Following leaves when the goal is BOTH reachable in a
+            // straight line again AND nearer than it was at the hit point, which is what makes it
+            // terminate instead of circling an island for ever.
+            private mutable byte[] navMode;
+            private mutable float[] navHitD;
             // WHERE EVERYBODY IS, BY BIN, so "who is standing next to me" is a short chain walk and
             // not fifty thousand distance tests. The same shape Wildlife uses for prey and NodeField
             // uses for resources, and for the same reason: this codebase keeps having to relearn
@@ -271,6 +287,8 @@ public bundle Agents {
                 this.binAt = new int[cap]();
                 this.crowdOrder = new int[cap]();
                 this.crowdN = 0;
+                this.navMode = new byte[cap]();
+                this.navHitD = new float[cap]();
                 this.px = new float[cap]();
                 this.py = new float[cap]();
                 this.home = new short[cap]();
@@ -332,6 +350,8 @@ public bundle Agents {
                 delete this.binNext;
                 delete this.binAt;
                 delete this.crowdOrder;
+                delete this.navMode;
+                delete this.navHitD;
                 delete this.px;
                 delete this.py;
                 delete this.home;
@@ -760,6 +780,8 @@ public bundle Agents {
                 this.binNext = AgentTable.widerI(this.binNext, cap);
                 this.binAt = AgentTable.widerI(this.binAt, cap);
                 this.crowdOrder = AgentTable.widerI(this.crowdOrder, cap);
+                this.navMode = AgentTable.widerB(this.navMode, cap);
+                this.navHitD = AgentTable.widerF(this.navHitD, cap);
                 this.px = AgentTable.widerF(this.px, cap);
                 this.py = AgentTable.widerF(this.py, cap);
                 this.home = AgentTable.widerS(this.home, cap);
@@ -1302,7 +1324,43 @@ public bundle Agents {
             public method setTarget(int i, int tx, int ty) returns void {
                 this.targetX[i] = cast<short>(tx);
                 this.targetY[i] = cast<short>(ty);
+                // A NEW DESTINATION IS A NEW JOURNEY. Whatever wall this person was working their
+                // way round belonged to the last one, and carrying the state over would have them
+                // hugging a coastline on behalf of somewhere they are no longer going.
+                this.navMode[i] = cast<byte>(AgentTable.NAV_DIRECT);
+                this.navHitD[i] = 0.0;
                 return;
+            }
+
+            // ---- going round something ----
+
+            public static fixed int NAV_DIRECT = 0;
+            public static fixed int NAV_FOLLOW = 1;
+
+            public method navModeOf(int i) returns int {
+                return cast<int>(this.navMode[i]) & 255;
+            }
+
+            public method beginFollowing(int i, float goalDist) returns void {
+                this.navMode[i] = cast<byte>(AgentTable.NAV_FOLLOW);
+                this.navHitD[i] = goalDist;
+                return;
+            }
+
+            public method stopFollowing(int i) returns void {
+                this.navMode[i] = cast<byte>(AgentTable.NAV_DIRECT);
+                return;
+            }
+
+            public method hitDistOf(int i) returns float {
+                return this.navHitD[i];
+            }
+
+            // Which way round an obstacle this person goes. Arbitrary and STABLE: two people at the
+            // same wall must not both pick the side that leads back into the trap, and one person
+            // must not dither at the mouth of it. The row index decides, once and for ever.
+            public method wallHandOf(int i) returns boolean {
+                return (i & 1) == 0;
             }
 
             public method targetXOf(int i) returns int {

@@ -75,9 +75,38 @@ public bundle Agents {
             // caravan that crosses a border warms it. Which means the sea lanes opened for trade
             // turn out to be the thing that ends wars -- a loop this world did not have.
             private mutable int[] bond;
+            // WHO HOLDS EACH 16-CELL BLOCK, or -1. This is the border on the map, the thing that is
+            // defended, and the whole point of the remodelling is that it lives HERE.
+            //
+            // It was derived, in `Sim.restake`, from where buildings stood and spread by the
+            // distance people work -- so the nation was a label painted over the settlements, and a
+            // country could not want ground it had not already built on. In a civilization the
+            // claim comes first and the settlements are planted in it.
+            //
+            // It is PERSISTENT: never recomputed, changed only by an event. That is what ends the
+            // churn for good. The old field was rebuilt from nothing every census and took whichever
+            // neighbour the loop happened to reach first, which is how six thousand four hundred and
+            // fifty-three blocks changed hands in an arc containing one conquest.
+            private mutable int[] realmOf;
+            // AND WHAT EACH COUNTRY HAS SEEN, one bit per block.
+            //
+            // An empire that has never sent anybody to sea does not know the other continent is
+            // there, and that stops being a bug and becomes a consequence. Nine hundred kilobytes
+            // for five hundred and twelve nations over fourteen thousand blocks -- eight times
+            // smaller than the same thing in bytes, which is why it is packed.
+            private mutable int[] seen;
+            private mutable int bw;
+            private mutable int bh;
 
-            public constructor Nations(int capacity) {
+            public constructor Nations(int capacity, int blocksW, int blocksH) {
                 this.cap = capacity;
+                this.bw = blocksW;
+                this.bh = blocksH;
+                this.realmOf = new int[blocksW * blocksH]();
+                for (int b in 0..blocksW * blocksH) {
+                    this.realmOf[b] = 0 - 1;
+                }
+                this.seen = new int[(capacity * blocksW * blocksH + 31) / 32]();
                 this.seat = new int[capacity]();
                 this.holds = new int[capacity]();
                 this.folk = new int[capacity]();
@@ -127,6 +156,131 @@ public bundle Agents {
                 delete this.hue;
                 delete this.best;
                 delete this.bond;
+                delete this.realmOf;
+                delete this.seen;
+            }
+
+            // ---- territory: the ground a country holds ----
+
+            public method blocksWide() returns int {
+                return this.bw;
+            }
+
+            public method blocksHigh() returns int {
+                return this.bh;
+            }
+
+            public method holderAt(int bx, int by) returns int {
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return 0 - 1;
+                }
+                return this.realmOf[by * this.bw + bx];
+            }
+
+            // Take free ground. FALSE if somebody already holds it, and that refusal is the rule
+            // that ends the churn: proximity does not move a border, an event does. Conquest calls
+            // `release` and then `stake`, which is the only way ground changes hands.
+            public method stake(int nat, int bx, int by) returns boolean {
+                if (nat < 0 || nat >= this.cap) {
+                    return false;
+                }
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return false;
+                }
+                int at = by * this.bw + bx;
+                if (this.realmOf[at] >= 0) {
+                    return this.realmOf[at] == nat;
+                }
+                this.realmOf[at] = nat;
+                return true;
+            }
+
+            public method release(int bx, int by) returns void {
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return;
+                }
+                this.realmOf[by * this.bw + bx] = 0 - 1;
+                return;
+            }
+
+            // Everything a country holds, given back at once. Returns how many blocks that was, so
+            // a caller can count what a death actually freed rather than assume it freed something.
+            public method releaseAll(int nat) returns int {
+                mutable int n = 0;
+                for (int b in 0..this.bw * this.bh) {
+                    if (this.realmOf[b] == nat) {
+                        this.realmOf[b] = 0 - 1;
+                        n = n + 1;
+                    }
+                }
+                return n;
+            }
+
+            public method blocksHeld(int nat) returns int {
+                mutable int n = 0;
+                for (int b in 0..this.bw * this.bh) {
+                    if (this.realmOf[b] == nat) {
+                        n = n + 1;
+                    }
+                }
+                return n;
+            }
+
+            // ---- knowledge: the ground a country has been to ----
+
+            private method sightBit(int nat, int bx, int by) returns long {
+                return cast<long>(nat) * cast<long>(this.bw * this.bh)
+                     + cast<long>(by * this.bw + bx);
+            }
+
+            public method sight(int nat, int bx, int by) returns void {
+                if (nat < 0 || nat >= this.cap) {
+                    return;
+                }
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return;
+                }
+                long bit = this.sightBit(nat, bx, by);
+                int word = cast<int>(bit / 32);
+                this.seen[word] = this.seen[word] | (1 << cast<int>(bit % 32));
+                return;
+            }
+
+            public method hasSeen(int nat, int bx, int by) returns boolean {
+                if (nat < 0 || nat >= this.cap) {
+                    return false;
+                }
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return false;
+                }
+                long bit = this.sightBit(nat, bx, by);
+                return (this.seen[cast<int>(bit / 32)] & (1 << cast<int>(bit % 32))) != 0;
+            }
+
+            public method blocksSeen(int nat) returns int {
+                mutable int n = 0;
+                for (int by in 0..this.bh) {
+                    for (int bx in 0..this.bw) {
+                        if (this.hasSeen(nat, bx, by)) {
+                            n = n + 1;
+                        }
+                    }
+                }
+                return n;
+            }
+
+            // A country that leaves the map forgets. Its number goes back in the pot for a people
+            // who break away later, and an inherited map would be a nation remembering a journey it
+            // never made -- the same mistake `found` is careful not to make with a granary.
+            public method forget(int nat) returns void {
+                for (int by in 0..this.bh) {
+                    for (int bx in 0..this.bw) {
+                        long bit = this.sightBit(nat, bx, by);
+                        int word = cast<int>(bit / 32);
+                        this.seen[word] = this.seen[word] & ~(1 << cast<int>(bit % 32));
+                    }
+                }
+                return;
             }
 
             public method limit() returns int {
@@ -229,6 +383,10 @@ public bundle Agents {
                     this.trunk[nat] = nat;
                 }
                 this.hue[nat] = Nations.banner(this.trunk[nat], nat);
+                // A recycled number starts blind. Whoever held it before has left the map, and a
+                // people inheriting somebody else's map would remember a journey it never made --
+                // the same mistake `found` is careful not to make with a granary.
+                this.forget(nat);
                 return;
             }
 

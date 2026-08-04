@@ -73,6 +73,12 @@ public bundle Agents {
             private mutable int thoughtThisFrame;
             private mutable int worstThink;
             private mutable int stuckTotal;
+            // Journeys that got round something instead of giving up at it, and journeys refused at
+            // the door because the ground was on the other side of the sea. Both are new verbs for
+            // this world and both are counted, because "the walking got better" is not a claim
+            // anybody can check.
+            private mutable long rounded;
+            private mutable long unreachable;
             private mutable int arrivals;
             private mutable long thoughtTotal;
             // Per community: how many live there, and how many are grown men and women. Rebuilt on
@@ -342,9 +348,17 @@ public bundle Agents {
             // Not where they are standing: a frontier read off fifty thousand moving people is
             // never still, and it moved constantly in a world where nothing whatever had happened
             // to move it. See `restake`.
-            private mutable int[] claim;        // holder plus the worked ring: what is drawn
-            private mutable int[] claimWas;     // what was drawn last census, to notice a real change
-            private mutable int[] claimEdge;
+            // WHICH SETTLEMENT SUSTAINS EACH BLOCK, or -1. The claim itself -- who OWNS the ground
+            // -- lives in `Nations.realmOf` and is persistent; this is the label that says which of
+            // that country's own towns keeps it alive, and it is rebuilt every census because it is
+            // a label rather than a title.
+            //
+            // `claim`, `claimWas` and `claimEdge` are gone with `restake`. Two shadow copies of a
+            // field existed only to make a rebuild-from-nothing stable, which is a problem that no
+            // longer exists once the field is never rebuilt.
+            private mutable int[] holdSite;
+            private mutable long rotted;        // blocks that went back to the world
+            private mutable long orphaned;      // towns that outlived their country and raised a flag
             private mutable float chronicleDue;   // world clock at which the next chronicle block is due
             private mutable int restakes;      // how many times the claim was recomputed at all
             private mutable long blockGained;  // blocks that went from nobody to somebody
@@ -505,6 +519,8 @@ public bundle Agents {
                 this.thoughtThisFrame = 0;
                 this.worstThink = 0;
                 this.stuckTotal = 0;
+                this.rounded = 0;
+                this.unreachable = 0;
                 this.arrivals = 0;
                 this.thoughtTotal = 0;
                 // Room for the world to fill up. Two hundred and fifty-six was the number of places
@@ -609,13 +625,12 @@ public bundle Agents {
                 }
                 this.claimW = (grid.width() + 15) / 16;
                 this.claimH = (grid.height() + 15) / 16;
-                this.claim = new int[this.claimW * this.claimH]();
-                this.claimWas = new int[this.claimW * this.claimH]();
-                this.claimEdge = new int[this.claimW * this.claimH]();
+                this.holdSite = new int[this.claimW * this.claimH]();
                 for (int b in 0..this.claimW * this.claimH) {
-                    this.claim[b] = 0 - 1;
-                    this.claimWas[b] = 0 - 1;
+                    this.holdSite[b] = 0 - 1;
                 }
+                this.rotted = 0;
+                this.orphaned = 0;
                 this.claimAge = 0;
                 this.slice = Simulation.SLICE_NS;
                 this.restakes = 0;
@@ -657,6 +672,7 @@ public bundle Agents {
                 // come to answer to. The count of living nations FALLS over an arc while each of
                 // them gets bigger, which is the shape history actually has.
                 this.paths = new Ways(grid.width(), grid.height()) on heap;
+                this.markTightGround(grid);
                 this.host = new Armies(64) on heap;
                 this.cwall = new int[this.ncomm]();
                 this.carmy = new int[this.ncomm]();
@@ -719,7 +735,7 @@ public bundle Agents {
                 this.revolts = 0;
                 this.converted = 0;
                 this.stocked = false;
-                this.realm = new Nations(this.ncomm) on heap;
+                this.realm = new Nations(this.ncomm, this.claimW, this.claimH) on heap;
                 this.cnat = new int[this.ncomm]();
                 for (int c in 0..this.ncomm) {
                     this.cnat[c] = c;
@@ -813,9 +829,7 @@ public bundle Agents {
                 delete this.cfoe;
                 delete this.craided;
                 delete this.craider;
-                delete this.claim;
-                delete this.claimWas;
-                delete this.claimEdge;
+                delete this.holdSite;
                 delete this.wild;
                 delete this.meter;
                 delete this.chief;
@@ -1397,12 +1411,15 @@ public bundle Agents {
 
             // Which nation holds this ground, or -1. The border is not drawn anywhere: it is the
             // union of what a nation's settlements hold, and it moves when they do.
+            // WHICH COUNTRY HOLDS THIS CELL, or -1. One lookup now: the claim is a nation's, and
+            // this used to go through a settlement to reach its flag because that was where the
+            // field lived. Off the map edge counts as nobody, so the coast gets a frontier drawn
+            // along it -- which is right: a shoreline IS where a country stops.
             public method realmAt(int x, int y) returns int {
-                int s = this.ownerAt(x, y);
-                if (s < 0) {
+                if (x < 0 || y < 0) {
                     return 0 - 1;
                 }
-                return this.cnat[s];
+                return this.realm.holderAt(x / 16, y / 16);
             }
 
             // Surplus buys slack time; slack time and curiosity buy discovery. A village living hand
@@ -1427,15 +1444,17 @@ public bundle Agents {
                 mutable int[] kin = new int[nn]();
                 for (int by in 0..this.claimH) {
                     for (int bx in 0..this.claimW) {
-                        int ms = this.claim[by * this.claimW + bx];
-                        if (ms < 0) {
+                        // Straight off the claim now, rather than off a settlement and then its
+                        // flag. This loop always wanted NATIONS -- it is asking who touches whom --
+                        // and was going through settlements only because that was where the field
+                        // lived.
+                        int me = this.realm.holderAt(bx, by);
+                        if (me < 0) {
                             continue;
                         }
-                        int me = this.cnat[ms];
                         if (bx + 1 < this.claimW) {
-                            int os = this.claim[by * this.claimW + bx + 1];
-                            if (os >= 0 && this.cnat[os] != me) {
-                                int o = this.cnat[os];
+                            int o = this.realm.holderAt(bx + 1, by);
+                            if (o >= 0 && o != me) {
                                 // A neighbour you can TALK TO is a different kind of neighbour, and
                                 // it is the tongue that decides it rather than the trunk. What
                                 // makes copying slow is not distance, it is having to work out what
@@ -1459,9 +1478,8 @@ public bundle Agents {
                             }
                         }
                         if (by + 1 < this.claimH) {
-                            int os = this.claim[(by + 1) * this.claimW + bx];
-                            if (os >= 0 && this.cnat[os] != me) {
-                                int o = this.cnat[os];
+                            int o = this.realm.holderAt(bx, by + 1);
+                            if (o >= 0 && o != me) {
                                 if (this.realm.tongueOf(me) == this.realm.tongueOf(o)) {
                                     kin[me] = this.higher(kin[me], this.realm.eraOf(o));
                                     kin[o] = this.higher(kin[o], this.realm.eraOf(me));
@@ -2502,10 +2520,12 @@ public bundle Agents {
                         this.realm.countTown(this.cnat[c], c, this.cpop[c]);
                     }
                 }
-                for (int b in 0..this.claimW * this.claimH) {
-                    int s = this.claim[b];
-                    if (s >= 0 && s < this.ncomm && this.cpop[s] > 0) {
-                        this.realm.countLand(this.cnat[s]);
+                for (int by in 0..this.claimH) {
+                    for (int bx in 0..this.claimW) {
+                        int who = this.realm.holderAt(bx, by);
+                        if (who >= 0) {
+                            this.realm.countLand(who);
+                        }
                     }
                 }
                 for (int nat in 0..this.realm.limit()) {
@@ -2760,203 +2780,201 @@ public bundle Agents {
             // worker covers. A village strung along a river holds the river; a city holds a wide
             // irregular country; a hamlet holds a blob. Nothing had to be tuned for that -- it falls
             // out of where fifty thousand people actually are.
-            private method restake() returns void {
+            // THE BORDER MOVES BECAUSE SOMETHING HAPPENED TO IT, AND IT IS NEVER REDRAWN.
+            //
+            // This replaces `restake`, which rebuilt the whole map from the building table every
+            // census. Three goes at that were wrong in the same way and the third is the one worth
+            // remembering: even reading the claim off BUILDINGS rather than off people, and even
+            // preferring the previous holder, the field was still being recomputed from nothing --
+            // so the answer depended on the order the loop happened to reach things in, and six
+            // thousand four hundred and fifty-three blocks changed hands in an arc containing one
+            // conquest. A border read off anything is a border that moves when that thing moves.
+            //
+            // So the field is ACCUMULATED, and this pass does exactly two things, neither of which
+            // can take ground off anybody:
+            //
+            //   it CLAIMS free ground within reach of a living settlement, and
+            //   it RELEASES ground no living settlement of the holder can still reach.
+            //
+            // Sovereignty and use become separate things that may disagree, which is the whole
+            // point: the empty valley between two of a country's towns is that country's although
+            // nobody works it, and a colonist from anywhere else planting there is invading.
+            private method spread() returns void {
                 this.restakes = this.restakes + 1;
                 int nb = this.claimW * this.claimH;
-                // A BORDER MOVES WHEN SOMETHING HAPPENS TO IT, AND NOT OTHERWISE.
-                //
-                // Two goes at this were wrong in the same way. Both read the claim off WHERE THE
-                // PEOPLE ARE: first as a snapshot every census, then as a long-run majority of the
-                // traffic. The second flickers far less than the first, and both are answering a
-                // question nobody asked. Fifty thousand people walk to work and walk home all day.
-                // If a frontier is a function of that, it is never still -- and there was no war,
-                // no colony, no famine, nothing at all had happened, and the map kept redrawing
-                // itself. A country's border is not a moving average of footfall.
-                //
-                // It is the ground its BUILDINGS stand on, spread by the distance its people work.
-                // A building is put up, pulled down, rebuilt as something else, or taken in a
-                // conquest -- and those are exactly the events that ought to move a frontier, and
-                // the only ones. Nothing else can. Between them the map is bit-for-bit identical,
-                // which is why `claimVersion` now almost never changes and the renderer almost
-                // never rebuilds the overlay.
-                //
-                // It is still READ off the world rather than drawn as a disk: a village strung
-                // along a river holds the river, because that is where it built; a city holds a
-                // wide irregular country, because it has three hundred buildings and a hamlet has
-                // four. Nothing had to be tuned for that.
+                // Which settlement, if any, keeps each block alive. This one IS derived and may be:
+                // it is a label rather than a title. Which of a nation's own towns is nearest
+                // changes nothing about who owns the ground, and every existing reader of
+                // `ownerAt` wants a settlement rather than a flag.
                 for (int b in 0..nb) {
-                    this.claim[b] = 0 - 1;
+                    this.holdSite[b] = 0 - 1;
                 }
-                int nbld = this.town.count();
-                mutable int i = 0;
-                while (i < nbld) {
-                    if (!this.town.isGone(i)) {
-                        int o = this.town.ownerOf(i);
-                        if (o >= 0 && o < this.ncomm) {
-                            int bx = this.town.xAt(i) / 16;
-                            int by = this.town.yAt(i) / 16;
-                            if (bx >= 0 && by >= 0 && bx < this.claimW && by < this.claimH) {
-                                int at = by * this.claimW + bx;
-                                // WHOEVER BUILT THERE FIRST HOLDS IT. The table is in order of
-                                // founding, so the first owner seen in a block is the one who got
-                                // there first, and every later building in that block -- theirs or
-                                // anybody else's -- changes nothing.
-                                //
-                                // This was a running majority, and a running majority is not a
-                                // majority: in a block shared by two villages the winner depended
-                                // on the order and the running balance, so ONE hut going up in a
-                                // contested block could hand it over, and the next hut could hand
-                                // it back. Buildings do not move, but they are raised and pulled
-                                // down constantly, and that was enough to keep a frontier that had
-                                // no business moving twitching all day -- slower than before, which
-                                // is exactly what João saw.
-                                //
-                                // First-come is the rule a border actually follows. A village loses
-                                // that ground when its own building there goes -- pulled down,
-                                // burnt, or taken -- and not because a neighbour built a shed.
-                                if (this.claim[at] < 0) {
-                                    this.claim[at] = o;
-                                }
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    int nat = this.cnat[c];
+                    int reach = this.reachOf(nat);
+                    int cbx = cast<int>(this.ccx[c]) / 16;
+                    int cby = cast<int>(this.ccy[c]) / 16;
+                    mutable int dy = 0 - reach;
+                    while (dy <= reach) {
+                        mutable int dx = 0 - reach;
+                        while (dx <= reach) {
+                            int bx = cbx + dx;
+                            int by = cby + dy;
+                            // Round and not square: a reach is a distance, and the corner of a box
+                            // is half again as far as its edge. Squared, so no root is taken inside
+                            // a loop that runs over every block of every settlement in the world.
+                            if (bx < 0 || by < 0 || bx >= this.claimW || by >= this.claimH
+                                || dx * dx + dy * dy > reach * reach) {
+                                dx = dx + 1;
+                                continue;
                             }
-                        }
-                    }
-                    i = i + 1;
-                }
-                // And then it spreads to the ground they work but do not sleep on. One ring a pass,
-                // read from the last pass so a claim cannot race across the map in a single census.
-                // TWICE OVER, AND THE FIRST TIME ONLY FOR THE PEOPLE WHO WERE ALREADY THERE.
-                //
-                // One set of passes carrying both rules at once was not enough: preferring the
-                // previous holder only reaches a block that is NEXT TO them, so a field two blocks
-                // out from its own village and one block from a neighbour's new hut was taken by
-                // the neighbour on the first pass and then skipped as settled. Nine thousand blocks
-                // an arc changed hands that way, still with no conquest anywhere.
-                //
-                // So continuity gets its own passes first, and reaches as far as the work does.
-                // Only ground that nobody worked last census is up for grabs, and that is a field
-                // coming into use rather than one being taken.
-                for (int pass in 0..Simulation.WORK_BLOCKS) {
-                    for (int b in 0..nb) {
-                        this.claimEdge[b] = this.claim[b];
-                    }
-                    for (int by in 0..this.claimH) {
-                        for (int bx in 0..this.claimW) {
                             int at = by * this.claimW + bx;
-                            if (this.claimEdge[at] >= 0) {
-                                continue;
+                            int who = this.realm.holderAt(bx, by);
+                            if (who < 0) {
+                                if (this.realm.stake(nat, bx, by)) {
+                                    this.blockGained = this.blockGained + 1;
+                                    this.claimAge = this.claimAge + 1;
+                                    this.holdSite[at] = c;
+                                }
+                            } else if (who == nat) {
+                                this.holdSite[at] = c;
                             }
-                            int keep = this.claimWas[at];
-                            if (keep < 0) {
-                                continue;
-                            }
-                            if ((bx > 0 && this.claimEdge[at - 1] == keep)
-                                || (bx + 1 < this.claimW && this.claimEdge[at + 1] == keep)
-                                || (by > 0 && this.claimEdge[at - this.claimW] == keep)
-                                || (by + 1 < this.claimH
-                                    && this.claimEdge[at + this.claimW] == keep)) {
-                                this.claim[at] = keep;
-                            }
+                            dx = dx + 1;
                         }
+                        dy = dy + 1;
                     }
                 }
-                for (int pass in 0..Simulation.WORK_BLOCKS) {
-                    for (int b in 0..nb) {
-                        this.claimEdge[b] = this.claim[b];
-                    }
-                    for (int by in 0..this.claimH) {
-                        for (int bx in 0..this.claimW) {
-                            int at = by * this.claimW + bx;
-                            if (this.claimEdge[at] >= 0) {
-                                continue;
-                            }
-                            // WHOEVER WORKED IT LAST CENSUS KEEPS IT, if they are still next to it.
-                            //
-                            // The core -- the ground people have built on -- is stable now, but the
-                            // worked ring around it was still being redrawn from nothing every
-                            // census, and it took whichever neighbour came first in the order left,
-                            // right, up, down. That order is arbitrary, and which neighbours exist
-                            // changes every time anybody anywhere puts up a hut. Measured over one
-                            // arc: eight thousand blocks fairly gained, two thousand fairly lost,
-                            // and TWELVE THOUSAND passing straight from one holder to another -- in
-                            // a world with zero conquests. That is the border theft João could see
-                            // and no mechanism in this game performs.
-                            //
-                            // Preferring the previous holder makes the ring as sticky as the core:
-                            // a field worked by one village goes on being theirs until that village
-                            // is no longer beside it, and a neighbour building nearby cannot take
-                            // it. When nobody held it, first-found still decides -- that case is a
-                            // block genuinely coming into use for the first time.
-                            mutable int take = 0 - 1;
-                            int was = this.claimWas[at];
-                            if (was >= 0) {
-                                if (bx > 0 && this.claimEdge[at - 1] == was) {
-                                    take = was;
-                                } else if (bx + 1 < this.claimW && this.claimEdge[at + 1] == was) {
-                                    take = was;
-                                } else if (by > 0 && this.claimEdge[at - this.claimW] == was) {
-                                    take = was;
-                                } else if (by + 1 < this.claimH
-                                           && this.claimEdge[at + this.claimW] == was) {
-                                    take = was;
-                                }
-                            }
-                            if (take < 0) {
-                                if (bx > 0 && this.claimEdge[at - 1] >= 0) {
-                                    take = this.claimEdge[at - 1];
-                                } else if (bx + 1 < this.claimW && this.claimEdge[at + 1] >= 0) {
-                                    take = this.claimEdge[at + 1];
-                                } else if (by > 0 && this.claimEdge[at - this.claimW] >= 0) {
-                                    take = this.claimEdge[at - this.claimW];
-                                } else if (by + 1 < this.claimH
-                                           && this.claimEdge[at + this.claimW] >= 0) {
-                                    take = this.claimEdge[at + this.claimW];
-                                }
-                            }
-                            this.claim[at] = take;
-                        }
-                    }
-                }
-                // The version is bumped only when the map genuinely LOOKS different. It used to be
-                // bumped unconditionally, so the renderer tore down and rebuilt every border quad in
-                // view on every census whether or not one block had moved -- and once the field went
-                // still, that work would have been entirely invisible.
-                // AND OF WHAT KIND. Three things can happen to a block, and they look nothing like
-                // each other from the air: ground nobody held becomes somebody's (a village
-                // spreading), ground somebody held becomes nobody's (a place gone), and ground
-                // passing from one holder straight to another. Only the third is a border being
-                // TAKEN, and there is no mechanism in this world that does it except conquest --
-                // so if it happens without one, that is the defect, and it is now countable
-                // instead of arguable.
-                mutable boolean moved = false;
-                for (int b in 0..nb) {
-                    if (this.claimWas[b] != this.claim[b]) {
-                        if (this.claimWas[b] < 0) {
-                            this.blockGained = this.blockGained + 1;
-                        } else if (this.claim[b] < 0) {
+                // AND WHAT NOTHING KEEPS ALIVE GOES BACK TO THE WORLD. A nation that loses its last
+                // settlement loses its last sustainer, so its whole country rots at once and leaves
+                // the map without anybody writing a rule for it; a nation that breaks apart leaves
+                // each settlement holding what lies within its own reach, which is exactly "each
+                // with the border it can hold".
+                //
+                // This is the replacement for merging. Merging was the only transition in this
+                // world that reduced the number of places without freeing an inch of ground: birth
+                // and death is a cycle, merging is a sink, and it beat hiving in twelve worlds out
+                // of twelve. Death returning ground is what lets the count of settlements rise.
+                for (int by in 0..this.claimH) {
+                    for (int bx in 0..this.claimW) {
+                        if (this.holdSite[by * this.claimW + bx] < 0
+                            && this.realm.holderAt(bx, by) >= 0) {
+                            this.realm.release(bx, by);
                             this.blockLost = this.blockLost + 1;
-                        } else {
-                            this.blockFlipped = this.blockFlipped + 1;
+                            this.rotted = this.rotted + 1;
+                            this.claimAge = this.claimAge + 1;
                         }
-                        this.claimWas[b] = this.claim[b];
-                        moved = true;
                     }
                 }
-                if (moved) {
-                    this.claimAge = this.claimAge + 1;
-                }
-                // Wildlife is told the same thing, once, and treats settled ground as no longer
+                // Wildlife is told the same thing, once, and treats held ground as no longer
                 // habitat. Fourteen thousand writes a second against a billion and a half distance
                 // tests a frame is the whole reason it is done this way round.
                 for (int by in 0..this.claimH) {
                     for (int bx in 0..this.claimW) {
-                        this.wild.setSettled(bx, by, this.claim[by * this.claimW + bx] >= 0);
+                        this.wild.setSettled(bx, by, this.realm.holderAt(bx, by) >= 0);
                     }
                 }
                 this.wild.reindex();
                 return;
             }
 
-            // Who holds this cell, or -1.
+            // How far a country's border may grow from one of its settlements, in 16-cell blocks.
+            //
+            // NOT CHOSEN BY TASTE, and honestly only ONE RUNG OF IT IS MEASURED. The reach
+            // histogram in `audit` reads the distance people actually keep from home, and on the
+            // real game it says 80 to 84 cells for the tribal age -- five blocks and a bit. Nothing
+            // in that run ever reached era 2 (`era.best` was 1 in all forty-four chronicle blocks),
+            // so eras two to four have no measurement and cannot be given one by running longer;
+            // that is a separate defect, ahead in the queue.
+            //
+            // Rather than invent three numbers, the three unmeasured rungs are carried up by a
+            // ratio this world already states about itself: `Ways.paceOn` says a trail is 1.20 of
+            // bare ground, a road 1.45 and paving 1.75, and those are the surfaces the eras unlock.
+            // So era 1 is what was measured, and each later era holds what its people can cover in
+            // the same day at the pace their roads allow. It is a flat table on purpose -- the big
+            // jump in this design is meant to come from PLANTING further out and from crossing
+            // water, not from one town's border ballooning.
+            //
+            // The moment era 2 has anybody in it, `reach.era2.p95` becomes real and this table
+            // should be re-derived from it rather than kept.
+            // GROUND IS REVEALED BY BEING WALKED.
+            //
+            // One pass over the living, on the census clock and not the tick clock: what a country
+            // knows changes at the rate somebody arrives somewhere new, which is a per-second fact
+            // and not a per-twentieth-of-a-second one. An empire that has never sent anybody to sea
+            // does not know the other continent is there, and that stops being a bug and becomes a
+            // consequence -- and the scout, who has existed as a body and as a role and never had a
+            // job, finally has one.
+            private method reveal() returns void {
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i)) {
+                        int h = this.folk.homeOf(i);
+                        if (h >= 0 && h < this.ncomm && this.cpop[h] > 0) {
+                            this.realm.sight(this.cnat[h], cast<int>(this.folk.xAt(i)) / 16,
+                                             cast<int>(this.folk.yAt(i)) / 16);
+                        }
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            // A SETTLEMENT WHOSE COUNTRY IS GONE BECOMES A COUNTRY.
+            //
+            // João's rule, and the reason it matters is arithmetic. Merging was the only transition
+            // in this world that reduced the number of places without freeing an inch of ground, so
+            // the count could only ever fall -- a hundred and thirty-one down to four over an arc,
+            // in twelve worlds out of twelve. Ground now returns to the world when nothing sustains
+            // it, and a stranded town raises its own flag, so the count can go both ways.
+            //
+            // It keeps its TONGUE and its TRUNK: the people did not change, only who they answer
+            // to. That is the difference between a country breaking up and a people being
+            // conquered, and it is why a civilization survives its nations dying.
+            private method orphan() returns void {
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    int was = this.cnat[c];
+                    if (was >= 0 && was < this.realm.limit() && this.realm.alive(was)) {
+                        continue;
+                    }
+                    int fresh = this.realm.open();
+                    if (fresh < 0) {
+                        continue;                    // the world is out of flags; it waits its turn
+                    }
+                    mutable int era0 = 1;
+                    if (was >= 0 && was < this.realm.limit()) {
+                        era0 = this.realm.eraOf(was);
+                    }
+                    this.realm.raise(fresh, this.ctongue[c], was, this.tick, era0);
+                    this.realm.countTown(fresh, c, this.cpop[c]);
+                    this.cnat[c] = fresh;
+                    this.orphaned = this.orphaned + 1;
+                }
+                return;
+            }
+
+            private method reachOf(int nat) returns int {
+                int era = this.realm.eraOf(nat);
+                if (era <= 1) {
+                    return Simulation.REACH_ERA1;
+                }
+                if (era == 2) {
+                    return Simulation.REACH_ERA2;
+                }
+                if (era == 3) {
+                    return Simulation.REACH_ERA3;
+                }
+                return Simulation.REACH_ERA4;
+            }
+
+            // Which SETTLEMENT keeps this cell, or -1. The label rather than the title: who owns
+            // the ground is `realmAt`, and this is which of that country's own towns sustains it.
             public method ownerAt(int x, int y) returns int {
                 if (x < 0 || y < 0) {
                     return 0 - 1;
@@ -2966,7 +2984,7 @@ public bundle Agents {
                 if (bx >= this.claimW || by >= this.claimH) {
                     return 0 - 1;
                 }
-                int c = this.claim[by * this.claimW + bx];
+                int c = this.holdSite[by * this.claimW + bx];
                 if (c < 0) {
                     return 0 - 1;
                 }
@@ -3028,6 +3046,51 @@ public bundle Agents {
                 return this.arrivals;
             }
 
+            // WHERE THERE IS NO ROOM FOR A LANE. Once, at the founding of the world.
+            //
+            // A separable dilation rather than a box test per cell: asking each of three and a half
+            // million cells about its twenty-four neighbours is ninety million reads, and asking it
+            // twice about five is eighteen. The answer is identical because "unwalkable within two
+            // in the box" is "unwalkable within two across, of anything unwalkable within two down".
+            private method markTightGround(Grid* grid) returns void {
+                int gw = grid.width();
+                int gh = grid.height();
+                int r = Ways.ROAD_ROOM;
+                mutable byte[] col = new byte[gw * gh]();
+                for (int y in 0..gh) {
+                    for (int x in 0..gw) {
+                        mutable boolean tight = false;
+                        mutable int dy = 0 - r;
+                        while (dy <= r) {
+                            int yy = y + dy;
+                            if (yy < 0 || yy >= gh || !Biomes.walkable(grid.biomeAt(x, yy))) {
+                                tight = true;
+                            }
+                            dy = dy + 1;
+                        }
+                        if (tight) {
+                            col[y * gw + x] = cast<byte>(1);
+                        }
+                    }
+                }
+                for (int y in 0..gh) {
+                    for (int x in 0..gw) {
+                        mutable boolean tight = false;
+                        mutable int dx = 0 - r;
+                        while (dx <= r) {
+                            int xx = x + dx;
+                            if (xx < 0 || xx >= gw || col[y * gw + xx] != 0) {
+                                tight = true;
+                            }
+                            dx = dx + 1;
+                        }
+                        this.paths.setCramped(x, y, tight);
+                    }
+                }
+                delete col;
+                return;
+            }
+
             private method walkable(int x, int y) returns boolean {
                 if (x < 0 || y < 0 || x >= this.g.width() || y >= this.g.height()) {
                     return false;
@@ -3039,6 +3102,120 @@ public bundle Agents {
             // person needs to see that the far bank is across water. Without it an agent sets off
             // toward somewhere it can plainly see it cannot reach, slides along the shore for thirty
             // seconds and gives up -- and half the abandoned journeys were exactly that.
+            // Is the ground clear for the next few cells this way? The half of the leaving rule that
+            // asks "can I go straight at it again": a walker following a wall has to know when the
+            // wall has stopped being between them and where they are going.
+            //
+            // Sampled every half cell rather than at a fixed count of points, because the question
+            // is about the NEXT few cells and not about the whole journey -- six samples over three
+            // hundred cells steps clean over a headland.
+            private method clearAhead(float x, float y, float ux, float uy, float cells) returns boolean {
+                mutable float t = 0.5;
+                while (t <= cells) {
+                    if (!this.walkable(cast<int>(x + ux * t), cast<int>(y + uy * t))) {
+                        return false;
+                    }
+                    t = t + 0.5;
+                }
+                return true;
+            }
+
+            // One step of following a wall, with the wall kept on one fixed side.
+            //
+            // Eight headings, tried in the order that hugs: turn TOWARD the wall first, then
+            // straight, then away. Turning toward it is blocked while the wall is there, so the
+            // walker goes straight along it; the moment the wall falls away -- a convex corner --
+            // the turn toward it opens and the walker follows it round. That is the whole
+            // algorithm, and it is why it needs no map and no memory beyond which way it hit.
+            //
+            // Writes the chosen heading into `stepX`/`stepY`. False means walled in on all eight.
+            private mutable float stepX;
+            private mutable float stepY;
+
+            private method followStep(int i, float x, float y, float span,
+                                      float rx, float ry) returns boolean {
+                float hand = 1.0;
+                mutable float turn = hand;
+                if (!this.folk.wallHandOf(i)) {
+                    turn = 0.0 - hand;
+                }
+                // Two, one, none, then away: +2, +1, 0, -1, -2, -3, +3, +4 eighths of a turn from
+                // the reference, all signed by the hand. Two eighths is a right angle, so the first
+                // try is square into the wall.
+                //
+                // No trigonometry. The eight rotations are the same eight numbers every time, and
+                // flipping the hand flips only the sine -- so the whole thing is two lookups and a
+                // sign, in the hottest loop this simulation has.
+                mutable int k = 0;
+                while (k < 8) {
+                    float c = this.turnCos(k);
+                    float s = this.turnSin(k) * turn;
+                    float dx = rx * c - ry * s;
+                    float dy = rx * s + ry * c;
+                    if (this.walkable(cast<int>(x + dx * span), cast<int>(y + dy * span))) {
+                        this.stepX = dx;
+                        this.stepY = dy;
+                        return true;
+                    }
+                    k = k + 1;
+                }
+                return false;
+            }
+
+            // The eight headings of the follow order, as cosine and sine of 45-degree multiples.
+            // Written out rather than held in a static array: a static field initialised from
+            // another static compiles to zero in this toolchain without a diagnostic (task #334),
+            // and eight literals cannot go wrong that way.
+            private method turnCos(int k) returns float {
+                if (k == 0) {
+                    return 0.0;                 // +2 eighths: square into the wall
+                }
+                if (k == 1) {
+                    return 0.7071068;           // +1
+                }
+                if (k == 2) {
+                    return 1.0;                 //  0, straight on
+                }
+                if (k == 3) {
+                    return 0.7071068;           // -1
+                }
+                if (k == 4) {
+                    return 0.0;                 // -2
+                }
+                if (k == 5) {
+                    return 0.0 - 0.7071068;     // -3
+                }
+                if (k == 6) {
+                    return 0.0 - 0.7071068;     // +3
+                }
+                return 0.0 - 1.0;               // +4, straight back
+            }
+
+            private method turnSin(int k) returns float {
+                if (k == 0) {
+                    return 1.0;
+                }
+                if (k == 1) {
+                    return 0.7071068;
+                }
+                if (k == 2) {
+                    return 0.0;
+                }
+                if (k == 3) {
+                    return 0.0 - 0.7071068;
+                }
+                if (k == 4) {
+                    return 0.0 - 1.0;
+                }
+                if (k == 5) {
+                    return 0.0 - 0.7071068;
+                }
+                if (k == 6) {
+                    return 0.7071068;
+                }
+                return 0.0;
+            }
+
             private method clearLine(float x0, float y0, int tx, int ty) returns boolean {
                 float dx = cast<float>(tx) + 0.5 - x0;
                 float dy = cast<float>(ty) + 0.5 - y0;
@@ -3460,6 +3637,24 @@ public bundle Agents {
                     // step of the walk and the distance in hand is the whole journey.
                     if (this.folk.timerOf(i) == 0.0) {
                         this.folk.setJourney(i, dist);
+                        // NOBODY WALKS TO ANOTHER CONTINENT.
+                        //
+                        // Twenty-three of the twenty-four places that hand somebody a destination
+                        // never asked whether there was a way to it, so an army ordered against a
+                        // nation across water set off walking at the sea and spent the whole of its
+                        // patience pressed against the shore. The landmass labelling already knows
+                        // the answer and costs two lookups: a journey to ground this person cannot
+                        // reach on foot ends here, at the start, instead of four minutes later on a
+                        // beach. Crossing water is a Fleet's job, not a walker's.
+                        int hereMass = this.g.massAt(cast<int>(x), cast<int>(y));
+                        int thereMass = this.g.massAt(this.folk.targetXOf(i),
+                                                      this.folk.targetYOf(i));
+                        if (hereMass >= 0 && thereMass >= 0 && hereMass != thereMass) {
+                            this.unreachable = this.unreachable + 1;
+                            this.folk.setAct(i, cast<int>(Act.Idle));
+                            i = i + 1;
+                            continue;
+                        }
                     }
                     this.folk.addTimer(i, beat);
                     // Patience is measured against the length of THIS journey, three times what it
@@ -3497,7 +3692,53 @@ public bundle Agents {
                     // gets them.
                     mutable float fx = ux;
                     mutable float fy = uy;
-                    if (!this.walkable(cast<int>(nx), cast<int>(ny))) {
+                    // GOING ROUND, RATHER THAN SLIDING ALONG.
+                    //
+                    // Sliding escapes a CONVEX obstacle and nothing else. Against a concave one --
+                    // a bay, an ice shelf, the inside of a mountain arc -- there is no tangent that
+                    // leads out, so the walker slides until the tangent turns and then oscillates
+                    // there until patience ends the journey. That was the line of soldiers strung
+                    // along the ice in João's window: not people giving up on going round, but
+                    // people with nothing in them that knew how to.
+                    //
+                    // So a walker who hits something starts FOLLOWING it, with a hand that is
+                    // arbitrary and fixed, and goes on following until the goal is BOTH clear ahead
+                    // again AND nearer than it was at the moment of the hit. Those two conditions
+                    // together are what makes it terminate: without the second, a walker circles an
+                    // island for ever, leaving and re-entering at the same point.
+                    mutable boolean following = this.folk.navModeOf(i) == AgentTable.NAV_FOLLOW;
+                    if (following && dist < this.folk.hitDistOf(i) - Simulation.NAV_GAIN
+                        && this.clearAhead(x, y, ux, uy, Simulation.NAV_LOOK)) {
+                        this.folk.stopFollowing(i);
+                        following = false;
+                        this.rounded = this.rounded + 1;
+                    }
+                    if (!following && !this.walkable(cast<int>(nx), cast<int>(ny))) {
+                        this.folk.beginFollowing(i, dist);
+                        following = true;
+                    }
+                    if (following) {
+                        // The reference is the way they are already going once they are following,
+                        // and the way to the goal on the tick they start -- which points into the
+                        // wall, so the first rotation away from it is the one that hugs.
+                        mutable float rx = this.folk.headXOf(i);
+                        mutable float ry = this.folk.headYOf(i);
+                        if (this.folk.hitDistOf(i) == dist) {
+                            rx = ux;
+                            ry = uy;
+                        }
+                        if (!this.followStep(i, x, y, span, rx, ry)) {
+                            // Walled in on every side. Keep the heading and let patience end it;
+                            // there is genuinely nowhere to put a foot.
+                            nx = x;
+                            ny = y;
+                        } else {
+                            fx = this.stepX;
+                            fy = this.stepY;
+                            nx = x + fx * span;
+                            ny = y + fy * span;
+                        }
+                    } else if (!this.walkable(cast<int>(nx), cast<int>(ny))) {
                         if (this.walkable(cast<int>(nx), cy)) {
                             ny = y;
                             fy = 0.0;
@@ -4003,7 +4244,8 @@ public bundle Agents {
                     }
                     c = c + 1;
                 }
-                this.restake();
+                this.spread();
+                this.reveal();
                 this.hearWho();
                 this.steep();
                 this.discover();
@@ -4026,6 +4268,9 @@ public bundle Agents {
                 // being consistently one second old beats being right about some fields and wrong
                 // about others.
                 this.realmCensus();
+                // And any town whose country did not survive that count raises its own flag. After
+                // the census, because it needs to know which nations still have anybody in them.
+                this.orphan();
                 // A route runs between two towns of ONE country, so it cannot be worked out before
                 // it is settled which towns exist and who they answer to -- the same reason the
                 // nations themselves are read after hiving, absorbing and colonising.
@@ -4720,8 +4965,8 @@ public bundle Agents {
                 if (bx < 1 || by < 1 || bx >= this.claimW - 1 || by >= this.claimH - 1) {
                     return 0;
                 }
-                if (this.claim[by * this.claimW + bx] >= 0) {
-                    return 0;                        // somebody already lives off this ground
+                if (this.realm.holderAt(bx, by) >= 0) {
+                    return 0;                        // somebody already holds this ground
                 }
                 if (!this.walkable(bx * 16 + 8, by * 16 + 8)) {
                     return 0;
@@ -7404,6 +7649,42 @@ public bundle Agents {
             // into the last bin, because a percentile taken over a saturating histogram lies -- and
             // this histogram exists precisely so the border reach is measured instead of guessed.
             public static int REACH_BINS = 512;
+            // How much nearer the goal has to be before a walker stops following a wall. Half a
+            // cell: enough that rounding cannot make a walker think it has gained ground when it
+            // has not, small enough that it lets go of the wall at the first real opening.
+            public static float NAV_GAIN = 0.5;
+            // And how far ahead the way has to be clear before it lets go. Three cells: the width
+            // of the headland a walker has just come round, and no more -- looking further would
+            // keep them pinned to a wall they had already cleared.
+            public static float NAV_LOOK = 3.0;
+            // HOW FAR A BORDER GROWS FROM A SETTLEMENT, in 16-cell blocks, by era.
+            //
+            // Era 1 is MEASURED: the reach histogram in `audit` reads how far people actually keep
+            // from home when they are NOT in transit. Read across a run rather than off one block,
+            // and read against the headcount it was taken over, it says 60 to 76 cells whenever
+            // there are thousands of people to measure -- and 180 to 216 in the blocks where the
+            // population had crashed to a couple of thousand scattered survivors. Those are small
+            // samples of a scattered world, not a longer walk. Sixty-four cells is four blocks.
+            //
+            // This said six first, from an earlier reading of 80 to 84 that still counted people in
+            // transit. Excluding them moved the number, so the number moved with it: a measurement
+            // that is corrected and not carried forward is the whole point of measuring.
+            //
+            // Eras 2 to 4 are NOT measured and cannot be, yet: nothing in a three-and-a-half-hour
+            // run ever left era 1 (`era.best` was 1 in all forty-four chronicle blocks), so there is
+            // nobody in those rows of the histogram. Rather than invent three numbers they are
+            // carried up by a ratio this world already states about itself -- `Ways.paceOn` says a
+            // trail is 1.20 of bare ground, a road 1.45 and paving 1.75, and those are the surfaces
+            // the eras unlock. Four times 1.45/1.20 is five; times 1.75/1.20 is six.
+            //
+            // Flat on purpose. The sprawl of a steam empire is meant to come from PLANTING further
+            // out and from crossing water, not from one town's border ballooning. The moment era 2
+            // has anybody in it, `reach.era2.p95` becomes real and this table should be re-derived
+            // from it rather than kept.
+            public static int REACH_ERA1 = 4;
+            public static int REACH_ERA2 = 5;
+            public static int REACH_ERA3 = 6;
+            public static int REACH_ERA4 = 6;
             // How many ticks between steps for somebody nobody is looking at. Four: enough to take
             // the largest cost in the simulation down to a quarter, small enough that four steps'
             // worth of ground is still under a cell, so walls are no more passable than they were.
@@ -8135,7 +8416,7 @@ public bundle Agents {
                 if (bx < 0 || by < 0 || bx >= this.claimW || by >= this.claimH) {
                     return 0 - 1;
                 }
-                int held = this.claim[by * this.claimW + bx];
+                int held = this.holdSite[by * this.claimW + bx];
                 if (held < 0 || held == h) {
                     return 0 - 1;                        // our ground, or nobody's
                 }
@@ -8817,6 +9098,15 @@ public bundle Agents {
                 // that quietly stops doing its job reads exactly like a pass that had nothing to
                 // do, so the bound is counted rather than trusted.
                 System.IO.Console.println($"A|crowd.capped|{this.folk.crowdCappings()}");
+                // WALKING. `stuck` is journeys abandoned when patience ran out -- the number that
+                // was invisibly large while nothing in this world could go round anything.
+                // `rounded` is journeys that got round an obstacle and carried on, a thing that
+                // could not happen before; `unreachable` is journeys refused at the door because
+                // the ground was across water, which used to be four minutes of walking into a sea.
+                System.IO.Console.println($"A|move.arrived|{this.arrivals}");
+                System.IO.Console.println($"A|move.stuck|{this.stuckTotal}");
+                System.IO.Console.println($"A|move.rounded|{this.rounded}");
+                System.IO.Console.println($"A|move.unreachable|{this.unreachable}");
                 // Settlements, so a run says how many places there ARE and not only how many were
                 // ever founded. The difference between two blocks is how many died in between.
                 mutable int places = 0;
@@ -8950,6 +9240,36 @@ public bundle Agents {
                 System.IO.Console.println($"A|border.block.gained|{this.blockGained}");
                 System.IO.Console.println($"A|border.block.lost|{this.blockLost}");
                 System.IO.Console.println($"A|border.block.flipped|{this.blockFlipped}");
+                // TERRITORY, as a thing a country holds rather than a thing read off its buildings.
+                //
+                // `land.claimed` is how much of the world is spoken for and `land.free` how much is
+                // going spare -- if free ever reaches zero the world is full and expansion has
+                // nowhere to go. `land.rotted` is the one that matters most: it is the replacement
+                // for merging, and if it stays at zero then settlements are dying and freeing
+                // nothing, which is the old defect wearing a new coat.
+                //
+                // `nation.known` says whether any country's map grows at all. Flat means scouts
+                // never leave, and the empty continents stay empty because nobody ever looked --
+                // which is the state the world was in, dressed up as a design.
+                mutable int claimed = 0;
+                for (int by in 0..this.claimH) {
+                    for (int bx in 0..this.claimW) {
+                        if (this.realm.holderAt(bx, by) >= 0) {
+                            claimed = claimed + 1;
+                        }
+                    }
+                }
+                mutable int known = 0;
+                for (int nat in 0..this.realm.limit()) {
+                    if (this.realm.alive(nat)) {
+                        known = known + this.realm.blocksSeen(nat);
+                    }
+                }
+                System.IO.Console.println($"A|land.claimed|{claimed}");
+                System.IO.Console.println($"A|land.free|{this.claimW * this.claimH - claimed}");
+                System.IO.Console.println($"A|land.rotted|{this.rotted}");
+                System.IO.Console.println($"A|nation.known|{known}");
+                System.IO.Console.println($"A|nation.orphaned|{this.orphaned}");
                 System.IO.Console.println($"A|born|{this.births}");
                 System.IO.Console.println($"A|died.old|{this.deathsOld}");
                 System.IO.Console.println($"A|died.hunger|{this.deathsHunger}");
@@ -9169,7 +9489,7 @@ public bundle Agents {
                 mutable int[] land = new int[this.ncomm]();
                 mutable int held = 0;
                 for (int b in 0..this.claimW * this.claimH) {
-                    int who = this.claim[b];
+                    int who = this.holdSite[b];
                     if (who >= 0) {
                         land[who] = land[who] + 1;
                         held = held + 1;
