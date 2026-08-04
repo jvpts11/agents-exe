@@ -391,6 +391,7 @@ public bundle Agents {
             private mutable long learnSlack;    // surplus a nation can spend on thinking
             private mutable long learnSchool;   // and what its shrines and libraries work out
             private mutable long learnGain;     // the two together, as `study` receives it
+            private mutable long sighted;       // far shores seen across water from a beach
             // AND WHY NO WAR IS EVER DECLARED. Same treatment again: `border.cause.conquest` reads
             // zero in every run, and "nations do not fight" is not a finding until the gate that
             // refuses them is a number.
@@ -689,6 +690,7 @@ public bundle Agents {
                 this.learnSlack = 0;
                 this.learnSchool = 0;
                 this.learnGain = 0;
+                this.sighted = 0;
                 this.warAsked = 0;
                 this.warNoRank = 0;
                 this.warNoSeat = 0;
@@ -3082,7 +3084,90 @@ public bundle Agents {
                     }
                     i = i + 1;
                 }
+                // AND YOU CAN SEE THE FAR SHORE FROM THIS ONE.
+                //
+                // Walking reveals ground, and walking cannot cross water -- so a nation could never
+                // learn that anything existed on the other side of the sea, and therefore could
+                // never choose to sail there, and therefore never walked there, and therefore never
+                // learned. The same shape of deadlock as the one that kept the world at three
+                // settlements: two conditions each waiting on the other.
+                //
+                // Measured before this: thirty-five hulls carried colonists across water in a
+                // thirty-minute run and thirty-four landed, and `land.virgin.towns` still read
+                // zero -- every crossing went to a coast the nation had already walked, because
+                // those were the only coasts it knew about.
+                //
+                // Sight from a shore breaks it, and it is not a new sense: a person standing on a
+                // beach can see land across a strait. Eight directions from each settlement, out to
+                // the distance an expedition can travel, taking the FIRST land found in each -- so
+                // what a coastal people learns is that there is something over there, not a survey
+                // of it. An inland town learns nothing it did not already know.
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0) {
+                        continue;
+                    }
+                    this.lookOutToSea(c);
+                }
                 return;
+            }
+
+            // The eight lines of sight from one settlement. Cheap on purpose: eight rays of at most
+            // COLONY_SPAN blocks apiece, once per settlement per census, against the alternative of
+            // asking fifty thousand people what they can see.
+            private method lookOutToSea(int c) returns void {
+                int nat = this.cnat[c];
+                if (nat < 0 || nat >= this.realm.limit()) {
+                    return;
+                }
+                int cbx = cast<int>(this.ccx[c]) / 16;
+                int cby = cast<int>(this.ccy[c]) / 16;
+                for (int d in 0..8) {
+                    int sx = this.rayX(d);
+                    int sy = this.rayY(d);
+                    mutable boolean crossed = false;
+                    mutable int k = 1;
+                    while (k <= Simulation.COLONY_SPAN) {
+                        int bx = cbx + sx * k;
+                        int by = cby + sy * k;
+                        if (bx < 0 || by < 0 || bx >= this.claimW || by >= this.claimH) {
+                            k = Simulation.COLONY_SPAN + 1;
+                            continue;
+                        }
+                        boolean land = this.walkable(bx * 16 + 8, by * 16 + 8);
+                        if (!land) {
+                            crossed = true;      // open water between here and whatever is beyond
+                        } else if (crossed) {
+                            // The first land on the far side of the water. That is what somebody on
+                            // a beach can see, and it is all they can see.
+                            this.realm.sight(nat, bx, by);
+                            this.sighted = this.sighted + 1;
+                            k = Simulation.COLONY_SPAN + 1;
+                            continue;
+                        }
+                        k = k + 1;
+                    }
+                }
+                return;
+            }
+
+            private method rayX(int d) returns int {
+                if (d == 0 || d == 1 || d == 7) {
+                    return 1;
+                }
+                if (d == 3 || d == 4 || d == 5) {
+                    return 0 - 1;
+                }
+                return 0;
+            }
+
+            private method rayY(int d) returns int {
+                if (d == 1 || d == 2 || d == 3) {
+                    return 1;
+                }
+                if (d == 5 || d == 6 || d == 7) {
+                    return 0 - 1;
+                }
+                return 0;
             }
 
             // A SETTLEMENT WHOSE COUNTRY IS GONE BECOMES A COUNTRY.
@@ -9544,6 +9629,7 @@ public bundle Agents {
                         }
                     }
                 }
+                System.IO.Console.println($"A|nation.sighted|{this.sighted}");
                 System.IO.Console.println($"A|nation.living|{this.realm.living()}");
                 System.IO.Console.println($"A|nation.onetown|{oneTown}");
                 System.IO.Console.println($"A|nation.fewtowns|{fewTowns}");
