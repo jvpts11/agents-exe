@@ -343,10 +343,12 @@ public bundle Agents {
             // never still, and it moved constantly in a world where nothing whatever had happened
             // to move it. See `restake`.
             private mutable int[] claim;        // holder plus the worked ring: what is drawn
-            private mutable int[] claimTally;   // scratch for the per-block majority of buildings
             private mutable int[] claimWas;     // what was drawn last census, to notice a real change
             private mutable int[] claimEdge;
             private mutable int restakes;      // how many times the claim was recomputed at all
+            private mutable long blockGained;  // blocks that went from nobody to somebody
+            private mutable long blockLost;    // blocks that went from somebody to nobody
+            private mutable long blockFlipped; // blocks that passed straight from one holder to another
             private mutable int claimW;
             private mutable int claimH;
             private mutable int claimAge;      // bumped on every rebuild, so the renderer can notice
@@ -595,7 +597,6 @@ public bundle Agents {
                 this.claimW = (grid.width() + 15) / 16;
                 this.claimH = (grid.height() + 15) / 16;
                 this.claim = new int[this.claimW * this.claimH]();
-                this.claimTally = new int[this.claimW * this.claimH]();
                 this.claimWas = new int[this.claimW * this.claimH]();
                 this.claimEdge = new int[this.claimW * this.claimH]();
                 for (int b in 0..this.claimW * this.claimH) {
@@ -604,6 +605,9 @@ public bundle Agents {
                 }
                 this.claimAge = 0;
                 this.restakes = 0;
+                this.blockGained = 0;
+                this.blockLost = 0;
+                this.blockFlipped = 0;
                 this.rate = 1.0;
                 this.owed = 0.0;
                 this.halted = false;
@@ -795,7 +799,6 @@ public bundle Agents {
                 delete this.craided;
                 delete this.craider;
                 delete this.claim;
-                delete this.claimTally;
                 delete this.claimWas;
                 delete this.claimEdge;
                 delete this.wild;
@@ -2768,7 +2771,6 @@ public bundle Agents {
                 // four. Nothing had to be tuned for that.
                 for (int b in 0..nb) {
                     this.claim[b] = 0 - 1;
-                    this.claimTally[b] = 0;
                 }
                 int nbld = this.town.count();
                 mutable int i = 0;
@@ -2780,17 +2782,25 @@ public bundle Agents {
                             int by = this.town.yAt(i) / 16;
                             if (bx >= 0 && by >= 0 && bx < this.claimW && by < this.claimH) {
                                 int at = by * this.claimW + bx;
-                                // Whoever has the most buildings in the block holds it. A plain
-                                // running majority is honest here in a way it never was over
-                                // people, because buildings do not move: the same block asked twice
-                                // with nothing built or lost in between gives the same answer.
-                                if (this.claim[at] == o) {
-                                    this.claimTally[at] = this.claimTally[at] + 1;
-                                } else if (this.claimTally[at] == 0) {
+                                // WHOEVER BUILT THERE FIRST HOLDS IT. The table is in order of
+                                // founding, so the first owner seen in a block is the one who got
+                                // there first, and every later building in that block -- theirs or
+                                // anybody else's -- changes nothing.
+                                //
+                                // This was a running majority, and a running majority is not a
+                                // majority: in a block shared by two villages the winner depended
+                                // on the order and the running balance, so ONE hut going up in a
+                                // contested block could hand it over, and the next hut could hand
+                                // it back. Buildings do not move, but they are raised and pulled
+                                // down constantly, and that was enough to keep a frontier that had
+                                // no business moving twitching all day -- slower than before, which
+                                // is exactly what João saw.
+                                //
+                                // First-come is the rule a border actually follows. A village loses
+                                // that ground when its own building there goes -- pulled down,
+                                // burnt, or taken -- and not because a neighbour built a shed.
+                                if (this.claim[at] < 0) {
                                     this.claim[at] = o;
-                                    this.claimTally[at] = 1;
-                                } else {
-                                    this.claimTally[at] = this.claimTally[at] - 1;
                                 }
                             }
                         }
@@ -2799,6 +2809,17 @@ public bundle Agents {
                 }
                 // And then it spreads to the ground they work but do not sleep on. One ring a pass,
                 // read from the last pass so a claim cannot race across the map in a single census.
+                // TWICE OVER, AND THE FIRST TIME ONLY FOR THE PEOPLE WHO WERE ALREADY THERE.
+                //
+                // One set of passes carrying both rules at once was not enough: preferring the
+                // previous holder only reaches a block that is NEXT TO them, so a field two blocks
+                // out from its own village and one block from a neighbour's new hut was taken by
+                // the neighbour on the first pass and then skipped as settled. Nine thousand blocks
+                // an arc changed hands that way, still with no conquest anywhere.
+                //
+                // So continuity gets its own passes first, and reaches as far as the work does.
+                // Only ground that nobody worked last census is up for grabs, and that is a field
+                // coming into use rather than one being taken.
                 for (int pass in 0..Simulation.WORK_BLOCKS) {
                     for (int b in 0..nb) {
                         this.claimEdge[b] = this.claim[b];
@@ -2809,15 +2830,72 @@ public bundle Agents {
                             if (this.claimEdge[at] >= 0) {
                                 continue;
                             }
+                            int keep = this.claimWas[at];
+                            if (keep < 0) {
+                                continue;
+                            }
+                            if ((bx > 0 && this.claimEdge[at - 1] == keep)
+                                || (bx + 1 < this.claimW && this.claimEdge[at + 1] == keep)
+                                || (by > 0 && this.claimEdge[at - this.claimW] == keep)
+                                || (by + 1 < this.claimH
+                                    && this.claimEdge[at + this.claimW] == keep)) {
+                                this.claim[at] = keep;
+                            }
+                        }
+                    }
+                }
+                for (int pass in 0..Simulation.WORK_BLOCKS) {
+                    for (int b in 0..nb) {
+                        this.claimEdge[b] = this.claim[b];
+                    }
+                    for (int by in 0..this.claimH) {
+                        for (int bx in 0..this.claimW) {
+                            int at = by * this.claimW + bx;
+                            if (this.claimEdge[at] >= 0) {
+                                continue;
+                            }
+                            // WHOEVER WORKED IT LAST CENSUS KEEPS IT, if they are still next to it.
+                            //
+                            // The core -- the ground people have built on -- is stable now, but the
+                            // worked ring around it was still being redrawn from nothing every
+                            // census, and it took whichever neighbour came first in the order left,
+                            // right, up, down. That order is arbitrary, and which neighbours exist
+                            // changes every time anybody anywhere puts up a hut. Measured over one
+                            // arc: eight thousand blocks fairly gained, two thousand fairly lost,
+                            // and TWELVE THOUSAND passing straight from one holder to another -- in
+                            // a world with zero conquests. That is the border theft João could see
+                            // and no mechanism in this game performs.
+                            //
+                            // Preferring the previous holder makes the ring as sticky as the core:
+                            // a field worked by one village goes on being theirs until that village
+                            // is no longer beside it, and a neighbour building nearby cannot take
+                            // it. When nobody held it, first-found still decides -- that case is a
+                            // block genuinely coming into use for the first time.
                             mutable int take = 0 - 1;
-                            if (bx > 0 && this.claimEdge[at - 1] >= 0) {
-                                take = this.claimEdge[at - 1];
-                            } else if (bx + 1 < this.claimW && this.claimEdge[at + 1] >= 0) {
-                                take = this.claimEdge[at + 1];
-                            } else if (by > 0 && this.claimEdge[at - this.claimW] >= 0) {
-                                take = this.claimEdge[at - this.claimW];
-                            } else if (by + 1 < this.claimH && this.claimEdge[at + this.claimW] >= 0) {
-                                take = this.claimEdge[at + this.claimW];
+                            int was = this.claimWas[at];
+                            if (was >= 0) {
+                                if (bx > 0 && this.claimEdge[at - 1] == was) {
+                                    take = was;
+                                } else if (bx + 1 < this.claimW && this.claimEdge[at + 1] == was) {
+                                    take = was;
+                                } else if (by > 0 && this.claimEdge[at - this.claimW] == was) {
+                                    take = was;
+                                } else if (by + 1 < this.claimH
+                                           && this.claimEdge[at + this.claimW] == was) {
+                                    take = was;
+                                }
+                            }
+                            if (take < 0) {
+                                if (bx > 0 && this.claimEdge[at - 1] >= 0) {
+                                    take = this.claimEdge[at - 1];
+                                } else if (bx + 1 < this.claimW && this.claimEdge[at + 1] >= 0) {
+                                    take = this.claimEdge[at + 1];
+                                } else if (by > 0 && this.claimEdge[at - this.claimW] >= 0) {
+                                    take = this.claimEdge[at - this.claimW];
+                                } else if (by + 1 < this.claimH
+                                           && this.claimEdge[at + this.claimW] >= 0) {
+                                    take = this.claimEdge[at + this.claimW];
+                                }
                             }
                             this.claim[at] = take;
                         }
@@ -2827,9 +2905,23 @@ public bundle Agents {
                 // bumped unconditionally, so the renderer tore down and rebuilt every border quad in
                 // view on every census whether or not one block had moved -- and once the field went
                 // still, that work would have been entirely invisible.
+                // AND OF WHAT KIND. Three things can happen to a block, and they look nothing like
+                // each other from the air: ground nobody held becomes somebody's (a village
+                // spreading), ground somebody held becomes nobody's (a place gone), and ground
+                // passing from one holder straight to another. Only the third is a border being
+                // TAKEN, and there is no mechanism in this world that does it except conquest --
+                // so if it happens without one, that is the defect, and it is now countable
+                // instead of arguable.
                 mutable boolean moved = false;
                 for (int b in 0..nb) {
                     if (this.claimWas[b] != this.claim[b]) {
+                        if (this.claimWas[b] < 0) {
+                            this.blockGained = this.blockGained + 1;
+                        } else if (this.claim[b] < 0) {
+                            this.blockLost = this.blockLost + 1;
+                        } else {
+                            this.blockFlipped = this.blockFlipped + 1;
+                        }
                         this.claimWas[b] = this.claim[b];
                         moved = true;
                     }
@@ -8610,6 +8702,18 @@ public bundle Agents {
                 // building raised at the edge of a settlement, per town lost or taken.
                 System.IO.Console.println($"A|border.moves|{this.claimAge}");
                 System.IO.Console.println($"A|border.asked|{this.restakes}");
+                // AND WHAT COULD HAVE MOVED IT. Territory is the ground a community has built on,
+                // so only a short list of events reaches it: a plot marked out, a workshop pulled
+                // down, a community wiped out (its buildings all fall), a conquest (its buildings
+                // change hands). If `border.moves` runs far above the sum of these, something is
+                // moving a frontier that has no right to -- which is the question that started
+                // this, and this is how it gets answered with a number instead of an impression.
+                System.IO.Console.println($"A|border.cause.built|{this.housed}");
+                System.IO.Console.println($"A|border.cause.pulled|{this.pulled}");
+                System.IO.Console.println($"A|border.cause.conquest|{this.conquests}");
+                System.IO.Console.println($"A|border.block.gained|{this.blockGained}");
+                System.IO.Console.println($"A|border.block.lost|{this.blockLost}");
+                System.IO.Console.println($"A|border.block.flipped|{this.blockFlipped}");
                 System.IO.Console.println($"A|born|{this.births}");
                 System.IO.Console.println($"A|died.old|{this.deathsOld}");
                 System.IO.Console.println($"A|died.hunger|{this.deathsHunger}");
