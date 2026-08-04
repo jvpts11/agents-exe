@@ -338,6 +338,7 @@ public bundle Agents {
                 mutable int lastY = win.cursorY();
                 mutable float shownRate = 0.0 - 1.0;
                 mutable boolean shownHalt = false;
+                mutable long frameOpened = Time.nanos();   // when this frame's drawing began
                 while (win.isOpen()) {
                     win.pump();
                     if (win.keyDown(0x1B)) {
@@ -416,7 +417,27 @@ public bundle Agents {
                     // The simulation is told which cells are on screen at full detail, so the people
                     // there walk around obstacles while everyone else simply advances.
                     sim.setNearWindow(r.detailX0(), r.detailY0(), r.detailX1(), r.detailY1());
+                    // THE WINDOW KEEPS ITS FRAME RATE AND THE WORLD GETS WHAT IS LEFT.
+                    //
+                    // The simulation's catch-up allowance used to be a constant, and a constant is
+                    // a guess about a machine: twenty-five milliseconds held the window at thirty
+                    // frames whatever else was true, and a faster machine got no more world for it.
+                    // Here the frame is budgeted the other way round -- take what drawing and the
+                    // window actually cost, and hand the remainder of a sixtieth of a second to the
+                    // world. A quiet frame runs more of it, a heavy one runs less, and the picture
+                    // stays smooth either way.
+                    //
+                    // The floor of four milliseconds matters: without it a machine that cannot
+                    // reach the target at all would stop simulating entirely and the world would
+                    // freeze rather than merely run slow.
+                    long beforeSim = Time.nanos();
+                    mutable long spare = 16666666 - (beforeSim - frameOpened);
+                    if (spare < 4000000) {
+                        spare = 4000000;
+                    }
+                    sim.setSlice(spare);
                     sim.advance(0.016);
+                    frameOpened = Time.nanos();
                     r.render(cw, ch);
                     // The title carries the clock AND the two rates. A speed control you cannot read
                     // is a speed control you do not trust, and a frame rate you only notice once it
