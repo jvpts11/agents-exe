@@ -82,6 +82,7 @@ public bundle Agents {
             private mutable int high;          // highest row ever handed out
             private mutable int[] freeSlot;    // recycled rows, a stack
             private mutable int freeTop;
+            private mutable int widenings;   // times the table has had to grow
 
             // where and who
             private mutable float[] px;
@@ -222,6 +223,7 @@ public bundle Agents {
                 this.live = 0;
                 this.high = 0;
                 this.freeTop = 0;
+                this.widenings = 0;
                 this.freeSlot = new int[cap]();
                 this.px = new float[cap]();
                 this.py = new float[cap]();
@@ -355,16 +357,134 @@ public bundle Agents {
             // Take a row: a recycled one if anybody has died, otherwise the next fresh one. Returns
             // -1 when the table is full, which the caller must handle rather than ignore -- a silent
             // failure here is a population that quietly stops growing.
+            // Fifty-three columns, one length. Written out per type rather than per column because
+            // a helper taking `T[]` and handing back a wider one is the same five lines each time,
+            // and the four of them below are the whole of it.
+            private static method widerI(int[] old, int cap) returns int[] {
+                mutable int[] w = new int[cap]();
+                for (int i in 0..old.length()) {
+                    w[i] = old[i];
+                }
+                delete old;
+                return w;
+            }
+
+            private static method widerF(float[] old, int cap) returns float[] {
+                mutable float[] w = new float[cap]();
+                for (int i in 0..old.length()) {
+                    w[i] = old[i];
+                }
+                delete old;
+                return w;
+            }
+
+            private static method widerS(short[] old, int cap) returns short[] {
+                mutable short[] w = new short[cap]();
+                for (int i in 0..old.length()) {
+                    w[i] = old[i];
+                }
+                delete old;
+                return w;
+            }
+
+            private static method widerB(byte[] old, int cap) returns byte[] {
+                mutable byte[] w = new byte[cap]();
+                for (int i in 0..old.length()) {
+                    w[i] = old[i];
+                }
+                delete old;
+                return w;
+            }
+
+            // ROOM FOR MORE PEOPLE. Doubling, so a world that grows steadily pays this a handful of
+            // times over its whole life rather than on every birth. Seventy-two bytes a head means
+            // the doubling from fifty thousand costs three and a half megabytes, and the one after
+            // that seven -- against a world whose ONLY alternative was to stop having children.
+            private method widen() returns void {
+                int cap = this.cap * 2;
+                this.freeSlot = AgentTable.widerI(this.freeSlot, cap);
+                this.px = AgentTable.widerF(this.px, cap);
+                this.py = AgentTable.widerF(this.py, cap);
+                this.home = AgentTable.widerS(this.home, cap);
+                this.job = AgentTable.widerB(this.job, cap);
+                this.role = AgentTable.widerB(this.role, cap);
+                this.flags = AgentTable.widerB(this.flags, cap);
+                this.hx = AgentTable.widerF(this.hx, cap);
+                this.hy = AgentTable.widerF(this.hy, cap);
+                this.task = AgentTable.widerB(this.task, cap);
+                this.taskTimer = AgentTable.widerF(this.taskTimer, cap);
+                this.journey = AgentTable.widerF(this.journey, cap);
+                this.targetNode = AgentTable.widerI(this.targetNode, cap);
+                this.workplace = AgentTable.widerI(this.workplace, cap);
+                this.bound = AgentTable.widerI(this.bound, cap);
+                this.targetX = AgentTable.widerS(this.targetX, cap);
+                this.targetY = AgentTable.widerS(this.targetY, cap);
+                this.carryKind = AgentTable.widerB(this.carryKind, cap);
+                this.carryAmt = AgentTable.widerS(this.carryAmt, cap);
+                this.kit = AgentTable.widerB(this.kit, cap);
+                this.toolLife = AgentTable.widerS(this.toolLife, cap);
+                this.age = AgentTable.widerF(this.age, cap);
+                this.lifespan = AgentTable.widerF(this.lifespan, cap);
+                this.hp = AgentTable.widerB(this.hp, cap);
+                this.hunger = AgentTable.widerB(this.hunger, cap);
+                this.tired = AgentTable.widerB(this.tired, cap);
+                this.fear = AgentTable.widerB(this.fear, cap);
+                this.lonely = AgentTable.widerB(this.lonely, cap);
+                this.ill = AgentTable.widerB(this.ill, cap);
+                this.bold = AgentTable.widerB(this.bold, cap);
+                this.social = AgentTable.widerB(this.social, cap);
+                this.greed = AgentTable.widerB(this.greed, cap);
+                this.curious = AgentTable.widerB(this.curious, cap);
+                this.ambition = AgentTable.widerB(this.ambition, cap);
+                this.influence = AgentTable.widerB(this.influence, cap);
+                this.nerve = AgentTable.widerB(this.nerve, cap);
+                this.held = AgentTable.widerB(this.held, cap);
+                this.serial = AgentTable.widerI(this.serial, cap);
+                this.spouse = AgentTable.widerI(this.spouse, cap);
+                this.spouseSer = AgentTable.widerI(this.spouseSer, cap);
+                this.friend = AgentTable.widerI(this.friend, cap);
+                this.friendSer = AgentTable.widerI(this.friendSer, cap);
+                this.foe = AgentTable.widerI(this.foe, cap);
+                this.foeSer = AgentTable.widerI(this.foeSer, cap);
+                this.mother = AgentTable.widerI(this.mother, cap);
+                this.motherSer = AgentTable.widerI(this.motherSer, cap);
+                this.father = AgentTable.widerI(this.father, cap);
+                this.fatherSer = AgentTable.widerI(this.fatherSer, cap);
+                this.sire = AgentTable.widerI(this.sire, cap);
+                this.sireSer = AgentTable.widerI(this.sireSer, cap);
+                this.gest = AgentTable.widerF(this.gest, cap);
+                this.nextThink = AgentTable.widerI(this.nextThink, cap);
+                this.cap = cap;
+                this.widenings = this.widenings + 1;
+                return;
+            }
+
+            // How many times the table has had to grow. Zero for the whole life of the project,
+            // because it could not.
+            public method widenings() returns int {
+                return this.widenings;
+            }
+
             public method spawn(float x, float y, int community) returns int {
                 mutable int i = 0 - 1;
                 if (this.freeTop > 0) {
                     this.freeTop = this.freeTop - 1;
                     i = this.freeSlot[this.freeTop];
-                } else if (this.high < this.cap) {
+                } else {
+                    if (this.high >= this.cap) {
+                        // THE TABLE IS NOT A POPULATION CAP. It was being used as one, and nobody
+                        // meant it to be: the world is built with `new AgentTable(50000)` and then
+                        // seeded with exactly fifty thousand people, so it is a hundred per cent
+                        // full on the first tick and stays there. From that moment every birth
+                        // needed a death first, silently -- `spawn` returned -1 and the child was
+                        // simply never born. A world that cannot grow cannot found anything: a
+                        // village never has people to spare, so it never hives off, while joining
+                        // up carries on regardless. Twelve runs out of twelve consolidated down to
+                        // a handful of huge settlements and then died. This was the reason.
+                        this.widen();
+                    }
                     i = this.high;
                     this.high = this.high + 1;
-                } else {
-                    return 0 - 1;
                 }
                 this.px[i] = x;
                 this.py[i] = y;
