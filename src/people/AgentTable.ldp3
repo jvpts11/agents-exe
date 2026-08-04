@@ -4,6 +4,7 @@ import Agents.World.Biomes;
 import Agents.World.NodeField;
 import Agents.World.Harvest;
 import Agents.World.LandMath;
+import System.Math.Math;
 
 // Everybody alive, as one table. An agent is an INDEX, not a pointer -- the same Structure-of-Arrays
 // shape as Grid and NodeField, and for the same reason: the ceiling is fifty thousand of them, and a
@@ -217,6 +218,43 @@ public bundle Agents {
             private mutable float[] gest;      // seconds of pregnancy left, 0 = not
             // scheduling
             private mutable int[] nextThink;
+            // WHERE EVERYBODY IS, BY BIN, so "who is standing next to me" is a short chain walk and
+            // not fifty thousand distance tests. The same shape Wildlife uses for prey and NodeField
+            // uses for resources, and for the same reason: this codebase keeps having to relearn
+            // that a per-person search over the whole table is the one mistake that does not show up
+            // until the world is full.
+            //
+            // A linked list per bin rather than a counting sort: the bins are rebuilt every tick and
+            // a counting sort needs two passes plus a prefix sum where a head-and-next list needs
+            // one, and nothing here has to come out in order.
+            //
+            // `binHead` is per BIN and so is sized the first time it is used, when the world is
+            // finally in hand; `binNext` is per PERSON and so is widened with every other column.
+            private mutable int[] binHead;
+            private mutable int[] binNext;
+            // AND WHICH BIN EACH PERSON WAS LINKED INTO, which is not the same question as which
+            // bin they are standing in now. The pass MOVES people as it goes, so by the time row
+            // nine hundred is reached, row four hundred may already have been shoved across a bin
+            // boundary -- and asking the live position which bin to search would then walk the
+            // chains of a bin this person is not linked in. Pairs went missing exactly that way:
+            // the crowd test settled to thirteen overlapping pairs and stayed there.
+            private mutable int[] binAt;
+            // AND THE LIVING, COMPACTED, so the pass costs what the population costs rather than
+            // what the table costs.
+            //
+            // The table never shrinks -- a dead row is recycled, so `limit()` is the high-water mark
+            // and a mature world carries two hundred thousand rows with nine thousand people in
+            // them. Undoing the index, building it and running the shoves are three sweeps, and
+            // done over the rows that is three passes of two hundred thousand to touch nine
+            // thousand. Building this list once means the other two walk the people instead.
+            private mutable int[] crowdOrder;
+            private mutable int crowdN;
+            private mutable int bw;
+            private mutable int bh;
+            // A long and not an int: this counts chain walks that stopped short, and a four-hour run
+            // reaches a hundred and forty million in twelve minutes of world time. An int would go
+            // round inside an arc and report a small number, which is worse than reporting none.
+            private mutable long crowdCapped;
 
             public constructor AgentTable(int cap) {
                 this.cap = cap;
@@ -225,6 +263,14 @@ public bundle Agents {
                 this.freeTop = 0;
                 this.widenings = 0;
                 this.freeSlot = new int[cap]();
+                this.bw = 0;
+                this.bh = 0;
+                this.crowdCapped = 0;
+                this.binHead = new int[1]();
+                this.binNext = new int[cap]();
+                this.binAt = new int[cap]();
+                this.crowdOrder = new int[cap]();
+                this.crowdN = 0;
                 this.px = new float[cap]();
                 this.py = new float[cap]();
                 this.home = new short[cap]();
@@ -282,6 +328,10 @@ public bundle Agents {
 
             public destructor ~AgentTable() returns void {
                 delete this.freeSlot;
+                delete this.binHead;
+                delete this.binNext;
+                delete this.binAt;
+                delete this.crowdOrder;
                 delete this.px;
                 delete this.py;
                 delete this.home;
@@ -354,6 +404,310 @@ public bundle Agents {
                 return (cast<int>(this.flags[i]) & AgentTable.F_ALIVE) != 0;
             }
 
+            // ---- nobody stands inside anybody else ----
+            //
+            // Every soldier in a muster is told to walk to the general's own cell, and the arrival
+            // test is a fifth of a cell, so an army arriving is fifty people inside a half-cell
+            // circle. Drawn at a cell apiece that is a wheel of bodies clipped through one another,
+            // which is what João watched happen before anything here measured it.
+            //
+            // The fix is not to move the muster target. A crowd around a leader IS what an army
+            // looks like; what was missing is that two people cannot occupy one spot. Which also
+            // means it cannot live inside the walking loop: the clump that had to be fixed is
+            // people who have ARRIVED and stopped, and the walking loop never sees them.
+
+            // How much room one person takes: THE WIDTH OF THE BODY ACTUALLY DRAWN.
+            //
+            // Measured off the meshes rather than reasoned about. The four agent models span, in
+            // mesh units, 3.20 / 2.81 / 3.48 / 1.89 across; the renderer draws them at scale 0.30
+            // into a world where one cell is two units, so on the ground they are 0.480 / 0.422 /
+            // 0.522 / 0.284 cells wide. The widest is the Scout at 0.522, and two people that far
+            // apart are exactly touching -- which is the whole of what "not clipping" means.
+            //
+            // This said 1.0 first, on the reasoning that a cell is this world's unit of ground
+            // everywhere else. The reasoning was clean and the number was WRONG BY DOUBLE, which is
+            // four times the area, and it did real damage: fifty thousand people cannot fit in a
+            // town at four times the room a person takes, so the pass shoved them outward without
+            // ever converging and an arc ended with 863 alive against a floor of a thousand -- with
+            // the pass off, the same arc passed. The rule this campaign keeps relearning, in a new
+            // costume: do not reason out a magnitude that can be measured.
+            public static float PERSONAL = 0.52;
+
+            // The bin, in cells. Anything at or above PERSONAL is correct: that is what makes "own
+            // bin plus four half-neighbours" cover every neighbouring pair EXACTLY once, with no
+            // pair seen twice and none missed, because the other four neighbours see this bin from
+            // their own side.
+            //
+            // ONE, and it was two. Two was chosen because the bin array is cleared every tick and
+            // one-cell bins are fifteen megabytes of it -- but the clear stopped being a sweep over
+            // the array (see `reindexCrowd`), so the size of the map costs nothing per tick and the
+            // only thing the bin size still decides is how long the chains are. Measured on the real
+            // game, two-cell bins had the pass hitting its chain bound two hundred and twenty-five
+            // million times in fifty world-minutes: a town square puts hundreds of people in four
+            // cells, so most of a chain was never walked and most of a crowd was never separated.
+            // One-cell bins cut what shares a chain by four.
+            public static int PERSONAL_BIN = 1;
+
+            // How far down one bin's chain a single pass will walk.
+            //
+            // Not a magnitude anybody picked: at 0.52 cells a person, a two-by-two-cell bin holds
+            // about fourteen people who are NOT already overlapping, so a chain past this length is
+            // people genuinely piled up -- a transient the next few passes clear. It is bounded so
+            // one heaving market square cannot cost the frame, and every time the bound bites it is
+            // COUNTED, because a pass that quietly stops doing its job reads exactly like a pass
+            // that had nothing to do.
+            public static int CROWD_CHAIN = 24;
+
+            public method crowdCappings() returns long {
+                return this.crowdCapped;
+            }
+
+            // Everybody dropped into the bin they are standing in. One pass, no allocation after
+            // the first call.
+            //
+            // THE CLEAR IS OVER THE PEOPLE, NOT OVER THE BINS, and that is not a micro-optimisation
+            // -- it was most of the cost of the whole simulation. Wiping the array wholesale is a
+            // million writes a tick whether the world holds fifty thousand people or four, so the
+            // pass was paying for the SIZE OF THE MAP twenty times a second. Measured on the real
+            // game before this: jostle 128 seconds against moving 15, 58 per cent of the tick and
+            // eight times what walking fifty thousand people costs.
+            //
+            // Every bin that has anything in it was written by somebody, and `binAt` remembers who
+            // went where -- so undoing the last build costs what the population costs and nothing
+            // for the empty world.
+            public method reindexCrowd(Grid* g) returns void {
+                int wantW = (g.width() + AgentTable.PERSONAL_BIN - 1) / AgentTable.PERSONAL_BIN;
+                int wantH = (g.height() + AgentTable.PERSONAL_BIN - 1) / AgentTable.PERSONAL_BIN;
+                if (this.bw != wantW || this.bh != wantH) {
+                    delete this.binHead;
+                    this.bw = wantW;
+                    this.bh = wantH;
+                    this.binHead = new int[wantW * wantH]();
+                    for (int b in 0..wantW * wantH) {
+                        this.binHead[b] = 0 - 1;
+                    }
+                } else {
+                    mutable int u = 0;
+                    while (u < this.crowdN) {
+                        this.binHead[this.binAt[this.crowdOrder[u]]] = 0 - 1;
+                        u = u + 1;
+                    }
+                }
+                this.crowdN = 0;
+                mutable int i = 0;
+                while (i < this.high) {
+                    this.binNext[i] = 0 - 1;
+                    this.binAt[i] = 0 - 1;
+                    if (this.alive(i)) {
+                        int at = this.binOfPerson(i);
+                        if (at >= 0) {
+                            this.binNext[i] = this.binHead[at];
+                            this.binHead[at] = i;
+                            this.binAt[i] = at;
+                            this.crowdOrder[this.crowdN] = i;
+                            this.crowdN = this.crowdN + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            private method binOfPerson(int i) returns int {
+                int bx = cast<int>(this.px[i]) / AgentTable.PERSONAL_BIN;
+                int by = cast<int>(this.py[i]) / AgentTable.PERSONAL_BIN;
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return 0 - 1;
+                }
+                return by * this.bw + bx;
+            }
+
+            // Push apart anybody standing inside anybody else.
+            //
+            // OVER THE PEOPLE INDEXED, not over the bins and not over the table. Sweeping bins reads
+            // a million cells to find the few thousand with anybody in them, which pays for the size
+            // of the map; sweeping the table reads two hundred thousand rows to find nine thousand
+            // people, which pays for everybody who has ever lived. `crowdOrder` is neither.
+            //
+            // Each person is compared against the REST OF THEIR OWN CHAIN -- everybody stored after
+            // them in their bin -- and against all of the east, south-east, south and south-west
+            // bins. That covers every neighbouring pair exactly once: the west, north-west, north
+            // and north-east neighbours see this person from their own side, and the own-bin
+            // remainder means two people in one bin meet once rather than twice.
+            public method separate(Grid* g) returns void {
+                mutable int k = 0;
+                while (k < this.crowdN) {
+                    int i = this.crowdOrder[k];
+                    k = k + 1;
+                    // The bin this person was LINKED into, not the one they are standing in now --
+                    // see the note on `binAt`. Reading the live position here silently dropped
+                    // pairs as soon as a shove carried somebody over a bin edge.
+                    int at = this.binAt[i];
+                    int bx = at % this.bw;
+                    int by = at / this.bw;
+                    this.shoveChain(g, i, this.binNext[i]);
+                    if (bx + 1 < this.bw) {
+                        this.shoveChain(g, i, this.binHead[at + 1]);
+                    }
+                    if (by + 1 < this.bh) {
+                        if (bx + 1 < this.bw) {
+                            this.shoveChain(g, i, this.binHead[at + this.bw + 1]);
+                        }
+                        this.shoveChain(g, i, this.binHead[at + this.bw]);
+                        if (bx > 0) {
+                            this.shoveChain(g, i, this.binHead[at + this.bw - 1]);
+                        }
+                    }
+                }
+                return;
+            }
+
+            private method shoveChain(Grid* g, int i, int first) returns void {
+                mutable int j = first;
+                mutable int seen = 0;
+                while (j >= 0 && seen < AgentTable.CROWD_CHAIN) {
+                    this.pushApart(g, i, j);
+                    j = this.binNext[j];
+                    seen = seen + 1;
+                }
+                if (j >= 0) {
+                    this.crowdCapped = this.crowdCapped + 1;
+                }
+                return;
+            }
+
+            // The shove itself. Two people closer than PERSONAL each give half the overlap, because
+            // a shove is mutual.
+            //
+            // EXACTLY COINCIDENT is the case that matters and the one a naive version gets wrong:
+            // the separating direction is undefined and dividing by a zero distance produces a
+            // position no test could ever explain -- and coincident is not a corner case here, it
+            // is the army case, since everybody was sent to the same cell. The tie is broken by the
+            // two row indices, which is arbitrary and STABLE: the same two people always part the
+            // same way, so a crowd settles instead of shimmering.
+            private method pushApart(Grid* g, int i, int j) returns void {
+                float dx = this.px[j] - this.px[i];
+                float dy = this.py[j] - this.py[i];
+                float d2 = dx * dx + dy * dy;
+                if (d2 >= AgentTable.PERSONAL * AgentTable.PERSONAL) {
+                    return;
+                }
+                mutable float ux = 1.0;
+                mutable float uy = 0.0;
+                mutable float over = AgentTable.PERSONAL;
+                if (d2 > 0.0001) {
+                    float d = cast<float>(Math.sqrt(cast<double>(d2)));
+                    ux = dx / d;
+                    uy = dy / d;
+                    over = AgentTable.PERSONAL - d;
+                } else {
+                    int spin = (i + j) & 7;
+                    ux = AgentTable.SPIN_X[spin];
+                    uy = AgentTable.SPIN_Y[spin];
+                }
+                float half = over * 0.5;
+                this.slideTo(g, i, this.px[i] - ux * half, this.py[i] - uy * half);
+                this.slideTo(g, j, this.px[j] + ux * half, this.py[j] + uy * half);
+                return;
+            }
+
+            // Move somebody, but only onto ground they could be standing on. Refusing the move is
+            // right and is not a failure: somebody pressed against a wall by a crowd stays against
+            // the wall, which is what a crowd against a wall does. Without the test a separation
+            // pass would trade one impossible state for another and push people into the sea --
+            // and this world has already been caught once with three hundred and ninety-four people
+            // standing on water.
+            private method slideTo(Grid* g, int i, float nx, float ny) returns void {
+                int cx = cast<int>(nx);
+                int cy = cast<int>(ny);
+                if (cx < 0 || cy < 0 || cx >= g.width() || cy >= g.height()) {
+                    return;
+                }
+                if (!Biomes.walkable(g.biomeAt(cx, cy))) {
+                    return;
+                }
+                this.px[i] = nx;
+                this.py[i] = ny;
+                return;
+            }
+
+            // How close the closest two people are, in cells. The honest way to hold the separation
+            // pass to account: "how many pairs are under the line" answers with a count that says
+            // nothing about whether they are a hair under or standing in one another. Quadratic,
+            // and so for tests only -- never in the tick.
+            public method closestPair() returns float {
+                mutable float best = 1000000.0;
+                for (int i in 0..this.high) {
+                    if (!this.alive(i)) {
+                        continue;
+                    }
+                    for (int j in i + 1..this.high) {
+                        if (!this.alive(j)) {
+                            continue;
+                        }
+                        float dx = this.px[j] - this.px[i];
+                        float dy = this.py[j] - this.py[i];
+                        float d2 = dx * dx + dy * dy;
+                        if (d2 < best) {
+                            best = d2;
+                        }
+                    }
+                }
+                if (best >= 1000000.0) {
+                    return 0.0;
+                }
+                return cast<float>(Math.sqrt(cast<double>(best)));
+            }
+
+            // How many pairs are standing inside one another. The question the separation pass
+            // exists to answer, asked directly so a test can hold it to account. Quadratic, and so
+            // for tests only -- never in the tick.
+            public method crowdedPairs(float within) returns int {
+                mutable int n = 0;
+                for (int i in 0..this.high) {
+                    if (!this.alive(i)) {
+                        continue;
+                    }
+                    for (int j in i + 1..this.high) {
+                        if (!this.alive(j)) {
+                            continue;
+                        }
+                        float dx = this.px[j] - this.px[i];
+                        float dy = this.py[j] - this.py[i];
+                        if (dx * dx + dy * dy < within * within) {
+                            n = n + 1;
+                        }
+                    }
+                }
+                return n;
+            }
+
+            // The eight ways two people standing in exactly the same place can part. Fixed and
+            // shared rather than computed, because the only thing this has to be is deterministic.
+            private static mutable float[] SPIN_X;
+            private static mutable float[] SPIN_Y;
+
+            onClassLoad {
+                AgentTable.SPIN_X = new float[8]();
+                AgentTable.SPIN_Y = new float[8]();
+                AgentTable.SPIN_X[0] = 1.0;
+                AgentTable.SPIN_Y[0] = 0.0;
+                AgentTable.SPIN_X[1] = 0.7071;
+                AgentTable.SPIN_Y[1] = 0.7071;
+                AgentTable.SPIN_X[2] = 0.0;
+                AgentTable.SPIN_Y[2] = 1.0;
+                AgentTable.SPIN_X[3] = 0.0 - 0.7071;
+                AgentTable.SPIN_Y[3] = 0.7071;
+                AgentTable.SPIN_X[4] = 0.0 - 1.0;
+                AgentTable.SPIN_Y[4] = 0.0;
+                AgentTable.SPIN_X[5] = 0.0 - 0.7071;
+                AgentTable.SPIN_Y[5] = 0.0 - 0.7071;
+                AgentTable.SPIN_X[6] = 0.0;
+                AgentTable.SPIN_Y[6] = 0.0 - 1.0;
+                AgentTable.SPIN_X[7] = 0.7071;
+                AgentTable.SPIN_Y[7] = 0.0 - 0.7071;
+            }
+
             // Take a row: a recycled one if anybody has died, otherwise the next fresh one. Returns
             // -1 when the table is full, which the caller must handle rather than ignore -- a silent
             // failure here is a population that quietly stops growing.
@@ -403,6 +757,9 @@ public bundle Agents {
             private method widen() returns void {
                 int cap = this.cap * 2;
                 this.freeSlot = AgentTable.widerI(this.freeSlot, cap);
+                this.binNext = AgentTable.widerI(this.binNext, cap);
+                this.binAt = AgentTable.widerI(this.binAt, cap);
+                this.crowdOrder = AgentTable.widerI(this.crowdOrder, cap);
                 this.px = AgentTable.widerF(this.px, cap);
                 this.py = AgentTable.widerF(this.py, cap);
                 this.home = AgentTable.widerS(this.home, cap);
@@ -492,6 +849,12 @@ public bundle Agents {
                 this.job[i] = cast<byte>(cast<int>(Job.Idle));
                 this.role[i] = cast<byte>(cast<int>(Role.None));
                 this.flags[i] = cast<byte>(AgentTable.F_ALIVE);
+                // `binAt` is deliberately NOT touched here. It is not a fact about this person, it
+                // is a note of which bin this ROW was last linked into, and the crowd index is
+                // undone by walking the rows it linked and wiping the bins they name. Clearing it
+                // on a birth loses the bin a recycled row was still heading -- which left a chain
+                // head pointing into last tick's world, and then indexed straight off the end of
+                // the array. The runtime caught it, which is what the runtime is for.
                 this.hx[i] = 0.0;
                 this.hy[i] = 1.0;
                 this.task[i] = cast<byte>(cast<int>(Act.Idle));
@@ -1438,10 +1801,65 @@ public bundle Agents {
                     delete cy;
                     return 0;
                 }
-                int per = total / found;
+                // WHICH LANDMASS EACH SITE IS ON, so half of them can be left empty. The grid does
+                // the labelling -- a continent is a connected component of walkable ground -- and
+                // it keeps the answer, so the audit can ask later whether anybody ever got to the
+                // ones that started empty.
+                g.labelMasses();
+                mutable boolean[] peopled = new boolean[found]();
+                mutable int usable = 0;
+                for (int s in 0..found) {
+                    int m = g.massAt(cx[s], cy[s]);
+                    // HALF THE CONTINENTS ARE LEFT EMPTY. Not a rule about the world -- an
+                    // experiment: every world so far started full, so nothing that needed somewhere
+                    // to go has ever had somewhere to go. Which half is by parity of the flood-fill
+                    // order, arbitrary but stable for a seed.
+                    peopled[s] = m >= 0 && (m % 2) == 0;
+                    if (peopled[s]) {
+                        usable = usable + 1;
+                    }
+                }
+                if (usable == 0) {
+                    for (int s in 0..found) {
+                        peopled[s] = true;
+                    }
+                    usable = found;
+                }
+                for (int s in 0..found) {
+                    if (peopled[s]) {
+                        g.markMassPeopled(cx[s], cy[s]);
+                    }
+                }
+                if (usable == 0) {
+                    for (int s in 0..found) {
+                        peopled[s] = true;
+                    }
+                    usable = found;
+                }
+                // AND THEY ARE NOT THE SAME SIZE. An even split is the one distribution a world
+                // never has, and it hides everything interesting: with every place identical there
+                // is no reason for anybody to go anywhere, no crowded place and no empty one, and
+                // no way to tell whether a village grew because the rules work or because it
+                // started level with all the others. The cube of a hash gives a few large places
+                // and a long tail of small ones, which is the shape real settlement has.
+                mutable int[] weight = new int[found]();
+                mutable int totalWeight = 0;
+                for (int s in 0..found) {
+                    weight[s] = 0;
+                    if (peopled[s]) {
+                        float r = LandMath.hash01(worldSeed ^ 0x3C7B, s * 31 + 5, 13);
+                        weight[s] = 1 + cast<int>(r * r * r * 60.0);
+                        totalWeight = totalWeight + weight[s];
+                    }
+                }
                 mutable int made = 0;
                 mutable int c = 0;
                 while (c < found) {
+                    if (!peopled[c] || totalWeight <= 0) {
+                        c = c + 1;
+                        continue;
+                    }
+                    int per = total * weight[c] / totalWeight;
                     mutable int n = 0;
                     mutable int tries = 0;
                     // A community is a disk: people live and work within a short walk of home, which
@@ -1472,6 +1890,8 @@ public bundle Agents {
                     }
                     c = c + 1;
                 }
+                delete peopled;
+                delete weight;
                 delete cx;
                 delete cy;
                 return made;

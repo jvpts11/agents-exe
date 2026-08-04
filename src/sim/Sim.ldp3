@@ -7399,6 +7399,11 @@ public bundle Agents {
             }
 
             public static int WORK_BLOCKS = 3;           // 16-cell blocks a COMMUNITY looks over: 48 cells
+            // Bins in the reach histogram, four cells each: two thousand cells of range, which is
+            // most of a 2560-cell world. Anything beyond it is counted apart rather than folded
+            // into the last bin, because a percentile taken over a saturating histogram lies -- and
+            // this histogram exists precisely so the border reach is measured instead of guessed.
+            public static int REACH_BINS = 512;
             // How many ticks between steps for somebody nobody is looking at. Four: enough to take
             // the largest cost in the simulation down to a quarter, small enough that four steps'
             // worth of ground is still under a cell, so walls are no more passable than they were.
@@ -8733,7 +8738,28 @@ public bundle Agents {
                 this.meter.lap(cast<int>(Phase.Thinking));
                 this.move(dt);
                 this.meter.lap(cast<int>(Phase.Moving));
+                this.jostle();
+                this.meter.lap(cast<int>(Phase.Jostle));
                 this.meter.tick();
+                return;
+            }
+
+            // NOBODY STANDS INSIDE ANYBODY ELSE.
+            //
+            // After moving and deliberately not inside it. The clump that had to be fixed is people
+            // who have ARRIVED and stopped -- an army standing round its general, a queue at a
+            // granary -- and the walking branch of `move` never sees them, because it returns early
+            // for anybody whose act is not one of the four ways of walking.
+            //
+            // Everybody, not only the people on screen. It is tempting to do this for the detail
+            // window alone, and it would be wrong twice over: positions feed the split rule and the
+            // colonising party, so a world where crowds only behave in front of the camera is a
+            // world that behaves differently depending on where somebody is looking. What it costs
+            // is measured as its own phase rather than assumed, because the last three times
+            // something here was "obviously expensive" the reasoning was wrong twice.
+            private method jostle() returns void {
+                this.folk.reindexCrowd(this.g);
+                this.folk.separate(this.g);
                 return;
             }
 
@@ -8787,6 +8813,10 @@ public bundle Agents {
                 // world was a hundred per cent full of people on its first tick.
                 System.IO.Console.println($"A|table.widenings|{this.folk.widenings()}");
                 System.IO.Console.println($"A|table.rows|{this.folk.limit()}");
+                // How often the separation pass hit its own chain bound and stopped early. A pass
+                // that quietly stops doing its job reads exactly like a pass that had nothing to
+                // do, so the bound is counted rather than trusted.
+                System.IO.Console.println($"A|crowd.capped|{this.folk.crowdCappings()}");
                 // Settlements, so a run says how many places there ARE and not only how many were
                 // ever founded. The difference between two blocks is how many died in between.
                 mutable int places = 0;
@@ -8796,6 +8826,107 @@ public bundle Agents {
                     }
                 }
                 System.IO.Console.println($"A|comm.alive|{places}");
+                // DID ANYBODY GET TO THE EMPTY HALF. Half the continents are seeded with nobody
+                // on them; these two say whether that is still true. `land.virgin` counts the
+                // settlements standing on ground that began empty -- a nation crossing water and
+                // staying -- against `land.masses`, how many separate landmasses there are at all.
+                mutable int onVirgin = 0;
+                for (int b in 0..this.town.count()) {
+                    if (!this.town.isGone(b) && this.g.massBeganEmpty(this.town.xAt(b), this.town.yAt(b))) {
+                        onVirgin = onVirgin + 1;
+                    }
+                }
+                System.IO.Console.println($"A|land.masses|{this.g.massCount()}");
+                System.IO.Console.println($"A|land.virgin.towns|{onVirgin}");
+                // HOW FAR PEOPLE ACTUALLY GET FROM HOME, BY ERA.
+                //
+                // The territory model needs a reach -- how far a nation's border may grow from a
+                // settlement -- and the one thing this campaign has learned six times over is that
+                // a magnitude chosen to taste makes the world worse. So it is not chosen: it is
+                // read off the world. A nation of the steam age holds a sprawling country because
+                // its people genuinely travel further, and the number that says how much further
+                // is this one.
+                //
+                // The 95th percentile and not the mean: the mean is dragged down by the half of
+                // everybody standing in their own village square, and a border is decided by the
+                // furthest ordinary journey rather than the average one. Bins of four cells over
+                // five hundred and twelve bins reach two thousand cells, which is most of the map;
+                // anybody beyond that is counted in `reach.capped` rather than silently dropped,
+                // because a percentile taken over a saturating histogram lies.
+                //
+                // AND NOT COUNTING ANYBODY IN TRANSIT, which the first version of this did and
+                // which made the number useless.
+                //
+                // Measured over everybody, the 95th percentile swung between fifty-six and two
+                // hundred and forty-four cells across one run -- four times over, and it swung
+                // AGAINST the settlement count rather than with anything. The reason is plain once
+                // seen: a founding party walking to its new ground is far from its centre BY
+                // CONSTRUCTION, and so is a refugee leaving a place that cannot feed him, and so is
+                // an army on the march. Those are journeys. A border follows where a people lives
+                // and works, not how far its longest expedition has got today.
+                //
+                // So the four walking acts are left out, and counted apart -- `reach.walking` is
+                // there so the exclusion is visible rather than silent.
+                mutable int[] far = new int[Simulation.REACH_BINS * 4]();
+                mutable int[] seenBy = new int[4]();
+                mutable int capped = 0;
+                mutable int walking = 0;
+                int fn = this.folk.limit();
+                mutable int fi = 0;
+                while (fi < fn) {
+                    if (this.folk.alive(fi)) {
+                        int doingNow = this.folk.actOf(fi);
+                        boolean inTransit = doingNow == cast<int>(Act.WalkTo)
+                                         || doingNow == cast<int>(Act.March)
+                                         || doingNow == cast<int>(Act.Carry)
+                                         || doingNow == cast<int>(Act.Flee);
+                        int hm = this.folk.homeOf(fi);
+                        if (inTransit) {
+                            walking = walking + 1;
+                        } else if (hm >= 0 && hm < this.ncomm && this.cpop[hm] > 0) {
+                            mutable int row = this.realm.eraOf(this.cnat[hm]) - 1;
+                            if (row < 0) {
+                                row = 0;
+                            }
+                            if (row > 3) {
+                                row = 3;
+                            }
+                            float ddx = this.folk.xAt(fi) - this.ccx[hm];
+                            float ddy = this.folk.yAt(fi) - this.ccy[hm];
+                            int cells = cast<int>(Math.sqrt(cast<double>(ddx * ddx + ddy * ddy)));
+                            int bin = cells / 4;
+                            if (bin >= Simulation.REACH_BINS) {
+                                capped = capped + 1;
+                            } else {
+                                far[row * Simulation.REACH_BINS + bin] =
+                                    far[row * Simulation.REACH_BINS + bin] + 1;
+                                seenBy[row] = seenBy[row] + 1;
+                            }
+                        }
+                    }
+                    fi = fi + 1;
+                }
+                for (int row in 0..4) {
+                    int want = seenBy[row] * 95 / 100;
+                    mutable int run = 0;
+                    mutable int at = 0;
+                    while (at < Simulation.REACH_BINS && run < want) {
+                        run = run + far[row * Simulation.REACH_BINS + at];
+                        at = at + 1;
+                    }
+                    int p95 = at * 4;
+                    int era = row + 1;
+                    // The headcount goes out beside the distance. An era nobody has reached has no
+                    // measurement at all, and a zero that means "nobody is here" must not be read
+                    // as a zero that means "they go nowhere" -- which is exactly the confusion the
+                    // reach table would otherwise be built on.
+                    System.IO.Console.println($"A|reach.era{era}.p95|{p95}");
+                    System.IO.Console.println($"A|reach.era{era}.folk|{seenBy[row]}");
+                }
+                System.IO.Console.println($"A|reach.capped|{capped}");
+                System.IO.Console.println($"A|reach.walking|{walking}");
+                delete far;
+                delete seenBy;
                 System.IO.Console.println($"A|comm.hived|{this.hived}");
                 System.IO.Console.println($"A|comm.joined|{this.joined}");
                 System.IO.Console.println($"A|comm.fled|{this.fled}");

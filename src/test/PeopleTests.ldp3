@@ -418,6 +418,95 @@ public bundle Agents {
                 Folk.people.kill(mum);
                 return;
             }
+
+            // Open ground with room around it, found rather than assumed.
+            //
+            // The first version of this asked only that the cell and its four neighbours be
+            // walkable, and the test then failed with twelve overlapping pairs left over. That was
+            // not the pass failing: twenty people needing a cell apiece have to spread to a radius
+            // of about three, and the spot it picked did not HAVE three clear cells -- so the pass
+            // correctly refused to push anybody into the sea and the crowd packed against the
+            // shore. A test that crowds people onto a beach measures `slideTo`'s refusal rather
+            // than the separation.
+            //
+            // So the patch is checked at the radius the crowd actually needs. If this ever fails to
+            // find one, that is the world generator and not the pass.
+            private static method openGround(int need, int which) returns int {
+                mutable int found = 0;
+                for (int y in need..Folk.H() - need) {
+                    for (int x in need..Folk.W() - need) {
+                        if (Folk.clearAround(x, y, need)) {
+                            if (found == which) {
+                                return y * Folk.W() + x;
+                            }
+                            found = found + 1;
+                        }
+                    }
+                }
+                return 0 - 1;
+            }
+
+            private static method clearAround(int cx, int cy, int r) returns boolean {
+                for (int y in cy - r..cy + r + 1) {
+                    for (int x in cx - r..cx + r + 1) {
+                        if (!Biomes.walkable(Folk.world.biomeAt(x, y))) {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+
+            // TWO PEOPLE CANNOT STAND IN ONE SPOT.
+            //
+            // Not a nicety. Every soldier in a muster is told to walk to the general's own cell and
+            // the arrival test is a fifth of a cell, so an army arriving is fifty people inside a
+            // half-cell circle -- which draws as a wheel of bodies clipped through one another, and
+            // which João saw before anything here measured it.
+            //
+            // Twenty people put on exactly one spot is that case in miniature, and it is also the
+            // hardest one for the pass: coincident people have no separating direction at all, so
+            // the tie has to be broken deterministically or a crowd shimmers instead of settling.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_crowd_spreads_out_instead_of_stacking() returns void {
+                // Twenty people at a cell apiece pack into about twenty square cells, which is a
+                // disc of radius three; four is that with room to settle rather than jam.
+                int at = Folk.openGround(4, 30);
+                Test.checking("the test found open dry ground to crowd onto");
+                Test.assertAtLeast(at, 0);
+                float sx = cast<float>(at % Folk.W()) + 0.5;
+                float sy = cast<float>(at / Folk.W()) + 0.5;
+                AgentTable* mob = new AgentTable(64) on heap;
+                for (int k in 0..20) {
+                    mob.spawn(sx, sy, 0);
+                }
+                Test.checking("they all start standing in one another");
+                Test.assertEqual(mob.crowdedPairs(AgentTable.PERSONAL), 190);
+                mutable int pass = 0;
+                while (pass < 80) {
+                    mob.reindexCrowd(Folk.world);
+                    mob.separate(Folk.world);
+                    pass = pass + 1;
+                }
+                // ASKED AS A DISTANCE, not as a count of pairs under a line.
+                //
+                // The count said thirteen and the count was the wrong question: a settled crowd
+                // packs hexagonally, every person touching about six others AT the separation
+                // distance, so fifty-odd pairs sit exactly on the threshold and whichever of them
+                // land a rounding error under it get counted as "inside one another". Thirteen
+                // pairs a thousandth of a cell short is not somebody standing in somebody -- it is
+                // Gauss-Seidel relaxation stopping where it should. The distance says which of the
+                // two it is, and a count never can.
+                //
+                // Ninety-five per cent of a body: closer than that is a person visibly inside
+                // another at the scale these are drawn, and further is contact.
+                System.IO.Console.println($"  closest pair after settling: {mob.closestPair()}");
+                Test.checking("and afterwards nobody is standing inside anybody");
+                Test.assertTrue(mob.closestPair() >= AgentTable.PERSONAL * 0.95);
+                delete mob;
+                return;
+            }
         }
     }
 }
