@@ -380,6 +380,17 @@ public bundle Agents {
             private mutable long colFull;       // the world is out of settlement names
             private mutable long colBlind;      // nowhere known, free and worth a town
             private mutable long colUnwilling;  // nobody standing on that side of the village
+            // AND WHY NOBODY EVER LEAVES ERA 1.
+            //
+            // `era.best` reads 1 in every chronicle block of every run measured, over three and a
+            // half hours of world time, which blocks sail, overseas colonisation, naval war, and
+            // every era-2 building and good there is. Same treatment as the expedition gates: the
+            // ladder is instrumented at the point it is climbed, so the answer is a number.
+            private mutable int learnFed;       // settlements with more food than they need
+            private mutable int learnHungry;    // and settlements without
+            private mutable long learnSlack;    // surplus a nation can spend on thinking
+            private mutable long learnSchool;   // and what its shrines and libraries work out
+            private mutable long learnGain;     // the two together, as `study` receives it
             private mutable float chronicleDue;   // world clock at which the next chronicle block is due
             private mutable int restakes;      // how many times the claim was recomputed at all
             private mutable long blockGained;  // blocks that went from nobody to somebody
@@ -663,6 +674,11 @@ public bundle Agents {
                 this.colFull = 0;
                 this.colBlind = 0;
                 this.colUnwilling = 0;
+                this.learnFed = 0;
+                this.learnHungry = 0;
+                this.learnSlack = 0;
+                this.learnSchool = 0;
+                this.learnGain = 0;
                 this.claimAge = 0;
                 this.slice = Simulation.SLICE_NS;
                 this.restakes = 0;
@@ -1600,6 +1616,8 @@ public bundle Agents {
                 // rose because the harvest was good.
                 mutable int[] lessons = new int[this.ncomm]();
                 this.town.learning(lessons, this.ncomm);
+                this.learnFed = 0;
+                this.learnHungry = 0;
                 for (int c in 0..this.ncomm) {
                     if (this.cpop[c] <= 0) {
                         continue;
@@ -1608,18 +1626,26 @@ public bundle Agents {
                     int need = this.cpop[c] * Simulation.LARDER;
                     int have = this.stores.foodOf(c);
                     if (have > need) {
+                        this.learnFed = this.learnFed + 1;
                         mutable int perHead = (have - need) / (this.cpop[c] + 1);
                         if (perHead > 40) {
                             perHead = 40;
                         }
                         slack[nat] = slack[nat] + perHead * this.cpop[c] / Simulation.VILLAGE;
+                    } else {
+                        this.learnHungry = this.learnHungry + 1;
                     }
                     mind[nat] = mind[nat]
                               + this.cultureOf(c, Simulation.C_CURIOUS) * this.cpop[c];
                     souls[nat] = souls[nat] + this.cpop[c];
                     scholars[nat] = scholars[nat] + lessons[c];
                 }
+                this.learnSlack = 0;
+                this.learnSchool = 0;
+                this.learnGain = 0;
                 for (int nat in 0..nn) {
+                    this.learnSlack = this.learnSlack + cast<long>(slack[nat]);
+                    this.learnSchool = this.learnSchool + cast<long>(scholars[nat]);
                     if (souls[nat] <= 0 || slack[nat] + scholars[nat] <= 0) {
                         continue;
                     }
@@ -1642,6 +1668,7 @@ public bundle Agents {
                     // neighbour, a hundred and thirty-seven thousand of them from a cousin" -- a
                     // subset larger than the set it belongs to, which is how you know a counter is
                     // measuring something other than what its name says.
+                    this.learnGain = this.learnGain + cast<long>(gain);
                     if (this.realm.study(nat, gain, Simulation.ERA_COST, Simulation.LAST_ERA)) {
                         if (taught) {
                             this.learned = this.learned + 1;
@@ -9386,6 +9413,23 @@ public bundle Agents {
                 System.IO.Console.println($"A|colony.no.names|{this.colFull}");
                 System.IO.Console.println($"A|colony.no.site|{this.colBlind}");
                 System.IO.Console.println($"A|colony.no.party|{this.colUnwilling}");
+                // THE LEARNING LADDER, at the rung it is climbed on. `learn.fed` against
+                // `learn.hungry` says whether anywhere in the world has a surplus at all;
+                // `learn.slack` and `learn.school` are the two things that buy an era, and
+                // `learn.lore` against `learn.cost` says how close anybody is to the next one.
+                mutable long lore = 0;
+                for (int nat in 0..this.realm.limit()) {
+                    if (this.realm.alive(nat)) {
+                        lore = lore + cast<long>(this.realm.loreOf(nat));
+                    }
+                }
+                System.IO.Console.println($"A|learn.fed|{this.learnFed}");
+                System.IO.Console.println($"A|learn.hungry|{this.learnHungry}");
+                System.IO.Console.println($"A|learn.slack|{this.learnSlack}");
+                System.IO.Console.println($"A|learn.school|{this.learnSchool}");
+                System.IO.Console.println($"A|learn.gain|{this.learnGain}");
+                System.IO.Console.println($"A|learn.lore|{lore}");
+                System.IO.Console.println($"A|learn.cost|{Simulation.ERA_COST}");
                 System.IO.Console.println($"A|born|{this.births}");
                 System.IO.Console.println($"A|died.old|{this.deathsOld}");
                 System.IO.Console.println($"A|died.hunger|{this.deathsHunger}");
