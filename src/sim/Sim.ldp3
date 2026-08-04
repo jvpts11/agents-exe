@@ -359,6 +359,27 @@ public bundle Agents {
             private mutable int[] holdSite;
             private mutable long rotted;        // blocks that went back to the world
             private mutable long orphaned;      // towns that outlived their country and raised a flag
+            // EXPANSION, counted three ways so "the world spreads now" is a claim somebody can
+            // check. `cleft` is how many people have fled each nation's towns since its last
+            // expedition -- the pressure that sends one out; `fromPressure` how many went for that
+            // reason; `bySea` how many crossed water, and `landed` how many got off the boat.
+            private mutable int[] cleft;
+            private mutable long fromPressure;
+            private mutable long bySea;
+            private mutable long landed;
+            // AND WHY AN EXPEDITION DID NOT LEAVE.
+            //
+            // "Expansion is rare" is not a finding; WHICH GATE closed is. Six counters, one per
+            // refusal, so the answer comes out of the running game as a number instead of being
+            // reasoned about -- which is how the last four defects in this file were found and how
+            // the two before them were missed.
+            private mutable long colAsked;      // settlements considered at all
+            private mutable long colSmall;      // too few people to spare a party
+            private mutable long colCalm;       // nobody under pressure to leave
+            private mutable long colBare;       // nothing in the granary to walk out with
+            private mutable long colFull;       // the world is out of settlement names
+            private mutable long colBlind;      // nowhere known, free and worth a town
+            private mutable long colUnwilling;  // nobody standing on that side of the village
             private mutable float chronicleDue;   // world clock at which the next chronicle block is due
             private mutable int restakes;      // how many times the claim was recomputed at all
             private mutable long blockGained;  // blocks that went from nobody to somebody
@@ -631,6 +652,17 @@ public bundle Agents {
                 }
                 this.rotted = 0;
                 this.orphaned = 0;
+                this.cleft = new int[this.ncomm]();
+                this.fromPressure = 0;
+                this.bySea = 0;
+                this.landed = 0;
+                this.colAsked = 0;
+                this.colSmall = 0;
+                this.colCalm = 0;
+                this.colBare = 0;
+                this.colFull = 0;
+                this.colBlind = 0;
+                this.colUnwilling = 0;
                 this.claimAge = 0;
                 this.slice = Simulation.SLICE_NS;
                 this.restakes = 0;
@@ -830,6 +862,7 @@ public bundle Agents {
                 delete this.craided;
                 delete this.craider;
                 delete this.holdSite;
+                delete this.cleft;
                 delete this.wild;
                 delete this.meter;
                 delete this.chief;
@@ -1056,13 +1089,65 @@ public bundle Agents {
                     int to = this.ships.bound(v);
                     int good = this.ships.cargoOf(v);
                     int amt = this.ships.loadOf(v);
-                    if (to >= 0 && to < this.ncomm && this.cpop[to] > 0 && amt > 0) {
+                    // A HULL CARRYING PEOPLE PUTS THEM ASHORE.
+                    //
+                    // Cargo of Nothing is the mark of a colonist run: the same hull, the same lane,
+                    // the same mooring, a different thing in the hold. They are set down where the
+                    // hull made port rather than walked there, because they were aboard -- and
+                    // walking is what could not cross the water in the first place.
+                    if (good == cast<int>(Good.Nothing) && to >= 0 && to < this.ncomm) {
+                        this.landColonists(to, this.ships.xAt(v), this.ships.yAt(v));
+                    } else if (to >= 0 && to < this.ncomm && this.cpop[to] > 0 && amt > 0) {
                         this.stores.stow(to, good, amt);
                         this.shipped = this.shipped + cast<long>(amt);
                     }
                     this.ships.moor(v);
                 }
                 return;
+            }
+
+            // Everybody belonging to this founding is put down on the far shore, and the founding
+            // stops being a journey. Without this the party would be standing at the quay they left
+            // from with a home three hundred cells over the sea, and every one of them would be
+            // refused at the door by the same landmass rule that stops a walker drowning.
+            private method landColonists(int d, float lx, float ly) returns void {
+                int n = this.folk.limit();
+                mutable int put = 0;
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.homeOf(i) == d) {
+                        this.folk.setPos(i, lx, ly);
+                        this.folk.setTarget(i, cast<int>(lx), cast<int>(ly));
+                        this.folk.setAct(i, cast<int>(Act.Idle));
+                        put = put + 1;
+                    }
+                    i = i + 1;
+                }
+                if (put > 0) {
+                    this.ccx[d] = lx;
+                    this.ccy[d] = ly;
+                    this.csiteX[d] = lx;
+                    this.csiteY[d] = ly;
+                    this.csettle[d] = 0;         // they have arrived; it is a place now
+                    this.landed = this.landed + 1;
+                }
+                return;
+            }
+
+            // A hull with people in it instead of grain.
+            private method embark(int nat, int seat, int d, float sx, float sy) returns boolean {
+                if (this.realm.eraOf(nat) < Simulation.SAIL_ERA) {
+                    return false;                    // no sail, no hull, no crossing
+                }
+                int v = this.ships.launch(cast<int>(Lane.Water), seat, d,
+                                          this.ccx[seat], this.ccy[seat], sx, sy,
+                                          cast<int>(Good.Nothing), Simulation.HAMLET,
+                                          this.realm.eraOf(nat));
+                if (v < 0) {
+                    return false;                    // every hull is at sea; the nation waits
+                }
+                this.bySea = this.bySea + 1;
+                return true;
             }
 
             public method fleet() returns Fleet* {
@@ -4016,6 +4101,22 @@ public bundle Agents {
                             }
                         } else {
                             this.hungryTicks = this.hungryTicks + 1;
+                            // AND THIS IS WHERE THE PRESSURE TO EXPAND IS FELT.
+                            //
+                            // It was counted off FLIGHT -- people who had actually left -- and that
+                            // is a deadlock, because fleeing requires a fatter neighbour to flee to.
+                            // Measured on the real game with the counters below: of fifty-six
+                            // thousand chances to send an expedition, thirty thousand were refused
+                            // for want of pressure while the world sat at three settlements. Three
+                            // settlements is exactly the state in which nobody can flee anywhere, so
+                            // no pressure was ever recorded, so no colony ever left, so there were
+                            // still three settlements.
+                            //
+                            // A people is under pressure when it CANNOT FEED ITSELF, whether or not
+                            // there is anywhere to run. That is the same reach for a mouthful that
+                            // crime and flight already hang off, one line above the point where the
+                            // old rule asked "and where would you go".
+                            this.pressed(this.folk.homeOf(i));
                             // AND THIS IS WHERE CRIME BELONGS.
                             //
                             // A person reaches for food and there is none. Thirty-two million times
@@ -4250,9 +4351,22 @@ public bundle Agents {
                 this.steep();
                 this.discover();
                 this.hive();
-                this.absorb();
-                // After the two accidental ways the map changes -- a village smearing itself in two
-                // and two villages growing into one -- comes the deliberate one.
+                // MERGING IS GONE.
+                //
+                // `absorb` used to run here and turn two places that had grown into each other into
+                // one. It was the only transition in this world that reduced the number of places
+                // without freeing an inch of ground -- birth and death is a cycle, merging is a
+                // sink -- and it beat hiving in twelve worlds out of twelve, including one run with
+                // half the continents deliberately empty and five thousand people in a world of two
+                // and a half million cells. Space was never the constraint; the sink was.
+                //
+                // Two settlements growing into each other are now two neighbouring places, which is
+                // what two neighbouring places are. A settlement is founded, dies -- freeing its
+                // ground, which `spread` returns to the world -- or changes hands by conquest. The
+                // count can rise again.
+                //
+                // After the accidental way the map changes -- a village smearing itself in two --
+                // comes the deliberate one.
                 this.colonise();
                 // And only THEN are the nations read, because only now is it settled which towns
                 // exist and who they answer to.
@@ -4368,125 +4482,25 @@ public bundle Agents {
             // dissolve every small nation into whichever big one it happened to be standing next to.
             public static int ASSIMILATE = 2;
 
-            // Two places that have grown into each other are one place.
+            // TWO PLACES THAT HAVE GROWN INTO EACH OTHER ARE TWO PLACES.
             //
-            // This is the half that was missing, and its absence was not a detail -- it was the
-            // reason the world could only ever get more fragmented. Splitting adds communities and
-            // nothing but total extinction ever took one away, so every run ended with every
-            // community number in the world used up and an average country of thirteen blocks, no
-            // matter how the split rule was tightened. Three attempts were spent tightening it.
+            // `absorb` stood here and merged them, and it is deleted. It was the only transition in
+            // this world that reduced the number of places without freeing an inch of ground: birth
+            // and death is a cycle, merging is a sink. `comm.joined` beat `comm.hived` in twelve
+            // worlds out of twelve, and it beat it in an experiment with half the continents
+            // deliberately empty and five thousand people in a world of two and a half million
+            // cells -- so space was never the constraint, and the sink was.
             //
-            // The test is the split's read the other way -- but at HALF the distance, and that gap
-            // is the whole difference between a world and a machine that hums. With both thresholds
-            // at REIGN, a daughter would drift back inside its mother's reach, merge, outgrow it and
-            // split again: ten thousand foundings and ten thousand joinings in one arc, every one of
-            // them wiping the trades of everybody involved. A place has to travel to leave and stay
-            // gone, so leaving is measured at a working day and returning at half of one.
+            // What replaces it is death returning ground: `spread` releases every block no living
+            // settlement can still reach, so a place that empties out frees real country and the
+            // next expedition can have it. A settlement is now founded, dies, or changes hands by
+            // conquest, and nothing else.
             //
-            // The smaller joins the larger and brings everything it built, which is how a town comes
-            // to have two sawmills and a hundred and forty houses -- and therefore how the upper
-            // rungs of the housing catalogue ever get used at all.
-            private method absorb() returns void {
-                for (int c in 0..this.ncomm) {
-                    this.cjoin[c] = 0 - 1;
-                }
-                for (int a in 0..this.ncomm) {
-                    // A party still walking to its ground is not a place yet, and neither end of a
-                    // merger may be one: its centre is where it is GOING, so the distance test
-                    // would be measuring against somewhere nobody is standing.
-                    if (this.cpop[a] <= 0 || this.csettle[a] > 0) {
-                        continue;
-                    }
-                    mutable int into = 0 - 1;
-                    mutable int biggest = this.cpop[a];
-                    for (int b in 0..this.ncomm) {
-                        if (b == a || this.cpop[b] <= biggest || this.csettle[b] > 0) {
-                            continue;                // only ever join something bigger, so no cycles
-                        }
-                        float dx = this.ccx[b] - this.ccx[a];
-                        float dy = this.ccy[b] - this.ccy[a];
-                        int near = Simulation.REIGN / 2;
-                        if (dx * dx + dy * dy > cast<float>(near * near)) {
-                            continue;
-                        }
-                        // Two towns of ONE nation that have grown into each other are one town, and
-                        // that is all it takes. Two towns of DIFFERENT nations touching is a border,
-                        // and a border is not a merger: a people is only absorbed by a neighbour
-                        // that plainly dwarfs it, and never by one it is at war with.
-                        //
-                        // Before nations existed this test did not exist either, so every place in
-                        // the world merged into every bigger place it touched -- which is why the
-                        // map had no countries on it, only a hundred and forty villages that had all
-                        // forgotten who they were related to.
-                        if (this.cnat[b] != this.cnat[a]) {
-                            if (this.cpop[b] < this.cpop[a] * Simulation.ASSIMILATE) {
-                                continue;
-                            }
-                            if (this.cfoe[a] == b || this.cfoe[b] == a || this.craided[a] > 0) {
-                                continue;
-                            }
-                        }
-                        biggest = this.cpop[b];
-                        into = b;
-                    }
-                    this.cjoin[a] = into;
-                }
-                // One hop only. A joins B and B joins C in the same census would leave A's people
-                // pointing at a number nobody lives in; C is bigger than B is bigger than A, so
-                // letting A wait a second and follow B into C next time is both simpler and true.
-                for (int a in 0..this.ncomm) {
-                    if (this.cjoin[a] >= 0 && this.cjoin[this.cjoin[a]] >= 0) {
-                        this.cjoin[a] = 0 - 1;
-                    }
-                }
-                mutable boolean any = false;
-                for (int a in 0..this.ncomm) {
-                    int into = this.cjoin[a];
-                    if (into < 0) {
-                        continue;
-                    }
-                    any = true;
-                    for (int g in 1..Goods.count()) {
-                        this.stores.add(into, g, this.stores.amountOf(a, g));
-                    }
-                    this.stores.clear(a);
-                    this.town.reown(a, into, cast<int>(BuildingKind.TownHall));
-                    // A town crossing a border takes its people's knowledge with it, and the nation
-                    // that gains it can now say it rules somebody it did not raise -- which is the
-                    // whole of what makes an empire an empire. Knowledge joins up; it is not
-                    // averaged and it is not lost.
-                    int mine = this.cnat[a];
-                    int theirs = this.cnat[into];
-                    if (mine != theirs) {
-                        this.realm.annex(theirs, mine);
-                        this.annexed = this.annexed + 1;
-                        if (this.realm.townsOf(mine) <= 1) {
-                            this.extinct = this.extinct + 1;
-                        }
-                    }
-                    this.cnat[a] = theirs;
-                    this.joined = this.joined + 1;
-                    this.joinedFolk = this.joinedFolk + cast<long>(this.cpop[a]);
-                    this.cpop[into] = this.cpop[into] + this.cpop[a];
-                    this.cpop[a] = 0;
-                    this.chief[a] = 0 - 1;
-                }
-                if (!any) {
-                    return;
-                }
-                int n = this.folk.limit();
-                mutable int i = 0;
-                while (i < n) {
-                    if (this.folk.alive(i)) {
-                        int h = this.folk.homeOf(i);
-                        if (h >= 0 && h < this.ncomm && this.cjoin[h] >= 0) {
-                            this.vacate(i, h);
-                            this.folk.setHome(i, this.cjoin[h]);
-                        }
-                    }
-                    i = i + 1;
-                }
-                return;
+            // `joined` and `joinedFolk` are KEPT and print zero for ever. A fact that vanishes from
+            // the chronicle is a fact nobody can confirm went to zero, and this one is the reason
+            // twelve worlds went extinct.
+            public method mergedAway() returns long {
+                return this.joined;
             }
 
             // Does any place hold together, and if not, where does the far end of it go?
@@ -4772,42 +4786,75 @@ public bundle Agents {
             // is asked once per WORLD per second, never once per nation, and certainly never once
             // per person. The turn-taking is what makes it fair without making it cost more.
             private method colonise() returns void {
-                int nn = this.realm.limit();
+                // ANY TOWN MAY SEND ONE, NOT ONLY A CAPITAL.
+                //
+                // This walked the NATIONS and asked each for its seat, so the only place in the
+                // world that could ever found anything was a capital -- three or four senders in a
+                // whole world, one census apart. Measured after merging was deleted: three colonies
+                // in five minutes of real time against twenty-one settlements decaying to three.
+                // The sink was gone and the source was a bottleneck of the same size.
+                //
+                // A town under pressure with something in its granary can send people out. That is
+                // what a town is; a capital is only the biggest one. The turn-taking still holds it
+                // to ONE a census for the whole world, which is the budget rule this codebase keeps
+                // having to relearn -- what changes is who is allowed to be asked.
+                int nc = this.ncomm;
                 mutable int tries = 0;
-                while (tries < nn) {
+                while (tries < nc) {
                     this.settler = this.settler + 1;
-                    if (this.settler >= nn) {
+                    if (this.settler >= nc) {
                         this.settler = 0;
                     }
                     tries = tries + 1;
-                    int nat = this.settler;
-                    if (!this.realm.alive(nat)) {
+                    int seat = this.settler;
+                    if (this.cpop[seat] <= 0) {
                         continue;
                     }
-                    // A people with nobody to say so does not mount an expedition. Below a chiefdom
-                    // there is no seat, and a colony is by definition somewhere that answers to one.
-                    if (this.realm.rankOf(nat) < cast<int>(Rank.Chiefdom)) {
+                    this.colAsked = this.colAsked + 1;
+                    if (this.cpop[seat] < Simulation.VILLAGE) {
+                        this.colSmall = this.colSmall + 1;
                         continue;
                     }
-                    int seat = this.realm.seatOf(nat);
-                    if (seat < 0 || this.cpop[seat] < Simulation.VILLAGE) {
+                    int nat = this.cnat[seat];
+                    if (nat < 0 || nat >= this.realm.limit() || !this.realm.alive(nat)) {
                         continue;
                     }
                     if (this.csettle[seat] > 0) {
                         continue;                    // still walking to its own ground
                     }
-                    // Paid for out of a full granary, twice over. A people that cannot feed itself
-                    // does not send thirty of its own over the horizon with nothing, and the food
-                    // they carry comes off the shelves at home -- so an expedition is a real cost
-                    // and a hungry year is a year nobody expands.
-                    if (this.stores.foodOf(seat) < this.cpop[seat] * Simulation.LARDER * 2) {
-                        continue;
+                    // PRESSURE, NOT PLENTY.
+                    //
+                    // This asked for a granary full twice over -- a people at its most comfortable,
+                    // and comfortable people do not walk over the horizon. Backwards, and the right
+                    // signal was already here and being discarded: `comm.fled` counts tens of
+                    // thousands of people a run abandoning places that cannot feed them, and every
+                    // one of them founded nothing because they only ever moved next door.
+                    //
+                    // Flight is the trigger now. They still carry provisions off the shelves below,
+                    // so an expedition is not free -- a people with nothing at all cannot mount one,
+                    // and a people under pressure with something in store can, which is what
+                    // expansion has always actually been.
+                    // How much hunger is worth an expedition: as many hungry person-seconds as the
+                    // party they would send has mouths to feed for a day. Thirty people, eight
+                    // days' larder apiece -- both numbers already in this file, multiplied here and
+                    // not in a static, because a static initialised from another static compiles to
+                    // zero in this toolchain without a diagnostic (task #334).
+                    if (this.cleft[nat] < Simulation.HAMLET * Simulation.LARDER) {
+                        this.colCalm = this.colCalm + 1;
+                        continue;                    // nobody is under enough pressure to leave
+                    }
+                    if (this.stores.foodOf(seat) < this.cpop[seat] * Simulation.LARDER / 2) {
+                        this.colBare = this.colBare + 1;
+                        continue;                    // and nothing whatever to walk out with
                     }
                     int d = this.freeCommunity();
                     if (d < 0) {
+                        this.colFull = this.colFull + 1;
                         return;                      // the world is out of names
                     }
                     if (this.plant(nat, seat, d)) {
+                        this.cleft[nat] = 0;         // that pressure has been spent
+                        this.fromPressure = this.fromPressure + 1;
                         return;                      // one a census, and no more
                     }
                 }
@@ -4819,50 +4866,67 @@ public bundle Agents {
             private method plant(int nat, int seat, int d) returns boolean {
                 int cbx = cast<int>(this.ccx[seat]) / 16;
                 int cby = cast<int>(this.ccy[seat]) / 16;
+                // WHERE THEY MAY GO IS WHAT THEY KNOW, AND HOW FAR IS WHAT THEIR ERA ALLOWS.
+                //
+                // This was a ring from four to ten blocks: a hundred and sixty cells in a world two
+                // and a half thousand across. A continent three hundred cells off was not rejected,
+                // it was never looked at -- which is why `land.virgin.towns` read zero in twelve
+                // worlds out of twelve, and why every "colony" turned out to be a hamlet on its own
+                // doorstep with `mech.colonies` and `comm.hived` coming out as the same number.
+                //
+                // Now the search is over the ground this nation has SEEN, out to the distance an
+                // expedition can survive. All three conditions are necessary, and that is the whole
+                // point: an empty continent stays empty until somebody EARNS the crossing, rather
+                // than staying empty because the code never looked at it.
+                int span = Simulation.COLONY_SPAN;
                 mutable int bestWorth = 0;
                 mutable int bestX = 0 - 1;
                 mutable int bestY = 0 - 1;
-                mutable int r = Simulation.COLONY_NEAR;
-                while (r <= Simulation.COLONY_FAR) {
-                    mutable int dx = 0 - r;
-                    while (dx <= r) {
-                        int wa = this.siteWorth(cbx + dx, cby - r);
-                        if (wa > bestWorth) {
-                            bestWorth = wa;
-                            bestX = cbx + dx;
-                            bestY = cby - r;
+                mutable int by = cby - span;
+                while (by <= cby + span) {
+                    mutable int bx = cbx - span;
+                    while (bx <= cbx + span) {
+                        // Not on its own doorstep: inside the seat's own reach a new town competes
+                        // with its parent for the same trees, which is what the near edge of the
+                        // old ring was for and is still right.
+                        int ddx = bx - cbx;
+                        int ddy = by - cby;
+                        int near = this.reachOf(nat);
+                        if (ddx * ddx + ddy * ddy <= near * near
+                            || !this.realm.hasSeen(nat, bx, by)) {
+                            bx = bx + 1;
+                            continue;
                         }
-                        int wb = this.siteWorth(cbx + dx, cby + r);
-                        if (wb > bestWorth) {
-                            bestWorth = wb;
-                            bestX = cbx + dx;
-                            bestY = cby + r;
+                        int w = this.siteWorth(bx, by);
+                        if (w > bestWorth) {
+                            bestWorth = w;
+                            bestX = bx;
+                            bestY = by;
                         }
-                        dx = dx + 1;
+                        bx = bx + 1;
                     }
-                    mutable int dy = 1 - r;
-                    while (dy <= r - 1) {
-                        int wc = this.siteWorth(cbx - r, cby + dy);
-                        if (wc > bestWorth) {
-                            bestWorth = wc;
-                            bestX = cbx - r;
-                            bestY = cby + dy;
-                        }
-                        int wd = this.siteWorth(cbx + r, cby + dy);
-                        if (wd > bestWorth) {
-                            bestWorth = wd;
-                            bestX = cbx + r;
-                            bestY = cby + dy;
-                        }
-                        dy = dy + 1;
-                    }
-                    r = r + 1;
+                    by = by + 1;
                 }
                 if (bestX < 0) {
-                    return false;                    // hemmed in: no unheld ground worth a town
+                    this.colBlind = this.colBlind + 1;
+                    return false;                    // nothing known, free and worth a town
                 }
                 float sx = cast<float>(bestX * 16 + 8);
                 float sy = cast<float>(bestY * 16 + 8);
+                // AND IF IT IS ACROSS WATER, THEY SAIL.
+                //
+                // `plant` sent people WALKING, and a walker does not cross water -- so half a world
+                // of empty continents was unreachable by construction while a Fleet of barges,
+                // sailships and steamships carried nothing but cargo past them. A sea expedition is
+                // not a new system: it is a hull with a different cargo, on the same lanes, with the
+                // same mooring. Which is also why it is gated on the era rather than on a rule
+                // saying so -- a people with no sail has no hull to put them in.
+                boolean overseas = this.g.massAt(cast<int>(sx), cast<int>(sy))
+                                != this.g.massAt(cast<int>(this.ccx[seat]),
+                                                 cast<int>(this.ccy[seat]));
+                if (overseas && !this.embark(nat, seat, d, sx, sy)) {
+                    return false;
+                }
                 // Who goes is not chosen either: it is whoever is already on that side of the
                 // village. The same reading hiving uses, and for the same reason -- a party picked
                 // by number would be thirty people teleported out of the middle of a crowd, and a
@@ -4884,6 +4948,7 @@ public bundle Agents {
                     i = i + 1;
                 }
                 if (facing < Simulation.HAMLET) {
+                    this.colUnwilling = this.colUnwilling + 1;
                     return false;                    // not enough of them are out that way
                 }
                 this.found(d, seat, sx, sy);
@@ -5001,8 +5066,23 @@ public bundle Agents {
             // is a walk of about a hundred and sixty cells, which at a cell and a quarter a second
             // is a third of a life -- far enough to be somewhere else, near enough that the people
             // sent there arrive alive.
-            public static int COLONY_NEAR = 4;
-            public static int COLONY_FAR = 10;
+            // HOW FAR AN EXPEDITION MAY GO, in 16-cell blocks, as distinct from how far a border
+            // grows on its own.
+            //
+            // Derived and not chosen: a founding party has TREK seconds to arrive before it gives
+            // up, and a person covers SPEED cells a second, so the longest walk anybody can survive
+            // is 240 x 1.25 = 300 cells -- nineteen blocks. Beyond that they die on the road, which
+            // is not expansion, and it is the same arithmetic whether they walk or sail, because a
+            // hull crossing is over in a fraction of the time.
+            //
+            // This replaces a ring from four to ten blocks. Ten blocks is a hundred and sixty cells
+            // in a world two and a half thousand across, so a continent three hundred cells away
+            // was never looked at once in the whole history of this game.
+            public static int COLONY_SPAN = 19;
+            // The era at which a people has hulls that cross open water. Three, the industrial age:
+            // era two is the age of the road, and the Fleet's own speed table gives Water to
+            // everything above it.
+            public static int SAIL_ERA = 3;
 
             // Censuses a founding party has to reach its ground before it gives up and settles for
             // wherever it got to. Four minutes: two thirds of a life, and long enough for the
@@ -5046,6 +5126,7 @@ public bundle Agents {
                                         cast<int>(this.ccy[this.cflee[h]]));
                     this.folk.setAct(i, cast<int>(Act.Flee));
                     this.fled = this.fled + 1;
+                    this.pressed(h);
                     this.exiled = this.exiled + 1;
                     return true;
                 }
@@ -5071,7 +5152,24 @@ public bundle Agents {
                 this.folk.setTarget(i, cast<int>(this.ccx[to]), cast<int>(this.ccy[to]));
                 this.folk.setAct(i, cast<int>(Act.Flee));
                 this.fled = this.fled + 1;
+                this.pressed(h);
                 return true;
+            }
+
+            // Somebody left a place that could not feed them, and their COUNTRY is the thing that
+            // feels it. That is the difference between the old rule and this one: flight used to be
+            // a fact about a person, noted and then dropped, so tens of thousands of people a run
+            // moved next door and nothing anywhere was any different for it. Now it accumulates
+            // where a decision can read it.
+            private method pressed(int h) returns void {
+                if (h < 0 || h >= this.ncomm) {
+                    return;
+                }
+                int nat = this.cnat[h];
+                if (nat >= 0 && nat < this.ncomm) {
+                    this.cleft[nat] = this.cleft[nat] + 1;
+                }
+                return;
             }
 
             // Where somebody goes when the place they were born cannot feed them.
@@ -9270,6 +9368,24 @@ public bundle Agents {
                 System.IO.Console.println($"A|land.rotted|{this.rotted}");
                 System.IO.Console.println($"A|nation.known|{known}");
                 System.IO.Console.println($"A|nation.orphaned|{this.orphaned}");
+                // EXPANSION. `frompressure` counts expeditions that left because their people were
+                // being squeezed out rather than because a granary was overflowing; `bysea` counts
+                // hulls that carried colonists instead of grain, and `landed` how many of those got
+                // ashore. All three were structurally impossible before: colonising fired on
+                // abundance, looked no further than ten blocks, and could not cross water.
+                System.IO.Console.println($"A|colony.frompressure|{this.fromPressure}");
+                System.IO.Console.println($"A|colony.bysea|{this.bySea}");
+                System.IO.Console.println($"A|colony.landed|{this.landed}");
+                // WHY NOT. Every refusal on the way to an expedition, counted where it happens. The
+                // largest of these IS the reason the world does not spread, and it is a number
+                // rather than a guess.
+                System.IO.Console.println($"A|colony.asked|{this.colAsked}");
+                System.IO.Console.println($"A|colony.no.small|{this.colSmall}");
+                System.IO.Console.println($"A|colony.no.calm|{this.colCalm}");
+                System.IO.Console.println($"A|colony.no.bare|{this.colBare}");
+                System.IO.Console.println($"A|colony.no.names|{this.colFull}");
+                System.IO.Console.println($"A|colony.no.site|{this.colBlind}");
+                System.IO.Console.println($"A|colony.no.party|{this.colUnwilling}");
                 System.IO.Console.println($"A|born|{this.births}");
                 System.IO.Console.println($"A|died.old|{this.deathsOld}");
                 System.IO.Console.println($"A|died.hunger|{this.deathsHunger}");
