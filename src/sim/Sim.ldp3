@@ -16,6 +16,7 @@ import Agents.World.Beasts;
 import Agents.World.Ways;
 import Agents.World.Surface;
 import System.Math.Math;
+import System.Time.Time;
 import Agents.People.AgentTable;
 import Agents.People.Act;
 import Agents.People.Job;
@@ -337,24 +338,21 @@ public bundle Agents {
             // chose. `claimEdge` is the previous ring, so the spread cannot race across the map in
             // one pass.
             //
-            // TERRITORY IS STICKY, and it has to be. The first version threw the whole field away
-            // every census and re-derived it from who happened to be standing where at that instant,
-            // by a streaming majority vote -- which is not a majority at all when three villages
-            // share a block, but whoever survived the cancellations in the order the rows came out
-            // of a table that recycles a row every time somebody is born. Watching the map, the
-            // borders never stopped moving: a country's whole frontier redrew itself several times a
-            // second because a handful of people crossed a line. Nobody's border does that.
+            // TERRITORY IS A LONG ARGUMENT, NOT A HEADCOUNT. The first version threw the whole
+            // field away every census and re-derived it from who happened to be standing where at
+            // that instant. Watching the map, the borders never stopped moving: a country's whole
+            // frontier redrew itself as fast as the census ran, because people walk to work and
+            // walk home and the strip between two villages genuinely is held by one of them one
+            // second and the other the next. Nobody's border does that.
             //
-            // So the instantaneous vote is now only EVIDENCE. `claimCore` is who actually holds the
-            // block and `claimHold` is how firmly; agreeing evidence strengthens the holder and
-            // disagreeing evidence wears it down, and the block changes hands only when the wearing
-            // reaches zero. One person walking through cannot move a border; a village genuinely
-            // spreading into its neighbour's ground still can, and takes a few censuses over it.
-            private mutable int[] claim;        // core plus the worked ring: what is drawn
-            private mutable int[] claimCore;    // who stands there, settled over time
-            private mutable int[] claimHold;    // how firmly the core holds it
-            private mutable int[] claimVote;    // this census's evidence, per block
-            private mutable int[] claimTally;   // scratch for the within-census vote
+            // `claimVote` is who holds the block and `claimTally` how firmly, and neither is ever
+            // cleared: everybody who walks through argues for their own village and against
+            // whoever holds it, so the holder is the long-run majority of the traffic rather than
+            // this instant's snapshot. See `restake` for why the cap and the decay both have to be
+            // there.
+            private mutable int[] claim;        // holder plus the worked ring: what is drawn
+            private mutable int[] claimVote;    // who holds each block, accumulated
+            private mutable int[] claimTally;   // how firmly, capped and decaying
             private mutable int[] claimWas;     // what was drawn last census, to notice a real change
             private mutable int[] claimEdge;
             private mutable int claimW;
@@ -409,7 +407,13 @@ public bundle Agents {
             // So `advance` takes real seconds, multiplies by the rate, and spends the result in
             // whole ticks -- carrying the remainder, so no time is lost to rounding at any rate.
             public static float TICK = 0.05;
-            public static int CATCHUP = 240;        // ticks one call may spend before it gives up
+            // How much wall clock one call may spend simulating before it hands the frame back.
+            // Twenty-five milliseconds against a renderer that draws this world in seven, so the
+            // window stays above thirty frames a second in the top gear on a full world.
+            public static long SLICE_NS = 25000000;
+            // And a hard stop on the count as well, for the case where the clock does not move:
+            // high enough that the slice is what actually ends the loop on any real machine.
+            public static int CATCHUP = 20000;
 
             private mutable float rate;
             private mutable float owed;
@@ -448,10 +452,27 @@ public bundle Agents {
                 }
                 this.owed = this.owed + real * this.rate;
                 mutable int n = 0;
+                // THE BUDGET IS TIME, NOT A COUNT OF TICKS.
+                //
+                // It was two hundred and forty ticks a call, which is a number of ticks and not an
+                // amount of work: a tick of an empty world is a hundred microseconds and a tick of
+                // fifty thousand people in a hundred villages is two and a half milliseconds, so
+                // the same allowance was a fifth of a frame at the start of an arc and a third of a
+                // SECOND by the end of one. Which is exactly what it looked like -- three frames a
+                // second in a window whose renderer, measured on its own, draws a hundred and forty.
+                //
+                // A slice of wall clock instead. The window stays answerable at any gear and on any
+                // machine, and the world runs at whatever that machine can actually give it, which
+                // is the honest answer to asking for three hundred times life speed.
+                long until = Time.nanos() + Simulation.SLICE_NS;
                 while (this.owed >= Simulation.TICK && n < Simulation.CATCHUP) {
                     this.step(Simulation.TICK);
                     this.owed = this.owed - Simulation.TICK;
                     n = n + 1;
+                    if (Time.nanos() >= until) {
+                        this.owed = 0.0;
+                        return n;
+                    }
                 }
                 if (n >= Simulation.CATCHUP) {
                     // Whatever is still owed is time the machine never had. Dropping it is the only
@@ -582,15 +603,13 @@ public bundle Agents {
                 this.claimW = (grid.width() + 15) / 16;
                 this.claimH = (grid.height() + 15) / 16;
                 this.claim = new int[this.claimW * this.claimH]();
-                this.claimCore = new int[this.claimW * this.claimH]();
-                this.claimHold = new int[this.claimW * this.claimH]();
                 this.claimVote = new int[this.claimW * this.claimH]();
                 this.claimTally = new int[this.claimW * this.claimH]();
                 this.claimWas = new int[this.claimW * this.claimH]();
                 this.claimEdge = new int[this.claimW * this.claimH]();
                 for (int b in 0..this.claimW * this.claimH) {
                     this.claim[b] = 0 - 1;
-                    this.claimCore[b] = 0 - 1;
+                    this.claimVote[b] = 0 - 1;
                     this.claimWas[b] = 0 - 1;
                 }
                 this.claimAge = 0;
@@ -785,8 +804,6 @@ public bundle Agents {
                 delete this.craided;
                 delete this.craider;
                 delete this.claim;
-                delete this.claimCore;
-                delete this.claimHold;
                 delete this.claimVote;
                 delete this.claimTally;
                 delete this.claimWas;
@@ -2737,13 +2754,32 @@ public bundle Agents {
             // out of where fifty thousand people actually are.
             private method restake() returns void {
                 int nb = this.claimW * this.claimH;
+                // THE VOTE IS NOT RE-RUN, IT IS CONTINUED.
+                //
+                // This started every census from nothing and asked who happened to be standing in
+                // each block at that instant. The answer to that question is genuinely different
+                // every time it is asked -- people walk to work and walk home, so the strip between
+                // two villages really is held by one of them one second and the other the next --
+                // and so the frontier of every country redrew itself as fast as the census ran.
+                // Adding a hysteresis on top only slowed the flicker down; it was still an
+                // instantaneous reading being asked to mean something it cannot mean.
+                //
+                // The tally now PERSISTS. It is one long-running majority over everybody who has
+                // ever walked through the block, decayed by one a census so ground nobody visits
+                // any more eventually goes quiet. A block where one village does most of the coming
+                // and going builds a lead thousands deep and does not wobble; a block genuinely
+                // shared drifts across slowly, at the rate the balance of traffic actually shifts;
+                // and a village that dies stops voting and its ground empties on its own.
+                //
+                // Same one int per block as before. The whole fix is not clearing it.
                 for (int b in 0..nb) {
-                    this.claimVote[b] = 0 - 1;
-                    this.claimTally[b] = 0;
+                    if (this.claimTally[b] > 0) {
+                        this.claimTally[b] = this.claimTally[b] - 1;
+                        if (this.claimTally[b] == 0) {
+                            this.claimVote[b] = 0 - 1;
+                        }
+                    }
                 }
-                // Who is standing where, settled by majority. A running vote rather than a count per
-                // community per block: a tally would be a quarter of a million cells wide and this
-                // is one int, because the only question asked of it is who has the most.
                 int n = this.folk.limit();
                 mutable int i = 0;
                 while (i < n) {
@@ -2755,7 +2791,13 @@ public bundle Agents {
                             if (bx >= 0 && by >= 0 && bx < this.claimW && by < this.claimH) {
                                 int at = by * this.claimW + bx;
                                 if (this.claimVote[at] == h) {
-                                    this.claimTally[at] = this.claimTally[at] + 1;
+                                    // The cap is what lets a border ever move again. Without it a
+                                    // block held for an hour builds a lead no conquest could spend,
+                                    // and the map would freeze solid instead of flickering -- the
+                                    // same mistake with the sign changed.
+                                    if (this.claimTally[at] < Simulation.CLAIM_GRIP) {
+                                        this.claimTally[at] = this.claimTally[at] + 1;
+                                    }
                                 } else if (this.claimTally[at] == 0) {
                                     this.claimVote[at] = h;
                                     this.claimTally[at] = 1;
@@ -2767,35 +2809,8 @@ public bundle Agents {
                     }
                     i = i + 1;
                 }
-                // That vote is only this instant's evidence, and this instant is worth very little:
-                // the same block polled a second apart can name a different community because six
-                // people crossed a line. It is folded into a HOLDING that remembers, so that what is
-                // drawn is who has been there rather than who is there right now.
                 for (int b in 0..nb) {
-                    int v = this.claimVote[b];
-                    if (v < 0) {
-                        // Nobody standing here at all. Let go slowly -- a village whose people are
-                        // all out in the fields this second has not abandoned its ground.
-                        if (this.claimHold[b] > 0) {
-                            this.claimHold[b] = this.claimHold[b] - 1;
-                        }
-                        if (this.claimHold[b] == 0) {
-                            this.claimCore[b] = 0 - 1;
-                        }
-                    } else if (this.claimCore[b] == v) {
-                        if (this.claimHold[b] < Simulation.CLAIM_GRIP) {
-                            this.claimHold[b] = this.claimHold[b] + 1;
-                        }
-                    } else {
-                        this.claimHold[b] = this.claimHold[b] - 1;
-                        if (this.claimHold[b] <= 0) {
-                            this.claimCore[b] = v;
-                            this.claimHold[b] = 1;
-                        }
-                    }
-                }
-                for (int b in 0..nb) {
-                    this.claim[b] = this.claimCore[b];
+                    this.claim[b] = this.claimVote[b];
                 }
                 // And then it spreads to the ground they work but do not sleep on. One ring a pass,
                 // read from the last pass so a claim cannot race across the map in a single census.
@@ -7241,10 +7256,12 @@ public bundle Agents {
             }
 
             public static int WORK_BLOCKS = 3;           // 16-cell blocks a COMMUNITY looks over: 48 cells
-            // How many censuses of contested evidence it takes to move a border. Six: long enough
-            // that people walking about cannot shift a frontier, short enough that a village really
-            // pushing into its neighbour's ground gets there within the life of one generation.
-            public static int CLAIM_GRIP = 6;
+            // The deepest lead a block's holder may build. It is a number of PASSAGES, not of
+            // censuses: two thousand is about a minute of a busy village's coming and going, which
+            // is how long that village's ground goes on being its ground after everybody in it has
+            // died or left. Deeper and a conquered town keeps its old colour for an age; shallower
+            // and the frontier starts wobbling again on ordinary traffic.
+            public static int CLAIM_GRIP = 2000;
             public static int REACH = 6;                 // cells a person searches where they stand
             // A WORK SESSION, not a grab. At five seconds a load the trade was seventy-one per cent
             // walking -- and the wood was only seven or eight cells away, so the map was never the
