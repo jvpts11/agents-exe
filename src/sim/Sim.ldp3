@@ -345,6 +345,7 @@ public bundle Agents {
             private mutable int[] claim;        // holder plus the worked ring: what is drawn
             private mutable int[] claimWas;     // what was drawn last census, to notice a real change
             private mutable int[] claimEdge;
+            private mutable float chronicleDue;   // world clock at which the next chronicle block is due
             private mutable int restakes;      // how many times the claim was recomputed at all
             private mutable long blockGained;  // blocks that went from nobody to somebody
             private mutable long blockLost;    // blocks that went from somebody to nobody
@@ -618,6 +619,7 @@ public bundle Agents {
                 this.claimAge = 0;
                 this.slice = Simulation.SLICE_NS;
                 this.restakes = 0;
+                this.chronicleDue = Simulation.CHRONICLE;
                 this.blockGained = 0;
                 this.blockLost = 0;
                 this.blockFlipped = 0;
@@ -7401,6 +7403,9 @@ public bundle Agents {
             // the largest cost in the simulation down to a quarter, small enough that four steps'
             // worth of ground is still under a cell, so walls are no more passable than they were.
             public static int FAR_SKIP = 4;
+            // World seconds between chronicle blocks. Five world-minutes: fine enough to see a trade
+            // rise and fall, coarse enough that four hours of run is megabytes and not gigabytes.
+            public static float CHRONICLE = 300.0;
             public static int REACH = 6;                 // cells a person searches where they stand
             // A WORK SESSION, not a grab. At five seconds a load the trade was seventy-one per cent
             // walking -- and the wood was only seven or eight cells away, so the map was never the
@@ -8693,6 +8698,15 @@ public bundle Agents {
                     this.censusDue = this.clock + 1.0;
                     this.meter.lap(cast<int>(Phase.Census));
                 }
+                // THE CHRONICLE. The whole audit, every CHRONICLE seconds of world time, so a run
+                // left going for hours leaves behind what actually HAPPENED rather than where it
+                // ended up. Two hundred and eighty-eight facts a block at five world-minutes apart
+                // is a few megabytes over four hours -- nothing beside knowing whether a trade rose
+                // and fell or never started.
+                if (this.clock >= this.chronicleDue) {
+                    this.chronicleDue = this.clock + Simulation.CHRONICLE;
+                    this.audit();
+                }
                 this.g.surface().regrow(dt);
                 // Hulls move on the clock like people do, not on the census -- a barge halfway
                 // across is halfway across, and a lane that only advanced once a census would
@@ -8761,7 +8775,26 @@ public bundle Agents {
             public method audit() returns void {
                 System.IO.Console.println("AUDIT-BEGIN");
                 System.IO.Console.println($"A|seed|{this.seed}");
+                // WHEN. Every block carries the world-clock reading it was taken at, because this
+                // is no longer only printed on the way out: it is printed every CHRONICLE seconds
+                // of world time, so what comes out of a long run is a time series and not a
+                // photograph of the end. A photograph of the end cannot tell you whether a good
+                // was never made or made for an hour and then stopped, and those two want
+                // completely different fixes.
+                System.IO.Console.println($"A|at|{cast<long>(this.clock)}");
                 System.IO.Console.println($"A|alive|{this.folk.count()}");
+                // Settlements, so a run says how many places there ARE and not only how many were
+                // ever founded. The difference between two blocks is how many died in between.
+                mutable int places = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] > 0) {
+                        places = places + 1;
+                    }
+                }
+                System.IO.Console.println($"A|comm.alive|{places}");
+                System.IO.Console.println($"A|comm.hived|{this.hived}");
+                System.IO.Console.println($"A|comm.joined|{this.joined}");
+                System.IO.Console.println($"A|comm.fled|{this.fled}");
                 // HOW MANY TIMES THE MAP OF THE WORLD CHANGED, against how many times it was asked.
                 // The first number used to equal the second, because the claim was re-derived from
                 // where people were standing and people never stop moving; the frontier of every
