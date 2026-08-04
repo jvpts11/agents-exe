@@ -391,6 +391,16 @@ public bundle Agents {
             private mutable long learnSlack;    // surplus a nation can spend on thinking
             private mutable long learnSchool;   // and what its shrines and libraries work out
             private mutable long learnGain;     // the two together, as `study` receives it
+            // AND WHY NO WAR IS EVER DECLARED. Same treatment again: `border.cause.conquest` reads
+            // zero in every run, and "nations do not fight" is not a finding until the gate that
+            // refuses them is a number.
+            private mutable long warAsked;
+            private mutable long warNoRank;     // not a kingdom; a chiefdom raids, it does not campaign
+            private mutable long warNoSeat;     // no capital big enough to raise from
+            private mutable long warNoFood;     // cannot feed its own capital, let alone an army
+            private mutable long warBusy;       // already has one in the field
+            private mutable long warNoAim;      // nobody it holds a grudge against, within reach
+            private mutable long warNoLead;     // nobody in the seat fit to lead it
             private mutable float chronicleDue;   // world clock at which the next chronicle block is due
             private mutable int restakes;      // how many times the claim was recomputed at all
             private mutable long blockGained;  // blocks that went from nobody to somebody
@@ -679,6 +689,13 @@ public bundle Agents {
                 this.learnSlack = 0;
                 this.learnSchool = 0;
                 this.learnGain = 0;
+                this.warAsked = 0;
+                this.warNoRank = 0;
+                this.warNoSeat = 0;
+                this.warNoFood = 0;
+                this.warBusy = 0;
+                this.warNoAim = 0;
+                this.warNoLead = 0;
                 this.claimAge = 0;
                 this.slice = Simulation.SLICE_NS;
                 this.restakes = 0;
@@ -1844,20 +1861,27 @@ public bundle Agents {
                     }
                     tries = tries + 1;
                     int nat = this.warlord;
-                    if (!this.realm.alive(nat)
-                        || this.realm.rankOf(nat) < cast<int>(Rank.Kingdom)) {
+                    if (!this.realm.alive(nat)) {
+                        continue;
+                    }
+                    this.warAsked = this.warAsked + 1;
+                    if (this.realm.rankOf(nat) < cast<int>(Rank.Kingdom)) {
+                        this.warNoRank = this.warNoRank + 1;
                         continue;                // a chiefdom raids; it does not campaign
                     }
                     int seat = this.realm.seatOf(nat);
                     if (seat < 0 || this.cpop[seat] < Simulation.VILLAGE) {
+                        this.warNoSeat = this.warNoSeat + 1;
                         continue;
                     }
                     // An army eats. A nation that cannot feed its own capital does not send five
                     // hundred people to sit in a field.
                     if (this.stores.foodOf(seat) < this.cpop[seat] * Simulation.LARDER) {
+                        this.warNoFood = this.warNoFood + 1;
                         continue;
                     }
                     if (this.armyOf(nat) >= 0) {
+                        this.warBusy = this.warBusy + 1;
                         continue;                // one in the field at a time
                     }
                     // What it wants: the nearest town of somebody it has a grudge against. The
@@ -1866,10 +1890,12 @@ public bundle Agents {
                     // could never provide on its own.
                     int want = this.warAim(nat, seat);
                     if (want < 0) {
+                        this.warNoAim = this.warNoAim + 1;
                         continue;
                     }
                     int lead = this.raiseGeneral(seat);
                     if (lead < 0) {
+                        this.warNoLead = this.warNoLead + 1;
                         continue;
                     }
                     int a = this.host.open();
@@ -8609,7 +8635,7 @@ public bundle Agents {
                 if (this.folk.hasKit(j, AgentTable.K_ARMOUR)) {
                     blow = blow * 3 / 5;
                 }
-                if (this.folk.wound(j, blow)) {
+                if (this.folk.wound(j, blow, this.clock)) {
                     // A DEAD MAN IS NOT STILL THE CHIEF, and war was the one death in this world
                     // that forgot to say so. Old age, hunger, illness and the ground all vacate the
                     // office; a raid did not -- so a village whose chief was cut down at the gate
@@ -8630,7 +8656,7 @@ public bundle Agents {
                 if (this.folk.hasKit(i, AgentTable.K_ARMOUR)) {
                     back = back * 3 / 5;
                 }
-                if (armed && this.folk.wound(i, back)) {
+                if (armed && this.folk.wound(i, back, this.clock)) {
                     this.vacate(i, this.folk.homeOf(i));
                     this.deathsWar = this.deathsWar + 1;
                     return;
@@ -9430,6 +9456,13 @@ public bundle Agents {
                 System.IO.Console.println($"A|learn.gain|{this.learnGain}");
                 System.IO.Console.println($"A|learn.lore|{lore}");
                 System.IO.Console.println($"A|learn.cost|{Simulation.ERA_COST}");
+                System.IO.Console.println($"A|war.asked|{this.warAsked}");
+                System.IO.Console.println($"A|war.no.rank|{this.warNoRank}");
+                System.IO.Console.println($"A|war.no.seat|{this.warNoSeat}");
+                System.IO.Console.println($"A|war.no.food|{this.warNoFood}");
+                System.IO.Console.println($"A|war.busy|{this.warBusy}");
+                System.IO.Console.println($"A|war.no.aim|{this.warNoAim}");
+                System.IO.Console.println($"A|war.no.lead|{this.warNoLead}");
                 System.IO.Console.println($"A|born|{this.births}");
                 System.IO.Console.println($"A|died.old|{this.deathsOld}");
                 System.IO.Console.println($"A|died.hunger|{this.deathsHunger}");

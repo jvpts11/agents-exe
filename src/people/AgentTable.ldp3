@@ -234,6 +234,14 @@ public bundle Agents {
             // terminate instead of circling an island for ever.
             private mutable byte[] navMode;
             private mutable float[] navHitD;
+            // WHEN THIS PERSON LAST TOOK A BLOW, on the world clock.
+            //
+            // `hp` has existed since the beginning and `wound` has been reducing it for as long as
+            // there have been raids -- and none of it has ever been visible. A world where people
+            // are hurt and killed and look exactly the same doing it is a world where a battle
+            // reads as a crowd standing still. This is the one field the renderer needs to show a
+            // hit landing, and the health it is left with does the rest.
+            private mutable float[] hurtAt;
             // WHERE EVERYBODY IS, BY BIN, so "who is standing next to me" is a short chain walk and
             // not fifty thousand distance tests. The same shape Wildlife uses for prey and NodeField
             // uses for resources, and for the same reason: this codebase keeps having to relearn
@@ -289,6 +297,7 @@ public bundle Agents {
                 this.crowdN = 0;
                 this.navMode = new byte[cap]();
                 this.navHitD = new float[cap]();
+                this.hurtAt = new float[cap]();
                 this.px = new float[cap]();
                 this.py = new float[cap]();
                 this.home = new short[cap]();
@@ -352,6 +361,7 @@ public bundle Agents {
                 delete this.crowdOrder;
                 delete this.navMode;
                 delete this.navHitD;
+                delete this.hurtAt;
                 delete this.px;
                 delete this.py;
                 delete this.home;
@@ -782,6 +792,7 @@ public bundle Agents {
                 this.crowdOrder = AgentTable.widerI(this.crowdOrder, cap);
                 this.navMode = AgentTable.widerB(this.navMode, cap);
                 this.navHitD = AgentTable.widerF(this.navHitD, cap);
+                this.hurtAt = AgentTable.widerF(this.hurtAt, cap);
                 this.px = AgentTable.widerF(this.px, cap);
                 this.py = AgentTable.widerF(this.py, cap);
                 this.home = AgentTable.widerS(this.home, cap);
@@ -1467,7 +1478,11 @@ public bundle Agents {
             // Take a blow. Returns true if it was the last one, so the caller can count the death
             // as its own kind -- of old age, of hunger, and now of somebody else. The three are
             // reported apart because a world where the third is zero has no history in it.
-            public method wound(int i, int n) returns boolean {
+            public method wound(int i, int n, float now) returns boolean {
+                // Stamped HERE, where every blow in this world passes through, so nothing can hurt
+                // somebody without it showing. The renderer flashes the moment and then reads what
+                // health they were left with.
+                this.hurtAt[i] = now;
                 int left = this.hpOf(i) - n;
                 if (left <= 0) {
                     this.hp[i] = cast<byte>(0);
@@ -1477,6 +1492,15 @@ public bundle Agents {
                 this.hp[i] = cast<byte>(left);
                 return false;
             }
+
+            public method hurtAtOf(int i) returns float {
+                return this.hurtAt[i];
+            }
+
+            // How long a blow shows on somebody. Two thirds of a second: long enough to read at the
+            // frame rates this runs at, short enough that a melee reads as a series of blows rather
+            // than as two people permanently on fire.
+            public static float HURT_FLASH = 0.65;
 
             // ---- life ----
 
