@@ -134,6 +134,12 @@ public bundle Agents {
             // a detail bake in flight, spread over frames
             private mutable boolean baking;
             private mutable address bkBuf;
+            // How many floats the buffer being filled right now can hold, and how many writes have
+            // been refused for running past it. `wrOver` should be zero for the life of a run; it
+            // is reported on the way out, so a disagreement between a counting pass and its
+            // emitting pass shows up as a number instead of as a heap panic in an unrelated place.
+            private mutable int wrCap;
+            private mutable int wrOver;
             private mutable int bkTris;
             private mutable int bkW;
             private mutable int bkRow;
@@ -172,6 +178,27 @@ public bundle Agents {
             private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
             private mutable int[] dNodeA;       // detail bake scratch: first node instance of each row
             private mutable int[] dNodeB;       // detail bake scratch: one past the last
+            // WHAT EACH OF THOSE NODES WAS WHEN IT WAS COUNTED.
+            //
+            // The detail bake sizes its buffer in one pass and fills it in another, and the two are
+            // many frames apart -- that is the whole point of slicing it. Everything else the two
+            // passes disagree about is already cached between them: the river tile, the way tile,
+            // the clutter. The node instances were not; the emitting pass went back and asked the
+            // world what kind each one was.
+            //
+            // The world answers differently, because `NodeField.regrow` runs EVERY TICK and rewrites
+            // a node's kind in place -- a felled tree comes back, bare ground seeds. So a stump that
+            // was counted as nothing could be a tree by the time it was drawn, and it would write
+            // triangles into a buffer sized without them. That is a heap overrun, and it landed as
+            // "double free of a heap block" somewhere else entirely, minutes later, in a run that
+            // looked nothing like the cause. It read as a rare one-off for as long as the world was
+            // only ever watched at life speed, where almost nothing regrows between two frames; at
+            // the top gear it took down two windows in six inside a minute.
+            //
+            // The bake is a photograph. It has to develop the picture it took.
+            private mutable int[] dNodeK;       // kind per visited instance, in visit order
+            private mutable int dNodeN;         // how many are cached
+            private mutable int dNodeCur;       // emitting cursor into dNodeK
             private mutable int[] btally;       // per-biome cell count inside one coarse block
             private mutable int[] connOrd;      // connection mask -> tile ordinal
             private mutable int[] fallOrd;      // outflow direction -> waterfall tile ordinal
@@ -293,6 +320,8 @@ public bundle Agents {
                 this.sScale = new float[1]();
                 this.baking = false;
                 this.bkBuf = cast<address>(0);
+                this.wrCap = 0;
+                this.wrOver = 0;
                 this.bkTris = 0;
                 this.bkW = 0;
                 this.bkRow = 0;
@@ -318,6 +347,9 @@ public bundle Agents {
                 this.dPropC = new int[1]();
                 this.dNodeA = new int[1]();
                 this.dNodeB = new int[1]();
+                this.dNodeK = new int[1]();
+                this.dNodeN = 0;
+                this.dNodeCur = 0;
                 this.nModel = new int[1]();
                 this.nInProps = new boolean[1]();
                 this.nScale = new float[1]();
@@ -379,6 +411,7 @@ public bundle Agents {
                 delete this.dPropC;
                 delete this.dNodeA;
                 delete this.dNodeB;
+                delete this.dNodeK;
                 delete this.bodyModel;
                 if (this.acap > 0) {
                     Memory.free(this.abuf);
@@ -1268,6 +1301,17 @@ public bundle Agents {
 
             private method wr(address buf, int w, float x, float y, float z,
                               float nx, float ny, float nz, float r, float g, float b) returns int {
+                // NOTHING GOES PAST THE END OF THE BUFFER. Every buffer here is sized by a counting
+                // pass and filled by an emitting pass, and any disagreement between the two writes
+                // over whatever the allocator put next -- which surfaces as a heap panic somewhere
+                // else entirely, minutes later, in a run that looks nothing like the cause. One of
+                // those disagreements was real and is fixed above; this is so the next one costs a
+                // missing tree rather than a corrupted heap. One integer compare against nine float
+                // stores, and it keeps the promise the language makes about undefined behaviour.
+                if (w + 9 > this.wrCap) {
+                    this.wrOver = this.wrOver + 1;
+                    return w + 9;
+                }
                 address p = buf + cast<address>(w * 4);
                 Memory.write<float>(p, x);
                 Memory.write<float>(p + cast<address>(4), y);
@@ -1601,6 +1645,15 @@ public bundle Agents {
                 tris = tris + rtris;
                 address buf = Memory.alloc(cast<long>(tris * 27 * 4 + 4));
                 address hbuf = Memory.alloc(cast<long>(htris * 27 * 4 + 4));
+                // This one pass fills TWO buffers alternately and `wr` only ever sees one cap, so
+                // the guard is set to the larger of them: it still stops a runaway, which is what
+                // it is for, and it cannot clip either buffer's honest contents. This pass is also
+                // the one place where the risk it guards against does not exist -- it counts and
+                // fills in the same call, with no simulation running in between.
+                this.wrCap = tris * 27;
+                if (htris > tris) {
+                    this.wrCap = htris * 27;
+                }
                 mutable int w = 0;
                 mutable int hw = 0;
                 by = 0;
@@ -1716,6 +1769,8 @@ public bundle Agents {
                 this.bkTris = 0;
                 this.bkW = 0;
                 this.bkRow = 0;
+                this.dNodeN = 0;
+                this.dNodeCur = 0;
                 this.bkOx = ox;
                 this.bkOy = oy;
                 this.bkPhase = 0;
@@ -1782,6 +1837,21 @@ public bundle Agents {
                     mutable int b = a;
                     while (b < e && nf.cellXAt(b) < ox + this.detW) {
                         int nk = nf.kindAt(b);
+                        // Remembered, not looked up again later. See dNodeK.
+                        if (this.dNodeN >= this.dNodeK.length()) {
+                            mutable int grow = this.dNodeK.length() * 2;
+                            if (grow < 1024) {
+                                grow = 1024;
+                            }
+                            mutable int[] bigger = new int[grow]();
+                            for (int q in 0..this.dNodeN) {
+                                bigger[q] = this.dNodeK[q];
+                            }
+                            delete this.dNodeK;
+                            this.dNodeK = bigger;
+                        }
+                        this.dNodeK[this.dNodeN] = nk;
+                        this.dNodeN = this.dNodeN + 1;
                         if (nk != 0 && this.nModel[nk] >= 0) {
                             tris = tris + this.nodeTris(nk);
                             if (Nodes.castsShadow(nk)) {
@@ -1827,6 +1897,10 @@ public bundle Agents {
                     return;
                 }
                 address buf = this.bkBuf;
+                // Re-declared on every slice, because the other bakes run between them and each one
+                // sets this for its own buffer. This is the pass the guard exists for: the buffer
+                // was sized frames ago and the world has not stopped since.
+                this.wrCap = this.bkTris * 27;
                 int ox = this.bkOx;
                 int oy = this.bkOy;
                 mutable int w = this.bkW;
@@ -1895,7 +1969,15 @@ public bundle Agents {
                     mutable int ni = this.dNodeA[y];
                     int nEnd = this.dNodeB[y];
                     while (ni < nEnd) {
-                        int nk = nf.kindAt(ni);
+                        // The kind this node had WHEN THE BUFFER WAS SIZED, not the kind it has
+                        // now: the world has been running the whole time this bake has been going
+                        // in, and asking it again is how a tree that grew back in the meantime
+                        // wrote triangles nobody had counted. See dNodeK.
+                        mutable int nk = 0;
+                        if (this.dNodeCur < this.dNodeN) {
+                            nk = this.dNodeK[this.dNodeCur];
+                            this.dNodeCur = this.dNodeCur + 1;
+                        }
                         if (nk != 0 && this.nModel[nk] >= 0) {
                             int cx2 = nf.cellXAt(ni);
                             int cy2 = nf.cellYAt(ni);
@@ -2428,6 +2510,7 @@ public bundle Agents {
                     this.acap = tris * 2;                      // headroom: a crowd must not realloc every frame
                     this.abuf = Memory.alloc(cast<long>(this.acap * 27 * 4 + 4));
                 }
+                this.wrCap = tris * 27;
                 mutable int w = 0;
                 i = 0;
                 while (i < n) {
@@ -2612,6 +2695,7 @@ public bundle Agents {
                     this.fcap = tris * 2;
                     this.fbuf = Memory.alloc(cast<long>(this.fcap * 27 * 4 + 4));
                 }
+                this.wrCap = tris * 27;
                 mutable int wr = 0;
                 for (int i in 0..n) {
                     if (!w.aliveAt(i)) {
@@ -2656,6 +2740,13 @@ public bundle Agents {
                 this.haveSim = true;
                 this.bakedClaim = 0 - 1;
                 return;
+            }
+
+            // How many vertex writes the buffer guard refused. Zero is the only correct answer, and
+            // it is printed on the way out rather than kept to itself: a guard that quietly saves
+            // the run every frame is a bug nobody ever finds.
+            public method overruns() returns int {
+                return this.wrOver;
             }
 
             public method frameMeter() returns Meter* {
@@ -2750,6 +2841,7 @@ public bundle Agents {
                     this.ocap = tris * 2;
                     this.obuf = Memory.alloc(cast<long>(this.ocap * 27 * 4 + 4));
                 }
+                this.wrCap = tris * 27;
                 mutable int w = 0;
                 for (int y in y0..y1) {
                     for (int x in x0..x1) {
@@ -2875,6 +2967,7 @@ public bundle Agents {
                     this.obuf = Memory.alloc(cast<long>(this.ocap * 27 * 4 + 4));
                 }
                 float half = cast<float>(bs);          // a block is bs cells, a cell is 2 units
+                this.wrCap = tris * 27;
                 mutable int w = 0;
                 for (int by in 0..bh) {
                     for (int bx in 0..bw) {
@@ -3032,6 +3125,7 @@ public bundle Agents {
                     this.bcap = tris * 2;
                     this.bbuf = Memory.alloc(cast<long>(this.bcap * 27 * 4 + 4));
                 }
+                this.wrCap = tris * 27;
                 mutable int w = 0;
                 for (int i in 0..n) {
                     int bx = this.town.xAt(i);
