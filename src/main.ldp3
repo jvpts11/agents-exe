@@ -9,10 +9,6 @@ import Agents.World.Grid;
 import Agents.World.WorldGen;
 import Agents.World.Biomes;
 import Agents.World.Nodes;
-import Agents.People.AgentTable;
-import Agents.Sim.Simulation;
-import Agents.Sim.Nations;
-import Agents.Sim.Rank;
 import Agents.Sim.Meter;
 import System.Time.Stopwatch;
 import Agents.World.WorldAudit;
@@ -72,28 +68,10 @@ public bundle Agents {
                         Main.forestShot();
                         return;
                     }
-                    if (args[0].equals("folkshot")) {
-                        Main.folkShot();
-                        return;
-                    }
-                    if (args[0].equals("simrun")) {
-                        // A SEED, so that two arcs can disagree about nothing.
-                        //
-                        // Every number this campaign has acted on came off one run of one seed, and
-                        // a difference between two arcs has been read as a result all day without
-                        // anybody knowing what two arcs of the SAME CODE disagree by. Until that
-                        // number exists, no measured delta smaller than it means anything at all.
-                        mutable int seed = 42;
-                        if (args.length() > 1) {
-                            mutable Scanner sc = new Scanner(args[1]) on heap;
-                            if (sc.hasNext()) {
-                                seed = sc.nextInt();
-                            }
-                            delete sc;
-                        }
-                        Main.simRun(seed);
-                        return;
-                    }
+                    // `folkshot` and `simrun` lived here. Both drove the simulation headlessly and
+                    // both went with it; whatever the new model needs in order to be watched
+                    // without a window gets written against the new model, rather than kept as the
+                    // shape the old one happened to leave behind.
                     if (args[0].equals("probe")) {
                         Main.probeSeam();
                         return;
@@ -328,29 +306,13 @@ public bundle Agents {
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                AgentTable* folk = new AgentTable(50000) on heap;
-                folk.seedWorld(g, 5000, 100, seed);
-                folk.report();
-                r.setPeople(folk, peopleMesh);
-                MeshAtlas* buildMesh = MeshAtlas.loadNamed(root, "buildings.index");
-                MeshAtlas* faunaMesh = MeshAtlas.loadNamed(root, "fauna.index");
-                Simulation* sim = new Simulation(g, folk, seed) on heap;
-                sim.setRate(pace);
-                // A THIRD ARGUMENT TURNS ON THE TRACE: every agent, every column, every tick,
-                // written to the path given. Off without it, because a mature world writes about a
-                // gigabyte a minute this way and no ordinary run should pay that. What it buys is
-                // the one question the counters cannot answer -- not "how often does this happen"
-                // but "what is that ring of people actually doing" -- and that can only be answered
-                // by an instrument that keeps the individual.
-                if (tracePath.length() > 0) {
-                    sim.traceTo(tracePath);
-                }
-                r.setTown(sim.buildings(), buildMesh);
-                r.setSim(sim);
-                r.setWays(sim.ways(), MeshAtlas.loadNamed(root, "ways.index"));
-                r.setItems(MeshAtlas.loadNamed(root, "items.index"));
-                r.setVehicles(MeshAtlas.loadNamed(root, "vehicles.index"));
-                r.setFauna(faunaMesh);
+                // THE WORLD, AND NOTHING LIVING IN IT YET.
+                //
+                // Everything that used to be built here -- fifty thousand agents, the simulation,
+                // the buildings raised on it, the roads worn into it, the fauna -- has been deleted
+                // to be written again. What is left is exactly the part that was never the problem:
+                // the world is generated, audited and drawn, and it will stay drawable while the
+                // new model is built against it one piece at a time.
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 Hud* text = new Hud(win.gl, 14) on heap;
                 mutable int lastX = win.cursorX();
@@ -385,41 +347,10 @@ public bundle Agents {
                             if (ev.vk == 0x50) {                           // P: the pixel filter
                                 r.pixelate = !r.pixelate;
                             }
-                            if (ev.vk == 0x54) {                           // T: the territory overlay
-                                r.setTerritory(!r.territoryOn());
-                            }
-                            if (ev.vk == 0x20) {                           // Space: pause
-                                sim.setHalted(!sim.isHalted());
-                                shownRate = 0.0 - 1.0;
-                            }
-                            // 1..6 are the gears. A whole arc of world time is two hours, so
-                            // watching it at life speed is not a thing anybody will do twice --
-                            // and a hundred generations of an economy is a number you want in
-                            // minutes when you are checking whether it holds.
-                            if (ev.vk == 0x31) {
-                                sim.setRate(1.0);
-                                sim.setHalted(false);
-                            }
-                            if (ev.vk == 0x32) {
-                                sim.setRate(2.0);
-                                sim.setHalted(false);
-                            }
-                            if (ev.vk == 0x33) {
-                                sim.setRate(5.0);
-                                sim.setHalted(false);
-                            }
-                            if (ev.vk == 0x34) {
-                                sim.setRate(20.0);
-                                sim.setHalted(false);
-                            }
-                            if (ev.vk == 0x35) {
-                                sim.setRate(60.0);
-                                sim.setHalted(false);
-                            }
-                            if (ev.vk == 0x36) {
-                                sim.setRate(300.0);
-                                sim.setHalted(false);
-                            }
+                            // THE GEARS AND THE PAUSE ARE GONE WITH THE CLOCK THEY DROVE. Speed
+                            // controls for a world with nothing happening in it would be three
+                            // keys that do nothing, which is worse than three keys that are not
+                            // there. They come back with the simulation.
                         }
                         delete ev;
                     }
@@ -433,63 +364,18 @@ public bundle Agents {
                     if (win.keyDown(0x44)) { r.pan(0.0, pan); }
                     int cw = win.width();
                     int ch = win.height();
-                    // The simulation is told which cells are on screen at full detail, so the people
-                    // there walk around obstacles while everyone else simply advances.
-                    sim.setNearWindow(r.detailX0(), r.detailY0(), r.detailX1(), r.detailY1());
-                    // THE WINDOW KEEPS ITS FRAME RATE AND THE WORLD GETS WHAT IS LEFT.
-                    //
-                    // The simulation's catch-up allowance used to be a constant, and a constant is
-                    // a guess about a machine: twenty-five milliseconds held the window at thirty
-                    // frames whatever else was true, and a faster machine got no more world for it.
-                    // Here the frame is budgeted the other way round -- take what drawing and the
-                    // window actually cost, and hand the remainder of a sixtieth of a second to the
-                    // world. A quiet frame runs more of it, a heavy one runs less, and the picture
-                    // stays smooth either way.
-                    //
-                    // The floor of four milliseconds matters: without it a machine that cannot
-                    // reach the target at all would stop simulating entirely and the world would
-                    // freeze rather than merely run slow.
-                    long beforeSim = Time.nanos();
-                    mutable long spare = 16666666 - (beforeSim - frameOpened);
-                    if (spare < 4000000) {
-                        spare = 4000000;
-                    }
-                    sim.setSlice(spare);
-                    sim.advance(0.016);
-                    frameOpened = Time.nanos();
                     r.render(cw, ch);
-                    // The title carries the clock AND the two rates. A speed control you cannot read
-                    // is a speed control you do not trust, and a frame rate you only notice once it
-                    // is already bad is a frame rate nobody was watching: this is the number that
-                    // says which slice made the game heavier, on the day that slice was written.
-                    //
-                    // The two are separate on purpose. They come apart the moment the gears are used
-                    // -- paused is sixty frames and no ticks, x300 is few frames and many -- and
-                    // which of the two fell is most of the diagnosis.
+                    // The frame rate, in the title and on the HUD. There is one clock now instead
+                    // of two: with nothing being simulated there is no tick rate to fall out of
+                    // step with the frame rate, and a second number that always agreed with the
+                    // first would be a number nobody reads.
                     Meter* fm = r.frameMeter();
-                    if (fm.roll() || sim.rateOf() != shownRate || sim.isHalted() != shownHalt) {
-                        sim.clockMeter().roll();
-                        shownRate = sim.rateOf();
-                        shownHalt = sim.isHalted();
-                        int fps = fm.fps();
-                        int tps = sim.clockMeter().tps();
-                        // WHAT IT IS ACTUALLY DOING, not what it was asked for. The gear is a
-                        // request; the world runs at whatever the machine gives it, and on a full
-                        // map the top gear asks for three hundred and gets twenty. Printing the
-                        // request as though it were the speed is how a window can sit there for an
-                        // hour claiming to be running fifteen times faster than it is.
-                        int got = cast<int>(cast<float>(tps) * Simulation.TICK);
-                        if (shownHalt) {
-                            win.setTitle($"agents.exe -- PAUSED | {fps} fps  [space run | 1-6 speed | T borders | P pixels | ESC]");
-                        } else if (got < cast<int>(shownRate)) {
-                            win.setTitle($"agents.exe -- x{got} of x{cast<int>(shownRate)} asked | {fps} fps, {tps} tps  [space pause | 1-6 speed | T borders | P pixels | ESC]");
-                        } else {
-                            win.setTitle($"agents.exe -- x{cast<int>(shownRate)} | {fps} fps, {tps} tps  [space pause | 1-6 speed | T borders | P pixels | ESC]");
-                        }
+                    if (fm.roll()) {
+                        win.setTitle($"agents.exe -- world  |  {fm.fps()} fps  [drag/arrows rotate | wheel zoom | WASD pan | P pixels | ESC]");
                     }
                     hud.begin(cw, ch, 0);
                     r.drawCompass(hud, cw, ch);
-                    text.rates(hud, r.frameMeter(), sim.clockMeter(), ch);
+                    text.rates(hud, r.frameMeter(), ch);
                     hud.flush();
                     win.swap();
                 }
@@ -497,25 +383,15 @@ public bundle Agents {
                 // real load is, and a profile you have to remember to ask for is a profile nobody
                 // reads.
                 r.frameMeter().report("frame");
-                sim.clockMeter().report("clock");
                 if (r.overruns() > 0) {
                     System.IO.Console.println($"renderer: {r.overruns()} vertex writes refused past the end of a buffer -- a counting pass and its emitting pass disagreed");
                 }
-                // AND THE WHOLE WORLD, in the same parseable block the headless arc emits. The
-                // point of running the real game six times is that everything is in the loop --
-                // renderer, window, input, meshes -- so the audit has to come off THAT run and not
-                // off a mode built beside it.
-                sim.audit();
                 delete text;
                 delete hud;
-                delete sim;
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete folk;
                 delete peopleMesh;
-                delete buildMesh;
-                delete faunaMesh;
                 delete props;
                 delete terr;
                 delete g;
@@ -612,10 +488,6 @@ public bundle Agents {
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                AgentTable* folk = new AgentTable(50000) on heap;
-                folk.seedWorld(g, 5000, 100, 42);
-                folk.report();
-                r.setPeople(folk, peopleMesh);
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 int cw = win.width();
                 int ch = win.height();
@@ -653,7 +525,6 @@ public bundle Agents {
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete folk;
                 delete peopleMesh;
                 delete props;
                 delete terr;
@@ -723,10 +594,6 @@ public bundle Agents {
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                AgentTable* folk = new AgentTable(50000) on heap;
-                folk.seedWorld(g, 5000, 100, 42);
-                folk.report();
-                r.setPeople(folk, peopleMesh);
                 r.aimAt(fx, fy);
                 r.setView(35.0, 28.0, 90.0);
                 int cw = win.width();
@@ -746,7 +613,6 @@ public bundle Agents {
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete folk;
                 delete peopleMesh;
                 delete props;
                 delete terr;
@@ -845,10 +711,6 @@ public bundle Agents {
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                AgentTable* folk = new AgentTable(50000) on heap;
-                folk.seedWorld(g, 5000, 100, 42);
-                folk.report();
-                r.setPeople(folk, peopleMesh);
                 int cw = win.width();
                 int ch = win.height();
                 r.aimAt(fx + spanX / 2, fy + spanY / 2);
@@ -861,7 +723,6 @@ public bundle Agents {
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete folk;
                 delete peopleMesh;
                 delete props;
                 delete terr;
@@ -928,10 +789,6 @@ public bundle Agents {
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                AgentTable* folk = new AgentTable(50000) on heap;
-                folk.seedWorld(g, 5000, 100, 42);
-                folk.report();
-                r.setPeople(folk, peopleMesh);
                 r.aimAt(fx, fy);
                 int cw = win.width();
                 int ch = win.height();
@@ -960,217 +817,12 @@ public bundle Agents {
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete folk;
                 delete peopleMesh;
                 delete props;
                 delete terr;
                 delete g;
                 delete win;
                 System.IO.Console.println("forestshot: wrote forest_a.ppm, forest_b.ppm, forest_c.ppm");
-                return;
-            }
-
-            // Run the clock headless and print what the movement slice is judged on: how many people
-            // decided in the worst frame -- which must NOT grow with the population -- and how many
-            // gave up on a destination, which must be nobody.
-            private static method simRun(int seed) returns void {
-                int w = 2560;
-                int h = 1440;
-                System.IO.Console.println($"simrun: seed {seed}");
-                WorldGen gen = new WorldGen(seed) on stack;
-                gen.setWorld(0, 0.0 - 1.0);
-                Grid* g = gen.generate(w, h);
-                AgentTable* folk = new AgentTable(50000) on heap;
-                folk.seedWorld(g, 5000, 100, seed);
-                folk.report();
-                Simulation* sim = new Simulation(g, folk, seed) on heap;
-                // Nobody is on screen, so everybody takes the cheap path -- the honest measurement
-                // of what fifty thousand people cost when the camera is not helping.
-                sim.setNearWindow(0, 0, 0, 0);
-                Stopwatch watch = new Stopwatch() on stack;
-                watch.start();
-                // Twenty generations at six minutes each. Stepping at 20 Hz rather than 60 because
-                // the simulation is written against dt and not against frames -- the only thing that
-                // changes is how finely a walk is chopped, and two hours of world time is not
-                // something to sit through at render rate.
-                float dt = 0.05;
-                int lifeSpan = 360;
-                int stepsPerGen = cast<int>(cast<float>(lifeSpan) / dt);
-                System.IO.Console.println("simrun: population by generation (a life is ~360s)");
-                mutable int gi = 0;
-                while (gi < 20) {
-                    mutable int frame = 0;
-                    while (frame < stepsPerGen) {
-                        sim.step(dt);
-                        frame = frame + 1;
-                    }
-                    gi = gi + 1;
-                    // Nations and the best era alongside the population, because those are the two
-                    // curves this arc exists to measure: whether polities CONSOLIDATE over time
-                    // rather than only multiply, and whether anybody is getting anywhere. Printed
-                    // per generation and not only at the end, since a count that peaks in the middle
-                    // and collapses looks identical to one that never rose if you only read the last
-                    // line.
-                    Nations* realm = sim.nations();
-                    int living = realm.living();
-                    int kings = realm.countOfRank(cast<int>(Rank.Kingdom))
-                              + realm.countOfRank(cast<int>(Rank.Empire));
-                    int best = realm.bestEra();
-                    int atBest = realm.countOfEra(best);
-                    int widest = realm.mostTowns();
-                    System.IO.Console.println($"  gen {gi}: {sim.livingCount()} alive, {sim.bornCount()} born so far || {living} nations ({kings} kingdoms+, widest holds {widest} towns), era {best} reached by {atBest}");
-                }
-                long ms = watch.elapsedMillis();
-                sim.report();
-                sim.audit();
-                // AND WHY THE BIGGEST TOWN IN THE WORLD DID NOT BUILD THE REST OF THE CATALOGUE.
-                //
-                // Two chains are dead for reasons that can only be guessed at from outside the
-                // auction -- flour and wool -- and both guesses have cost an arc. The auction turns
-                // a kind down for one of eight reasons and then says nothing, so a chain that cannot
-                // START looks exactly like a chain nobody wants. This prints which reason bit, for
-                // the one town most likely to have got furthest.
-                System.IO.Console.println("what the largest town could and could not raise:");
-                sim.explain(sim.busiestTownIndex());
-                // Ticks a second is the honest headline for a headless sweep: "so many steps in so
-                // many milliseconds" is the same fact stated in a way nobody can compare against the
-                // last run without a calculator.
-                mutable long tps = 0;
-                if (ms > 0) {
-                    tps = cast<long>(stepsPerGen) * 20 * 1000 / ms;
-                }
-                System.IO.Console.println($"simrun: {stepsPerGen * 20} steps in {ms} ms | {tps} ticks a second");
-                delete sim;
-                delete folk;
-                delete g;
-                return;
-            }
-
-            // The most crowded place in the world, from three heights. Same reason forestshot exists:
-            // judging people from a capture aimed wherever the default camera points is how you
-            // conclude there is nobody about when the shot landed on an empty steppe.
-            private static method folkShot() returns void {
-                int w = 2560;
-                int h = 1440;
-                WorldGen gen = new WorldGen(42) on stack;
-                gen.setWorld(0, 0.0 - 1.0);
-                Grid* g = gen.generate(w, h);
-                AgentTable* folk = new AgentTable(50000) on heap;
-                folk.seedWorld(g, 5000, 100, 42);
-                folk.report();
-                // Bucket everybody into 64-cell blocks and take the fullest.
-                int bw = w / 64;
-                int bh = h / 64;
-                int[] bucket = new int[bw * bh]();
-                mutable int i = 0;
-                int n = folk.limit();
-                while (i < n) {
-                    if (folk.alive(i)) {
-                        int bx = cast<int>(folk.xAt(i)) / 64;
-                        int by = cast<int>(folk.yAt(i)) / 64;
-                        if (bx >= 0 && by >= 0 && bx < bw && by < bh) {
-                            bucket[by * bw + bx] = bucket[by * bw + bx] + 1;
-                        }
-                    }
-                    i = i + 1;
-                }
-                mutable int best = 0;
-                mutable int fx = w / 2;
-                mutable int fy = h / 2;
-                mutable int b = 0;
-                while (b < bw * bh) {
-                    if (bucket[b] > best) {
-                        best = bucket[b];
-                        fx = (b % bw) * 64 + 32;
-                        fy = (b / bw) * 64 + 32;
-                    }
-                    b = b + 1;
-                }
-                delete bucket;
-                System.IO.Console.println($"folkshot: fullest block at {fx},{fy} with {best} people");
-                String root = Main.assetRoot();
-                GlWindow* win = new GlWindow() on heap;
-                if (root.length() == 0 || win.open("folk", 1200, 750, 3, 3) == 0) {
-                    System.IO.Console.println("folkshot: no GL window.");
-                    delete win;
-                    delete folk;
-                    delete g;
-                    return;
-                }
-                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
-                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
-                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* peopleMesh = MeshAtlas.loadNamed(root, "agents.index");
-                MeshAtlas* buildMesh = MeshAtlas.loadNamed(root, "buildings.index");
-                MeshAtlas* faunaMesh = MeshAtlas.loadNamed(root, "fauna.index");
-                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
-                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                r.setPeople(folk, peopleMesh);
-                r.aimAt(fx, fy);
-                int cw = win.width();
-                int ch = win.height();
-                r.setView(20.0, 28.0, 40.0);
-                Simulation* sim = new Simulation(g, folk, 42) on heap;
-                r.setTown(sim.buildings(), buildMesh);
-                r.setSim(sim);
-                r.setWays(sim.ways(), MeshAtlas.loadNamed(root, "ways.index"));
-                r.setItems(MeshAtlas.loadNamed(root, "items.index"));
-                r.setVehicles(MeshAtlas.loadNamed(root, "vehicles.index"));
-                r.setFauna(faunaMesh);
-                // Ten minutes of world time before the shutter opens. Half a minute was enough to
-                // see whether people MOVE; a village only exists once somebody has gathered enough
-                // to want a workshop and somebody else has spent ninety seconds raising it.
-                mutable int f = 0;
-                while (f < 12000) {
-                    sim.setNearWindow(r.detailX0(), r.detailY0(), r.detailX1(), r.detailY1());
-                    sim.step(0.05);
-                    f = f + 1;
-                }
-                r.flushDetail();
-                sim.report();
-                mutable int k = 0;
-                while (k < 4) {
-                    if (k == 0) {
-                        r.setView(20.0, 28.0, 40.0);        // among them
-                    } else if (k == 1) {
-                        r.setView(20.0, 42.0, 110.0);       // the settlement
-                    } else if (k == 2) {
-                        r.setView(20.0, 58.0, 300.0);       // where it thins out
-                    } else {
-                        // And one from far enough out that the detail LOD is OFF, which is the only
-                        // distance the political overlay is worth anything and was the one place it
-                        // used to draw nothing at all.
-                        r.setView(20.0, 72.0, 3000.0);
-                    }
-                    r.flushDetail();
-                    r.render(cw, ch);
-                    byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
-                    if (k == 0) {
-                        Main.writePpmFlipped(px, cw, ch, "folk_a.ppm");
-                    } else if (k == 1) {
-                        Main.writePpmFlipped(px, cw, ch, "folk_b.ppm");
-                    } else if (k == 2) {
-                        Main.writePpmFlipped(px, cw, ch, "folk_c.ppm");
-                    } else {
-                        Main.writePpmFlipped(px, cw, ch, "folk_far.ppm");
-                    }
-                    delete px;
-                    k = k + 1;
-                }
-                delete r;
-                delete rivers;
-                delete peopleMesh;
-                delete buildMesh;
-                delete faunaMesh;
-                delete nodeMesh;
-                delete props;
-                delete terr;
-                delete sim;
-                delete folk;
-                delete g;
-                delete win;
-                System.IO.Console.println("folkshot: wrote folk_a.ppm, folk_b.ppm, folk_c.ppm");
                 return;
             }
 
@@ -1225,10 +877,6 @@ public bundle Agents {
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                AgentTable* folk = new AgentTable(50000) on heap;
-                folk.seedWorld(g, 5000, 100, 42);
-                folk.report();
-                r.setPeople(folk, peopleMesh);
                 r.aimAt(fx, fy);
                 int cw = win.width();
                 int ch = win.height();
@@ -1257,7 +905,6 @@ public bundle Agents {
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete folk;
                 delete peopleMesh;
                 delete props;
                 delete terr;
@@ -1353,10 +1000,6 @@ public bundle Agents {
                     delete wa;
                     GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                     r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                    AgentTable* folk = new AgentTable(50000) on heap;
-                    folk.seedWorld(g, 5000, 100, 42);
-                    folk.report();
-                    r.setPeople(folk, peopleMesh);
                     int cw = win.width();
                     int ch = win.height();
                     r.flushDetail();
@@ -1367,8 +1010,7 @@ public bundle Agents {
                                   (k % cols) * tw, (k / cols) * th, tw, th, v == 0);
                     delete px;
                     delete r;
-                    delete folk;
-                    delete g;
+                        delete g;
                     if (v == 0) {
                         passed = passed + 1;
                     }
