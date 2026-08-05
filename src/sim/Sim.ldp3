@@ -358,6 +358,8 @@ public bundle Agents {
             // longer exists once the field is never rebuilt.
             private mutable int[] holdSite;
             private mutable long rotted;        // blocks that went back to the world
+            private mutable int[] cheldLast;    // population last census, to notice a town dying
+            private mutable long townsDied;     // settlements that emptied out
             private mutable long orphaned;      // towns that outlived their country and raised a flag
             // EXPANSION, counted three ways so "the world spreads now" is a claim somebody can
             // check. `cleft` is how many people have fled each nation's towns since its last
@@ -686,6 +688,8 @@ public bundle Agents {
                 }
                 this.rotted = 0;
                 this.orphaned = 0;
+                this.cheldLast = new int[this.ncomm]();
+                this.townsDied = 0;
                 this.cleft = new int[this.ncomm]();
                 this.fromPressure = 0;
                 this.bySea = 0;
@@ -3328,6 +3332,23 @@ public bundle Agents {
                 // world that reduced the number of places without freeing an inch of ground: birth
                 // and death is a cycle, merging is a sink, and it beat hiving in twelve worlds out
                 // of twelve. Death returning ground is what lets the count of settlements rise.
+                // WHAT ACTUALLY MOVED THE BORDER, counted where it moves.
+                //
+                // Anchoring the claim on buildings stopped the blobs sliding away from their towns,
+                // and ground still changes hands -- 8,124 blocks taken and 6,560 given back in
+                // eight minutes. That is either a defect or the world working, and "either" is not
+                // an answer. Two things can un-sustain a block: the settlement that held it DIED,
+                // or the building that reached it was pulled down or burnt. They are counted apart
+                // because they want completely different fixes, and because guessing between them
+                // is exactly what this campaign keeps being punished for.
+                mutable int diedThisCensus = 0;
+                for (int c in 0..this.ncomm) {
+                    if (this.cpop[c] <= 0 && this.cheldLast[c] > 0) {
+                        diedThisCensus = diedThisCensus + 1;
+                    }
+                    this.cheldLast[c] = this.cpop[c];
+                }
+                this.townsDied = this.townsDied + cast<long>(diedThisCensus);
                 for (int by in 0..this.claimH) {
                     for (int bx in 0..this.claimW) {
                         if (this.holdSite[by * this.claimW + bx] < 0
@@ -10001,6 +10022,7 @@ public bundle Agents {
                 System.IO.Console.println($"A|land.claimed|{claimed}");
                 System.IO.Console.println($"A|land.free|{this.claimW * this.claimH - claimed}");
                 System.IO.Console.println($"A|land.rotted|{this.rotted}");
+                System.IO.Console.println($"A|border.cause.townDied|{this.townsDied}");
                 System.IO.Console.println($"A|nation.known|{known}");
                 System.IO.Console.println($"A|nation.orphaned|{this.orphaned}");
                 // EXPANSION. `frompressure` counts expeditions that left because their people were
