@@ -1650,6 +1650,21 @@ public bundle Agents {
             // this used to go through a settlement to reach its flag because that was where the
             // field lived. Off the map edge counts as nobody, so the coast gets a frontier drawn
             // along it -- which is right: a shoreline IS where a country stops.
+            // Which settlement holds a BLOCK, with no question asked about the ground.
+            //
+            // `ownerAt` masks the answer by walkability, which is right for deciding who works a
+            // cell and wrong for drawing: a claim that stops at the waterline makes a coastal town
+            // paint like an archipelago, and worse, it hands the renderer -1 for every cell of sea
+            // inside a country -- which is how João ended up watching frontiers turn beige the
+            // moment they touched water. Sovereignty and passability are different questions and
+            // this is the one the map is asking.
+            public method siteBlockAt(int bx, int by) returns int {
+                if (bx < 0 || by < 0 || bx >= this.claimW || by >= this.claimH) {
+                    return 0 - 1;
+                }
+                return this.holdSite[by * this.claimW + bx];
+            }
+
             public method realmAt(int x, int y) returns int {
                 if (x < 0 || y < 0) {
                     return 0 - 1;
@@ -9856,47 +9871,29 @@ public bundle Agents {
                 this.meter.lap(cast<int>(Phase.Thinking));
                 this.move(dt);
                 this.meter.lap(cast<int>(Phase.Moving));
-                this.jostle();
-                this.meter.lap(cast<int>(Phase.Jostle));
                 this.meter.tick();
                 return;
             }
 
-            // NOBODY STANDS INSIDE ANYBODY ELSE.
+            // PEOPLE DO NOT COLLIDE, AND THEY DO NOT KEEP THEIR DISTANCE EITHER. There is no pass
+            // here any more, and this note is what is left of two of them.
             //
-            // After moving and deliberately not inside it. The clump that had to be fixed is people
-            // who have ARRIVED and stopped -- an army standing round its general, a queue at a
-            // granary -- and the walking branch of `move` never sees them, because it returns early
-            // for anybody whose act is not one of the four ways of walking.
+            // The first pushed every overlapping PAIR apart. It cost 40 to 49 per cent of the tick,
+            // four or five times what walking every person in the world costs, and in the crowds
+            // João was actually complaining about -- a mountainside, a shoreline, a town centre --
+            // it did not work at all: a pressed crowd is one where every push lands somebody inside
+            // somebody else, so the pass spent whole frames trading one impossible arrangement for
+            // another and its own counter said so eighty million times a run.
             //
-            // Everybody, not only the people on screen. It is tempting to do this for the detail
-            // window alone, and it would be wrong twice over: positions feed the split rule and the
-            // colonising party, so a world where crowds only behave in front of the camera is a
-            // world that behaves differently depending on where somebody is looking. What it costs
-            // is measured as its own phase rather than assumed, because the last three times
-            // something here was "obviously expensive" the reasoning was wrong twice.
-            private method jostle() returns void {
-                // PEOPLE DO NOT COLLIDE. They keep room.
-                //
-                // This pass used to push every overlapping PAIR apart, and it was wrong in the two
-                // ways that matter. It cost 40 to 49 per cent of the tick -- four or five times
-                // what walking every person in the world costs -- and in the crowds João actually
-                // complained about it did not work at all: on a mountainside, at a shoreline and in
-                // a town centre a crowd is PRESSED, every push lands somebody inside somebody else,
-                // and the pass spends the whole frame trading one impossible arrangement for
-                // another without ever finishing. Its own counter said so, eighty million times a
-                // run. Half-rate was tried and measured and did not help, because the work was
-                // proportional to accumulated overlap and not to the number of passes.
-                //
-                // What replaces it asks a different question -- not "is anybody inside me" but "is
-                // there room where I am standing". Four people fit in a cell at 0.52 cells a body;
-                // the fifth shifts their feet. One add per person, no pair ever looked at, and it
-                // converges for the plain reason the shove could not: leaving a full cell makes it
-                // emptier, so the crowd drains outward instead of heaving in place.
-                this.folk.reindexCrowd(this.g);
-                this.folk.spaceOut(this.g);
-                return;
-            }
+            // The second kept four to a cell and moved the fifth. It was cheap and it converged,
+            // and João's answer was still no: agents have no collision and no minimum spacing.
+            // Which is the right call, and not only on cost. Every version of this was TREATING A
+            // SYMPTOM -- people pile up on a mountainside because they were all sent through the
+            // same pass, and at a shoreline because they were sent across water. Spreading the heap
+            // out makes the picture tidier without making one agent's day any less absurd, and it
+            // hid the very thing that needed finding. The heap is the evidence. Where people gather
+            // for no reason is now a question about where they were SENT, which is the only place
+            // it was ever answerable.
 
             public method clockMeter() returns Meter* {
                 return this.meter;
@@ -9951,7 +9948,6 @@ public bundle Agents {
                 // How often the separation pass hit its own chain bound and stopped early. A pass
                 // that quietly stops doing its job reads exactly like a pass that had nothing to
                 // do, so the bound is counted rather than trusted.
-                System.IO.Console.println($"A|crowd.capped|{this.folk.crowdCappings()}");
                 // WALKING. `stuck` is journeys abandoned when patience ran out -- the number that
                 // was invisibly large while nothing in this world could go round anything.
                 // `rounded` is journeys that got round an obstacle and carried on, a thing that

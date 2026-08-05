@@ -2334,6 +2334,21 @@ public bundle Agents {
             // A NATION's colour, straight off its banner. `communityTint` takes a settlement and
             // looks the nation up through it, which is right for the wash inside a town and wrong
             // for anything drawn on ground no town is standing on -- most of a country.
+            // A SETTLEMENT's colour, falling back to its country's when no settlement is there.
+            //
+            // Every place the overlay asks "whose is this cell" gets -1 for most of a country --
+            // ground a town claims but does not stand on -- and `communityTint` answers a negative
+            // index out of its index-modulo fallback, whose last branch is (0.95, 0.55, 0.20). That
+            // is the beige João watched frontiers turn into the moment they crossed water, because
+            // `ownerAt` refuses every unwalkable cell by design. A country is one colour on every
+            // kind of ground it holds, and this is the only place that can be true.
+            private method siteTint(int own, int nat, int channel) returns float {
+                if (own >= 0) {
+                    return this.communityTint(own, channel);
+                }
+                return this.realmTint(nat, channel);
+            }
+
             private method realmTint(int nat, int channel) returns float {
                 if (nat < 0 || this.sim == null) {
                     return 0.5;
@@ -2349,6 +2364,14 @@ public bundle Agents {
             }
 
             private method communityTint(int c, int channel) returns float {
+                // NOBODY IS NOT A COLOUR. Below this line `c` indexes a fallback palette by
+                // modulo, and a negative index fell out of the bottom of it as (0.95, 0.55, 0.20)
+                // -- a beige that three separate callers were painting onto the map without ever
+                // having asked for it. Callers that legitimately have no settlement now say so by
+                // going through `siteTint`; this is the backstop for the ones nobody has found yet.
+                if (c < 0) {
+                    return 0.5;
+                }
                 if (this.sim != null) {
                     int nat = this.sim.nationOf(c);
                     if (nat >= 0) {
@@ -2885,6 +2908,19 @@ public bundle Agents {
                         if (this.sim.realmAt(x, y + 1) != o) {
                             edges = edges + 1;
                         }
+                        // The divisions inside a country, counted east and south only -- a line
+                        // between two cells belongs to one of them.
+                        int mine = this.sim.siteBlockAt(x / 16, y / 16);
+                        if (mine >= 0) {
+                            if (this.sim.realmAt(x + 1, y) == o
+                                && this.sim.siteBlockAt((x + 1) / 16, y / 16) != mine) {
+                                edges = edges + 1;
+                            }
+                            if (this.sim.realmAt(x, y + 1) == o
+                                && this.sim.siteBlockAt(x / 16, (y + 1) / 16) != mine) {
+                                edges = edges + 1;
+                            }
+                        }
                     }
                 }
                 if (held == 0) {
@@ -2954,6 +2990,24 @@ public bundle Agents {
                         if (this.sim.realmAt(x, y + 1) != o) {
                             w = this.ovQuad(w, cx, cy + 1.0 - br, z, 1.0, br, r, g, b);
                         }
+                        // WHERE ONE CITY STOPS AND THE NEXT BEGINS, inside one country. Thinner and
+                        // darker than the frontier and drawn only where the realm is the same on
+                        // both sides, so a county line can never read as a border.
+                        int mine = this.sim.siteBlockAt(x / 16, y / 16);
+                        if (mine >= 0) {
+                            float cbr = br * 0.5;
+                            float qr = 0.45 * this.communityTint(mine, 0);
+                            float qg = 0.45 * this.communityTint(mine, 1);
+                            float qb = 0.45 * this.communityTint(mine, 2);
+                            if (this.sim.realmAt(x + 1, y) == o
+                                && this.sim.siteBlockAt((x + 1) / 16, y / 16) != mine) {
+                                w = this.ovQuad(w, cx + 1.0 - cbr, cy, z, cbr, 1.0, qr, qg, qb);
+                            }
+                            if (this.sim.realmAt(x, y + 1) == o
+                                && this.sim.siteBlockAt(x / 16, (y + 1) / 16) != mine) {
+                                w = this.ovQuad(w, cx, cy + 1.0 - cbr, z, 1.0, cbr, qr, qg, qb);
+                            }
+                        }
                     }
                 }
                 this.gl.bindVertexArray(this.ovao);
@@ -3011,6 +3065,20 @@ public bundle Agents {
                         if (this.blockRealm(bx, by + 1, bs) != nat) {
                             edges = edges + 1;
                         }
+                        // The internal divisions, counted where they are drawn: east and south
+                        // only, because a line between two blocks belongs to one of them and
+                        // drawing it from both sides is the same strip written twice.
+                        int mine = this.sim.siteBlockAt(bx, by);
+                        if (mine >= 0) {
+                            if (this.blockRealm(bx + 1, by, bs) == nat
+                                && this.sim.siteBlockAt(bx + 1, by) != mine) {
+                                edges = edges + 1;
+                            }
+                            if (this.blockRealm(bx, by + 1, bs) == nat
+                                && this.sim.siteBlockAt(bx, by + 1) != mine) {
+                                edges = edges + 1;
+                            }
+                        }
                     }
                 }
                 mutable int towns = 0;
@@ -3041,13 +3109,17 @@ public bundle Agents {
                         if (nat < 0) {
                             continue;
                         }
-                        int own = this.sim.ownerAt(mx, my);
+                        // The BLOCK's holder, not whoever happens to be standing on its middle
+                        // cell. Sampling the middle asked a per-cell question of per-block data and
+                        // got -1 for any block whose centre is water, forest or bare hillside --
+                        // which is most of them.
+                        int own = this.sim.siteBlockAt(bx, by);
                         w = this.ovQuad(w, cast<float>(bx * bs) * 2.0 + half,
                                         cast<float>(by * bs) * 2.0 + half,
                                         this.blockRoof(bx * bs, by * bs, bs),
                                         half, half,
-                                        this.communityTint(own, 0), this.communityTint(own, 1),
-                                        this.communityTint(own, 2));
+                                        this.siteTint(own, nat, 0), this.siteTint(own, nat, 1),
+                                        this.siteTint(own, nat, 2));
                     }
                 }
                 this.oedge = w / 9;
@@ -3060,13 +3132,13 @@ public bundle Agents {
                         if (nat < 0) {
                             continue;
                         }
-                        int own = this.sim.ownerAt(mx, my);
+                        int own = this.sim.siteBlockAt(bx, by);
                         float ex = cast<float>(bx * bs) * 2.0 + half;
                         float ey = cast<float>(by * bs) * 2.0 + half;
                         float ez = this.blockRoof(bx * bs, by * bs, bs) + 0.3;
-                        float r = 0.35 + 0.65 * this.communityTint(own, 0);
-                        float g = 0.35 + 0.65 * this.communityTint(own, 1);
-                        float b = 0.35 + 0.65 * this.communityTint(own, 2);
+                        float r = 0.35 + 0.65 * this.realmTint(nat, 0);
+                        float g = 0.35 + 0.65 * this.realmTint(nat, 1);
+                        float b = 0.35 + 0.65 * this.realmTint(nat, 2);
                         if (this.blockRealm(bx - 1, by, bs) != nat) {
                             w = this.ovQuad(w, ex - half + bth, ey, ez, bth, half, r, g, b);
                         }
@@ -3078,6 +3150,31 @@ public bundle Agents {
                         }
                         if (this.blockRealm(bx, by + 1, bs) != nat) {
                             w = this.ovQuad(w, ex, ey + half - bth, ez, half, bth, r, g, b);
+                        }
+                        // AND WHERE ONE CITY STOPS AND THE NEXT BEGINS, inside one country.
+                        //
+                        // A nation's territory is the union of its cities' territories, and until
+                        // now the map only ever drew the union -- so a kingdom of forty towns was
+                        // one undifferentiated wash and there was no way to see, by looking, which
+                        // town held what. That is exactly the picture needed to tell a claim that
+                        // has drifted from one that has not, or a dying colony from a growing one.
+                        //
+                        // Drawn thinner and darker than the national line and only where the realm
+                        // is the SAME on both sides, so an internal division can never be mistaken
+                        // for a frontier: countries are bright lines, counties are faint ones.
+                        if (own >= 0) {
+                            float cr = 0.45 * this.communityTint(own, 0);
+                            float cg = 0.45 * this.communityTint(own, 1);
+                            float cb = 0.45 * this.communityTint(own, 2);
+                            float cth = bth * 0.5;
+                            if (this.blockRealm(bx + 1, by, bs) == nat
+                                && this.sim.siteBlockAt(bx + 1, by) != own) {
+                                w = this.ovQuad(w, ex + half - cth, ey, ez, cth, half, cr, cg, cb);
+                            }
+                            if (this.blockRealm(bx, by + 1, bs) == nat
+                                && this.sim.siteBlockAt(bx, by + 1) != own) {
+                                w = this.ovQuad(w, ex, ey + half - cth, ez, half, cth, cr, cg, cb);
+                            }
                         }
                     }
                 }
