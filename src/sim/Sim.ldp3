@@ -1,4 +1,6 @@
 import System.IO.Console;
+import System.IO.File;
+import System.Text.StringBuilder;
 import Agents.World.Grid;
 import Agents.World.Biome;
 import Agents.World.Biomes;
@@ -358,6 +360,10 @@ public bundle Agents {
             // longer exists once the field is never rebuilt.
             private mutable int[] holdSite;
             private mutable long rotted;        // blocks that went back to the world
+            private mutable String tracePath;   // where every agent is written, when tracing
+            private mutable boolean tracing;    // a flag and not a null test: see traceTick
+            private mutable int traceTicks;
+            private mutable long traceRows;
             private mutable int[] cheldLast;    // population last census, to notice a town dying
             private mutable long townsDied;     // settlements that emptied out
             private mutable long orphaned;      // towns that outlived their country and raised a flag
@@ -9906,8 +9912,54 @@ public bundle Agents {
                 this.meter.lap(cast<int>(Phase.Thinking));
                 this.move(dt);
                 this.meter.lap(cast<int>(Phase.Moving));
+                this.traceTick();
                 this.meter.tick();
                 return;
+            }
+
+            // ---- the trace ----
+            //
+            // Off unless a path is given. A world of a hundred thousand people writes a hundred
+            // thousand lines a tick, twenty times a world-second, which is gigabytes a minute -- so
+            // this cannot be on by default and it is not going to pretend otherwise. When it IS on
+            // it writes everything, because a trace with a sample in it answers questions about the
+            // sample.
+            //
+            // One append per tick, not one per person: the whole tick is built in memory and
+            // handed to the file in a single call. Appending per line would put a system call
+            // between every two agents and the trace would cost more than the simulation.
+            private method traceTick() returns void {
+                // A BOOLEAN, not a null test. Nullable in this language is declaration-only with no
+                // narrowing, so `path == null` is not the question the type system will answer
+                // here; a flag says the same thing and says it in a way that cannot be misread.
+                if (!this.tracing) {
+                    return;
+                }
+                mutable StringBuilder* sb = new StringBuilder() on heap;
+                int rows = this.folk.traceInto(sb, this.traceTicks);
+                this.folk.traceTallyInto(sb, this.traceTicks);
+                File.appendAll(this.tracePath, sb.toString());
+                delete sb;
+                this.traceTicks = this.traceTicks + 1;
+                this.traceRows = this.traceRows + cast<long>(rows);
+                return;
+            }
+
+            // Turn the trace on and start its file. The header goes down first so the file explains
+            // its own columns, and `writeAll` rather than `appendAll` so a second run does not read
+            // as one impossibly long one.
+            public method traceTo(String path) returns void {
+                this.tracePath = path;
+                this.tracing = true;
+                this.traceTicks = 0;
+                this.traceRows = 0;
+                File.writeAll(path, AgentTable.traceHeader() + "\n");
+                System.IO.Console.println($"trace: every agent, every tick -> {path}");
+                return;
+            }
+
+            public method traceRowsWritten() returns long {
+                return this.traceRows;
             }
 
             // PEOPLE DO NOT COLLIDE, AND THEY DO NOT KEEP THEIR DISTANCE EITHER. There is no pass
