@@ -399,6 +399,7 @@ public bundle Agents {
             // a battle nobody was fighting.
             private mutable long fought;
             private mutable long won;
+            private mutable long sought;        // orders to march on an enemy army rather than a town
             private mutable long blowsCapped;
             // And the same at sea.
             private mutable long seaFought;
@@ -704,6 +705,7 @@ public bundle Agents {
                 this.sighted = 0;
                 this.fought = 0;
                 this.won = 0;
+                this.sought = 0;
                 this.blowsCapped = 0;
                 this.seaFought = 0;
                 this.seaSunk = 0;
@@ -2916,6 +2918,11 @@ public bundle Agents {
             // besieging army stands off a wall at: if that is close enough to be shooting at a
             // town, it is close enough to be fighting an army.
             public static int BATTLE_REACH = 12;
+            // How far off a general will turn to face another army. A day's march: a person covers
+            // SPEED cells a second and a census is a second, so three hundred cells is the distance
+            // an army could actually cross before the news went stale. Beyond that a host is a
+            // rumour, and marching at one would be a general reading the simulation.
+            public static int SEEK_REACH = 300;
             // Weight of arms that buys one blow a second. Ten: a host of five hundred levies with
             // a weight of about ten apiece lands fifty blows a second, which kills a few of them a
             // second and settles a battle of that size in about a minute -- the same order as a
@@ -9176,8 +9183,34 @@ public bundle Agents {
                     this.folk.setRole(i, cast<int>(Role.None));
                     return;
                 }
+                if (this.busy(i)) {
+                    return;
+                }
+                // AN ARMY IN FRONT OF YOU OUTRANKS A TOWN BEHIND IT.
+                //
+                // Every host in this world marched at a TOWN and besieged it, and nothing anywhere
+                // made one seek, meet or intercept another. Measured after the battle model was
+                // built: `war.fought` reached forty seconds of contact in the first eight minutes
+                // of a run and was still exactly forty seventeen minutes later. The battles worked;
+                // the armies simply never found each other, because two hosts converging on two
+                // different towns pass like ships.
+                //
+                // Defending the realm did not exist as a behaviour either -- an enemy host could
+                // walk through a country to reach a town on the far side of it and nobody turned to
+                // face them. Marching on the nearer enemy is both of those at once, and it is what
+                // a general would obviously do: you do not walk past the army that is coming for
+                // your capital in order to besiege theirs.
+                int foe = this.nearestHost(mine, i);
+                if (foe >= 0) {
+                    int them = this.host.generalOf(foe);
+                    this.folk.setTarget(i, cast<int>(this.folk.xAt(them)),
+                                           cast<int>(this.folk.yAt(them)));
+                    this.folk.setAct(i, cast<int>(Act.March));
+                    this.sought = this.sought + 1;
+                    return;
+                }
                 int t = this.host.targetOf(mine);
-                if (t < 0 || this.busy(i)) {
+                if (t < 0) {
                     return;
                 }
                 // Once he is in front of it he STOPS. A general who kept re-issuing the same order
@@ -9192,6 +9225,38 @@ public bundle Agents {
                 this.folk.setTarget(i, cast<int>(this.ccx[t]), cast<int>(this.ccy[t]));
                 this.folk.setAct(i, cast<int>(Act.March));
                 return;
+            }
+
+            // The nearest hostile host worth turning to face, or -1.
+            //
+            // Within a day's march, which is the distance a general could actually hear about one:
+            // beyond that an army is a rumour, and turning to meet it would be a general reading
+            // the simulation rather than his own country.
+            private method nearestHost(int mine, int lead) returns int {
+                int an = this.host.nationOf(mine);
+                mutable int best = 0 - 1;
+                mutable float near = cast<float>(Simulation.SEEK_REACH * Simulation.SEEK_REACH);
+                for (int b in 0..this.host.limit()) {
+                    if (b == mine || !this.host.alive(b)) {
+                        continue;
+                    }
+                    int bn = this.host.nationOf(b);
+                    if (bn == an || this.realm.bondOf(an, bn) >= Nations.BOND_PEACE) {
+                        continue;
+                    }
+                    int them = this.host.generalOf(b);
+                    if (them < 0 || !this.folk.alive(them)) {
+                        continue;
+                    }
+                    float dx = this.folk.xAt(them) - this.folk.xAt(lead);
+                    float dy = this.folk.yAt(them) - this.folk.yAt(lead);
+                    float d2 = dx * dx + dy * dy;
+                    if (d2 < near) {
+                        near = d2;
+                        best = b;
+                    }
+                }
+                return best;
             }
 
             // WHICH BENCH OF HIS TRADE, and not merely which trade -- the same rule one step finer,
@@ -9926,6 +9991,7 @@ public bundle Agents {
                 // `won` is battles that ended in one side breaking; before this there was no such
                 // thing as either, because everything violent in this world was a duel between two
                 // people who happened to be standing on the same ground.
+                System.IO.Console.println($"A|war.sought|{this.sought}");
                 System.IO.Console.println($"A|war.fought|{this.fought}");
                 System.IO.Console.println($"A|war.routs|{this.won}");
                 System.IO.Console.println($"A|war.blows.capped|{this.blowsCapped}");
