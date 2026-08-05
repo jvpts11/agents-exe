@@ -1,0 +1,875 @@
+import System.IO.Console;
+import Agents.People.Lexicon;
+import Agents.People.ChainPool;
+
+// WHAT AN AGENT IS.
+//
+// An agent in the ordinary sense of the word: something that perceives, wants, decides and acts.
+// Not a particle with statistics attached. Everything below is a part of that, and the shape of
+// this file is decided by one answer -- there is no ceiling on the population, it is however many
+// the machine will carry.
+//
+// That answer rules out a class per agent. One object each means one allocation each, a pointer
+// chase for every field, and lists inside lists for the memory; the ceiling then arrives as a
+// MEMORY ceiling, long before the machine's own. So an agent is a ROW, and the world is columns.
+//
+// Three kinds of thing live here:
+//
+//   Fixed-size facts are columns. `hp`, `energy`, `sanity`, the class, and every catalogue number.
+//   A pass over the living reads one array end to end.
+//
+//   Variable-size facts are CHAINS in shared pools -- languages, nationalities, relations, and
+//   every part of memory. The row holds only the index of the first link; an agent who knows
+//   nothing holds -1 and costs nothing. See ChainPool.
+//
+//   Named things are catalogue numbers. A culture, a religion, a tongue, a trade, a given name are
+//   each stored once in the world and referred to by number, so two agents share a religion when
+//   they hold the same integer. See Lexicon.
+//
+// Mental conditions are the one exception, and it is the exception that proves the rule: they are a
+// bounded list and one agent may have several at once, so they are a BITMASK. Sixty-four conditions
+// in eight bytes, and "does this one have that" is a single AND.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace People {
+
+        // What kind of agent this is. Deliberately small: this is the agent's ROLE in the world,
+        // not its trade -- a soldier who farms is a Soldier with a farming job, and the two answer
+        // different questions.
+        public enum AgentClass {
+            Civilian, Soldier, Scout, Protagonist
+        }
+
+        public class AgentTable {
+            // ---- the world's shared vocabulary ----
+            //
+            // Held here rather than passed in at every call, because every one of them is asked
+            // about constantly and by everybody. They are created with the table and die with it.
+            private mutable Lexicon* givenNames;
+            private mutable Lexicon* familyNames;
+            private mutable Lexicon* cultures;
+            private mutable Lexicon* religions;
+            private mutable Lexicon* tongues;
+            private mutable Lexicon* traits;        // personality
+            private mutable Lexicon* trades;        // job
+            private mutable Lexicon* feelings;      // mental state: grieving, content, afraid
+            private mutable Lexicon* conditions;    // autism, ADHD, psychosis -- indexed by BIT
+            private mutable Lexicon* nations;
+            private mutable Lexicon* abilities;     // skills
+            private mutable Lexicon* lore;          // common and academical knowledge alike
+            private mutable Lexicon* places;
+            private mutable Lexicon* tastes;        // what can be liked or disliked
+            private mutable Lexicon* happenings;    // kinds of event
+
+            // ---- the pools every chain lives in ----
+            //
+            // One per KIND rather than one shared by all, so that a walk over an agent's languages
+            // touches only language links. Mixing them would put a person's whole life in one
+            // array and make every walk a walk through everything.
+            private mutable ChainPool* spoken;      // languages, weight = fluency
+            private mutable ChainPool* citizen;     // nationalities, weight = how it was acquired
+            private mutable ChainPool* bonds;       // relations, value = agent id, weight = regard
+            private mutable ChainPool* skilled;     // skills, weight = level
+            private mutable ChainPool* common;      // common knowledge, weight = certainty
+            private mutable ChainPool* learned;     // academical knowledge, weight = depth
+            private mutable ChainPool* known;       // places, weight = familiarity
+            private mutable ChainPool* remembered;  // people, weight = how vividly
+            private mutable ChainPool* liked;       // likes, weight = how much
+            private mutable ChainPool* disliked;    // dislikes, weight = how much
+            private mutable ChainPool* lived;       // events, weight = how firmly held
+
+            // ---- the columns ----
+            private mutable byte[] flags;
+            private mutable int[] id;               // stable identity; a row is reused, an id is not
+            private mutable float[] hp;             // 0..100
+            private mutable int[] energy;           // 0..1000, integer on purpose
+            private mutable byte[] sanity;          // 0..100
+            private mutable byte[] klass;           // AgentClass
+            private mutable int[] given;
+            private mutable int[] family;
+            private mutable int[] trait;
+            private mutable int[] culture;
+            private mutable int[] religion;
+            private mutable int[] trade;
+            private mutable int[] feeling;
+            private mutable long[] ailments;        // bitmask over `conditions`
+            private mutable float[] px;             // WHERE it is, which is not what it is -- see below
+            private mutable float[] py;
+
+            // The heads of this agent's chains. Eleven numbers, and eleven lists that cost nothing
+            // when empty.
+            private mutable int[] langHead;
+            private mutable int[] natHead;
+            private mutable int[] bondHead;
+            private mutable int[] skillHead;
+            private mutable int[] commonHead;
+            private mutable int[] learnedHead;
+            private mutable int[] placeHead;
+            private mutable int[] peopleHead;
+            private mutable int[] likeHead;
+            private mutable int[] dislikeHead;
+            private mutable int[] eventHead;
+
+            private mutable int cap;
+            private mutable int high;               // rows ever handed out
+            private mutable int live;
+            private mutable int[] freeSlot;
+            private mutable int freeTop;
+            private mutable int nextId;             // never reused, so an id names one life only
+            private mutable long widenings;
+
+            public constructor AgentTable(int capacity) {
+                this.cap = capacity;
+                if (this.cap < 8) {
+                    this.cap = 8;
+                }
+                this.givenNames = new Lexicon("given names", 64) on heap;
+                this.familyNames = new Lexicon("family names", 64) on heap;
+                this.cultures = new Lexicon("cultures", 16) on heap;
+                this.religions = new Lexicon("religions", 16) on heap;
+                this.tongues = new Lexicon("tongues", 16) on heap;
+                this.traits = new Lexicon("personalities", 16) on heap;
+                this.trades = new Lexicon("trades", 32) on heap;
+                this.feelings = new Lexicon("feelings", 16) on heap;
+                this.conditions = new Lexicon("conditions", 16) on heap;
+                this.nations = new Lexicon("nations", 16) on heap;
+                this.abilities = new Lexicon("skills", 32) on heap;
+                this.lore = new Lexicon("lore", 64) on heap;
+                this.places = new Lexicon("places", 64) on heap;
+                this.tastes = new Lexicon("tastes", 32) on heap;
+                this.happenings = new Lexicon("event kinds", 32) on heap;
+
+                this.spoken = new ChainPool("languages", this.cap) on heap;
+                this.citizen = new ChainPool("nationalities", this.cap) on heap;
+                this.bonds = new ChainPool("relations", this.cap * 2) on heap;
+                this.skilled = new ChainPool("skills", this.cap * 2) on heap;
+                this.common = new ChainPool("common knowledge", this.cap * 2) on heap;
+                this.learned = new ChainPool("academical knowledge", this.cap) on heap;
+                this.known = new ChainPool("places known", this.cap) on heap;
+                this.remembered = new ChainPool("people remembered", this.cap * 2) on heap;
+                this.liked = new ChainPool("likes", this.cap) on heap;
+                this.disliked = new ChainPool("dislikes", this.cap) on heap;
+                this.lived = new ChainPool("events", this.cap * 2) on heap;
+
+                this.flags = new byte[this.cap]();
+                this.id = new int[this.cap]();
+                this.hp = new float[this.cap]();
+                this.energy = new int[this.cap]();
+                this.sanity = new byte[this.cap]();
+                this.klass = new byte[this.cap]();
+                this.given = new int[this.cap]();
+                this.family = new int[this.cap]();
+                this.trait = new int[this.cap]();
+                this.culture = new int[this.cap]();
+                this.religion = new int[this.cap]();
+                this.trade = new int[this.cap]();
+                this.feeling = new int[this.cap]();
+                this.ailments = new long[this.cap]();
+                this.px = new float[this.cap]();
+                this.py = new float[this.cap]();
+                this.langHead = new int[this.cap]();
+                this.natHead = new int[this.cap]();
+                this.bondHead = new int[this.cap]();
+                this.skillHead = new int[this.cap]();
+                this.commonHead = new int[this.cap]();
+                this.learnedHead = new int[this.cap]();
+                this.placeHead = new int[this.cap]();
+                this.peopleHead = new int[this.cap]();
+                this.likeHead = new int[this.cap]();
+                this.dislikeHead = new int[this.cap]();
+                this.eventHead = new int[this.cap]();
+                this.freeSlot = new int[this.cap]();
+
+                this.high = 0;
+                this.live = 0;
+                this.freeTop = 0;
+                this.nextId = 1;
+                this.widenings = 0;
+            }
+
+            public destructor ~AgentTable() returns void {
+                delete this.givenNames;
+                delete this.familyNames;
+                delete this.cultures;
+                delete this.religions;
+                delete this.tongues;
+                delete this.traits;
+                delete this.trades;
+                delete this.feelings;
+                delete this.conditions;
+                delete this.nations;
+                delete this.abilities;
+                delete this.lore;
+                delete this.places;
+                delete this.tastes;
+                delete this.happenings;
+                delete this.spoken;
+                delete this.citizen;
+                delete this.bonds;
+                delete this.skilled;
+                delete this.common;
+                delete this.learned;
+                delete this.known;
+                delete this.remembered;
+                delete this.liked;
+                delete this.disliked;
+                delete this.lived;
+                delete this.flags;
+                delete this.id;
+                delete this.hp;
+                delete this.energy;
+                delete this.sanity;
+                delete this.klass;
+                delete this.given;
+                delete this.family;
+                delete this.trait;
+                delete this.culture;
+                delete this.religion;
+                delete this.trade;
+                delete this.feeling;
+                delete this.ailments;
+                delete this.px;
+                delete this.py;
+                delete this.langHead;
+                delete this.natHead;
+                delete this.bondHead;
+                delete this.skillHead;
+                delete this.commonHead;
+                delete this.learnedHead;
+                delete this.placeHead;
+                delete this.peopleHead;
+                delete this.likeHead;
+                delete this.dislikeHead;
+                delete this.eventHead;
+                delete this.freeSlot;
+                return;
+            }
+
+            public static fixed int F_ALIVE = 1;
+
+            // What a person starts with. Full health, a full day's energy, and a sound mind: these
+            // are the numbers everything else moves AWAY from, so they are the ceiling of each
+            // scale rather than a middle somebody chose.
+            public static fixed float HP_FULL = 100.0;
+            public static fixed int ENERGY_FULL = 1000;
+            public static fixed int SANITY_FULL = 100;
+
+            public method limit() returns int {
+                return this.high;
+            }
+
+            public method living() returns int {
+                return this.live;
+            }
+
+            public method alive(int i) returns boolean {
+                return (cast<int>(this.flags[i]) & AgentTable.F_ALIVE) != 0;
+            }
+
+            // ---- the vocabulary, so the world outside can teach it ----
+
+            public method givenNameBook() returns Lexicon* {
+                return this.givenNames;
+            }
+
+            public method familyNameBook() returns Lexicon* {
+                return this.familyNames;
+            }
+
+            public method cultureBook() returns Lexicon* {
+                return this.cultures;
+            }
+
+            public method religionBook() returns Lexicon* {
+                return this.religions;
+            }
+
+            public method tongueBook() returns Lexicon* {
+                return this.tongues;
+            }
+
+            public method traitBook() returns Lexicon* {
+                return this.traits;
+            }
+
+            public method tradeBook() returns Lexicon* {
+                return this.trades;
+            }
+
+            public method feelingBook() returns Lexicon* {
+                return this.feelings;
+            }
+
+            public method conditionBook() returns Lexicon* {
+                return this.conditions;
+            }
+
+            public method nationBook() returns Lexicon* {
+                return this.nations;
+            }
+
+            public method skillBook() returns Lexicon* {
+                return this.abilities;
+            }
+
+            public method loreBook() returns Lexicon* {
+                return this.lore;
+            }
+
+            public method placeBook() returns Lexicon* {
+                return this.places;
+            }
+
+            public method tasteBook() returns Lexicon* {
+                return this.tastes;
+            }
+
+            public method eventKindBook() returns Lexicon* {
+                return this.happenings;
+            }
+
+            // ---- being born and dying ----
+
+            // Take a row and put a person in it. Everything variable starts empty, which costs
+            // eleven stores of -1 and not one allocation.
+            public method spawn(float x, float y, int kind) returns int {
+                mutable int i = 0;
+                if (this.freeTop > 0) {
+                    this.freeTop = this.freeTop - 1;
+                    i = this.freeSlot[this.freeTop];
+                } else {
+                    if (this.high >= this.cap) {
+                        this.widen();
+                    }
+                    i = this.high;
+                    this.high = this.high + 1;
+                }
+                this.flags[i] = cast<byte>(AgentTable.F_ALIVE);
+                this.id[i] = this.nextId;
+                this.nextId = this.nextId + 1;
+                this.hp[i] = AgentTable.HP_FULL;
+                this.energy[i] = AgentTable.ENERGY_FULL;
+                this.sanity[i] = cast<byte>(AgentTable.SANITY_FULL);
+                this.klass[i] = cast<byte>(kind);
+                this.given[i] = 0 - 1;
+                this.family[i] = 0 - 1;
+                this.trait[i] = 0 - 1;
+                this.culture[i] = 0 - 1;
+                this.religion[i] = 0 - 1;
+                this.trade[i] = 0 - 1;
+                this.feeling[i] = 0 - 1;
+                this.ailments[i] = 0;
+                this.px[i] = x;
+                this.py[i] = y;
+                this.langHead[i] = 0 - 1;
+                this.natHead[i] = 0 - 1;
+                this.bondHead[i] = 0 - 1;
+                this.skillHead[i] = 0 - 1;
+                this.commonHead[i] = 0 - 1;
+                this.learnedHead[i] = 0 - 1;
+                this.placeHead[i] = 0 - 1;
+                this.peopleHead[i] = 0 - 1;
+                this.likeHead[i] = 0 - 1;
+                this.dislikeHead[i] = 0 - 1;
+                this.eventHead[i] = 0 - 1;
+                this.live = this.live + 1;
+                return i;
+            }
+
+            // EVERYTHING THEY KNEW GOES BACK TO THE POOLS.
+            //
+            // This is the one place a leak could hide and never be noticed: a row is recycled, so a
+            // forgotten chain would not dangle or crash -- it would simply sit in the pool for ever,
+            // held by nobody, and the pool would grow until the machine complained. Eleven releases,
+            // one per chain, and the pools' own counters will show it if one is ever missed.
+            public method kill(int i) returns void {
+                if (!this.alive(i)) {
+                    return;
+                }
+                this.spoken.release(this.langHead[i]);
+                this.citizen.release(this.natHead[i]);
+                this.bonds.release(this.bondHead[i]);
+                this.skilled.release(this.skillHead[i]);
+                this.common.release(this.commonHead[i]);
+                this.learned.release(this.learnedHead[i]);
+                this.known.release(this.placeHead[i]);
+                this.remembered.release(this.peopleHead[i]);
+                this.liked.release(this.likeHead[i]);
+                this.disliked.release(this.dislikeHead[i]);
+                this.lived.release(this.eventHead[i]);
+                this.langHead[i] = 0 - 1;
+                this.natHead[i] = 0 - 1;
+                this.bondHead[i] = 0 - 1;
+                this.skillHead[i] = 0 - 1;
+                this.commonHead[i] = 0 - 1;
+                this.learnedHead[i] = 0 - 1;
+                this.placeHead[i] = 0 - 1;
+                this.peopleHead[i] = 0 - 1;
+                this.likeHead[i] = 0 - 1;
+                this.dislikeHead[i] = 0 - 1;
+                this.eventHead[i] = 0 - 1;
+                this.flags[i] = cast<byte>(0);
+                if (this.freeTop < this.cap) {
+                    this.freeSlot[this.freeTop] = i;
+                    this.freeTop = this.freeTop + 1;
+                }
+                this.live = this.live - 1;
+                return;
+            }
+
+            // ---- the fixed facts ----
+
+            public method idOf(int i) returns int {
+                return this.id[i];
+            }
+
+            public method hpOf(int i) returns float {
+                return this.hp[i];
+            }
+
+            public method energyOf(int i) returns int {
+                return this.energy[i];
+            }
+
+            public method sanityOf(int i) returns int {
+                return cast<int>(this.sanity[i]) & 255;
+            }
+
+            public method classOf(int i) returns int {
+                return cast<int>(this.klass[i]) & 255;
+            }
+
+            public method xOf(int i) returns float {
+                return this.px[i];
+            }
+
+            public method yOf(int i) returns float {
+                return this.py[i];
+            }
+
+            public method setPos(int i, float x, float y) returns void {
+                this.px[i] = x;
+                this.py[i] = y;
+                return;
+            }
+
+            // Health only ever moves through here, and it is CLAMPED at both ends rather than left
+            // to arithmetic: a wound that takes an agent to -3 and a salve that takes them to 104
+            // are both states nothing downstream is written to handle, and both are one subtraction
+            // away at any moment.
+            public method heal(int i, float d) returns void {
+                mutable float h = this.hp[i] + d;
+                if (h > AgentTable.HP_FULL) {
+                    h = AgentTable.HP_FULL;
+                }
+                if (h < 0.0) {
+                    h = 0.0;
+                }
+                this.hp[i] = h;
+                return;
+            }
+
+            // Energy is spent in integers and it floors at zero, because zero is not "very tired",
+            // it is the specific state that MEANS this agent must sleep. A negative energy would be
+            // a second way of saying the same thing, and the first thing to disagree with it.
+            public method spend(int i, int d) returns void {
+                mutable int e = this.energy[i] - d;
+                if (e < 0) {
+                    e = 0;
+                }
+                this.energy[i] = e;
+                return;
+            }
+
+            public method rest(int i, int d) returns void {
+                mutable int e = this.energy[i] + d;
+                if (e > AgentTable.ENERGY_FULL) {
+                    e = AgentTable.ENERGY_FULL;
+                }
+                this.energy[i] = e;
+                return;
+            }
+
+            public method mustSleep(int i) returns boolean {
+                return this.energy[i] <= 0;
+            }
+
+            public method shake(int i, int d) returns void {
+                mutable int s = this.sanityOf(i) + d;
+                if (s > AgentTable.SANITY_FULL) {
+                    s = AgentTable.SANITY_FULL;
+                }
+                if (s < 0) {
+                    s = 0;
+                }
+                this.sanity[i] = cast<byte>(s);
+                return;
+            }
+
+            // ---- who they are ----
+
+            public method setName(int i, int givenId, int familyId) returns void {
+                this.given[i] = givenId;
+                this.family[i] = familyId;
+                return;
+            }
+
+            public method givenOf(int i) returns int {
+                return this.given[i];
+            }
+
+            public method familyOf(int i) returns int {
+                return this.family[i];
+            }
+
+            public method setTrait(int i, int t) returns void {
+                this.trait[i] = t;
+                return;
+            }
+
+            public method traitOf(int i) returns int {
+                return this.trait[i];
+            }
+
+            public method setCulture(int i, int c) returns void {
+                this.culture[i] = c;
+                return;
+            }
+
+            public method cultureOf(int i) returns int {
+                return this.culture[i];
+            }
+
+            public method setReligion(int i, int r) returns void {
+                this.religion[i] = r;
+                return;
+            }
+
+            public method religionOf(int i) returns int {
+                return this.religion[i];
+            }
+
+            public method setTrade(int i, int j) returns void {
+                this.trade[i] = j;
+                return;
+            }
+
+            public method tradeOf(int i) returns int {
+                return this.trade[i];
+            }
+
+            public method setFeeling(int i, int f) returns void {
+                this.feeling[i] = f;
+                return;
+            }
+
+            public method feelingOf(int i) returns int {
+                return this.feeling[i];
+            }
+
+            // ---- mental conditions, as bits ----
+            //
+            // A bitmask because the catalogue is bounded and an agent may carry several at once:
+            // autism and ADHD together are ordinary, and a chain of two links to say so would cost
+            // more than the whole set does here.
+
+            public method afflict(int i, int conditionId) returns void {
+                if (conditionId < 0 || conditionId > 63) {
+                    return;
+                }
+                this.ailments[i] = this.ailments[i] | (cast<long>(1) << conditionId);
+                return;
+            }
+
+            public method cure(int i, int conditionId) returns void {
+                if (conditionId < 0 || conditionId > 63) {
+                    return;
+                }
+                this.ailments[i] = this.ailments[i] & ~(cast<long>(1) << conditionId);
+                return;
+            }
+
+            public method suffers(int i, int conditionId) returns boolean {
+                if (conditionId < 0 || conditionId > 63) {
+                    return false;
+                }
+                return (this.ailments[i] & (cast<long>(1) << conditionId)) != 0;
+            }
+
+            public method ailmentsOf(int i) returns long {
+                return this.ailments[i];
+            }
+
+            // ---- the chains ----
+            //
+            // Each of these is the same three lines: hand the head to the pool, take the new head
+            // back, write it into the column. The repetition is the point -- one method per kind
+            // means the caller never has to know which pool holds what, and a new kind of memory is
+            // a new pool and a new pair of methods rather than a change to anything existing.
+
+            public method learnTongue(int i, int tongueId, int fluency) returns void {
+                this.langHead[i] = this.spoken.remember(this.langHead[i], tongueId, fluency);
+                return;
+            }
+
+            public method tongueHeadOf(int i) returns int {
+                return this.langHead[i];
+            }
+
+            public method tonguePool() returns ChainPool* {
+                return this.spoken;
+            }
+
+            public method grantNationality(int i, int nationId, int how) returns void {
+                this.natHead[i] = this.citizen.remember(this.natHead[i], nationId, how);
+                return;
+            }
+
+            public method nationalityHeadOf(int i) returns int {
+                return this.natHead[i];
+            }
+
+            public method nationalityPool() returns ChainPool* {
+                return this.citizen;
+            }
+
+            public method relateTo(int i, int otherId, int regard) returns void {
+                this.bondHead[i] = this.bonds.remember(this.bondHead[i], otherId, regard);
+                return;
+            }
+
+            public method relationHeadOf(int i) returns int {
+                return this.bondHead[i];
+            }
+
+            public method relationPool() returns ChainPool* {
+                return this.bonds;
+            }
+
+            public method learnSkill(int i, int skillId, int level) returns void {
+                this.skillHead[i] = this.skilled.remember(this.skillHead[i], skillId, level);
+                return;
+            }
+
+            public method skillHeadOf(int i) returns int {
+                return this.skillHead[i];
+            }
+
+            public method skillPool() returns ChainPool* {
+                return this.skilled;
+            }
+
+            public method learnCommon(int i, int loreId, int certainty) returns void {
+                this.commonHead[i] = this.common.remember(this.commonHead[i], loreId, certainty);
+                return;
+            }
+
+            public method commonHeadOf(int i) returns int {
+                return this.commonHead[i];
+            }
+
+            public method commonPool() returns ChainPool* {
+                return this.common;
+            }
+
+            public method learnAcademical(int i, int loreId, int depth) returns void {
+                this.learnedHead[i] = this.learned.remember(this.learnedHead[i], loreId, depth);
+                return;
+            }
+
+            public method academicalHeadOf(int i) returns int {
+                return this.learnedHead[i];
+            }
+
+            public method academicalPool() returns ChainPool* {
+                return this.learned;
+            }
+
+            public method learnPlace(int i, int placeId, int familiarity) returns void {
+                this.placeHead[i] = this.known.remember(this.placeHead[i], placeId, familiarity);
+                return;
+            }
+
+            public method placeHeadOf(int i) returns int {
+                return this.placeHead[i];
+            }
+
+            public method placePool() returns ChainPool* {
+                return this.known;
+            }
+
+            public method rememberPerson(int i, int otherId, int vividness) returns void {
+                this.peopleHead[i] = this.remembered.remember(this.peopleHead[i], otherId, vividness);
+                return;
+            }
+
+            public method peopleHeadOf(int i) returns int {
+                return this.peopleHead[i];
+            }
+
+            public method peoplePool() returns ChainPool* {
+                return this.remembered;
+            }
+
+            public method like(int i, int tasteId, int howMuch) returns void {
+                this.likeHead[i] = this.liked.remember(this.likeHead[i], tasteId, howMuch);
+                return;
+            }
+
+            public method likeHeadOf(int i) returns int {
+                return this.likeHead[i];
+            }
+
+            public method likePool() returns ChainPool* {
+                return this.liked;
+            }
+
+            public method dislike(int i, int tasteId, int howMuch) returns void {
+                this.dislikeHead[i] = this.disliked.remember(this.dislikeHead[i], tasteId, howMuch);
+                return;
+            }
+
+            public method dislikeHeadOf(int i) returns int {
+                return this.dislikeHead[i];
+            }
+
+            public method dislikePool() returns ChainPool* {
+                return this.disliked;
+            }
+
+            // ---- events, and the two kinds of them ----
+            //
+            // An unforgettable event is held at UNFORGETTABLE and never touched by the fade. A
+            // forgettable one carries a weight that falls with time and rises when the memory is
+            // used, and when it reaches the floor the link goes back to the pool.
+            //
+            // The two are the same chain with the same shape, which matters: an event does not
+            // change kind by being remembered differently, and a person recalling something they
+            // thought they had forgotten is the weight going back up, not the memory moving house.
+
+            public static fixed int UNFORGETTABLE = 1000000;
+            public static fixed int FADE_FLOOR = 0;
+
+            public method witness(int i, int eventKindId, int strength) returns void {
+                this.eventHead[i] = this.lived.push(this.eventHead[i], eventKindId, strength);
+                return;
+            }
+
+            public method witnessForEver(int i, int eventKindId) returns void {
+                this.eventHead[i] = this.lived.push(this.eventHead[i], eventKindId,
+                                                   AgentTable.UNFORGETTABLE);
+                return;
+            }
+
+            public method eventHeadOf(int i) returns int {
+                return this.eventHead[i];
+            }
+
+            public method eventPool() returns ChainPool* {
+                return this.lived;
+            }
+
+            // Time passing over one agent's memory. Everything forgettable loses a little; anything
+            // that falls to the floor is let go.
+            public method fade(int i, int by) returns void {
+                mutable int at = this.eventHead[i];
+                while (at >= 0) {
+                    int w = this.lived.weightOf(at);
+                    if (w < AgentTable.UNFORGETTABLE) {
+                        this.lived.setWeight(at, w - by);
+                    }
+                    at = this.lived.nextOf(at);
+                }
+                this.eventHead[i] = this.lived.prune(this.eventHead[i], AgentTable.FADE_FLOOR);
+                return;
+            }
+
+            // ---- growing ----
+
+            private method widen() returns void {
+                int want = this.cap * 2;
+                this.flags = AgentTable.widerB(this.flags, want);
+                this.id = AgentTable.widerI(this.id, want);
+                this.hp = AgentTable.widerF(this.hp, want);
+                this.energy = AgentTable.widerI(this.energy, want);
+                this.sanity = AgentTable.widerB(this.sanity, want);
+                this.klass = AgentTable.widerB(this.klass, want);
+                this.given = AgentTable.widerI(this.given, want);
+                this.family = AgentTable.widerI(this.family, want);
+                this.trait = AgentTable.widerI(this.trait, want);
+                this.culture = AgentTable.widerI(this.culture, want);
+                this.religion = AgentTable.widerI(this.religion, want);
+                this.trade = AgentTable.widerI(this.trade, want);
+                this.feeling = AgentTable.widerI(this.feeling, want);
+                this.ailments = AgentTable.widerL(this.ailments, want);
+                this.px = AgentTable.widerF(this.px, want);
+                this.py = AgentTable.widerF(this.py, want);
+                this.langHead = AgentTable.widerI(this.langHead, want);
+                this.natHead = AgentTable.widerI(this.natHead, want);
+                this.bondHead = AgentTable.widerI(this.bondHead, want);
+                this.skillHead = AgentTable.widerI(this.skillHead, want);
+                this.commonHead = AgentTable.widerI(this.commonHead, want);
+                this.learnedHead = AgentTable.widerI(this.learnedHead, want);
+                this.placeHead = AgentTable.widerI(this.placeHead, want);
+                this.peopleHead = AgentTable.widerI(this.peopleHead, want);
+                this.likeHead = AgentTable.widerI(this.likeHead, want);
+                this.dislikeHead = AgentTable.widerI(this.dislikeHead, want);
+                this.eventHead = AgentTable.widerI(this.eventHead, want);
+                this.freeSlot = AgentTable.widerI(this.freeSlot, want);
+                this.cap = want;
+                this.widenings = this.widenings + 1;
+                return;
+            }
+
+            private static method widerI(int[] old, int want) returns int[] {
+                mutable int[] w = new int[want]();
+                mutable int i = 0;
+                while (i < old.length()) {
+                    w[i] = old[i];
+                    i = i + 1;
+                }
+                delete old;
+                return w;
+            }
+
+            private static method widerF(float[] old, int want) returns float[] {
+                mutable float[] w = new float[want]();
+                mutable int i = 0;
+                while (i < old.length()) {
+                    w[i] = old[i];
+                    i = i + 1;
+                }
+                delete old;
+                return w;
+            }
+
+            private static method widerB(byte[] old, int want) returns byte[] {
+                mutable byte[] w = new byte[want]();
+                mutable int i = 0;
+                while (i < old.length()) {
+                    w[i] = old[i];
+                    i = i + 1;
+                }
+                delete old;
+                return w;
+            }
+
+            private static method widerL(long[] old, int want) returns long[] {
+                mutable long[] w = new long[want]();
+                mutable int i = 0;
+                while (i < old.length()) {
+                    w[i] = old[i];
+                    i = i + 1;
+                }
+                delete old;
+                return w;
+            }
+
+            public method report() returns void {
+                System.IO.Console.println($"agents: {this.live} alive of {this.high} rows, {this.cap} capacity, {this.widenings} widenings");
+                return;
+            }
+        }
+    }
+}

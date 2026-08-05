@@ -1,0 +1,345 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.People.Lexicon;
+import Agents.People.ChainPool;
+import Agents.People.AgentTable;
+import Agents.People.AgentClass;
+
+// The agent, held to account.
+//
+// This is the foundation everything else will be built on, and the two things that would be worst
+// to get wrong are both invisible from the outside: a chain that is dropped without being returned,
+// and a catalogue that hands out two numbers for one name. Neither crashes. Both would quietly rot
+// the world over an arc, exactly the way the model this replaces did.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Test {
+
+        public class AgentTests {
+
+            [Tag(name: "agents")]
+            [Test]
+            public static method a_name_gets_one_number_however_often_it_is_asked_for() returns void {
+                Lexicon* book = new Lexicon("test", 4) on heap;
+                int a = book.idOf("Iron");
+                int b = book.idOf("Bronze");
+                int again = book.idOf("Iron");
+                Test.checking("the same name comes back with the same number");
+                Test.assertEqual(again, a);
+                Test.checking("and a different name does not");
+                Test.assertTrue(b != a);
+                Test.checking("so the world learned exactly two things");
+                Test.assertEqual(book.count(), 2);
+                Test.checking("and can say them back");
+                Test.assertTrue(book.nameOf(a).equals("Iron"));
+                Test.checking("while something it never heard of is not there");
+                Test.assertEqual(book.find("Mithril"), 0 - 1);
+                delete book;
+                return;
+            }
+
+            // GROWING MUST NOT LOSE ANYTHING. The catalogue starts at four and doubles; the entries
+            // written before the first doubling are the ones a careless copy would drop, and they
+            // would be dropped SILENTLY -- every later lookup would simply add them again under a
+            // new number and the world would end up with two of every early religion.
+            [Tag(name: "agents")]
+            [Test]
+            public static method a_catalogue_keeps_everything_it_had_after_it_grows() returns void {
+                Lexicon* book = new Lexicon("test", 4) on heap;
+                mutable int[] first = new int[40]();
+                for (int i in 0..40) {
+                    first[i] = book.idOf($"thing{i}");
+                }
+                Test.checking("forty distinct names became forty entries");
+                Test.assertEqual(book.count(), 40);
+                mutable boolean stable = true;
+                for (int i in 0..40) {
+                    if (book.idOf($"thing{i}") != first[i]) {
+                        stable = false;
+                    }
+                    if (!book.nameOf(first[i]).equals($"thing{i}")) {
+                        stable = false;
+                    }
+                }
+                Test.checking("and every one of them still answers to its original number");
+                Test.assertTrue(stable);
+                delete first;
+                delete book;
+                return;
+            }
+
+            [Tag(name: "agents")]
+            [Test]
+            public static method a_chain_holds_what_was_put_in_it() returns void {
+                ChainPool* pool = new ChainPool("test", 8) on heap;
+                mutable int head = 0 - 1;
+                head = pool.remember(head, 7, 100);
+                head = pool.remember(head, 9, 50);
+                head = pool.remember(head, 11, 25);
+                Test.checking("three things went in");
+                Test.assertEqual(pool.lengthOf(head), 3);
+                Test.checking("and the middle one can be found");
+                Test.assertTrue(pool.findIn(head, 9) >= 0);
+                Test.checking("with the weight it went in with");
+                Test.assertEqual(pool.weightOf(pool.findIn(head, 9)), 50);
+                Test.checking("while something never added is not found");
+                Test.assertEqual(pool.findIn(head, 8), 0 - 1);
+                delete pool;
+                return;
+            }
+
+            // LEARNING SOMETHING TWICE DOES NOT GIVE YOU TWO OF IT. This is the whole reason
+            // `remember` exists beside `push`: a person who is taught their own language again is
+            // better at it, not bilingual in it.
+            [Tag(name: "agents")]
+            [Test]
+            public static method remembering_the_same_thing_deepens_it_instead_of_duplicating_it() returns void {
+                ChainPool* pool = new ChainPool("test", 8) on heap;
+                mutable int head = 0 - 1;
+                head = pool.remember(head, 7, 30);
+                head = pool.remember(head, 7, 80);
+                Test.checking("it is still one link");
+                Test.assertEqual(pool.lengthOf(head), 1);
+                Test.checking("held more strongly than before");
+                Test.assertEqual(pool.weightOf(pool.findIn(head, 7)), 80);
+                head = pool.remember(head, 7, 10);
+                Test.checking("and a weaker telling does not weaken what is already known");
+                Test.assertEqual(pool.weightOf(pool.findIn(head, 7)), 80);
+                delete pool;
+                return;
+            }
+
+            // THE SLOT MUST COME BACK. A pool that never reclaims is a leak that looks like a
+            // working program: nothing breaks, memory simply climbs until the machine gives up --
+            // which is precisely the failure mode this layout exists to avoid.
+            [Tag(name: "agents")]
+            [Test]
+            public static method releasing_a_chain_hands_every_slot_back() returns void {
+                ChainPool* pool = new ChainPool("test", 8) on heap;
+                mutable int head = 0 - 1;
+                for (int i in 0..20) {
+                    head = pool.remember(head, i, i + 1);
+                }
+                Test.checking("twenty links are live");
+                Test.assertEqual(pool.liveLinks(), 20);
+                pool.release(head);
+                Test.checking("and after release none are");
+                Test.assertEqual(pool.liveLinks(), 0);
+                int before = pool.capacity();
+                mutable int again = 0 - 1;
+                for (int i in 0..20) {
+                    again = pool.remember(again, i, 1);
+                }
+                Test.checking("twenty more reuse the freed slots rather than growing the pool");
+                Test.assertEqual(pool.capacity(), before);
+                pool.release(again);
+                delete pool;
+                return;
+            }
+
+            [Tag(name: "agents")]
+            [Test]
+            public static method pruning_drops_only_what_has_faded_to_nothing() returns void {
+                ChainPool* pool = new ChainPool("test", 8) on heap;
+                mutable int head = 0 - 1;
+                head = pool.remember(head, 1, 5);
+                head = pool.remember(head, 2, 0);
+                head = pool.remember(head, 3, 9);
+                head = pool.prune(head, 0);
+                Test.checking("the one at the floor went");
+                Test.assertEqual(pool.findIn(head, 2), 0 - 1);
+                Test.checking("and the two above it stayed");
+                Test.assertEqual(pool.lengthOf(head), 2);
+                Test.checking("with their slot returned to the pool");
+                Test.assertEqual(pool.liveLinks(), 2);
+                delete pool;
+                return;
+            }
+
+            [Tag(name: "agents")]
+            [Test]
+            public static method an_agent_is_born_whole() returns void {
+                AgentTable* folk = new AgentTable(16) on heap;
+                int i = folk.spawn(10.0, 20.0, cast<int>(AgentClass.Civilian));
+                Test.checking("they are alive");
+                Test.assertTrue(folk.alive(i));
+                Test.checking("with an id of their own");
+                Test.assertTrue(folk.idOf(i) > 0);
+                Test.checking("in full health");
+                Test.assertTrue(folk.hpOf(i) > 99.0);
+                Test.checking("with a full day in them");
+                Test.assertEqual(folk.energyOf(i), AgentTable.ENERGY_FULL);
+                Test.checking("and a sound mind");
+                Test.assertEqual(folk.sanityOf(i), AgentTable.SANITY_FULL);
+                Test.checking("knowing nothing yet");
+                Test.assertEqual(folk.tongueHeadOf(i), 0 - 1);
+                Test.assertEqual(folk.eventHeadOf(i), 0 - 1);
+                delete folk;
+                return;
+            }
+
+            // AN ID NAMES ONE LIFE. Rows are recycled and ids are not, which is what lets a memory
+            // of a person outlive the person: a relation pointing at id 41 does not silently become
+            // a relation with whoever was born into that row afterwards.
+            [Tag(name: "agents")]
+            [Test]
+            public static method a_recycled_row_does_not_inherit_the_dead_ones_identity() returns void {
+                AgentTable* folk = new AgentTable(16) on heap;
+                int first = folk.spawn(1.0, 1.0, cast<int>(AgentClass.Civilian));
+                int wasId = folk.idOf(first);
+                folk.kill(first);
+                int second = folk.spawn(2.0, 2.0, cast<int>(AgentClass.Soldier));
+                Test.checking("the row came back round");
+                Test.assertEqual(second, first);
+                Test.checking("but the identity did not");
+                Test.assertTrue(folk.idOf(second) != wasId);
+                delete folk;
+                return;
+            }
+
+            [Tag(name: "agents")]
+            [Test]
+            public static method energy_floors_at_zero_and_that_is_what_sleep_means() returns void {
+                AgentTable* folk = new AgentTable(16) on heap;
+                int i = folk.spawn(0.0, 0.0, cast<int>(AgentClass.Scout));
+                Test.checking("a rested agent need not sleep");
+                Test.assertTrue(!folk.mustSleep(i));
+                folk.spend(i, 4000);
+                Test.checking("spending more than they had does not go negative");
+                Test.assertEqual(folk.energyOf(i), 0);
+                Test.checking("and that is precisely the state that means sleep");
+                Test.assertTrue(folk.mustSleep(i));
+                folk.rest(i, 999999);
+                Test.checking("while rest cannot take them past full");
+                Test.assertEqual(folk.energyOf(i), AgentTable.ENERGY_FULL);
+                delete folk;
+                return;
+            }
+
+            [Tag(name: "agents")]
+            [Test]
+            public static method health_is_clamped_at_both_ends() returns void {
+                AgentTable* folk = new AgentTable(16) on heap;
+                int i = folk.spawn(0.0, 0.0, cast<int>(AgentClass.Civilian));
+                folk.heal(i, 0.0 - 500.0);
+                Test.checking("a mortal wound stops at nothing left");
+                Test.assertTrue(folk.hpOf(i) == 0.0);
+                folk.heal(i, 500.0);
+                Test.checking("and a cure stops at whole");
+                Test.assertTrue(folk.hpOf(i) == AgentTable.HP_FULL);
+                delete folk;
+                return;
+            }
+
+            [Tag(name: "agents")]
+            [Test]
+            public static method conditions_are_several_at_once_and_each_answers_separately() returns void {
+                AgentTable* folk = new AgentTable(16) on heap;
+                int i = folk.spawn(0.0, 0.0, cast<int>(AgentClass.Civilian));
+                int autism = folk.conditionBook().idOf("autism");
+                int adhd = folk.conditionBook().idOf("adhd");
+                int psychosis = folk.conditionBook().idOf("psychosis");
+                folk.afflict(i, autism);
+                folk.afflict(i, adhd);
+                Test.checking("they have the two they were given");
+                Test.assertTrue(folk.suffers(i, autism));
+                Test.assertTrue(folk.suffers(i, adhd));
+                Test.checking("and not the one they were not");
+                Test.assertTrue(!folk.suffers(i, psychosis));
+                folk.cure(i, adhd);
+                Test.checking("curing one leaves the other alone");
+                Test.assertTrue(folk.suffers(i, autism));
+                Test.assertTrue(!folk.suffers(i, adhd));
+                delete folk;
+                return;
+            }
+
+            // THE WHOLE POINT OF THE LAYOUT, TESTED. An agent with a life behind them -- tongues,
+            // nationalities, skills, places, people, tastes, events -- and when they die every last
+            // link of it goes back to the pools. If this ever fails, the world leaks a person's
+            // entire memory every time somebody dies, and nothing anywhere would say so.
+            [Tag(name: "agents")]
+            [Test]
+            public static method a_whole_life_returns_to_the_pools_when_it_ends() returns void {
+                AgentTable* folk = new AgentTable(16) on heap;
+                int i = folk.spawn(5.0, 5.0, cast<int>(AgentClass.Protagonist));
+                folk.setName(i, folk.givenNameBook().idOf("Aldric"),
+                             folk.familyNameBook().idOf("Vance"));
+                folk.setCulture(i, folk.cultureBook().idOf("Highland"));
+                folk.setReligion(i, folk.religionBook().idOf("the Old Faith"));
+                folk.setTrait(i, folk.traitBook().idOf("stubborn"));
+                folk.setTrade(i, folk.tradeBook().idOf("smith"));
+                folk.setFeeling(i, folk.feelingBook().idOf("content"));
+                folk.learnTongue(i, folk.tongueBook().idOf("Highland"), 100);
+                folk.learnTongue(i, folk.tongueBook().idOf("Trade Tongue"), 40);
+                folk.grantNationality(i, folk.nationBook().idOf("Karsk"), 1);
+                folk.grantNationality(i, folk.nationBook().idOf("Vey"), 2);
+                folk.learnSkill(i, folk.skillBook().idOf("smithing"), 70);
+                folk.learnCommon(i, folk.loreBook().idOf("fire burns"), 100);
+                folk.learnAcademical(i, folk.loreBook().idOf("the tempering of steel"), 60);
+                folk.learnPlace(i, folk.placeBook().idOf("the north pass"), 30);
+                folk.rememberPerson(i, 41, 80);
+                folk.like(i, folk.tasteBook().idOf("bread"), 60);
+                folk.dislike(i, folk.tasteBook().idOf("the sea"), 90);
+                folk.witnessForEver(i, folk.eventKindBook().idOf("the night the hall burned"));
+                folk.witness(i, folk.eventKindBook().idOf("a quiet market day"), 5);
+
+                Test.checking("he speaks two tongues");
+                Test.assertEqual(folk.tonguePool().lengthOf(folk.tongueHeadOf(i)), 2);
+                Test.checking("holds two nationalities");
+                Test.assertEqual(folk.nationalityPool().lengthOf(folk.nationalityHeadOf(i)), 2);
+                Test.checking("and remembers two things that happened");
+                Test.assertEqual(folk.eventPool().lengthOf(folk.eventHeadOf(i)), 2);
+
+                folk.kill(i);
+                Test.checking("and when he dies, every language goes back");
+                Test.assertEqual(folk.tonguePool().liveLinks(), 0);
+                Test.checking("every nationality");
+                Test.assertEqual(folk.nationalityPool().liveLinks(), 0);
+                Test.checking("every skill");
+                Test.assertEqual(folk.skillPool().liveLinks(), 0);
+                Test.checking("everything he knew");
+                Test.assertEqual(folk.commonPool().liveLinks(), 0);
+                Test.assertEqual(folk.academicalPool().liveLinks(), 0);
+                Test.checking("everywhere he had been");
+                Test.assertEqual(folk.placePool().liveLinks(), 0);
+                Test.checking("everyone he remembered");
+                Test.assertEqual(folk.peoplePool().liveLinks(), 0);
+                Test.checking("everything he loved and hated");
+                Test.assertEqual(folk.likePool().liveLinks(), 0);
+                Test.assertEqual(folk.dislikePool().liveLinks(), 0);
+                Test.checking("and everything that ever happened to him");
+                Test.assertEqual(folk.eventPool().liveLinks(), 0);
+                delete folk;
+                return;
+            }
+
+            // WHAT IS UNFORGETTABLE IS UNFORGETTABLE. The fade runs over everything, and the night
+            // the hall burned is still there afterwards while the quiet market day is not.
+            [Tag(name: "agents")]
+            [Test]
+            public static method time_takes_the_ordinary_days_and_leaves_the_night_that_mattered() returns void {
+                AgentTable* folk = new AgentTable(16) on heap;
+                int i = folk.spawn(0.0, 0.0, cast<int>(AgentClass.Civilian));
+                int fire = folk.eventKindBook().idOf("the night the hall burned");
+                int market = folk.eventKindBook().idOf("a quiet market day");
+                folk.witnessForEver(i, fire);
+                folk.witness(i, market, 10);
+                mutable int years = 0;
+                while (years < 20) {
+                    folk.fade(i, 1);
+                    years = years + 1;
+                }
+                Test.checking("the market day is gone");
+                Test.assertEqual(folk.eventPool().findIn(folk.eventHeadOf(i), market), 0 - 1);
+                Test.checking("the fire is not");
+                Test.assertTrue(folk.eventPool().findIn(folk.eventHeadOf(i), fire) >= 0);
+                Test.checking("and only the one link remains live");
+                Test.assertEqual(folk.eventPool().liveLinks(), 1);
+                delete folk;
+                return;
+            }
+        }
+    }
+}

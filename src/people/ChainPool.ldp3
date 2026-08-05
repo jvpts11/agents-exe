@@ -1,0 +1,272 @@
+import System.IO.Console;
+
+// MANY SMALL LISTS, IN THREE ARRAYS SHARED BY THE WHOLE WORLD.
+//
+// An agent's languages, nationalities, skills, places, likes and remembered people are all lists
+// whose length nobody can predict: one agent speaks one tongue and another speaks five, one has
+// been nowhere and another has crossed a continent. The obvious shape is a list object per agent
+// per category, and with no ceiling on the population that is the shape that kills it -- ten list
+// objects per agent is ten allocations and ten pointer chases each, and the memory ceiling arrives
+// long before the machine's does.
+//
+// So every list of a given kind in the world lives in ONE pool. An agent holds the index of its
+// first link and nothing else; each link holds a value, a companion number, and the index of the
+// next link. An agent with nothing holds -1 and costs nothing at all. A new fact costs one slot
+// taken off a free list, and a forgotten one hands that slot straight back.
+//
+// `weight` is the second number, and it is not decoration: it is what a relationship is worth, how
+// strong a like is, how well a skill is known, how firmly a memory is held. Everything in this
+// world that an agent carries has a degree, and giving every link one from the start is what stops
+// the model needing a second parallel pool the first time something needs to fade.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace People {
+
+        public class ChainPool {
+            private mutable String title;
+            private mutable int[] value;      // what the link refers to: a catalogue id, an agent id
+            private mutable int[] weight;     // how strongly: skill level, regard, memory strength
+            private mutable int[] next;       // the next link, or -1
+            private mutable int cap;
+            private mutable int high;         // slots ever handed out
+            private mutable int freeTop;      // head of the free list, -1 when empty
+            private mutable int live;         // links currently held by somebody
+            private mutable long widenings;
+
+            public constructor ChainPool(String what, int capacity) {
+                this.title = what;
+                this.cap = capacity;
+                if (this.cap < 8) {
+                    this.cap = 8;
+                }
+                this.value = new int[this.cap]();
+                this.weight = new int[this.cap]();
+                this.next = new int[this.cap]();
+                this.high = 0;
+                this.freeTop = 0 - 1;
+                this.live = 0;
+                this.widenings = 0;
+            }
+
+            public destructor ~ChainPool() returns void {
+                delete this.value;
+                delete this.weight;
+                delete this.next;
+                return;
+            }
+
+            public method liveLinks() returns int {
+                return this.live;
+            }
+
+            public method capacity() returns int {
+                return this.cap;
+            }
+
+            // ---- reading a chain ----
+            //
+            // A caller walks a chain by asking for the head and then following `nextOf` until -1.
+            // There is no iterator object, on purpose: an iterator per walk is an allocation per
+            // walk, and these are walked in the innermost loops there are.
+
+            public method valueOf(int link) returns int {
+                return this.value[link];
+            }
+
+            public method weightOf(int link) returns int {
+                return this.weight[link];
+            }
+
+            public method nextOf(int link) returns int {
+                return this.next[link];
+            }
+
+            public method setWeight(int link, int w) returns void {
+                this.weight[link] = w;
+                return;
+            }
+
+            public method addWeight(int link, int d) returns void {
+                this.weight[link] = this.weight[link] + d;
+                return;
+            }
+
+            // How many links a chain has. Walks it, so it is for reports and tests rather than for
+            // anything that runs every tick.
+            public method lengthOf(int head) returns int {
+                mutable int n = 0;
+                mutable int at = head;
+                while (at >= 0) {
+                    n = n + 1;
+                    at = this.next[at];
+                }
+                return n;
+            }
+
+            // The link in this chain whose value is `v`, or -1. Linear, which is right: these
+            // chains are short by nature -- a person's languages, a person's nationalities -- and a
+            // map per agent would cost more than the walk saves.
+            public method findIn(int head, int v) returns int {
+                mutable int at = head;
+                while (at >= 0) {
+                    if (this.value[at] == v) {
+                        return at;
+                    }
+                    at = this.next[at];
+                }
+                return 0 - 1;
+            }
+
+            // ---- changing a chain ----
+            //
+            // Every one of these takes the OLD head and returns the NEW head, because a chain is
+            // owned by whoever holds its head and this pool has no idea who that is. The caller
+            // writes the answer back into its own column. It reads a little oddly the first time
+            // and it is the only shape that lets one pool serve every owner in the world.
+
+            // Put a value at the front, or raise the weight of the one already there.
+            //
+            // Idempotent by value, which is what nearly every caller wants: learning a language you
+            // already speak makes you better at it, it does not give you a second copy of it.
+            public method remember(int head, int v, int w) returns int {
+                int had = this.findIn(head, v);
+                if (had >= 0) {
+                    if (w > this.weight[had]) {
+                        this.weight[had] = w;
+                    }
+                    return head;
+                }
+                int slot = this.take();
+                this.value[slot] = v;
+                this.weight[slot] = w;
+                this.next[slot] = head;
+                return slot;
+            }
+
+            // Put a value at the front WITHOUT looking for it first. For the chains where the same
+            // value legitimately appears twice -- two separate events at the same place, two
+            // separate meetings with the same person -- and where the caller has already decided
+            // this is a new one.
+            public method push(int head, int v, int w) returns int {
+                int slot = this.take();
+                this.value[slot] = v;
+                this.weight[slot] = w;
+                this.next[slot] = head;
+                return slot;
+            }
+
+            // Drop the first link with this value, handing its slot back.
+            public method forget(int head, int v) returns int {
+                mutable int at = head;
+                mutable int prev = 0 - 1;
+                while (at >= 0) {
+                    if (this.value[at] == v) {
+                        int after = this.next[at];
+                        if (prev < 0) {
+                            this.give(at);
+                            return after;
+                        }
+                        this.next[prev] = after;
+                        this.give(at);
+                        return head;
+                    }
+                    prev = at;
+                    at = this.next[at];
+                }
+                return head;
+            }
+
+            // Drop every link whose weight has fallen to or below the floor, handing the slots back.
+            //
+            // THE FLOOR IS PASSED IN rather than fixed here, because what counts as forgotten is a
+            // decision about the KIND of thing being held, not about the machinery holding it: a
+            // skill worn down to nothing is not the same event as a passing acquaintance fading.
+            public method prune(int head, int floor) returns int {
+                mutable int newHead = head;
+                mutable int at = head;
+                mutable int prev = 0 - 1;
+                while (at >= 0) {
+                    int after = this.next[at];
+                    if (this.weight[at] <= floor) {
+                        if (prev < 0) {
+                            newHead = after;
+                        } else {
+                            this.next[prev] = after;
+                        }
+                        this.give(at);
+                    } else {
+                        prev = at;
+                    }
+                    at = after;
+                }
+                return newHead;
+            }
+
+            // Hand a whole chain back. Called when an agent dies: everything it knew returns to the
+            // pool in one walk rather than being leaked because nobody owned the tail.
+            public method release(int head) returns void {
+                mutable int at = head;
+                while (at >= 0) {
+                    int after = this.next[at];
+                    this.give(at);
+                    at = after;
+                }
+                return;
+            }
+
+            // ---- the slots themselves ----
+
+            private method take() returns int {
+                if (this.freeTop >= 0) {
+                    int slot = this.freeTop;
+                    this.freeTop = this.next[slot];
+                    this.live = this.live + 1;
+                    return slot;
+                }
+                if (this.high >= this.cap) {
+                    this.widen();
+                }
+                int slot = this.high;
+                this.high = this.high + 1;
+                this.live = this.live + 1;
+                return slot;
+            }
+
+            private method give(int slot) returns void {
+                this.value[slot] = 0 - 1;
+                this.weight[slot] = 0;
+                this.next[slot] = this.freeTop;
+                this.freeTop = slot;
+                this.live = this.live - 1;
+                return;
+            }
+
+            private method widen() returns void {
+                int want = this.cap * 2;
+                this.value = ChainPool.wider(this.value, want);
+                this.weight = ChainPool.wider(this.weight, want);
+                this.next = ChainPool.wider(this.next, want);
+                this.cap = want;
+                this.widenings = this.widenings + 1;
+                return;
+            }
+
+            private static method wider(int[] old, int want) returns int[] {
+                mutable int[] w = new int[want]();
+                mutable int i = 0;
+                while (i < old.length()) {
+                    w[i] = old[i];
+                    i = i + 1;
+                }
+                delete old;
+                return w;
+            }
+
+            public method report() returns void {
+                System.IO.Console.println($"{this.title}: {this.live} links live, {this.high} of {this.cap} slots used, {this.widenings} widenings");
+                return;
+            }
+        }
+    }
+}
