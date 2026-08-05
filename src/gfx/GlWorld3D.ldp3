@@ -89,6 +89,44 @@ public bundle Agents {
             private mutable int[] bodyModel;    // AgentClass ordinal -> model index in the atlas
             private mutable boolean havePeople;
             private mutable Folk* folk;
+            private mutable int folkTick;       // which movement tick the world is on
+            // ---- the instanced path for agents ----
+            //
+            // ONE MESH ON THE CARD, AND NINE NUMBERS A PERSON A FRAME.
+            //
+            // Measured before this existed: after the block index the agent bake was still 679 of
+            // a thousand of the frame at 9.7 ms a call, because every visible agent was rebuilt
+            // vertex by vertex, body and shadow, every frame -- about seven million float writes.
+            // None of that was waste in the sense the sweep had been; it was real work, done over
+            // and over on geometry that never changes.
+            //
+            // So each of the four bodies goes to the card ONCE, and per frame each agent costs
+            // position, rotation, colour and shade. The vertex shader does the turning that the
+            // emitters used to do on the processor.
+            //
+            // Four of everything, one per class, because an instanced draw takes one mesh and one
+            // run of instances: grouping by model is what makes it four draw calls instead of one
+            // per person.
+            private mutable int aProg;
+            private mutable int[] mvao;         // per class: the vertex array
+            private mutable int[] mvbo;         // per class: the body, uploaded once
+            private mutable int[] ivbo;         // per class: this frame's instances
+            private mutable int[] mverts;       // per class: vertices in the body
+            private mutable int[] icount;       // per class: instances this frame
+            private mutable int[] icap;         // per class: instances the buffer can hold
+            private mutable address[] ibuf;     // per class: where they are built
+            private mutable int uAProj;
+            private mutable int uAView;
+            private mutable int uAScale;
+            // The agent program shares the world's FRAGMENT shader, so it inherits that shader's
+            // uniforms too -- and an unset uniform is zero, not "the sensible default". uAlpha at
+            // zero means every person is drawn fully transparent the moment anything turns
+            // blending on. Bound here so the crowd cannot depend on the blend state of whatever
+            // pass happened to run before it.
+            private mutable int uAAlpha;
+            private mutable int uAFlat;
+            private mutable boolean haveInstancing;
+            private mutable int diagFrame;
             // Buildings get their own buffer for the opposite reason to people: they do NOT move, so
             // it could in principle live with the terrain -- but the terrain bake is sliced across
             // frames and a village that goes up mid-slice would be half drawn until the sweep came
@@ -258,6 +296,27 @@ public bundle Agents {
             public constructor GlWorld3D(Gl gl) {
                 this.gl = gl;
                 this.prog = Shader.fromSource(gl, GlWorld3D.vertSrc(), GlWorld3D.fragSrc());
+                // The agents get their own program, sharing the world's fragment shader: the
+                // lighting and the flat-shading rule must be the same, or a crowd would be lit
+                // differently from the ground it stands on.
+                this.aProg = Shader.fromSource(gl, GlWorld3D.agentVertSrc(), GlWorld3D.fragSrc());
+                this.uAProj = gl.getUniformLocation(this.aProg, "uProj");
+                this.uAView = gl.getUniformLocation(this.aProg, "uView");
+                this.uAScale = gl.getUniformLocation(this.aProg, "uScale");
+                this.uAAlpha = gl.getUniformLocation(this.aProg, "uAlpha");
+                this.uAFlat = gl.getUniformLocation(this.aProg, "uFlat");
+                this.diagFrame = 0;
+                this.mvao = new int[4]();
+                this.mvbo = new int[4]();
+                this.ivbo = new int[4]();
+                this.mverts = new int[4]();
+                this.icount = new int[4]();
+                this.icap = new int[4]();
+                this.ibuf = new address[4]();
+                // Instancing is core in GL 3.3 and this window asks for 3.3, so it is taken as
+                // present rather than probed. If a driver ever lies about its version, the agents
+                // are what stops drawing, and that is loud enough to find without a flag for it.
+                this.haveInstancing = true;
                 this.vao = gl.genVertexArray();
                 this.vbo = gl.genBuffer();
                 this.setupVao(this.vao, this.vbo);
@@ -2074,19 +2133,132 @@ public bundle Agents {
                         this.bodyModel[k] = 0;
                     }
                 }
+                this.folkTick = 0;
+                this.uploadBodies();
                 return;
             }
 
-            // Rebuild the people buffer for this frame: everybody standing inside the detail
-            // window. The whole roll is swept, because half a million bounds tests cost almost
-            // nothing next to one triangle -- only those in view cost a triangle.
+            // Which movement tick the world is on, so the crowd can be drawn between the position
+            // it was moved from and the one it was moved to.
+            public method setFolkTick(int t) returns void {
+                this.folkTick = t;
+                return;
+            }
+
+            // EACH BODY TO THE CARD, ONCE. Ten floats a vertex: position, normal, the mesh's own
+            // colour, and whether this triangle takes a tint. That last one is why the tint rule
+            // can live in the shader at all -- `grp[tri] >= 1000` is a fact about the model, so it
+            // travels with the model instead of being re-decided per person per frame.
+            private method uploadBodies() returns void {
+                for (int k in 0..4) {
+                    int mord = this.bodyModel[k];
+                    int t0 = this.people.triStart[mord];
+                    int tn = this.people.triCount[mord];
+                    int verts = tn * 3;
+                    this.mverts[k] = verts;
+                    address buf = Memory.alloc(cast<long>(verts * 10 * 4 + 4));
+                    mutable int p = 0;
+                    mutable int t = 0;
+                    while (t < tn) {
+                        int tri = t0 + t;
+                        float cr = cast<float>(this.people.cr[tri]) / 255.0;
+                        float cg = cast<float>(this.people.cg[tri]) / 255.0;
+                        float cb = cast<float>(this.people.cb[tri]) / 255.0;
+                        mutable float tint = 0.0;
+                        if (this.people.grp[tri] >= 1000) {
+                            tint = 1.0;
+                        }
+                        mutable int j = 0;
+                        while (j < 3) {
+                            int vi = tri * 3 + j;
+                            Memory.write<float>(buf + cast<address>(p) * cast<address>(4), this.people.px[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 1) * cast<address>(4), this.people.py[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 2) * cast<address>(4), this.people.pz[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 3) * cast<address>(4), this.people.nx[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 4) * cast<address>(4), this.people.ny[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 5) * cast<address>(4), this.people.nz[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 6) * cast<address>(4), cr);
+                            Memory.write<float>(buf + cast<address>(p + 7) * cast<address>(4), cg);
+                            Memory.write<float>(buf + cast<address>(p + 8) * cast<address>(4), cb);
+                            Memory.write<float>(buf + cast<address>(p + 9) * cast<address>(4), tint);
+                            p = p + 10;
+                            j = j + 1;
+                        }
+                        t = t + 1;
+                    }
+                    if (this.mvbo[k] == 0) {
+                        this.mvbo[k] = this.gl.genBuffer();
+                        this.ivbo[k] = this.gl.genBuffer();
+                        this.mvao[k] = this.gl.genVertexArray();
+                    }
+                    this.gl.bindBuffer(GL.ARRAY_BUFFER, this.mvbo[k]);
+                    this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(verts * 10 * 4),
+                                       cast<long>(buf), GL.STATIC_DRAW);
+                    Memory.free(buf);
+                    // The vertex array remembers both bindings AND the divisors, so this is said
+                    // once here rather than every frame at draw time.
+                    this.gl.bindVertexArray(this.mvao[k]);
+                    this.gl.bindBuffer(GL.ARRAY_BUFFER, this.mvbo[k]);
+                    this.gl.vertexAttribPointer(0, 3, GL.FLOAT, cast<byte>(0), 40, 0);
+                    this.gl.enableVertexAttribArray(0);
+                    this.gl.vertexAttribPointer(1, 3, GL.FLOAT, cast<byte>(0), 40, 12);
+                    this.gl.enableVertexAttribArray(1);
+                    this.gl.vertexAttribPointer(2, 3, GL.FLOAT, cast<byte>(0), 40, 24);
+                    this.gl.enableVertexAttribArray(2);
+                    this.gl.vertexAttribPointer(3, 1, GL.FLOAT, cast<byte>(0), 40, 36);
+                    this.gl.enableVertexAttribArray(3);
+                    this.gl.bindBuffer(GL.ARRAY_BUFFER, this.ivbo[k]);
+                    this.gl.vertexAttribPointer(4, 3, GL.FLOAT, cast<byte>(0), 40, 0);
+                    this.gl.enableVertexAttribArray(4);
+                    this.gl.vertexAttribDivisor(4, 1);
+                    this.gl.vertexAttribPointer(5, 2, GL.FLOAT, cast<byte>(0), 40, 12);
+                    this.gl.enableVertexAttribArray(5);
+                    this.gl.vertexAttribDivisor(5, 1);
+                    this.gl.vertexAttribPointer(6, 4, GL.FLOAT, cast<byte>(0), 40, 20);
+                    this.gl.enableVertexAttribArray(6);
+                    this.gl.vertexAttribDivisor(6, 1);
+                    this.gl.vertexAttribPointer(7, 1, GL.FLOAT, cast<byte>(0), 40, 36);
+                    this.gl.enableVertexAttribArray(7);
+                    this.gl.vertexAttribDivisor(7, 1);
+                    this.gl.bindVertexArray(0);
+                }
+                System.IO.Console.println($"people: 4 bodies uploaded once ({this.mverts[0]}, {this.mverts[1]}, {this.mverts[2]}, {this.mverts[3]} vertices)");
+                return;
+            }
+
+            // Ten floats for one instance: where, which way, what colour, how lit.
+            private method putInstance(int k, float x, float y, float z, float ca, float sa,
+                                       float r, float g, float b, float mode,
+                                       float shade) returns void {
+                if (this.icount[k] >= this.icap[k]) {
+                    return;                                  // counted short: the caller sized it
+                }
+                address at = this.ibuf[k] + cast<address>(this.icount[k]) * cast<address>(40);
+                Memory.write<float>(at, x);
+                Memory.write<float>(at + cast<address>(4), y);
+                Memory.write<float>(at + cast<address>(8), z);
+                Memory.write<float>(at + cast<address>(12), ca);
+                Memory.write<float>(at + cast<address>(16), sa);
+                Memory.write<float>(at + cast<address>(20), r);
+                Memory.write<float>(at + cast<address>(24), g);
+                Memory.write<float>(at + cast<address>(28), b);
+                Memory.write<float>(at + cast<address>(32), mode);
+                Memory.write<float>(at + cast<address>(36), shade);
+                this.icount[k] = this.icount[k] + 1;
+                return;
+            }
+
+            // WHERE EVERY VISIBLE PERSON IS, THIS FRAME. Not their geometry -- ten numbers each,
+            // and the card already has the shape.
             //
-            // Counted and emitted in ONE walk each, in the same order. A second walk of half a
-            // million to count what the first is about to draw is exactly the kind of thing that
-            // turns a frame budget into a suggestion.
+            // Only the blocks the window covers are visited, and within them only two instances a
+            // person: the body, and the shadow it stands on. Counted first so each buffer is sized
+            // for what it will hold, then written in the same order.
             private method bakeAgents() returns void {
-                this.anverts = 0;
-                if (!this.havePeople) {
+                for (int k in 0..4) {
+                    this.icount[k] = 0;
+                }
+                if (!this.havePeople || !this.haveInstancing) {
                     return;
                 }
                 if (!this.detailOn || !this.haveDetail) {
@@ -2096,17 +2268,12 @@ public bundle Agents {
                 int y0 = this.detY0;
                 int x1 = x0 + this.detW;
                 int y1 = y0 + this.detH;
-                // ONLY THE BLOCKS THE WINDOW COVERS. This used to walk the whole roll twice, and
-                // measured on the real game with half a million people it was 95.6 per cent of the
-                // frame -- eleven frames a second, almost none of it spent on anybody who could be
-                // seen. The window is a few hundred cells across and the world is thousands, so
-                // this visits a handful of blocks instead of every person alive.
                 int bs = Folk.BLOCK;
                 int bx0 = x0 / bs;
                 int by0 = y0 / bs;
                 int bx1 = (x1 + bs - 1) / bs;
                 int by1 = (y1 + bs - 1) / bs;
-                mutable int tris = 0;
+                mutable int[] want = new int[4]();
                 mutable int by = by0;
                 while (by < by1) {
                     mutable int bx = bx0;
@@ -2117,7 +2284,7 @@ public bundle Agents {
                             int ax = cast<int>(one.x);
                             int ay = cast<int>(one.y);
                             if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
-                                tris = tris + this.people.triCount[this.bodyModel[one.klass]] * 2;
+                                want[one.klass] = want[one.klass] + 2;
                             }
                             i = this.folk.nextOf(i);
                         }
@@ -2125,85 +2292,79 @@ public bundle Agents {
                     }
                     by = by + 1;
                 }
-                if (tris == 0) {
-                    return;
-                }
-                if (tris > this.acap) {
-                    if (this.acap > 0) {
-                        Memory.free(this.abuf);
+                for (int k in 0..4) {
+                    if (want[k] > this.icap[k]) {
+                        if (this.icap[k] > 0) {
+                            Memory.free(this.ibuf[k]);
+                        }
+                        this.icap[k] = want[k] * 2;    // headroom: a crowd must not realloc a frame
+                        this.ibuf[k] = Memory.alloc(cast<long>(this.icap[k] * 40 + 4));
                     }
-                    this.acap = tris * 2;                      // headroom: a crowd must not realloc every frame
-                    this.abuf = Memory.alloc(cast<long>(this.acap * 27 * 4 + 4));
                 }
-                this.wrCap = tris * 27;
-                mutable int w = 0;
                 by = by0;
                 while (by < by1) {
                     mutable int bx = bx0;
                     while (bx < bx1) {
-                    mutable int i = this.folk.headAt(bx, by);
-                    while (i >= 0) {
-                    Agent* one = this.folk.at(i);
-                    float fx = one.x;
-                    float fy = one.y;
-                    int ax = cast<int>(fx);
-                    int ay = cast<int>(fy);
-                    if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
-                        int ord = this.grid.biomeAt(ax, ay);
-                        int lvl = this.stackLvl(ord, ax, ay);
-                        float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
-                        float topZ = this.tileTop[ord] + zOff;
-                        float shade = this.shadeAt(ax, ay, 1, lvl);
-                        // The shadow goes down first so the body lands on top of it, and it darkens
-                        // the GROUND COLOUR rather than being black: a shadow on sand and a shadow
-                        // on snow are different colours, and a flat black disc under everything is
-                        // what makes a world look pasted together.
-                        int ut = this.terr.triStart[ord] + 8;
-                        float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
-                        float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
-                        float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
-                        // A mesh is modelled with +Y forward, so rotating local +Y onto the heading
-                        // is exactly ca = hy and sa = -hx. The heading IS the rotation: no angle in
-                        // between and no trigonometry anywhere in this loop.
-                        float ca = one.hy;
-                        float sa = 0.0 - one.hx;
-                        int bm = this.bodyModel[one.klass];
-                        // They hover a little clear of the ground and breathe up and down, rather
-                        // than sliding along the dirt like a chess piece being pushed. A parabola
-                        // over a wrapped phase, not a sine -- the sine here range-reduces in a
-                        // loop, which on a clock that only counts up costs more every hour the
-                        // window stays open.
-                        float ph = this.timeSec * 1.35 + cast<float>(i) * 0.37;
-                        float fr = ph - cast<float>(cast<int>(ph));
-                        float lift = 0.14 + fr * (1.0 - fr) * 4.0 * 0.07;
-                        w = this.emitMeshShadowTurned(this.people, this.abuf, w, bm,
-                                                      fx * 2.0, fy * 2.0, topZ + 0.010, 0.30,
-                                                      gr, gg, gb, false, ca, sa);
-                        // The body takes its colour from the CULTURE, which is the only thing this
-                        // agent belongs to yet. When there are nations again it becomes theirs.
-                        int c = one.culture;
-                        w = this.emitTintedTurned(this.people, this.abuf, w, bm,
-                                                  fx * 2.0, fy * 2.0, topZ + lift, 0.30,
-                                                  GlWorld3D.hueOf(c, 0), GlWorld3D.hueOf(c, 1),
-                                                  GlWorld3D.hueOf(c, 2), shade, ca, sa);
-                    }
-                    i = this.folk.nextOf(i);
-                    }
+                        mutable int i = this.folk.headAt(bx, by);
+                        while (i >= 0) {
+                            Agent* one = this.folk.at(i);
+                            // DRAWN BETWEEN WHERE IT WAS AND WHERE IT IS. An agent is moved once
+                            // every Folk.SLICES frames, so its stored position is a staircase;
+                            // this is what turns the staircase back into walking. Paid only for
+                            // the couple of thousand agents on screen, not for the half million.
+                            float f = this.folk.moveFraction(i, this.folkTick);
+                            float fx = one.px + (one.x - one.px) * f;
+                            float fy = one.py + (one.y - one.py) * f;
+                            int ax = cast<int>(fx);
+                            int ay = cast<int>(fy);
+                            if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
+                                int k = one.klass;
+                                int ord = this.grid.biomeAt(ax, ay);
+                                int lvl = this.stackLvl(ord, ax, ay);
+                                float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
+                                float topZ = this.tileTop[ord] + zOff;
+                                float shade = this.shadeAt(ax, ay, 1, lvl);
+                                // The shadow darkens the GROUND's own colour rather than being
+                                // black: a shadow on sand and a shadow on snow are different
+                                // colours, and a flat black disc under everybody is what makes a
+                                // world look pasted together.
+                                int ut = this.terr.triStart[ord] + 8;
+                                float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
+                                float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
+                                float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
+                                // A mesh is modelled +Y forward, so the heading IS the rotation:
+                                // ca = hy, sa = -hx, and no trigonometry anywhere.
+                                float ca = one.hy;
+                                float sa = 0.0 - one.hx;
+                                // They hover clear of the ground and breathe, rather than sliding
+                                // along the dirt like a chess piece. A parabola over a wrapped
+                                // phase, not a sine: the sine range-reduces in a loop and costs
+                                // more every hour the window stays open.
+                                float ph = this.timeSec * 1.35 + cast<float>(i) * 0.37;
+                                float fr = ph - cast<float>(cast<int>(ph));
+                                float lift = 0.14 + fr * (1.0 - fr) * 4.0 * 0.07;
+                                this.putInstance(k, fx * 2.0, fy * 2.0, topZ + 0.012,
+                                                 ca, sa, gr, gg, gb, 1.0, 1.0);
+                                int c = one.culture;
+                                this.putInstance(k, fx * 2.0, fy * 2.0, topZ + lift,
+                                                 ca, sa, GlWorld3D.hueOf(c, 0),
+                                                 GlWorld3D.hueOf(c, 1), GlWorld3D.hueOf(c, 2),
+                                                 0.0, shade);
+                            }
+                            i = this.folk.nextOf(i);
+                        }
                         bx = bx + 1;
                     }
                     by = by + 1;
                 }
-                // AND HANDED TO THE CARD. Without this the buffer is built perfectly in memory
-                // every frame and never uploaded, so the draw call renders whatever was last in
-                // the VBO -- which is nothing. The bake sat at 99.8 per cent of the frame while
-                // drawing not one person: expensive and invisible at the same time, which is the
-                // pairing that makes a missing step hard to see.
-                this.gl.bindVertexArray(this.avao);
-                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.avbo);
-                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4),
-                                   cast<long>(this.abuf), GL.DYNAMIC_DRAW);
-                this.gl.bindVertexArray(0);
-                this.anverts = tris * 3;
+                delete want;
+                for (int k in 0..4) {
+                    if (this.icount[k] > 0) {
+                        this.gl.bindBuffer(GL.ARRAY_BUFFER, this.ivbo[k]);
+                        this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(this.icount[k] * 40),
+                                           cast<long>(this.ibuf[k]), GL.DYNAMIC_DRAW);
+                    }
+                }
                 return;
             }
 
@@ -2460,8 +2621,10 @@ public bundle Agents {
             }
 
             // ---- frame ----
+            // The meter is opened and closed by the LOOP, not here: a frame is more than the part
+            // of it this class owns, and a renderer that starts the clock at its own first line is
+            // how the loop's own costs went unmeasured for as long as they did.
             public method render(int fbW, int fbH) returns void {
-                this.gauge.begin();
                 this.ensureDetail();
                 if (this.baking && !this.haveDetail) {
                     // nothing on screen to cover the wait: finish the first one outright
@@ -2536,9 +2699,49 @@ public bundle Agents {
                     this.gl.bindVertexArray(this.fvao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.fnverts);
                 }
-                if (this.anverts > 0) {
-                    this.gl.bindVertexArray(this.avao);
-                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.anverts);
+                // THE PEOPLE, FOUR DRAWS FOR HOWEVER MANY OF THEM THERE ARE.
+                //
+                // Their own program, because the turning that used to be done per vertex on the
+                // processor is done per vertex on the card now. One draw per class: an instanced
+                // draw takes ONE mesh and a run of instances, so grouping by body is what turns
+                // "one draw per person" into four.
+                //
+                // The program is swapped back afterwards -- everything drawn after this expects
+                // the world's own shader bound and its uniforms live.
+                mutable boolean drewFolk = false;
+                for (int k in 0..4) {
+                    if (this.icount[k] > 0 && this.mverts[k] > 0) {
+                        if (!drewFolk) {
+                            this.gl.useProgram(this.aProg);
+                            this.gl.uniformMatrix4fv(this.uAProj, 1, cast<byte>(0), this.projM.ptr());
+                            this.gl.uniformMatrix4fv(this.uAView, 1, cast<byte>(0), this.viewM.ptr());
+                            this.gl.uniform1f(this.uAScale, 0.30);
+                            this.gl.uniform1f(this.uAAlpha, 1.0);
+                            this.gl.uniform1f(this.uAFlat, 0.0);
+                            drewFolk = true;
+                        }
+                        this.gl.bindVertexArray(this.mvao[k]);
+                        this.gl.drawArraysInstanced(GL.TRIANGLES, 0, this.mverts[k],
+                                                    this.icount[k]);
+                    }
+                }
+                // ONE FRAME'S WORTH OF WHAT THE CARD WAS ACTUALLY TOLD. A crowd that does not
+                // appear has only a few possible causes -- nobody baked, the program did not link,
+                // the uniforms are not where the program says, or the driver rejected the call --
+                // and each of them shows up as a different line here. Printed once, on a settled
+                // frame, because the answer is the same on every frame after the first.
+                this.diagFrame = this.diagFrame + 1;
+                if (this.diagFrame == 60) {
+                    System.IO.Console.println($"people: {this.icount[0] + this.icount[1] + this.icount[2] + this.icount[3]} instances in 4 draws, glError={Wgl.glGetError()}");
+                }
+                if (drewFolk) {
+                    this.gl.bindVertexArray(0);
+                    this.gl.useProgram(this.prog);
+                    this.gl.uniformMatrix4fv(this.uProj, 1, cast<byte>(0), this.projM.ptr());
+                    this.gl.uniformMatrix4fv(this.uView, 1, cast<byte>(0), this.viewM.ptr());
+                    this.gl.uniform1f(this.uTime, this.timeSec);
+                    this.gl.uniform1f(this.uAlpha, 1.0);
+                    this.gl.uniform1f(this.uFlat, 0.0);
                 }
                 // The map overlay goes on LAST and see-through, over everything including the
                 // people, because it is a thing drawn on a map rather than a thing in the world.
@@ -2560,11 +2763,11 @@ public bundle Agents {
                 }
                 this.gl.bindVertexArray(0);
                 this.gauge.lap(cast<int>(Phase.Draw));
-                this.gauge.frame();
 
                 if (!this.pixelate) {
                     // raw render went straight to the screen; just drop depth so the HUD draws on top
                     Wgl.glDisable(GL.DEPTH_TEST);
+                    this.gauge.lap(cast<int>(Phase.Post));
                     return;
                 }
 
@@ -2586,6 +2789,7 @@ public bundle Agents {
                 Wgl.glDrawArrays(GL.TRIANGLES, 0, 6);
                 this.gl.bindVertexArray(0);
                 this.gl.activeTexture(0x84C0);
+                this.gauge.lap(cast<int>(Phase.Post));
             }
 
             // ---- compass HUD: needle + upright N/E/S/W letters, drawn with the 2D batch ----
@@ -2780,6 +2984,53 @@ public bundle Agents {
 
             private static method postVert() returns String {
                 return "#version 330 core\nlayout(location=0) in vec2 aPos;\nlayout(location=1) in vec2 aUV;\nout vec2 vUV;\nvoid main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
+            }
+
+            // THE AGENT SHADER: the turning the emitters used to do per vertex on the processor,
+            // done here per vertex on the card, from nine numbers the frame sent for this person.
+            //
+            // Locations 0..3 are the body and never change once uploaded. Locations 4..7 advance
+            // once per INSTANCE, not once per vertex -- that divisor is the whole trick.
+            //
+            // Two shapes come out of the same mesh. A body is turned by the heading, lit by its own
+            // normals, and tinted where the model says a triangle takes a tint. A shadow is the
+            // same body sheared by height onto the ground, flat, in the ground's own colour --
+            // which is what makes a shadow on sand and a shadow on snow different colours instead
+            // of a black disc pasted under everybody. `iCol.w` says which of the two this is.
+            private static method agentVertSrc() returns String {
+                return "#version 330 core\n"
+                     + "layout(location=0) in vec3 aPos;\n"
+                     + "layout(location=1) in vec3 aNrm;\n"
+                     + "layout(location=2) in vec3 aCol;\n"
+                     + "layout(location=3) in float aTint;\n"
+                     + "layout(location=4) in vec3 iPos;\n"
+                     + "layout(location=5) in vec2 iRot;\n"
+                     + "layout(location=6) in vec4 iCol;\n"
+                     + "layout(location=7) in float iShade;\n"
+                     + "uniform mat4 uProj;\nuniform mat4 uView;\nuniform float uScale;\n"
+                     + "out vec3 vNrm;\nout vec3 vCol;\n"
+                     + "void main(){\n"
+                     + "  float lx = aPos.x * uScale;\n"
+                     + "  float ly = aPos.y * uScale;\n"
+                     + "  float hz = aPos.z * uScale;\n"
+                     + "  float ca = iRot.x;\n  float sa = iRot.y;\n"
+                     + "  vec3 world;\n  vec3 n;\n  vec3 c;\n"
+                     + "  if (iCol.w >= 0.5) {\n"
+                     + "    world = vec3(lx*ca - ly*sa + iPos.x - hz*0.368,\n"
+                     + "                 lx*sa + ly*ca + iPos.y - hz*0.579,\n"
+                     + "                 iPos.z);\n"
+                     + "    n = vec3(0.0, 0.0, 1.0);\n"
+                     + "    c = iCol.rgb;\n"
+                     + "  } else {\n"
+                     + "    world = vec3(lx*ca - ly*sa + iPos.x, lx*sa + ly*ca + iPos.y, hz + iPos.z);\n"
+                     + "    n = vec3(aNrm.x*ca - aNrm.y*sa, aNrm.x*sa + aNrm.y*ca, aNrm.z);\n"
+                     + "    c = aCol;\n"
+                     + "    if (aTint > 0.5) { c = c * iCol.rgb; }\n"
+                     + "    c = c * iShade;\n"
+                     + "  }\n"
+                     + "  gl_Position = uProj * uView * vec4(world, 1.0);\n"
+                     + "  vNrm = n; vCol = c;\n"
+                     + "}\n";
             }
 
             private static method postFrag() returns String {

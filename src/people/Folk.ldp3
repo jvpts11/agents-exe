@@ -48,8 +48,33 @@ public bundle Agents {
             private mutable int bw;
             private mutable int bh;
             private mutable long rebinnings; // how often somebody actually changed block
+            private mutable long groundLooks; // how often the world was actually asked about a cell
 
             public static fixed int BLOCK = 32;
+
+            // NOBODY IS MOVED EVERY FRAME, AND NOTHING EVER SHOULD BE.
+            //
+            // Measured on the real game: moving half a million agents cost 34 ms of a 38 ms frame
+            // -- ninety per cent of it -- and that was with each agent doing nothing but drifting.
+            // The moment any of them has to DECIDE something the per-agent cost multiplies, so a
+            // loop that touches everybody at frame rate is a wall this game would hit again with a
+            // bigger number.
+            //
+            // So the population is cut into slices and one slice moves per frame. Each agent is
+            // therefore moved once every SLICES frames and takes SLICES steps when it does, which
+            // leaves the speed it crosses the world at exactly unchanged -- the work is spread,
+            // not reduced, and no agent is ever skipped.
+            //
+            // The slices are CONTIGUOUS RANGES rather than every-eighth-agent. A strided walk
+            // touches one object per cache line and throws the other seven away; a contiguous one
+            // reads what it is given. Same agents, same count, different order, and the order is
+            // most of the cost at this size.
+            //
+            // This is the third time this frame is fixed by the same idea. The terrain bake is
+            // sliced across frames; the block index is maintained incrementally instead of rebuilt;
+            // and now the movement. In each case the mistake was doing all of something every frame
+            // when only a part of it had changed.
+            public static fixed int SLICES = 16;
 
             public constructor Folk(int howMany, int withSeed) {
                 this.roll = new Agent*[howMany]();
@@ -61,6 +86,7 @@ public bundle Agents {
                 this.n = 0;
                 this.seed = withSeed;
                 this.rebinnings = 0;
+                this.groundLooks = 0;
             }
 
             public destructor ~Folk() returns void {
@@ -251,43 +277,195 @@ public bundle Agents {
             public method wander(Grid* g, float dt, int tick) returns void {
                 float w = cast<float>(g.width());
                 float h = cast<float>(g.height());
-                mutable int i = 0;
-                while (i < this.n) {
+                // ONE AGENT'S WHOLE INTERVAL AT A TIME: SLICES small steps, not one big one.
+                //
+                // Taking a single step SLICES times the length would let somebody cross a river
+                // one cell wide without ever testing the water -- the ground is only asked about
+                // where the step LANDS. Half a second of frame rate is not worth agents walking
+                // through rivers, and the small steps turn out not to cost it: they run out of a
+                // handful of registers, and the cell shortcut below means the eight of them
+                // together still ask the world about a cell at most once or twice.
+                float advance = dt * 1.25;
+                int slice = tick % Folk.SLICES;
+                mutable int i = this.sliceStart(slice);
+                int stop = this.sliceStart(slice + 1);
+                // Counted in a register and banked once. Bumping a field of `this` inside the hot
+                // loop puts a store to the same address between every iteration and every one
+                // after it -- a counter that exists to prove the loop is cheap should not be one
+                // of the reasons it is not.
+                mutable long looks = 0;
+                int steps = Folk.SLICES;
+                while (i < stop) {
                     mutable Agent* one = this.roll[i];
+                    // THE WHOLE INTERVAL IS WALKED IN REGISTERS and written back once. The old loop
+                    // read and wrote four fields of a scattered object on every step; this reads
+                    // them once, turns eight times, and stores once.
+                    float wasX = one.x;
+                    float wasY = one.y;
+                    mutable float px = wasX;
+                    mutable float py = wasY;
+                    mutable float hx = one.hx;
+                    mutable float hy = one.hy;
+                    mutable int cx = cast<int>(px);
+                    mutable int cy = cast<int>(py);
+                    // The edges of the cell it is standing in, as floats, so the inner loop can
+                    // ask "still inside?" without converting anything.
+                    mutable float lox = cast<float>(cx);
+                    mutable float hix = lox + 1.0;
+                    mutable float loy = cast<float>(cy);
+                    mutable float hiy = loy + 1.0;
+                    // TURNED ONCE PER INTERVAL, WALKED IN SMALL STEPS.
+                    //
+                    // These are two different things and only one of them has to happen often. The
+                    // steps must stay small or an agent crosses a one-cell river without ever
+                    // testing the water. The TURN does not: sixty direction changes a second is a
+                    // tremor, not a walk, and a person who picks a direction and holds it for a
+                    // quarter of a second reads as somebody going somewhere. Eight turns an
+                    // interval cost 119 ns an agent, measured, for a difference nobody can see.
                     float turn = (LandMath.hash01(this.seed ^ 0x77A3, i, tick) - 0.5) * 0.6;
-                    float nx = one.hx - one.hy * turn;
-                    float ny = one.hy + one.hx * turn;
-                    float len = cast<float>(Math.sqrt(cast<double>(nx * nx + ny * ny)));
-                    if (len > 0.0001) {
-                        one.hx = nx / len;
-                        one.hy = ny / len;
+                    float nx = hx - hy * turn;
+                    float ny = hy + hx * turn;
+                    // NORMALISED WITHOUT A SQUARE ROOT, because of what is known about the number
+                    // going into it. The turn above is a first-order rotation, so it lengthens a
+                    // unit heading by sqrt(1+turn*turn) -- at most four and a half per cent.
+                    // `len2` therefore always sits in [1, 1.09], and over that range one Newton
+                    // step from 1 is good to better than two parts in a thousand. It is also
+                    // SELF-CORRECTING: whatever residue is left is the input to the next
+                    // interval's correction, so the error cannot accumulate.
+                    //
+                    // Measured: the square root was 6.6 ns of the 87 ns an agent cost, most of it
+                    // the float->double->float trip around a double-precision routine to refine a
+                    // number already known to three decimals.
+                    float len2 = nx * nx + ny * ny;
+                    if (len2 > 0.00000001) {
+                        float inv = 1.5 - 0.5 * len2;
+                        hx = nx * inv;
+                        hy = ny * inv;
                     }
-                    float sx = one.x + one.hx * dt * 1.25;
-                    float sy = one.y + one.hy * dt * 1.25;
-                    if (sx >= 0.0 && sy >= 0.0 && sx < w && sy < h
-                        && Biomes.walkable(g.biomeAt(cast<int>(sx), cast<int>(sy)))) {
-                        one.x = sx;
-                        one.y = sy;
-                    } else {
-                        // Turned back rather than stopped: an agent pressed against a shore that
-                        // keeps trying the same step is the defect this project spent a day
-                        // measuring, and it starts exactly here.
-                        one.hx = 0.0 - one.hx;
-                        one.hy = 0.0 - one.hy;
+                    // The step itself, once. Between one sub-step and the next the heading only
+                    // changes if the agent turned back off a shore, so the multiply belongs where
+                    // that happens rather than on every one of the sixteen.
+                    mutable float dx = hx * advance;
+                    mutable float dy = hy * advance;
+                    mutable int k = 0;
+                    while (k < steps) {
+                        float sx = px + dx;
+                        float sy = py + dy;
+                        // THE GROUND IS ONLY ASKED WHEN THE CELL CHANGES.
+                        //
+                        // Measured: `biomeAt` plus `walkable` was 40.8 ns of the 87 ns an agent
+                        // cost -- just under half of the most expensive phase in the frame -- and
+                        // nearly all of it was cache: half a million agents each jumping to an
+                        // arbitrary byte of a 2.7 MB map.
+                        //
+                        // But a step is 0.06 of a cell, so an agent spends about sixteen of them
+                        // inside the same square. If the step lands in the cell it is ALREADY
+                        // standing in, that cell is walkable by construction -- it is standing
+                        // there -- and no question needs asking. Not an approximation: the same
+                        // answer, not fetched.
+                        //
+                        // Same idea as the block index in the other half of the frame: stop asking
+                        // the world every frame about something that changes every few hundred.
+                        // "STILL IN THE SAME CELL" IS ASKED IN FLOATING POINT, not by converting
+                        // to integers and comparing those.
+                        //
+                        // Measured: the step itself is two multiplies and an add, and it was
+                        // costing 26 ns. LDP3 has no exploitable undefined behaviour, so a
+                        // float-to-int cast is not one instruction -- it is a saturating
+                        // conversion with the range checks that makes it safe, and there were two
+                        // of them on the innermost line of the hottest loop in the game.
+                        //
+                        // The cell an agent stands in has known edges, so the same question
+                        // answers in four compares against numbers already in registers. The cast
+                        // still happens on the rare step that leaves the cell, where its cost is
+                        // paid once instead of sixteen times -- the safety is not given up
+                        // anywhere, it is just no longer bought when nothing is being converted.
+                        if (sx >= lox && sx < hix && sy >= loy && sy < hiy) {
+                            px = sx;
+                            py = sy;
+                        } else {
+                            looks = looks + 1;
+                            if (sx >= 0.0 && sy >= 0.0 && sx < w && sy < h
+                                && Biomes.walkable(g.biomeAt(cast<int>(sx), cast<int>(sy)))) {
+                                px = sx;
+                                py = sy;
+                                cx = cast<int>(sx);
+                                cy = cast<int>(sy);
+                                lox = cast<float>(cx);
+                                hix = lox + 1.0;
+                                loy = cast<float>(cy);
+                                hiy = loy + 1.0;
+                            } else {
+                                dx = 0.0 - dx;
+                                dy = 0.0 - dy;
+                                // Turned back rather than stopped: an agent pressed against a
+                                // shore that keeps trying the same step is the defect this project
+                                // spent a day measuring, and it starts exactly here.
+                                hx = 0.0 - hx;
+                                hy = 0.0 - hy;
+                            }
+                        }
+                        k = k + 1;
                     }
-                    // Only somebody who has actually crossed a boundary is re-linked. At the speed
-                    // people move, that is a few hundred of half a million in a tick -- the test is
-                    // two divides and a compare, and the work behind it almost never happens.
-                    int nowIn = this.blockIndexOf(one.x, one.y);
+                    one.px = wasX;
+                    one.py = wasY;
+                    one.x = px;
+                    one.y = py;
+                    one.hx = hx;
+                    one.hy = hy;
+                    // The index is touched once per interval rather than once per step, and only
+                    // when the block actually changed.
+                    int nowIn = this.blockIndexOf(px, py);
                     if (nowIn != this.blockOf[i]) {
                         this.unlink(i);
                         this.link(i, nowIn);
                         this.rebinnings = this.rebinnings + 1;
                     }
-                    one.spend(1);
+                    // What `spend` does, without the call: this runs half a million times a second
+                    // and the method is four lines. The rule it enforces -- energy never goes
+                    // below zero -- is the same one, written where it is paid for.
+                    mutable int e = one.energy - Folk.SLICES;
+                    if (e < 0) {
+                        e = 0;
+                    }
+                    one.energy = e;
                     i = i + 1;
                 }
+                this.groundLooks = this.groundLooks + looks;
                 return;
+            }
+
+            // How often the world was actually asked. If this ever approaches one per agent per
+            // tick the shortcut above has stopped working, and the frame will say so long before
+            // anybody thinks to look -- so the number is kept rather than assumed.
+            public method groundLookCount() returns long {
+                return this.groundLooks;
+            }
+
+            // Where slice `s` begins. Written so that `sliceStart(SLICES)` is the whole roll, which
+            // is what makes the loop above need no special case for the last slice -- integer
+            // division would otherwise leave the final few agents unmoved forever, and an agent
+            // nobody moves is the kind of defect that hides for weeks behind "they look fine".
+            public method sliceStart(int s) returns int {
+                if (s >= Folk.SLICES) {
+                    return this.n;
+                }
+                return cast<int>(cast<long>(this.n) * cast<long>(s) / cast<long>(Folk.SLICES));
+            }
+
+            // HOW FAR THROUGH ITS OWN INTERVAL AGENT `i` IS, for the renderer to draw it between
+            // where it was and where it now is. Zero the frame it moved, approaching one the frame
+            // before it moves again.
+            public method moveFraction(int i, int tick) returns float {
+                if (this.n <= 0) {
+                    return 0.0;
+                }
+                int s = cast<int>(cast<long>(i) * cast<long>(Folk.SLICES) / cast<long>(this.n));
+                mutable int since = (tick - s) % Folk.SLICES;
+                if (since < 0) {
+                    since = since + Folk.SLICES;
+                }
+                return cast<float>(since) / cast<float>(Folk.SLICES);
             }
 
             // What the population is carrying, counted rather than assumed.
