@@ -1,0 +1,311 @@
+import System.IO.Console;
+import System.Time.Time;
+import System.Math.Math;
+import Agents.World.Grid;
+import Agents.World.Biomes;
+import Agents.World.LandMath;
+import Agents.People.Agent;
+import Agents.People.Recall;
+import Agents.People.AgentClass;
+
+// THE POPULATION, AND THE EXPERIMENT IT EXISTS TO SETTLE.
+//
+// Half a million agents as real objects, spread evenly over the walkable world, each carrying a
+// life's worth of memory, each wandering. No nation, no economy, nothing else -- the question is
+// only what this weighs and what it costs to move, and anything else in the loop would muddy it.
+//
+// The comparison it is against: Worldbox, written in C++, sits at 2.5 GB with two thousand sapient
+// agents. That is the number to hold in mind while reading whatever this prints.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace People {
+
+        public class Folk {
+            private mutable Agent*[] roll;
+            private mutable int n;
+            private mutable int seed;
+
+            // WHERE EVERYBODY IS, BY BLOCK.
+            //
+            // Measured on the real game before this existed: drawing half a million agents spent
+            // 95.6 per cent of the frame, and almost all of it was walking the whole roll twice to
+            // find the few thousand actually on screen. Eleven frames a second, and not one of
+            // those milliseconds went on anybody who could be seen.
+            //
+            // So the world is divided into blocks and each block keeps a chain of who is standing
+            // in it. The renderer then visits only the blocks its window covers. The chain is two
+            // int arrays and no allocation: `head` per block, `nextIn` per agent -- the same shape
+            // the crowd index used, for the same reason.
+            //
+            // Kept up to date INCREMENTALLY rather than rebuilt. An agent moves 0.06 cells a tick
+            // and a block is thirty-two across, so somebody changes block roughly once every five
+            // hundred ticks: rebuilding the whole index every frame would be paying for half a
+            // million moves to record a few hundred.
+            private mutable int[] head;      // per block: first agent, or -1
+            private mutable int[] nextIn;    // per agent: next in the same block, or -1
+            private mutable int[] blockOf;   // per agent: which block it is linked into
+            private mutable int bw;
+            private mutable int bh;
+            private mutable long rebinnings; // how often somebody actually changed block
+
+            public static fixed int BLOCK = 32;
+
+            public constructor Folk(int howMany, int withSeed) {
+                this.roll = new Agent*[howMany]();
+                this.nextIn = new int[howMany]();
+                this.blockOf = new int[howMany]();
+                this.head = new int[1]();
+                this.bw = 0;
+                this.bh = 0;
+                this.n = 0;
+                this.seed = withSeed;
+                this.rebinnings = 0;
+            }
+
+            public destructor ~Folk() returns void {
+                mutable int i = 0;
+                while (i < this.n) {
+                    delete this.roll[i];
+                    i = i + 1;
+                }
+                delete this.roll;
+                delete this.nextIn;
+                delete this.blockOf;
+                delete this.head;
+                return;
+            }
+
+            // ---- the index the renderer walks ----
+
+            public method blocksWide() returns int {
+                return this.bw;
+            }
+
+            public method blocksHigh() returns int {
+                return this.bh;
+            }
+
+            public method headAt(int bx, int by) returns int {
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return 0 - 1;
+                }
+                return this.head[by * this.bw + bx];
+            }
+
+            public method nextOf(int i) returns int {
+                return this.nextIn[i];
+            }
+
+            public method rebinCount() returns long {
+                return this.rebinnings;
+            }
+
+            private method blockIndexOf(float x, float y) returns int {
+                int bx = cast<int>(x) / Folk.BLOCK;
+                int by = cast<int>(y) / Folk.BLOCK;
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return 0 - 1;
+                }
+                return by * this.bw + bx;
+            }
+
+            private method link(int i, int b) returns void {
+                this.blockOf[i] = b;
+                if (b < 0) {
+                    this.nextIn[i] = 0 - 1;
+                    return;
+                }
+                this.nextIn[i] = this.head[b];
+                this.head[b] = i;
+                return;
+            }
+
+            // Take somebody out of the chain they are in. Walks that one block's chain, which is
+            // short by construction -- a block is a thousand cells and the world is not that
+            // crowded -- and it only happens when somebody actually crosses a boundary.
+            private method unlink(int i) returns void {
+                int b = this.blockOf[i];
+                if (b < 0) {
+                    return;
+                }
+                mutable int at = this.head[b];
+                if (at == i) {
+                    this.head[b] = this.nextIn[i];
+                    return;
+                }
+                while (at >= 0) {
+                    int after = this.nextIn[at];
+                    if (after == i) {
+                        this.nextIn[at] = this.nextIn[i];
+                        return;
+                    }
+                    at = after;
+                }
+                return;
+            }
+
+            public method count() returns int {
+                return this.n;
+            }
+
+            public method at(int i) returns Agent* {
+                return this.roll[i];
+            }
+
+            // EVENLY OVER THE WALKABLE WORLD, and evenly is the point: a clump would measure
+            // clumping rather than population. Candidate cells are drawn from the whole map and
+            // kept if they are ground somebody could stand on, so the spread follows the shape of
+            // the continents without anybody having to decide where the continents are.
+            //
+            // The refusals are counted. A world whose land is so scarce that most draws are sea
+            // would quietly produce far fewer agents than asked for, and a silent shortfall would
+            // make every number after it wrong in the same direction.
+            public method scatter(Grid* g, int howMany, int memoryEach) returns void {
+                int w = g.width();
+                int h = g.height();
+                // The index is sized to the world here rather than in the constructor, because the
+                // world is what decides how many blocks there are and the constructor has not seen
+                // it yet.
+                delete this.head;
+                this.bw = (w + Folk.BLOCK - 1) / Folk.BLOCK;
+                this.bh = (h + Folk.BLOCK - 1) / Folk.BLOCK;
+                this.head = new int[this.bw * this.bh]();
+                for (int b in 0..this.bw * this.bh) {
+                    this.head[b] = 0 - 1;
+                }
+                mutable int made = 0;
+                mutable int tries = 0;
+                mutable int wet = 0;
+                int ceiling = howMany * 40;
+                while (made < howMany && tries < ceiling) {
+                    tries = tries + 1;
+                    int gx = cast<int>(LandMath.hash01(this.seed ^ 0x51ED, tries, 7)
+                                       * cast<float>(w - 1));
+                    int gy = cast<int>(LandMath.hash01(this.seed ^ 0x2C9F, tries, 11)
+                                       * cast<float>(h - 1));
+                    if (!Biomes.walkable(g.biomeAt(gx, gy))) {
+                        wet = wet + 1;
+                        continue;
+                    }
+                    mutable Agent* one = new Agent(made + 1, cast<float>(gx) + 0.5,
+                                                  cast<float>(gy) + 0.5,
+                                                  made % AgentClass.count()) on heap;
+                    this.fill(one, made, memoryEach);
+                    this.roll[made] = one;
+                    this.link(made, this.blockIndexOf(one.x, one.y));
+                    made = made + 1;
+                    if (made % 50000 == 0) {
+                        System.IO.Console.println($"  scattered {made} of {howMany}...");
+                    }
+                }
+                this.n = made;
+                System.IO.Console.println($"scatter: {made} agents placed, {tries} draws, {wet} fell in the sea");
+                return;
+            }
+
+            // A LIFE'S WORTH OF MEMORY, so the measurement is of an agent that has lived rather
+            // than of an empty one. The proportions are a person's: more places seen and people met
+            // than trades mastered, more ordinary days remembered than skills learned.
+            private method fill(Agent* one, int idx, int scale) returns void {
+                one.given = idx % 512;
+                one.family = (idx / 512) % 256;
+                one.trait = idx % 12;
+                one.culture = idx % 6;
+                one.religion = idx % 5;
+                one.trade = idx % 20;
+                one.feeling = idx % 8;
+                if (idx % 17 == 0) {
+                    one.afflict(idx % 8);
+                }
+                one.languages.add(new Recall(idx % 6, 100));
+                if (idx % 3 == 0) {
+                    one.languages.add(new Recall((idx + 1) % 6, 40));
+                }
+                one.nationalities.add(new Recall(idx % 4, 1));
+                if (idx % 9 == 0) {
+                    one.nationalities.add(new Recall((idx + 2) % 4, 2));
+                }
+                mutable int k = 0;
+                while (k < scale) {
+                    one.relations.add(new Recall((idx + k * 7) % 100000, 50 + k));
+                    one.memory.people.add(new Recall((idx + k * 13) % 100000, 40 + k));
+                    one.memory.places.add(new Recall((idx + k * 3) % 4096, 20 + k));
+                    one.memory.events.add(new Recall((idx + k * 5) % 2048, 10 + k));
+                    one.memory.common.add(new Recall((idx + k) % 512, 80));
+                    if (k < scale / 2) {
+                        one.memory.skills.add(new Recall((idx + k) % 64, 30 + k));
+                        one.memory.likes.add(new Recall((idx + k * 2) % 128, 60));
+                        one.memory.dislikes.add(new Recall((idx + k * 3) % 128, 70));
+                        one.memory.academical.add(new Recall((idx + k) % 256, 45));
+                    }
+                    k = k + 1;
+                }
+                return;
+            }
+
+            // WANDERING, which is the cheapest thing that still touches every agent every tick.
+            // Each one drifts along its heading, turns a little, and turns away from ground it
+            // cannot cross. That is enough to make the cost of "a world full of agents" real
+            // without pretending any of them is deciding anything.
+            public method wander(Grid* g, float dt, int tick) returns void {
+                float w = cast<float>(g.width());
+                float h = cast<float>(g.height());
+                mutable int i = 0;
+                while (i < this.n) {
+                    mutable Agent* one = this.roll[i];
+                    float turn = (LandMath.hash01(this.seed ^ 0x77A3, i, tick) - 0.5) * 0.6;
+                    float nx = one.hx - one.hy * turn;
+                    float ny = one.hy + one.hx * turn;
+                    float len = cast<float>(Math.sqrt(cast<double>(nx * nx + ny * ny)));
+                    if (len > 0.0001) {
+                        one.hx = nx / len;
+                        one.hy = ny / len;
+                    }
+                    float sx = one.x + one.hx * dt * 1.25;
+                    float sy = one.y + one.hy * dt * 1.25;
+                    if (sx >= 0.0 && sy >= 0.0 && sx < w && sy < h
+                        && Biomes.walkable(g.biomeAt(cast<int>(sx), cast<int>(sy)))) {
+                        one.x = sx;
+                        one.y = sy;
+                    } else {
+                        // Turned back rather than stopped: an agent pressed against a shore that
+                        // keeps trying the same step is the defect this project spent a day
+                        // measuring, and it starts exactly here.
+                        one.hx = 0.0 - one.hx;
+                        one.hy = 0.0 - one.hy;
+                    }
+                    // Only somebody who has actually crossed a boundary is re-linked. At the speed
+                    // people move, that is a few hundred of half a million in a tick -- the test is
+                    // two divides and a compare, and the work behind it almost never happens.
+                    int nowIn = this.blockIndexOf(one.x, one.y);
+                    if (nowIn != this.blockOf[i]) {
+                        this.unlink(i);
+                        this.link(i, nowIn);
+                        this.rebinnings = this.rebinnings + 1;
+                    }
+                    one.spend(1);
+                    i = i + 1;
+                }
+                return;
+            }
+
+            // What the population is carrying, counted rather than assumed.
+            public method facts() returns long {
+                mutable long total = 0;
+                mutable int i = 0;
+                while (i < this.n) {
+                    total = total + cast<long>(this.roll[i].carried());
+                    i = i + 1;
+                }
+                return total;
+            }
+
+            public method report() returns void {
+                System.IO.Console.println($"folk: {this.n} agents carrying {this.facts()} remembered facts");
+                System.IO.Console.println($"folk: indexed over {this.bw}x{this.bh} blocks of {Folk.BLOCK} cells");
+                return;
+            }
+        }
+    }
+}

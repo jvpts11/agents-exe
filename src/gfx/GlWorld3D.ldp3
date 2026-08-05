@@ -9,6 +9,9 @@ import Agents.World.NodeField;
 import Agents.World.NodeAtlas;
 import Agents.World.BuildingKind;
 import Agents.World.Builds;
+import Agents.People.Folk;
+import Agents.People.Agent;
+import Agents.People.AgentClass;
 import Agents.Sim.Meter;
 import Agents.Sim.Phase;
 import Agents.World.Species;
@@ -83,8 +86,9 @@ public bundle Agents {
             private mutable int acap;           // triangles the agent buffer can hold
             private mutable address abuf;
             private mutable MeshAtlas* people;
-            private mutable int[] bodyModel;    // Body ordinal -> model index in the people atlas
+            private mutable int[] bodyModel;    // AgentClass ordinal -> model index in the atlas
             private mutable boolean havePeople;
+            private mutable Folk* folk;
             // Buildings get their own buffer for the opposite reason to people: they do NOT move, so
             // it could in principle live with the terrain -- but the terrain bake is sliced across
             // frames and a village that goes up mid-slice would be half drawn until the sweep came
@@ -2039,6 +2043,210 @@ public bundle Agents {
                 return p;
             }
 
+            // THE PEOPLE, BACK ON SCREEN AND AGAINST THE OBJECT MODEL.
+            //
+            // Four models, one per class, chosen off the agent's own `klass`. What is deliberately
+            // NOT here yet: carried items, vehicles, rank stars and the wound tint. Every one of
+            // those drew something the old simulation knew and this one does not yet, and drawing
+            // them against invented data is how a picture starts lying about the world behind it.
+            // They come back as the systems that feed them do.
+            public method setPeople(Folk* who, MeshAtlas* art) returns void {
+                this.folk = who;
+                this.people = art;
+                this.havePeople = art != null && who != null;
+                if (!this.havePeople) {
+                    return;
+                }
+                delete this.bodyModel;
+                this.bodyModel = new int[AgentClass.count()]();
+                for (int k in 0..AgentClass.count()) {
+                    this.bodyModel[k] = 0;
+                }
+                // The atlas names its models; the class ordinals are matched to them by name so
+                // that reordering the enum cannot silently give every soldier a civilian's body.
+                this.bodyModel[cast<int>(AgentClass.Civilian)] = art.ordOf("Civil");
+                this.bodyModel[cast<int>(AgentClass.Soldier)] = art.ordOf("Soldier");
+                this.bodyModel[cast<int>(AgentClass.Scout)] = art.ordOf("Scout");
+                this.bodyModel[cast<int>(AgentClass.Protagonist)] = art.ordOf("Protagonist");
+                for (int k in 0..AgentClass.count()) {
+                    if (this.bodyModel[k] < 0) {
+                        System.IO.Console.println($"people: no mesh for class {k}; it will draw as the first model");
+                        this.bodyModel[k] = 0;
+                    }
+                }
+                return;
+            }
+
+            // Rebuild the people buffer for this frame: everybody standing inside the detail
+            // window. The whole roll is swept, because half a million bounds tests cost almost
+            // nothing next to one triangle -- only those in view cost a triangle.
+            //
+            // Counted and emitted in ONE walk each, in the same order. A second walk of half a
+            // million to count what the first is about to draw is exactly the kind of thing that
+            // turns a frame budget into a suggestion.
+            private method bakeAgents() returns void {
+                this.anverts = 0;
+                if (!this.havePeople) {
+                    return;
+                }
+                if (!this.detailOn || !this.haveDetail) {
+                    return;                                    // far out, a person is under a pixel
+                }
+                int x0 = this.detX0;
+                int y0 = this.detY0;
+                int x1 = x0 + this.detW;
+                int y1 = y0 + this.detH;
+                // ONLY THE BLOCKS THE WINDOW COVERS. This used to walk the whole roll twice, and
+                // measured on the real game with half a million people it was 95.6 per cent of the
+                // frame -- eleven frames a second, almost none of it spent on anybody who could be
+                // seen. The window is a few hundred cells across and the world is thousands, so
+                // this visits a handful of blocks instead of every person alive.
+                int bs = Folk.BLOCK;
+                int bx0 = x0 / bs;
+                int by0 = y0 / bs;
+                int bx1 = (x1 + bs - 1) / bs;
+                int by1 = (y1 + bs - 1) / bs;
+                mutable int tris = 0;
+                mutable int by = by0;
+                while (by < by1) {
+                    mutable int bx = bx0;
+                    while (bx < bx1) {
+                        mutable int i = this.folk.headAt(bx, by);
+                        while (i >= 0) {
+                            Agent* one = this.folk.at(i);
+                            int ax = cast<int>(one.x);
+                            int ay = cast<int>(one.y);
+                            if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
+                                tris = tris + this.people.triCount[this.bodyModel[one.klass]] * 2;
+                            }
+                            i = this.folk.nextOf(i);
+                        }
+                        bx = bx + 1;
+                    }
+                    by = by + 1;
+                }
+                if (tris == 0) {
+                    return;
+                }
+                if (tris > this.acap) {
+                    if (this.acap > 0) {
+                        Memory.free(this.abuf);
+                    }
+                    this.acap = tris * 2;                      // headroom: a crowd must not realloc every frame
+                    this.abuf = Memory.alloc(cast<long>(this.acap * 27 * 4 + 4));
+                }
+                this.wrCap = tris * 27;
+                mutable int w = 0;
+                by = by0;
+                while (by < by1) {
+                    mutable int bx = bx0;
+                    while (bx < bx1) {
+                    mutable int i = this.folk.headAt(bx, by);
+                    while (i >= 0) {
+                    Agent* one = this.folk.at(i);
+                    float fx = one.x;
+                    float fy = one.y;
+                    int ax = cast<int>(fx);
+                    int ay = cast<int>(fy);
+                    if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
+                        int ord = this.grid.biomeAt(ax, ay);
+                        int lvl = this.stackLvl(ord, ax, ay);
+                        float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
+                        float topZ = this.tileTop[ord] + zOff;
+                        float shade = this.shadeAt(ax, ay, 1, lvl);
+                        // The shadow goes down first so the body lands on top of it, and it darkens
+                        // the GROUND COLOUR rather than being black: a shadow on sand and a shadow
+                        // on snow are different colours, and a flat black disc under everything is
+                        // what makes a world look pasted together.
+                        int ut = this.terr.triStart[ord] + 8;
+                        float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
+                        float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
+                        float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
+                        // A mesh is modelled with +Y forward, so rotating local +Y onto the heading
+                        // is exactly ca = hy and sa = -hx. The heading IS the rotation: no angle in
+                        // between and no trigonometry anywhere in this loop.
+                        float ca = one.hy;
+                        float sa = 0.0 - one.hx;
+                        int bm = this.bodyModel[one.klass];
+                        // They hover a little clear of the ground and breathe up and down, rather
+                        // than sliding along the dirt like a chess piece being pushed. A parabola
+                        // over a wrapped phase, not a sine -- the sine here range-reduces in a
+                        // loop, which on a clock that only counts up costs more every hour the
+                        // window stays open.
+                        float ph = this.timeSec * 1.35 + cast<float>(i) * 0.37;
+                        float fr = ph - cast<float>(cast<int>(ph));
+                        float lift = 0.14 + fr * (1.0 - fr) * 4.0 * 0.07;
+                        w = this.emitMeshShadowTurned(this.people, this.abuf, w, bm,
+                                                      fx * 2.0, fy * 2.0, topZ + 0.010, 0.30,
+                                                      gr, gg, gb, false, ca, sa);
+                        // The body takes its colour from the CULTURE, which is the only thing this
+                        // agent belongs to yet. When there are nations again it becomes theirs.
+                        int c = one.culture;
+                        w = this.emitTintedTurned(this.people, this.abuf, w, bm,
+                                                  fx * 2.0, fy * 2.0, topZ + lift, 0.30,
+                                                  GlWorld3D.hueOf(c, 0), GlWorld3D.hueOf(c, 1),
+                                                  GlWorld3D.hueOf(c, 2), shade, ca, sa);
+                    }
+                    i = this.folk.nextOf(i);
+                    }
+                        bx = bx + 1;
+                    }
+                    by = by + 1;
+                }
+                // AND HANDED TO THE CARD. Without this the buffer is built perfectly in memory
+                // every frame and never uploaded, so the draw call renders whatever was last in
+                // the VBO -- which is nothing. The bake sat at 99.8 per cent of the frame while
+                // drawing not one person: expensive and invisible at the same time, which is the
+                // pairing that makes a missing step hard to see.
+                this.gl.bindVertexArray(this.avao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.avbo);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4),
+                                   cast<long>(this.abuf), GL.DYNAMIC_DRAW);
+                this.gl.bindVertexArray(0);
+                this.anverts = tris * 3;
+                return;
+            }
+
+            // Six plain colours, so that a crowd is legible before anything in the world has an
+            // opinion about who belongs to whom. Deliberately not derived from a nation's banner:
+            // there are no nations, and inventing one to colour by would be the picture claiming
+            // something the world does not know.
+            private static method hueOf(int c, int channel) returns float {
+                mutable int k = c;
+                if (k < 0) {
+                    k = 0;
+                }
+                k = k % 6;
+                if (k == 0) {
+                    if (channel == 0) { return 0.85; }
+                    if (channel == 1) { return 0.72; }
+                    return 0.45;
+                }
+                if (k == 1) {
+                    if (channel == 0) { return 0.45; }
+                    if (channel == 1) { return 0.68; }
+                    return 0.85;
+                }
+                if (k == 2) {
+                    if (channel == 0) { return 0.55; }
+                    if (channel == 1) { return 0.80; }
+                    return 0.52;
+                }
+                if (k == 3) {
+                    if (channel == 0) { return 0.88; }
+                    if (channel == 1) { return 0.55; }
+                    return 0.50;
+                }
+                if (k == 4) {
+                    if (channel == 0) { return 0.78; }
+                    if (channel == 1) { return 0.60; }
+                    return 0.85;
+                }
+                if (channel == 0) { return 0.90; }
+                if (channel == 1) { return 0.85; }
+                return 0.62;
+            }
+
             // Finish the detail bake in one go rather than a slice a frame. Used by the headless
             // shots, which have no frames to spread the work over.
             //
@@ -2266,12 +2474,12 @@ public bundle Agents {
                     this.stepBake();
                 }
                 this.gauge.lap(cast<int>(Phase.Terrain));
-                // The people, fauna, town and border bakes stood here, each with its own lap on
-                // the meter. All four fed off the simulation and all four are gone with it. The
-                // phases stay in the enum and the laps come back one at a time as the new model
-                // gives the renderer something to draw again -- which is also how the frame budget
-                // stays honest while it grows: whatever is added is timed from the day it is added,
-                // rather than discovered to be expensive later.
+                this.bakeAgents();
+                this.gauge.lap(cast<int>(Phase.People));
+                // The fauna, town and border bakes stood here too. All three fed off the simulation
+                // and are gone with it; their phases stay in the enum and their laps come back one
+                // at a time as the new model gives the renderer something to draw again -- which is
+                // how the frame budget stays honest while it grows.
                 if (this.pixelate) {
                     if (this.fbo == 0) {
                         this.initPost(640, 400);

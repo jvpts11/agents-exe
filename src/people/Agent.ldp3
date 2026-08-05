@@ -1,0 +1,168 @@
+import System.IO.Console;
+import System.Collections.ArrayList;
+
+// THE AGENT AS AN OBJECT, WRITTEN TO BE MEASURED RATHER THAN ARGUED ABOUT.
+//
+// The columns-versus-objects question was going in circles on arithmetic, so it stops being an
+// argument and becomes a number: half a million of these, spread over the world, each carrying a
+// life's worth of memory, and we look at what the machine says.
+//
+// This is deliberately the NATURAL object model, not a strawman and not a hand-tuned one. A class
+// per agent, a sub-object for the memory because that is how João modelled it, and idiomatic
+// growable lists for everything of unpredictable length. If the answer comes back fine, this is
+// what we keep, and it is the version that reads best. If it does not, we will know by how much and
+// against what, which is worth more than either of us being right.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace People {
+
+        // One remembered thing and how firmly it is held.
+        //
+        // A record, so a list of them is a list of VALUES -- sixty-two of these per agent as
+        // separate objects would be sixty-two more allocations each, and that is a cost of the
+        // container choice rather than of the model.
+        public record Recall(int what, int strength) {
+        }
+
+        // Everything an agent remembers. A sub-object because the model has it as one: an agent
+        // HAS a memory, and the memory has parts.
+        public class Recollection {
+            public mutable ArrayList<Recall>* skills;      // what it can do
+            public mutable ArrayList<Recall>* common;      // what everybody around it knows
+            public mutable ArrayList<Recall>* academical;  // what it was taught or worked out
+            public mutable ArrayList<Recall>* places;      // where it has been
+            public mutable ArrayList<Recall>* events;      // what it remembers happening
+            public mutable ArrayList<Recall>* people;      // who it remembers
+            public mutable ArrayList<Recall>* likes;
+            public mutable ArrayList<Recall>* dislikes;
+
+            public constructor Recollection() {
+                this.skills = new ArrayList<Recall>() on heap;
+                this.common = new ArrayList<Recall>() on heap;
+                this.academical = new ArrayList<Recall>() on heap;
+                this.places = new ArrayList<Recall>() on heap;
+                this.events = new ArrayList<Recall>() on heap;
+                this.people = new ArrayList<Recall>() on heap;
+                this.likes = new ArrayList<Recall>() on heap;
+                this.dislikes = new ArrayList<Recall>() on heap;
+            }
+
+            public destructor ~Recollection() returns void {
+                delete this.skills;
+                delete this.common;
+                delete this.academical;
+                delete this.places;
+                delete this.events;
+                delete this.people;
+                delete this.likes;
+                delete this.dislikes;
+                return;
+            }
+
+            // How many things this agent remembers in total. The honest size of one life.
+            public method total() returns int {
+                return this.skills.size() + this.common.size() + this.academical.size()
+                     + this.places.size() + this.events.size() + this.people.size()
+                     + this.likes.size() + this.dislikes.size();
+            }
+        }
+
+        public class Agent {
+            // ---- who it is ----
+            public mutable int id;
+            public mutable int given;        // catalogue number, not the text
+            public mutable int family;
+            public mutable int trait;        // personality
+            public mutable int culture;
+            public mutable int religion;
+            public mutable int trade;        // job
+            public mutable int klass;        // AgentClass
+
+            // ---- what state it is in ----
+            public mutable float hp;         // 0..100
+            public mutable int energy;       // 0..1000, integer on purpose
+            public mutable int sanity;       // 0..100
+            public mutable int feeling;      // the mental state now
+            public mutable long ailments;    // mental conditions, as bits
+
+            // ---- where it is ----
+            public mutable float x;
+            public mutable float y;
+            public mutable float hx;         // where it is facing, which is where it wanders
+            public mutable float hy;
+
+            // ---- what it carries ----
+            public mutable ArrayList<Recall>* languages;
+            public mutable ArrayList<Recall>* nationalities;
+            public mutable ArrayList<Recall>* relations;
+            public mutable Recollection* memory;
+
+            public constructor Agent(int who, float ax, float ay, int kind) {
+                this.id = who;
+                this.x = ax;
+                this.y = ay;
+                this.hx = 1.0;
+                this.hy = 0.0;
+                this.klass = kind;
+                this.hp = 100.0;
+                this.energy = 1000;
+                this.sanity = 100;
+                this.given = 0 - 1;
+                this.family = 0 - 1;
+                this.trait = 0 - 1;
+                this.culture = 0 - 1;
+                this.religion = 0 - 1;
+                this.trade = 0 - 1;
+                this.feeling = 0 - 1;
+                this.ailments = 0;
+                this.languages = new ArrayList<Recall>() on heap;
+                this.nationalities = new ArrayList<Recall>() on heap;
+                this.relations = new ArrayList<Recall>() on heap;
+                this.memory = new Recollection() on heap;
+            }
+
+            public destructor ~Agent() returns void {
+                delete this.languages;
+                delete this.nationalities;
+                delete this.relations;
+                delete this.memory;
+                return;
+            }
+
+            public method mustSleep() returns boolean {
+                return this.energy <= 0;
+            }
+
+            public method spend(int d) returns void {
+                mutable int e = this.energy - d;
+                if (e < 0) {
+                    e = 0;
+                }
+                this.energy = e;
+                return;
+            }
+
+            public method suffers(int condition) returns boolean {
+                if (condition < 0 || condition > 63) {
+                    return false;
+                }
+                return (this.ailments & (cast<long>(1) << condition)) != 0;
+            }
+
+            public method afflict(int condition) returns void {
+                if (condition < 0 || condition > 63) {
+                    return;
+                }
+                this.ailments = this.ailments | (cast<long>(1) << condition);
+                return;
+            }
+
+            // Everything this agent holds, counted. What one life weighs, in facts.
+            public method carried() returns int {
+                return this.languages.size() + this.nationalities.size() + this.relations.size()
+                     + this.memory.total();
+            }
+        }
+    }
+}

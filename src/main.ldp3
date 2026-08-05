@@ -9,8 +9,11 @@ import Agents.World.Grid;
 import Agents.World.WorldGen;
 import Agents.World.Biomes;
 import Agents.World.Nodes;
+import Agents.People.Folk;
+import Agents.People.Agent;
 import Agents.Sim.Meter;
 import System.Time.Stopwatch;
+import System.Time.Time;
 import Agents.World.WorldAudit;
 import Agents.World.Landmass;
 import Agents.Gfx.SoftPainter;
@@ -88,6 +91,36 @@ public bundle Agents {
                     }
                     if (args[0].equals("iso2d")) {
                         Main.runIso2d();
+                        return;
+                    }
+                    // THE WEIGH-IN. Half a million agents as real objects, scattered over the
+                    // world, each carrying a life's worth of memory, all of them wandering. It
+                    // exists to answer one question with a number instead of an argument: what
+                    // does the object model cost.
+                    if (args[0].equals("weigh")) {
+                        mutable int howMany = 500000;
+                        if (args.length() > 1) {
+                            mutable Scanner hs = new Scanner(args[1]) on heap;
+                            if (hs.hasNext()) {
+                                int got = hs.nextInt();
+                                if (got > 0) {
+                                    howMany = got;
+                                }
+                            }
+                            delete hs;
+                        }
+                        mutable int deep = 12;
+                        if (args.length() > 2) {
+                            mutable Scanner ds = new Scanner(args[2]) on heap;
+                            if (ds.hasNext()) {
+                                int got = ds.nextInt();
+                                if (got > 0) {
+                                    deep = got;
+                                }
+                            }
+                            delete ds;
+                        }
+                        Main.weigh(howMany, deep);
                         return;
                     }
                 }
@@ -313,12 +346,32 @@ public bundle Agents {
                 // to be written again. What is left is exactly the part that was never the problem:
                 // the world is generated, audited and drawn, and it will stay drawable while the
                 // new model is built against it one piece at a time.
+                // HALF A MILLION PEOPLE, IN THE REAL GAME. Measured headless first at 2.4 GB and
+                // 23 ms a tick, which is the number that settled objects against columns. This is
+                // the same population in the window that actually draws, which is the only test
+                // that decides whether it holds.
+                Folk* folk = new Folk(500000, seed) on heap;
+                folk.scatter(g, 500000, 12);
+                folk.report();
+                r.setPeople(folk, peopleMesh);
+                // THE CAMERA OPENS ON A PERSON, not on the middle of the map.
+                //
+                // The middle of a generated world is as likely to be open ocean as anything else,
+                // and a window that opens on empty water while half a million people stand
+                // somewhere off screen is a window that reports "there is nobody here" about a
+                // world that is full. Looking at somebody is the only opening shot that cannot
+                // lie about whether anybody exists.
+                if (folk.count() > 0) {
+                    Agent* first = folk.at(0);
+                    r.aimAt(cast<int>(first.x), cast<int>(first.y));
+                    r.setView(0.7, 0.55, 90.0);
+                    System.IO.Console.println($"camera: opening on agent 1 at {cast<int>(first.x)},{cast<int>(first.y)}");
+                }
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 Hud* text = new Hud(win.gl, 14) on heap;
                 mutable int lastX = win.cursorX();
                 mutable int lastY = win.cursorY();
-                mutable float shownRate = 0.0 - 1.0;
-                mutable boolean shownHalt = false;
+                mutable int wanderTick = 0;
                 mutable long frameOpened = Time.nanos();   // when this frame's drawing began
                 while (win.isOpen()) {
                     win.pump();
@@ -364,6 +417,11 @@ public bundle Agents {
                     if (win.keyDown(0x44)) { r.pan(0.0, pan); }
                     int cw = win.width();
                     int ch = win.height();
+                    // Everybody moves, every frame. Nothing decides anything yet -- this is the
+                    // cost of a world full of people, paid honestly, before any of them is asked
+                    // to think.
+                    folk.wander(g, 0.05, wanderTick);
+                    wanderTick = wanderTick + 1;
                     r.render(cw, ch);
                     // The frame rate, in the title and on the HUD. There is one clock now instead
                     // of two: with nothing being simulated there is no tick rate to fall out of
@@ -388,6 +446,7 @@ public bundle Agents {
                 }
                 delete text;
                 delete hud;
+                delete folk;
                 delete r;
                 delete rivers;
                 delete nodeMesh;
@@ -396,6 +455,55 @@ public bundle Agents {
                 delete terr;
                 delete g;
                 delete win;
+                return;
+            }
+
+            // WHAT THE OBJECT MODEL WEIGHS, measured rather than argued.
+            //
+            // Half a million agents, each a real object with its own memory object and eleven
+            // growable lists, spread evenly over the walkable world and then all wandering. The
+            // build time, the tick time and the memory are printed; the caller reads the process's
+            // working set from outside, because a program measuring its own footprint is a program
+            // that can be wrong about it in the flattering direction.
+            //
+            // The number to compare against: Worldbox, in C++, at 2.5 GB with two thousand sapient
+            // agents.
+            private static method weigh(int howMany, int deep) returns void {
+                int w = 2560;
+                int h = 1440;
+                System.IO.Console.println($"weigh: {howMany} agents as objects, {deep} deep in memory each");
+                long t0 = Time.nanos();
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(w, h);
+                long t1 = Time.nanos();
+                System.IO.Console.println($"world: {(t1 - t0) / 1000000} ms");
+                Folk* folk = new Folk(howMany, 42) on heap;
+                folk.scatter(g, howMany, deep);
+                long t2 = Time.nanos();
+                System.IO.Console.println($"spawn: {(t2 - t1) / 1000000} ms");
+                folk.report();
+                // Twenty ticks of everybody wandering. Enough to time the pass without the run
+                // becoming about the wandering.
+                mutable int tick = 0;
+                while (tick < 20) {
+                    folk.wander(g, 0.05, tick);
+                    tick = tick + 1;
+                }
+                long t3 = Time.nanos();
+                System.IO.Console.println($"wander: {(t3 - t2) / 1000000} ms for 20 ticks of {folk.count()} agents");
+                System.IO.Console.println($"wander: {(t3 - t2) / 20000000} ms a tick");
+                System.IO.Console.println("HOLDING -- read the working set now");
+                // Held alive on purpose while the caller reads the process's memory from outside.
+                // Freeing first would measure a program that had already given the answer back.
+                long until = Time.nanos() + 8000000000;
+                mutable long spins = 0;
+                while (Time.nanos() < until) {
+                    spins = spins + 1;
+                }
+                System.IO.Console.println($"still holding {folk.count()} agents");
+                delete folk;
+                delete g;
                 return;
             }
 
