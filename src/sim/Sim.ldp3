@@ -3254,14 +3254,40 @@ public bundle Agents {
                 for (int b in 0..nb) {
                     this.holdSite[b] = 0 - 1;
                 }
-                for (int c in 0..this.ncomm) {
-                    if (this.cpop[c] <= 0) {
+                // A CITY'S TERRITORY IS THE GROUND IT HAS BUILT ON, WIDENED BY ITS REACH. A NATION'S
+                // IS THE UNION OF ITS CITIES'. Nothing else.
+                //
+                // This was anchored on `ccx`/`ccy` -- the MEAN POSITION OF THE LIVING -- and that
+                // was wrong in a way João could see from the window: the centre of a settlement
+                // drifts constantly, because it is an average over work parties walking out, people
+                // fleeing, and everybody born or dead since the last census. So the claim slid
+                // around while the houses stood still: ground behind it rotted, ground in front of
+                // it was taken, and the map filled with blobs that appeared, moved and vanished
+                // with the real town somewhere else entirely. Cities ended up holding no ground at
+                // all.
+                //
+                // Buildings do not move. Anchoring on them makes the claim as still as the town is,
+                // which is what a border is -- and it keeps the shape honest for free: a village
+                // strung along a river holds the river because that is where it built, and a city
+                // of three hundred plots holds a wide irregular country because it has three
+                // hundred plots.
+                int nbld = this.town.count();
+                mutable int bi = 0;
+                while (bi < nbld) {
+                    if (this.town.isGone(bi)) {
+                        bi = bi + 1;
+                        continue;
+                    }
+                    int c = this.town.ownerOf(bi);
+                    if (c < 0 || c >= this.ncomm || this.cpop[c] <= 0) {
+                        bi = bi + 1;
                         continue;
                     }
                     int nat = this.cnat[c];
                     int reach = this.reachOf(nat);
-                    int cbx = cast<int>(this.ccx[c]) / 16;
-                    int cby = cast<int>(this.ccy[c]) / 16;
+                    int cbx = this.town.xAt(bi) / 16;
+                    int cby = this.town.yAt(bi) / 16;
+                    bi = bi + 1;
                     mutable int dy = 0 - reach;
                     while (dy <= reach) {
                         mutable int dx = 0 - reach;
@@ -4242,19 +4268,26 @@ public bundle Agents {
                         this.rounded = this.rounded + 1;
                     }
                     if (!following && !this.walkable(cast<int>(nx), cast<int>(ny))) {
+                        // The heading is set to the way they were going when they hit it, so the
+                        // first rotation is measured from the wall itself. This used to be decided
+                        // by asking whether `hitDist` still EQUALS the current distance -- a float
+                        // comparison that is true on the first tick and, for anybody who is not
+                        // making progress, true for ever after. So a walker pinned at a shore
+                        // re-aimed at the goal every single tick, turned ninety degrees off it,
+                        // came back, and turned again: the spinning and flicking at the water's
+                        // edge João watched, which was not the wall-following failing but this one
+                        // line never letting it start.
+                        this.folk.setFacing(i, ux, uy);
                         this.folk.beginFollowing(i, dist);
                         following = true;
                     }
                     if (following) {
-                        // The reference is the way they are already going once they are following,
-                        // and the way to the goal on the tick they start -- which points into the
-                        // wall, so the first rotation away from it is the one that hugs.
-                        mutable float rx = this.folk.headXOf(i);
-                        mutable float ry = this.folk.headYOf(i);
-                        if (this.folk.hitDistOf(i) == dist) {
-                            rx = ux;
-                            ry = uy;
-                        }
+                        // The reference is always the way they are already going. Once you are
+                        // working your way round something, the only thing that decides the next
+                        // step is where you are facing and where the wall is -- the goal comes back
+                        // into it at the leaving test above and nowhere else.
+                        float rx = this.folk.headXOf(i);
+                        float ry = this.folk.headYOf(i);
                         if (!this.followStep(i, x, y, span, rx, ry)) {
                             // Walled in on every side. Keep the heading and let patience end it;
                             // there is genuinely nowhere to put a foot.
@@ -6101,6 +6134,38 @@ public bundle Agents {
                 return best;
             }
 
+            // IS THERE ROOM TO PUT A BUILDING HERE, or is something already touching it?
+            //
+            // Plots were placed anywhere the GROUND allowed, and nothing anywhere asked whether a
+            // building was already there -- so a town came out as rows of longhouses shoulder to
+            // shoulder with no street between them, which is not a town anybody can read. A place
+            // with three hundred plots looked like one continuous roof.
+            //
+            // The gap is a building's own footprint and not a number picked to look right: the
+            // meshes are laid out on the same cell grid everything else in this world uses, and a
+            // longhouse is several cells long, so BUILD_GAP is the room a cart needs to get past
+            // one -- the same two cells a road needs, for the same reason.
+            private method roomToBuild(int px, int py) returns boolean {
+                int n = this.town.count();
+                mutable int b = 0;
+                while (b < n) {
+                    if (!this.town.isGone(b)) {
+                        int dx = this.town.xAt(b) - px;
+                        int dy = this.town.yAt(b) - py;
+                        if (dx * dx + dy * dy < Simulation.BUILD_GAP * Simulation.BUILD_GAP) {
+                            return false;
+                        }
+                    }
+                    b = b + 1;
+                }
+                return true;
+            }
+
+            // Cells between one building and the next. Four: a longhouse is about two cells across
+            // and a cart needs two beside it, which is the same clearance a road is given and comes
+            // from the same fact about the same meshes.
+            public static int BUILD_GAP = 4;
+
             private method considerBuilding(int c) returns void {
                 if (this.cseat[c] < 0) {
                     // The seat, free at founding, at the middle of where the people actually are.
@@ -7244,7 +7309,7 @@ public bundle Agents {
                     float d = near + LandMath.hash01(this.seed ^ 0x51A9, c * 17 + t, this.tick) * span;
                     int px = cast<int>(this.ccx[c] + LandMath.cos(a) * d);
                     int py = cast<int>(this.ccy[c] + LandMath.sin(a) * d);
-                    if (this.groundOk(px, py, ground)) {
+                    if (this.groundOk(px, py, ground) && this.roomToBuild(px, py)) {
                         // A full table is a refusal like any other. The first version took `mark`
                         // on trust and reported three hundred thousand plots marked out against
                         // four thousand rows -- the counter was measuring how often the world had
