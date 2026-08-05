@@ -2452,6 +2452,7 @@ public bundle Agents {
                 float span = cast<float>(Simulation.RANKS * Simulation.RANKS);
                 int nat = this.host.nationOf(a);
                 mutable int c = 0;
+                mutable int rank = 0;
                 mutable int i = 0;
                 while (i < n) {
                     if (this.folk.alive(i) && this.folk.jobOf(i) == cast<int>(Job.Raider)) {
@@ -2463,6 +2464,16 @@ public bundle Agents {
                                 // Weighed rather than counted. Same loop, same cost, and the
                                 // difference between a mob and an army.
                                 c = c + this.mettle(i);
+                                // AND GIVEN A PLACE IN THE LINE, in the same loop that decides who
+                                // is in the army at all. Nothing else in the world knows the roll,
+                                // so nothing else could number it: this is the one pass that walks
+                                // exactly the men under one general.
+                                //
+                                // The number is by table row, which makes it stable while the army
+                                // holds together and reshuffles only when somebody falls -- the
+                                // ranks close up, which is what ranks do.
+                                this.folk.setFile(i, rank);
+                                rank = rank + 1;
                             }
                         }
                     }
@@ -2470,6 +2481,71 @@ public bundle Agents {
                 }
                 return c;
             }
+
+            // Send somebody to THEIR PLACE behind the general rather than to the general himself.
+            //
+            // This is the whole of the formation, and the defect it fixes was one line: every man
+            // in an army was given the general's own cell as his destination, so sixty men walked
+            // at one point and arrived as a heap with their general buried in it. Nothing was wrong
+            // with the walking -- they went exactly where they were sent.
+            //
+            // Ranks form BEHIND the general, along the way he is going, so a company on the march
+            // trails him and a company arriving at a town arrives facing it. The direction comes
+            // from the army's target when it has one, which is nearly always: an army with no
+            // target is one that has just mustered and is standing about, and standing about in
+            // ranks facing north is as good an arrangement as any.
+            private method formUp(int i, int a, int lead) returns void {
+                float gx = this.folk.xAt(lead);
+                float gy = this.folk.yAt(lead);
+                mutable float fx = 0.0;
+                mutable float fy = 1.0;
+                int t = this.host.targetOf(a);
+                if (t >= 0 && t < this.ncomm) {
+                    float dx = this.ccx[t] - gx;
+                    float dy = this.ccy[t] - gy;
+                    float d = cast<float>(Math.sqrt(cast<double>(dx * dx + dy * dy)));
+                    if (d > 0.001) {
+                        fx = dx / d;
+                        fy = dy / d;
+                    }
+                }
+                mutable int f = this.folk.fileOf(i);
+                if (f < 0) {
+                    f = 0;
+                }
+                int rank = f / Simulation.FILE;
+                int col = f % Simulation.FILE;
+                float side = cast<float>(col) - cast<float>(Simulation.FILE - 1) * 0.5;
+                float back = cast<float>(rank + 1);
+                // Right of the march direction is (fy, -fx). Ranks step backward along it, files
+                // step sideways across it, and the general is the origin -- so the block turns with
+                // him instead of being a fixed patch of ground.
+                float px = gx + fy * side * Simulation.FILE_GAP - fx * back * Simulation.FILE_GAP;
+                float py = gy - fx * side * Simulation.FILE_GAP - fy * back * Simulation.FILE_GAP;
+                mutable int tx = cast<int>(px);
+                mutable int ty = cast<int>(py);
+                // A place in the line that is in the sea is not a place. Falling back on the
+                // general's own cell keeps the man with his army instead of marching him into
+                // water to hold a formation -- the ranks bunch where the ground is narrow, which is
+                // what ranks do on a mountain pass.
+                if (!this.walkable(tx, ty)) {
+                    tx = cast<int>(gx);
+                    ty = cast<int>(gy);
+                }
+                this.folk.setTarget(i, tx, ty);
+                return;
+            }
+
+            // How wide a platoon is. Six abreast is a platoon front and not a number picked to look
+            // tidy: at FILE_GAP apart it is about eight cells across, which is four longhouses, so
+            // a marching company reads as a block against the buildings around it at the zoom João
+            // plays at. Wider than that and a company crossing a valley looks like a wall.
+            public static int FILE = 6;
+
+            // Cells between one man and the man beside him. A body is 0.52 cells and a cell holds
+            // four of them, so 1.4 is comfortably more than shoulder to shoulder -- the ranks stay
+            // separate lines rather than merging into one mass at a distance.
+            public static float FILE_GAP = 1.4;
 
             // What a town can put in the way of an army. Everybody grown who lives there, at
             // whatever they carry -- a farmer with a hoe is not a soldier but he is not nothing
@@ -6182,15 +6258,46 @@ public bundle Agents {
                 return true;
             }
 
-            // Cells between one building and the next. Four: a longhouse is about two cells across
-            // and a cart needs two beside it, which is the same clearance a road is given and comes
-            // from the same fact about the same meshes.
-            public static int BUILD_GAP = 4;
+            // Cells between one building's middle and the next one's. MEASURED off the meshes, and
+            // measured only after the guessed version was caught being wrong.
+            //
+            // This said four, on the recollection that "a longhouse is about two cells across". All
+            // 148 building meshes were then measured: the widest is the Longhouse at 1.94 cells
+            // either side of its middle, so two of them end to end need 3.88 BEFORE there is any
+            // street at all. Four centre-to-centre left an eighth of a cell between them -- which is
+            // why João's towns came out as one continuous roof with no way to read what was in
+            // them, and why he named longhouses and houses specifically. They are the widest things
+            // in the catalogue and the most numerous.
+            //
+            // Six is 3.88 for the two buildings plus the two cells a cart needs to get past, which
+            // is ROAD_ROOM: the same clearance a road is given, from the same measurement of the
+            // same meshes. The next-widest are Warehouse 1.75 and Aqueduct 1.72, so the widest pair
+            // in the world is the one this is sized for and everything else gets more room, not
+            // less.
+            public static int BUILD_GAP = 6;
 
             private method considerBuilding(int c) returns void {
                 if (this.cseat[c] < 0) {
-                    // The seat, free at founding, at the middle of where the people actually are.
-                    int b = this.town.mark(cast<int>(this.ccx[c]), cast<int>(this.ccy[c]),
+                    // The seat, free at founding, at the middle of where the people actually are --
+                    // NUDGED off anything already standing there.
+                    //
+                    // A seat is the one building that may not simply be refused: a settlement
+                    // without one never builds anything again. So instead of the plot rule's
+                    // yes-or-no this walks outward until it finds room, and takes the crowd's
+                    // middle unchanged if it never finds any. That case is a colony planted at the
+                    // edge of an existing town, which is exactly where two halls ended up inside
+                    // one another.
+                    mutable int sx = cast<int>(this.ccx[c]);
+                    mutable int sy = cast<int>(this.ccy[c]);
+                    mutable int ring = 0;
+                    while (ring < 8 && !this.roomToBuild(sx, sy)) {
+                        ring = ring + 1;
+                        float a = cast<float>(c + ring) * 0.785398;
+                        float d = cast<float>(ring * Simulation.BUILD_GAP);
+                        sx = cast<int>(this.ccx[c] + LandMath.cos(a) * d);
+                        sy = cast<int>(this.ccy[c] + LandMath.sin(a) * d);
+                    }
+                    int b = this.town.mark(sx, sy,
                                            cast<int>(BuildingKind.TownHall), c,
                                            cast<int>(this.ccx[c]), cast<int>(this.ccy[c]));
                     if (b >= 0) {
@@ -9060,8 +9167,7 @@ public bundle Agents {
                 if (mine >= 0) {
                     int lead = this.host.generalOf(mine);
                     if (lead >= 0 && this.folk.alive(lead) && lead != i) {
-                        this.folk.setTarget(i, cast<int>(this.folk.xAt(lead)),
-                                               cast<int>(this.folk.yAt(lead)));
+                        this.formUp(i, mine, lead);
                         this.folk.setAct(i, cast<int>(Act.March));
                         return;
                     }
@@ -9770,31 +9876,25 @@ public bundle Agents {
             // is measured as its own phase rather than assumed, because the last three times
             // something here was "obviously expensive" the reasoning was wrong twice.
             private method jostle() returns void {
-                // RUNNING THIS AT HALF RATE WAS TRIED AND DOES NOT PAY. Written down so nobody
-                // tries it again, this line included.
+                // PEOPLE DO NOT COLLIDE. They keep room.
                 //
-                // The pass is 40 to 49 per cent of the tick -- four or five times what walking
-                // every person in the world costs -- and skipping every other tick is the obvious
-                // trade, with a stated price: a person covers SPEED * dt of ground in a tick, so
-                // the worst extra overlap between passes is 1.25 * 0.05 * 2 = 0.125 cells against a
-                // body 0.52 cells across. A quarter of a body, for half the cost.
+                // This pass used to push every overlapping PAIR apart, and it was wrong in the two
+                // ways that matter. It cost 40 to 49 per cent of the tick -- four or five times
+                // what walking every person in the world costs -- and in the crowds João actually
+                // complained about it did not work at all: on a mountainside, at a shoreline and in
+                // a town centre a crowd is PRESSED, every push lands somebody inside somebody else,
+                // and the pass spends the whole frame trading one impossible arrangement for
+                // another without ever finishing. Its own counter said so, eighty million times a
+                // run. Half-rate was tried and measured and did not help, because the work was
+                // proportional to accumulated overlap and not to the number of passes.
                 //
-                // Measured on the real game, the share did not move: 48.4 per cent at half rate
-                // against 48.9 at full. The work is proportional to the overlap that has
-                // ACCUMULATED, not to the number of passes -- skipping ticks does not remove the
-                // shoving, it collects it into fewer and heavier passes, so the same pairs are
-                // resolved either way and the only thing that changed was the accuracy. Paying a
-                // quarter of a body for nothing is worse than paying nothing for nothing.
-                //
-                // Two things about this pass are already as cheap as they can be: the index is
-                // undone by walking the people who wrote it rather than wiping the map, and the
-                // shoves walk a compacted list of the living rather than two hundred thousand rows
-                // to find forty thousand. What is left is the pair tests, and those ARE the work --
-                // fifty thousand people who must not stand inside each other is not a cost anybody
-                // can arrange away, only one that can be spent where it matters. If this is ever
-                // worth attacking again, the thing to attack is WHERE, not HOW OFTEN.
+                // What replaces it asks a different question -- not "is anybody inside me" but "is
+                // there room where I am standing". Four people fit in a cell at 0.52 cells a body;
+                // the fifth shifts their feet. One add per person, no pair ever looked at, and it
+                // converges for the plain reason the shove could not: leaving a full cell makes it
+                // emptier, so the crowd drains outward instead of heaving in place.
                 this.folk.reindexCrowd(this.g);
-                this.folk.separate(this.g);
+                this.folk.spaceOut(this.g);
                 return;
             }
 
@@ -10270,6 +10370,37 @@ public bundle Agents {
                 System.IO.Console.println($"A|kingdoms|{kings}");
                 System.IO.Console.println($"A|era.best|{best}");
                 System.IO.Console.println($"A|era.atBest|{atBest}");
+                // THE WHOLE LADDER, not only its top rung.
+                //
+                // `era.best` is the furthest ANY nation has got, and reading it as though it
+                // described the world was a mistake this campaign already made once: twelve seeds
+                // reported era 4 and were called a pass, and João then watched the game and saw
+                // everybody sitting in era 2. Both were true. One nation in a hundred reaching the
+                // last era is not a world that advanced, and a maximum can never say which of the
+                // two it is looking at.
+                mutable int e1 = 0;
+                mutable int e2 = 0;
+                mutable int e3 = 0;
+                mutable int e4 = 0;
+                for (int n in 0..this.realm.limit()) {
+                    if (!this.realm.alive(n)) {
+                        continue;
+                    }
+                    int e = this.realm.eraOf(n);
+                    if (e <= 1) {
+                        e1 = e1 + 1;
+                    } else if (e == 2) {
+                        e2 = e2 + 1;
+                    } else if (e == 3) {
+                        e3 = e3 + 1;
+                    } else {
+                        e4 = e4 + 1;
+                    }
+                }
+                System.IO.Console.println($"A|era.at1|{e1}");
+                System.IO.Console.println($"A|era.at2|{e2}");
+                System.IO.Console.println($"A|era.at3|{e3}");
+                System.IO.Console.println($"A|era.at4|{e4}");
                 System.IO.Console.println($"A|widest|{this.realm.mostTowns()}");
                 // Every good by what the world actually made of it. A zero here that is zero in all
                 // six worlds is a dead good; a zero in one is a world without a seam.

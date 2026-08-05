@@ -2331,6 +2331,23 @@ public bundle Agents {
             //
             // The six-hue walk stays as the fallback for anything with no nation behind it: a
             // preview with no simulation, or a settlement that has just died.
+            // A NATION's colour, straight off its banner. `communityTint` takes a settlement and
+            // looks the nation up through it, which is right for the wash inside a town and wrong
+            // for anything drawn on ground no town is standing on -- most of a country.
+            private method realmTint(int nat, int channel) returns float {
+                if (nat < 0 || this.sim == null) {
+                    return 0.5;
+                }
+                int flag = this.sim.nations().bannerOf(nat);
+                if (channel == 0) {
+                    return cast<float>((flag >> 16) & 255) / 255.0;
+                }
+                if (channel == 1) {
+                    return cast<float>((flag >> 8) & 255) / 255.0;
+                }
+                return cast<float>(flag & 255) / 255.0;
+            }
+
             private method communityTint(int c, int channel) returns float {
                 if (this.sim != null) {
                     int nat = this.sim.nationOf(c);
@@ -2834,16 +2851,28 @@ public bundle Agents {
                 int y1 = y0 + this.detH;
                 mutable int held = 0;
                 mutable int edges = 0;
+                // COUNTED OVER THE SAME CELLS THEY ARE DRAWN OVER. They were not, and that is why
+                // João kept finding frontiers that were half there or not there at all.
+                //
+                // The wash is per SETTLEMENT and the border is per NATION, and since territory
+                // became a block claim those are wildly different sets: a nation holds every cell
+                // of a sixteen-cell block, and settlements stand on a handful of them. Counting the
+                // border edges only around cells that had a settlement therefore sized the buffer
+                // for a small fraction of the edges the second pass then went on to write. What was
+                // over the line was dropped, silently, which reads exactly like a border that is
+                // sometimes drawn and sometimes not.
                 for (int y in y0..y1) {
                     for (int x in x0..x1) {
-                        if (this.sim.ownerAt(x, y) < 0) {
-                            continue;
+                        if (this.sim.ownerAt(x, y) >= 0) {
+                            held = held + 1;
                         }
-                        held = held + 1;
                         // The border is where the NATION changes, not where the settlement does.
                         // Drawn on settlements it put a hard line between two towns of one kingdom
                         // and none at all along the frontier that people actually die over.
                         int o = this.sim.realmAt(x, y);
+                        if (o < 0) {
+                            continue;
+                        }
                         if (this.sim.realmAt(x - 1, y) != o) {
                             edges = edges + 1;
                         }
@@ -2901,11 +2930,18 @@ public bundle Agents {
                                 + this.zAdj[ord] + 0.90;
                         float cx = cast<float>(x) * 2.0 + 1.0;
                         float cy = cast<float>(y) * 2.0 + 1.0;
-                        int own = this.sim.ownerAt(x, y);
-                        // Brighter than the wash so the line reads as a line and not as thicker paint.
-                        float r = 0.35 + 0.65 * this.communityTint(own, 0);
-                        float g = 0.35 + 0.65 * this.communityTint(own, 1);
-                        float b = 0.35 + 0.65 * this.communityTint(own, 2);
+                        // THE NATION'S OWN COLOUR, read from the nation.
+                        //
+                        // This used to read `ownerAt(x, y)` -- the SETTLEMENT standing on the cell
+                        // -- and a border cell almost never has one: the frontier is the far edge of
+                        // a claim, sixty-odd cells from the town that made it. So the tint was
+                        // fetched for community -1 on nearly every border cell in the world, which
+                        // falls through `communityTint`'s nation lookup into its index-modulo
+                        // fallback with a negative index. Whatever colour that produced, it was not
+                        // the country's, and it was not the same one twice along a frontier.
+                        float r = 0.35 + 0.65 * this.realmTint(o, 0);
+                        float g = 0.35 + 0.65 * this.realmTint(o, 1);
+                        float b = 0.35 + 0.65 * this.realmTint(o, 2);
                         if (this.sim.realmAt(x - 1, y) != o) {
                             w = this.ovQuad(w, cx - 1.0 + br, cy, z, br, 1.0, r, g, b);
                         }

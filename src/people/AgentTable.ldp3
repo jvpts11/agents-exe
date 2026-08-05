@@ -242,6 +242,7 @@ public bundle Agents {
             // reads as a crowd standing still. This is the one field the renderer needs to show a
             // hit landing, and the health it is left with does the rest.
             private mutable float[] hurtAt;
+            private mutable int[] fileAt;       // where in the formation, -1 for anybody not in one
             // WHERE EVERYBODY IS, BY BIN, so "who is standing next to me" is a short chain walk and
             // not fifty thousand distance tests. The same shape Wildlife uses for prey and NodeField
             // uses for resources, and for the same reason: this codebase keeps having to relearn
@@ -279,6 +280,7 @@ public bundle Agents {
             // reaches a hundred and forty million in twelve minutes of world time. An int would go
             // round inside an arc and report a small number, which is worse than reporting none.
             private mutable long crowdCapped;
+            private mutable int[] binFill;      // heads counted in each cell, this tick
 
             public constructor AgentTable(int cap) {
                 this.cap = cap;
@@ -291,6 +293,7 @@ public bundle Agents {
                 this.bh = 0;
                 this.crowdCapped = 0;
                 this.binHead = new int[1]();
+                this.binFill = new int[1]();
                 this.binNext = new int[cap]();
                 this.binAt = new int[cap]();
                 this.crowdOrder = new int[cap]();
@@ -298,6 +301,7 @@ public bundle Agents {
                 this.navMode = new byte[cap]();
                 this.navHitD = new float[cap]();
                 this.hurtAt = new float[cap]();
+                this.fileAt = new int[cap]();
                 this.px = new float[cap]();
                 this.py = new float[cap]();
                 this.home = new short[cap]();
@@ -356,12 +360,14 @@ public bundle Agents {
             public destructor ~AgentTable() returns void {
                 delete this.freeSlot;
                 delete this.binHead;
+                delete this.binFill;
                 delete this.binNext;
                 delete this.binAt;
                 delete this.crowdOrder;
                 delete this.navMode;
                 delete this.navHitD;
                 delete this.hurtAt;
+                delete this.fileAt;
                 delete this.px;
                 delete this.py;
                 delete this.home;
@@ -478,16 +484,31 @@ public bundle Agents {
             // One-cell bins cut what shares a chain by four.
             public static int PERSONAL_BIN = 1;
 
-            // How far down one bin's chain a single pass will walk.
+            // HOW MANY MAY STAND IN ONE CELL. This is the whole of the crowding rule now, and it
+            // replaces pushing bodies out of one another.
             //
-            // Not a magnitude anybody picked: at 0.52 cells a person, a two-by-two-cell bin holds
-            // about fourteen people who are NOT already overlapping, so a chain past this length is
-            // people genuinely piled up -- a transient the next few passes clear. It is bounded so
-            // one heaving market square cannot cost the frame, and every time the bound bites it is
-            // COUNTED, because a pass that quietly stops doing its job reads exactly like a pass
-            // that had nothing to do.
-            public static int CROWD_CHAIN = 24;
+            // People do not collide any more: two of them may walk through each other, and nothing
+            // in the tick resolves a pair. What is kept is the thing that was actually wanted --
+            // ROOM. A person is 0.52 cells across, so four of them fit in a cell without touching,
+            // and a fifth has nowhere to be. Anybody past the fourth steps out.
+            //
+            // This is cheaper by a whole complexity class and it is also the only version that
+            // CONVERGES. The mutual shove was quadratic in what shares a bin, cost 40 to 49 per
+            // cent of the tick, and in a blob of three hundred it never finished: everybody was
+            // inside somebody, each shove created two more overlaps, and the pass spent the frame
+            // trading one impossible arrangement for another. Counting heads in a cell is one add
+            // per person per tick, and a person who steps out of a full cell makes the cell less
+            // full -- so a crowd thins out over a few seconds instead of heaving for ever.
+            public static int CELL_ROOM = 4;
 
+            // How far somebody with nowhere to stand moves in one tick, in cells. Deliberately
+            // shorter than a cell: this is somebody shifting their feet to make room, not somebody
+            // being flung, and small steps mean a packed square unpacks smoothly outward rather
+            // than exploding and re-collapsing.
+            public static float STEP_OUT = 0.30;
+
+            // How many times a tick somebody had nowhere to stand. Not a cap and not an error --
+            // it is the size of the crowding problem, printed rather than assumed.
             public method crowdCappings() returns long {
                 return this.crowdCapped;
             }
@@ -510,9 +531,11 @@ public bundle Agents {
                 int wantH = (g.height() + AgentTable.PERSONAL_BIN - 1) / AgentTable.PERSONAL_BIN;
                 if (this.bw != wantW || this.bh != wantH) {
                     delete this.binHead;
+                    delete this.binFill;
                     this.bw = wantW;
                     this.bh = wantH;
                     this.binHead = new int[wantW * wantH]();
+                    this.binFill = new int[wantW * wantH]();
                     for (int b in 0..wantW * wantH) {
                         this.binHead[b] = 0 - 1;
                     }
@@ -520,6 +543,7 @@ public bundle Agents {
                     mutable int u = 0;
                     while (u < this.crowdN) {
                         this.binHead[this.binAt[this.crowdOrder[u]]] = 0 - 1;
+                        this.binFill[this.binAt[this.crowdOrder[u]]] = 0;
                         u = u + 1;
                     }
                 }
@@ -564,80 +588,65 @@ public bundle Agents {
             // bins. That covers every neighbouring pair exactly once: the west, north-west, north
             // and north-east neighbours see this person from their own side, and the own-bin
             // remainder means two people in one bin meet once rather than twice.
-            public method separate(Grid* g) returns void {
+            // Give everybody somewhere to stand. NOT a collision pass -- nothing here looks at a
+            // pair, and two people may walk straight through each other.
+            //
+            // The rule is per CELL, not per pair: count the heads in a cell, and anybody past the
+            // fourth shifts their feet outward. That is one add and one compare per person, against
+            // a pair test per neighbour per person, and it is the difference between a pass that
+            // costs half the tick and one that does not show up in the meter.
+            //
+            // It also behaves where the shove did not. João's three complaints were mountains, the
+            // water's edge and town centres -- all places where a crowd is PRESSED, either against
+            // ground nobody can cross or around one doorway everybody was sent to. A mutual shove
+            // in a pressed crowd is a treadmill: every push creates two more overlaps and the pass
+            // spends the whole frame without reducing anything. Counting heads cannot loop like
+            // that, because a person who leaves a full cell makes it emptier and never comes back
+            // for a second helping.
+            public method spaceOut(Grid* g) returns void {
                 mutable int k = 0;
                 while (k < this.crowdN) {
                     int i = this.crowdOrder[k];
                     k = k + 1;
                     // The bin this person was LINKED into, not the one they are standing in now --
-                    // see the note on `binAt`. Reading the live position here silently dropped
-                    // pairs as soon as a shove carried somebody over a bin edge.
+                    // see the note on `binAt`. A step out can carry somebody over a bin edge, and
+                    // reading the live position would then count them in a cell they have left.
                     int at = this.binAt[i];
-                    int bx = at % this.bw;
-                    int by = at / this.bw;
-                    this.shoveChain(g, i, this.binNext[i]);
-                    if (bx + 1 < this.bw) {
-                        this.shoveChain(g, i, this.binHead[at + 1]);
+                    this.binFill[at] = this.binFill[at] + 1;
+                    if (this.binFill[at] <= AgentTable.CELL_ROOM) {
+                        continue;
                     }
-                    if (by + 1 < this.bh) {
-                        if (bx + 1 < this.bw) {
-                            this.shoveChain(g, i, this.binHead[at + this.bw + 1]);
-                        }
-                        this.shoveChain(g, i, this.binHead[at + this.bw]);
-                        if (bx > 0) {
-                            this.shoveChain(g, i, this.binHead[at + this.bw - 1]);
-                        }
-                    }
-                }
-                return;
-            }
-
-            private method shoveChain(Grid* g, int i, int first) returns void {
-                mutable int j = first;
-                mutable int seen = 0;
-                while (j >= 0 && seen < AgentTable.CROWD_CHAIN) {
-                    this.pushApart(g, i, j);
-                    j = this.binNext[j];
-                    seen = seen + 1;
-                }
-                if (j >= 0) {
                     this.crowdCapped = this.crowdCapped + 1;
+                    this.stepOut(g, i);
                 }
                 return;
             }
 
-            // The shove itself. Two people closer than PERSONAL each give half the overlap, because
-            // a shove is mutual.
+            // One step outward for somebody with nowhere to stand.
             //
-            // EXACTLY COINCIDENT is the case that matters and the one a naive version gets wrong:
-            // the separating direction is undefined and dividing by a zero distance produces a
-            // position no test could ever explain -- and coincident is not a corner case here, it
-            // is the army case, since everybody was sent to the same cell. The tie is broken by the
-            // two row indices, which is arbitrary and STABLE: the same two people always part the
-            // same way, so a crowd settles instead of shimmering.
-            private method pushApart(Grid* g, int i, int j) returns void {
-                float dx = this.px[j] - this.px[i];
-                float dy = this.py[j] - this.py[i];
-                float d2 = dx * dx + dy * dy;
-                if (d2 >= AgentTable.PERSONAL * AgentTable.PERSONAL) {
-                    return;
+            // The direction is fixed by the row index, which makes it ARBITRARY and STABLE at once:
+            // arbitrary because nothing about a crowd says which way is out, and stable because the
+            // same person always leaves the same way, so a square unpacks in a steady direction
+            // instead of shimmering. Three directions are tried before giving up, so somebody in a
+            // corner with two walls still finds the one open side rather than staying stacked
+            // because their first choice happened to be rock.
+            private method stepOut(Grid* g, int i) returns void {
+                mutable int t = 0;
+                while (t < 3) {
+                    int spin = (i + t) & 7;
+                    float nx = this.px[i] + AgentTable.SPIN_X[spin] * AgentTable.STEP_OUT;
+                    float ny = this.py[i] + AgentTable.SPIN_Y[spin] * AgentTable.STEP_OUT;
+                    int cx = cast<int>(nx);
+                    int cy = cast<int>(ny);
+                    if (cx >= 0 && cy >= 0 && cx < g.width() && cy < g.height()) {
+                        if (Biomes.walkable(g.biomeAt(cx, cy))) {
+                            this.px[i] = nx;
+                            this.py[i] = ny;
+                            return;
+                        }
+                    }
+                    t = t + 1;
                 }
-                mutable float ux = 1.0;
-                mutable float uy = 0.0;
-                mutable float over = AgentTable.PERSONAL;
-                if (d2 > 0.0001) {
-                    float d = cast<float>(Math.sqrt(cast<double>(d2)));
-                    ux = dx / d;
-                    uy = dy / d;
-                    over = AgentTable.PERSONAL - d;
-                } else {
-                    int spin = (i + j) & 7;
-                    ux = AgentTable.SPIN_X[spin];
-                    uy = AgentTable.SPIN_Y[spin];
-                }
-                float half = over * 0.5;
-                this.slideTo(g, i, this.px[i] - ux * half, this.py[i] - uy * half);
-                this.slideTo(g, j, this.px[j] + ux * half, this.py[j] + uy * half);
                 return;
             }
 
@@ -659,6 +668,32 @@ public bundle Agents {
                 this.px[i] = nx;
                 this.py[i] = ny;
                 return;
+            }
+
+            // How many distinct cells the living are standing in. The question the spacing pass
+            // exists to answer -- a crowd that has drained is a crowd spread over ground, and one
+            // that has not is everybody on one spot. Quadratic, and so for tests only.
+            public method cellsOccupied() returns int {
+                mutable int n = 0;
+                for (int i in 0..this.high) {
+                    if (!this.alive(i)) {
+                        continue;
+                    }
+                    mutable boolean first = true;
+                    for (int j in 0..i) {
+                        if (!this.alive(j)) {
+                            continue;
+                        }
+                        if (cast<int>(this.px[j]) == cast<int>(this.px[i])
+                            && cast<int>(this.py[j]) == cast<int>(this.py[i])) {
+                            first = false;
+                        }
+                    }
+                    if (first) {
+                        n = n + 1;
+                    }
+                }
+                return n;
             }
 
             // How close the closest two people are, in cells. The honest way to hold the separation
@@ -793,6 +828,7 @@ public bundle Agents {
                 this.navMode = AgentTable.widerB(this.navMode, cap);
                 this.navHitD = AgentTable.widerF(this.navHitD, cap);
                 this.hurtAt = AgentTable.widerF(this.hurtAt, cap);
+                this.fileAt = AgentTable.widerI(this.fileAt, cap);
                 this.px = AgentTable.widerF(this.px, cap);
                 this.py = AgentTable.widerF(this.py, cap);
                 this.home = AgentTable.widerS(this.home, cap);
@@ -1495,6 +1531,22 @@ public bundle Agents {
 
             public method hurtAtOf(int i) returns float {
                 return this.hurtAt[i];
+            }
+
+            // Where somebody stands in their army's formation, counted from the front rank.
+            //
+            // An army had no shape at all: every man was sent to the general's exact cell, so a
+            // host of sixty arrived as one heap with a general somewhere inside it -- the "little
+            // wheel of agents around a general" João kept seeing. A place in the line is the whole
+            // of what was missing. It is a NUMBER and not a position, because the position depends
+            // on where the general is and which way he is marching, and both change every tick.
+            public method setFile(int i, int f) returns void {
+                this.fileAt[i] = f;
+                return;
+            }
+
+            public method fileOf(int i) returns int {
+                return this.fileAt[i];
             }
 
             // How long a blow shows on somebody. Two thirds of a second: long enough to read at the
