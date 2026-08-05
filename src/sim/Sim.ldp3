@@ -392,6 +392,17 @@ public bundle Agents {
             private mutable long learnSchool;   // and what its shrines and libraries work out
             private mutable long learnGain;     // the two together, as `study` receives it
             private mutable long sighted;       // far shores seen across water from a beach
+            // BATTLES, counted so "there are wars now" is a claim somebody can check. `fought` is
+            // seconds two hosts spent in contact, `won` is battles that ended in a rout, and
+            // `blowsCapped` is how often a host was too big for one second to resolve -- the bound
+            // is stated rather than hidden, because a pass that quietly stops striking reads like
+            // a battle nobody was fighting.
+            private mutable long fought;
+            private mutable long won;
+            private mutable long blowsCapped;
+            // And the same at sea.
+            private mutable long seaFought;
+            private mutable long seaSunk;
             // AND WHY NO WAR IS EVER DECLARED. Same treatment again: `border.cause.conquest` reads
             // zero in every run, and "nations do not fight" is not a finding until the gate that
             // refuses them is a number.
@@ -691,6 +702,11 @@ public bundle Agents {
                 this.learnSchool = 0;
                 this.learnGain = 0;
                 this.sighted = 0;
+                this.fought = 0;
+                this.won = 0;
+                this.blowsCapped = 0;
+                this.seaFought = 0;
+                this.seaSunk = 0;
                 this.warAsked = 0;
                 this.warNoRank = 0;
                 this.warNoSeat = 0;
@@ -1113,6 +1129,99 @@ public bundle Agents {
             // where it can, so this is short: it is the strait and the headland that are dangerous,
             // which is also why anybody ever fought over one.
             public static int PREY_REACH = 90;
+
+            // TWO HULLS OF COUNTRIES AT ODDS, MEETING AT SEA.
+            //
+            // `privateer` already lets a hostile QUAY take a hull passing it -- a shore battery, in
+            // effect. What could not happen was two ships fighting each other, so the sea was a
+            // place where cargo crossed and nothing was ever contested on it. A nation could sail
+            // colonists past an enemy fleet and arrive unmolested.
+            //
+            // The model is the land battle's, reduced to its bones because a hull is one thing and
+            // not five hundred: the heavier vessel wins, weight being the era that built it and the
+            // load it is carrying, and the loser goes down with everything aboard. No morale --
+            // ships do not rout, they sink or they get away -- and no partial damage, because a
+            // half-sunk hull is a state this world has nowhere to keep.
+            private method seaBattle() returns void {
+                int nv = this.ships.limit();
+                for (int v in 0..nv) {
+                    if (!this.ships.running(v) || this.ships.laneOf(v) != cast<int>(Lane.Water)) {
+                        continue;
+                    }
+                    int vc = this.ships.bound(v);
+                    if (vc < 0 || vc >= this.ncomm) {
+                        continue;
+                    }
+                    int vn = this.cnat[vc];
+                    for (int w in v + 1..nv) {
+                        if (!this.ships.running(w) || this.ships.laneOf(w) != cast<int>(Lane.Water)) {
+                            continue;
+                        }
+                        int wc = this.ships.bound(w);
+                        if (wc < 0 || wc >= this.ncomm) {
+                            continue;
+                        }
+                        int wn = this.cnat[wc];
+                        if (wn == vn || this.realm.bondOf(vn, wn) >= Nations.BOND_PEACE) {
+                            continue;
+                        }
+                        float dx = this.ships.xAt(w) - this.ships.xAt(v);
+                        float dy = this.ships.yAt(w) - this.ships.yAt(v);
+                        if (dx * dx + dy * dy
+                            > cast<float>(Simulation.SEA_REACH * Simulation.SEA_REACH)) {
+                            continue;
+                        }
+                        this.seaFought = this.seaFought + 1;
+                        // The heavier hull wins. Era first, because a steamship is not a barge;
+                        // load second, because a laden hull is slower to come about -- the same
+                        // two facts the Fleet already keeps about every vessel.
+                        int weighV = this.ships.eraOf(v) * 100 - this.ships.loadOf(v);
+                        int weighW = this.ships.eraOf(w) * 100 - this.ships.loadOf(w);
+                        mutable int lost = w;
+                        if (weighW > weighV) {
+                            lost = v;
+                        }
+                        // Everything aboard goes down with her, including anybody being carried to
+                        // a founding -- which is what makes an escort worth having and a crossing
+                        // in wartime a gamble rather than a formality.
+                        int bound = this.ships.bound(lost);
+                        if (this.ships.cargoOf(lost) == cast<int>(Good.Nothing)
+                            && bound >= 0 && bound < this.ncomm) {
+                            this.drownColonists(bound);
+                        }
+                        this.ships.moor(lost);
+                        this.seaSunk = this.seaSunk + 1;
+                        this.realm.warm(vn, wn, Simulation.BOND_PER_SACK);
+                        if (lost == v) {
+                            continue;                // this hull is gone; stop pairing it
+                        }
+                    }
+                }
+                return;
+            }
+
+            // A founding that went down at sea. The party is drowned rather than quietly deleted:
+            // they were real rows with real kin, and a colony that "never arrived" while its people
+            // went on living somewhere invisible is the kind of ghost this table has been careful
+            // not to keep.
+            private method drownColonists(int d) returns void {
+                int n = this.folk.limit();
+                mutable int i = 0;
+                while (i < n) {
+                    if (this.folk.alive(i) && this.folk.homeOf(i) == d) {
+                        this.folk.kill(i);
+                        this.deathsWar = this.deathsWar + 1;
+                    }
+                    i = i + 1;
+                }
+                this.cpop[d] = 0;
+                this.csettle[d] = 0;
+                return;
+            }
+
+            // How close two hulls have to pass to fight. The same ninety cells a hostile quay can
+            // reach a passing ship at: a strait is dangerous for the same reason whoever is in it.
+            public static int SEA_REACH = 90;
 
             // Move everything under way, and unload whatever made port. The fleet carries and this
             // pays: a table that both moves things and touches a store is a table two things can go
@@ -1861,6 +1970,153 @@ public bundle Agents {
                     }
                 }
                 return;
+            }
+
+            // TWO ARMIES THAT MEET IN THE OPEN FIGHT.
+            //
+            // Until now they could not. Everything violent in this world was a DUEL: `blowLanded`
+            // finds one person standing on ground somebody else's town holds and hits them, once,
+            // every MELEE seconds. So two hosts of five hundred could march past each other, or
+            // stand in the same field, and the only thing that happened was a scatter of individual
+            // scuffles among whoever happened to be over a border. There was no such thing as a
+            // battle, and `died.war` read zero in every run this game has ever had.
+            //
+            // The model is a LINE, and it is the smallest one that is honest:
+            //
+            //   Two hosts of nations at odds, within sight of each other, are in CONTACT.
+            //   Each second of contact, each side lands blows in proportion to the weight of arms
+            //   it carries -- which is where the whole iron chain finally arrives, because a host
+            //   with spears and mail hurts one with sticks and cannot be hurt back as easily.
+            //   The blows fall on the people NEAREST THE ENEMY, which is what a front line is.
+            //   Losses cost heart, and a host whose heart runs out ROUTS and goes home.
+            //
+            // Nobody rolls for a winner. A battle is a thing that takes time, kills people on both
+            // sides, and is decided by who breaks first -- and because the blows are real wounds on
+            // real rows, every one of them shows on the person who took it.
+            private method battles() returns void {
+                int na = this.host.limit();
+                for (int a in 0..na) {
+                    if (!this.host.alive(a)) {
+                        continue;
+                    }
+                    int an = this.host.nationOf(a);
+                    int lead = this.host.generalOf(a);
+                    if (lead < 0 || !this.folk.alive(lead)) {
+                        continue;
+                    }
+                    for (int b in a + 1..na) {
+                        if (!this.host.alive(b)) {
+                            continue;
+                        }
+                        int bn = this.host.nationOf(b);
+                        if (bn == an) {
+                            continue;                // allies of one flag do not fight each other
+                        }
+                        int other = this.host.generalOf(b);
+                        if (other < 0 || !this.folk.alive(other)) {
+                            continue;
+                        }
+                        float dx = this.folk.xAt(other) - this.folk.xAt(lead);
+                        float dy = this.folk.yAt(other) - this.folk.yAt(lead);
+                        if (dx * dx + dy * dy
+                            > cast<float>(Simulation.BATTLE_REACH * Simulation.BATTLE_REACH)) {
+                            continue;
+                        }
+                        // In contact. Neither may be at peace with the other: two countries that
+                        // trade are not worth marching on, and that is already how this world
+                        // decides who is an enemy.
+                        if (this.realm.bondOf(an, bn) >= Nations.BOND_PEACE) {
+                            continue;
+                        }
+                        this.clash(a, b, lead, other);
+                        this.fought = this.fought + 1;
+                    }
+                }
+                return;
+            }
+
+            // One second of a battle. Both sides at once, so neither is advantaged by the order of
+            // the loop -- an asymmetry that would decide every battle in the world by army index.
+            private method clash(int a, int b, int leadA, int leadB) returns void {
+                int weightA = this.host.strengthOf(a);
+                int weightB = this.host.strengthOf(b);
+                if (weightA <= 0 || weightB <= 0) {
+                    return;
+                }
+                int fellA = this.landBlows(b, weightB, this.folk.xAt(leadA), this.folk.yAt(leadA),
+                                           this.host.nationOf(a));
+                int fellB = this.landBlows(a, weightA, this.folk.xAt(leadB), this.folk.yAt(leadB),
+                                           this.host.nationOf(b));
+                // WHAT LOSSES DO TO A HOST. Heart is spent per man down, so a side taking three
+                // times the casualties breaks about three times sooner -- which is why a battle
+                // ends in a rout rather than in mutual extinction, and why arms and armour decide
+                // wars without anybody comparing two numbers and declaring a winner.
+                this.host.dishearten(a, fellA * Simulation.HEART_PER_LOSS);
+                this.host.dishearten(b, fellB * Simulation.HEART_PER_LOSS);
+                this.deathsWar = this.deathsWar + cast<long>(fellA + fellB);
+                if (this.host.heartOf(a) <= 0) {
+                    this.host.noteRout(a);
+                    this.standDown(a);
+                    this.won = this.won + 1;
+                } else if (this.host.heartOf(b) <= 0) {
+                    this.host.noteRout(b);
+                    this.standDown(b);
+                    this.won = this.won + 1;
+                }
+                return;
+            }
+
+            // The blows one side lands this second, on the people of the other who are NEAREST the
+            // enemy. Returns how many of them died.
+            //
+            // Nearest and not random: a front line is the whole reason a battle has a shape, and
+            // picking victims out of the whole host would kill cooks standing half a mile back
+            // while the spearmen at the front went home unmarked.
+            private method landBlows(int foe, int weight, float atX, float atY, int side) returns int {
+                mutable int blows = weight / Simulation.BLOWS_PER_WEIGHT;
+                if (blows < 1) {
+                    blows = 1;
+                }
+                if (blows > Simulation.BLOWS_CAP) {
+                    blows = Simulation.BLOWS_CAP;      // one second is one second, however big
+                    this.blowsCapped = this.blowsCapped + 1;
+                }
+                int n = this.folk.limit();
+                mutable int fell = 0;
+                mutable int landed = 0;
+                mutable int i = 0;
+                while (i < n && landed < blows) {
+                    if (!this.folk.alive(i)) {
+                        i = i + 1;
+                        continue;
+                    }
+                    int h = this.folk.homeOf(i);
+                    if (h < 0 || h >= this.ncomm || this.cnat[h] != side) {
+                        i = i + 1;
+                        continue;
+                    }
+                    float dx = this.folk.xAt(i) - atX;
+                    float dy = this.folk.yAt(i) - atY;
+                    if (dx * dx + dy * dy
+                        > cast<float>(Simulation.BATTLE_REACH * Simulation.BATTLE_REACH)) {
+                        i = i + 1;
+                        continue;
+                    }
+                    // What a blow costs is what the striker carries and what the struck one wears.
+                    // Both already exist as items; this is the first place in the world where the
+                    // difference between them decides who lives.
+                    mutable int hurt = Simulation.BLOW_BARE;
+                    if (this.folk.hasKit(i, AgentTable.K_ARMOUR)) {
+                        hurt = Simulation.BLOW_MAILED;
+                    }
+                    if (this.folk.wound(i, hurt, this.clock)) {
+                        fell = fell + 1;
+                    }
+                    this.folk.setAct(i, cast<int>(Act.Fight));
+                    landed = landed + 1;
+                    i = i + 1;
+                }
+                return fell;
             }
 
             // Somebody decides. This is the difference between a war and a raid: a raid needs
@@ -2656,6 +2912,24 @@ public bundle Agents {
             // lives through exactly the machinery a village brawl already used. There is no separate
             // battle code anywhere in this file, and there should not be.
             public static int SIEGE_LINE = 12;
+            // How close two hosts have to be to be fighting each other. The same twelve cells a
+            // besieging army stands off a wall at: if that is close enough to be shooting at a
+            // town, it is close enough to be fighting an army.
+            public static int BATTLE_REACH = 12;
+            // Weight of arms that buys one blow a second. Ten: a host of five hundred levies with
+            // a weight of about ten apiece lands fifty blows a second, which kills a few of them a
+            // second and settles a battle of that size in about a minute -- the same order as a
+            // siege, which is the only other thing in this world that takes military time.
+            public static int BLOWS_PER_WEIGHT = 10;
+            // And the most one second can resolve, so an enormous host cannot cost the frame. It is
+            // COUNTED when it bites (`war.blows.capped`): a bound nobody can see is a bound that
+            // silently changes the answer.
+            public static int BLOWS_CAP = 200;
+            // What a blow takes off somebody with nothing on, and off somebody in mail. Both out of
+            // a hundred, so a man in armour survives about three times as many. This is where the
+            // iron chain -- ore, smelting, forge, armourer -- finally decides something.
+            public static int BLOW_BARE = 34;
+            public static int BLOW_MAILED = 11;
             // How many a single barracks keeps standing. Small on purpose: a standing soldier eats
             // without producing, so a town that lines them up instead of feeding itself starves,
             // and the catalogue should let it make that mistake without forcing it.
@@ -4571,6 +4845,11 @@ public bundle Agents {
                 this.railway();
                 // And then the wars, which need the nations settled to know who is whose.
                 this.campaign();
+                // Hosts that have found each other, and hulls that have. Both after the campaign,
+                // because a battle is what happens to armies that already exist and a sea fight is
+                // what happens to shipping that is already under way.
+                this.battles();
+                this.seaBattle();
                 this.wayOut();
                 this.quarrel();
                 return;
@@ -9643,6 +9922,15 @@ public bundle Agents {
                 System.IO.Console.println($"A|war.busy|{this.warBusy}");
                 System.IO.Console.println($"A|war.no.aim|{this.warNoAim}");
                 System.IO.Console.println($"A|war.no.lead|{this.warNoLead}");
+                // BATTLES, on land and at sea. `fought` is seconds two hosts spent in contact and
+                // `won` is battles that ended in one side breaking; before this there was no such
+                // thing as either, because everything violent in this world was a duel between two
+                // people who happened to be standing on the same ground.
+                System.IO.Console.println($"A|war.fought|{this.fought}");
+                System.IO.Console.println($"A|war.routs|{this.won}");
+                System.IO.Console.println($"A|war.blows.capped|{this.blowsCapped}");
+                System.IO.Console.println($"A|sea.fought|{this.seaFought}");
+                System.IO.Console.println($"A|sea.sunk|{this.seaSunk}");
                 System.IO.Console.println($"A|born|{this.births}");
                 System.IO.Console.println($"A|died.old|{this.deathsOld}");
                 System.IO.Console.println($"A|died.hunger|{this.deathsHunger}");
