@@ -44,11 +44,13 @@ public bundle Agents {
             // million moves to record a few hundred.
             private mutable int[] head;      // per block: first agent, or -1
             private mutable int[] nextIn;    // per agent: next in the same block, or -1
+            private mutable int[] prevIn;    // per agent: previous in the same block, or -1
             private mutable int[] blockOf;   // per agent: which block it is linked into
             private mutable int bw;
             private mutable int bh;
             private mutable long rebinnings; // how often somebody actually changed block
             private mutable long groundLooks; // how often the world was actually asked about a cell
+            private mutable long movedEver;   // how many agent-moves have actually been done
 
             public static fixed int BLOCK = 32;
 
@@ -79,6 +81,7 @@ public bundle Agents {
             public constructor Folk(int howMany, int withSeed) {
                 this.roll = new Agent*[howMany]();
                 this.nextIn = new int[howMany]();
+                this.prevIn = new int[howMany]();
                 this.blockOf = new int[howMany]();
                 this.head = new int[1]();
                 this.bw = 0;
@@ -87,6 +90,51 @@ public bundle Agents {
                 this.seed = withSeed;
                 this.rebinnings = 0;
                 this.groundLooks = 0;
+                this.movedEver = 0;
+            }
+
+            // HOW MUCH WORK THE MOVE ACTUALLY DID, over the whole run. Divided by the frame count
+            // it must come to n/SLICES; if it comes to n, the slicing is not slicing and every
+            // number measured about the movement is measuring something else.
+            // EVERYBODY IS STILL IN THE INDEX, counted by walking it rather than assumed.
+            //
+            // The chains are what the renderer sees, and a bug in linking them does not crash: it
+            // makes people quietly stop being drawn, or drawn twice, which looks like a rendering
+            // problem and is not. So the index is counted against the roll, and both the total and
+            // the longest chain are reported -- the second because the chain length is what made
+            // the old unlink expensive, and a number nobody prints is a number nobody notices
+            // growing.
+            public method auditIndex() returns void {
+                mutable long seen = 0;
+                mutable int longest = 0;
+                mutable int b = 0;
+                int blocks = this.bw * this.bh;
+                while (b < blocks) {
+                    mutable int at = this.head[b];
+                    mutable int len = 0;
+                    while (at >= 0 && len <= this.n) {
+                        len = len + 1;
+                        at = this.nextIn[at];
+                    }
+                    if (len > longest) {
+                        longest = len;
+                    }
+                    seen = seen + cast<long>(len);
+                    b = b + 1;
+                }
+                System.IO.Console.println($"index: {seen} agents on the chains of {this.n} on the roll, longest chain {longest}");
+                if (seen != cast<long>(this.n)) {
+                    System.IO.Console.println("index: THE INDEX AND THE ROLL DISAGREE -- somebody is linked twice or not at all");
+                }
+                return;
+            }
+
+            public method moveWork(long frames) returns void {
+                if (frames <= 0) {
+                    return;
+                }
+                System.IO.Console.println($"move: {this.movedEver / frames} agents a frame (expected {this.n / Folk.SLICES}), {this.groundLooks / frames} ground looks, {this.rebinnings / frames} rebins");
+                return;
             }
 
             public destructor ~Folk() returns void {
@@ -97,6 +145,7 @@ public bundle Agents {
                 }
                 delete this.roll;
                 delete this.nextIn;
+                delete this.prevIn;
                 delete this.blockOf;
                 delete this.head;
                 return;
@@ -140,33 +189,45 @@ public bundle Agents {
                 this.blockOf[i] = b;
                 if (b < 0) {
                     this.nextIn[i] = 0 - 1;
+                    this.prevIn[i] = 0 - 1;
                     return;
                 }
-                this.nextIn[i] = this.head[b];
+                int was = this.head[b];
+                this.nextIn[i] = was;
+                this.prevIn[i] = 0 - 1;
+                if (was >= 0) {
+                    this.prevIn[was] = i;
+                }
                 this.head[b] = i;
                 return;
             }
 
-            // Take somebody out of the chain they are in. Walks that one block's chain, which is
-            // short by construction -- a block is a thousand cells and the world is not that
-            // crowded -- and it only happens when somebody actually crosses a boundary.
+            // Take somebody out of the chain they are in, WITHOUT LOOKING FOR THEM.
+            //
+            // This used to walk the block's chain from the head, on the reasoning that a block is
+            // a thousand cells and a chain would be short. Measured on the real game with half a
+            // million agents: 80x45 blocks, so a chain averages a hundred and thirty-nine, and
+            // 1,219 agents cross a block boundary every frame. That is a hundred and seventy
+            // thousand random hops through a 2 MB array per frame to remove 1,219 entries -- the
+            // search cost more than everything it was searching for.
+            //
+            // The chain is doubly linked now, so removal is four assignments and no search. Two
+            // more megabytes for `prevIn`, against a population that already carries two gigabytes
+            // of memories: the trade was never close.
             private method unlink(int i) returns void {
                 int b = this.blockOf[i];
                 if (b < 0) {
                     return;
                 }
-                mutable int at = this.head[b];
-                if (at == i) {
-                    this.head[b] = this.nextIn[i];
-                    return;
+                int p = this.prevIn[i];
+                int nx = this.nextIn[i];
+                if (p >= 0) {
+                    this.nextIn[p] = nx;
+                } else {
+                    this.head[b] = nx;
                 }
-                while (at >= 0) {
-                    int after = this.nextIn[at];
-                    if (after == i) {
-                        this.nextIn[at] = this.nextIn[i];
-                        return;
-                    }
-                    at = after;
+                if (nx >= 0) {
+                    this.prevIn[nx] = p;
                 }
                 return;
             }
@@ -295,6 +356,7 @@ public bundle Agents {
                 // of the reasons it is not.
                 mutable long looks = 0;
                 int steps = Folk.SLICES;
+                this.movedEver = this.movedEver + cast<long>(stop - i);
                 while (i < stop) {
                     mutable Agent* one = this.roll[i];
                     // THE WHOLE INTERVAL IS WALKED IN REGISTERS and written back once. The old loop
