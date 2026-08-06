@@ -58,6 +58,7 @@ public bundle Agents {
             private mutable long refusedWet;   // the ground beside it cannot be walked
             private mutable long noPlot;       // wanted a house, owned nowhere to put one
             private mutable boolean changed;   // ground changed hands since anybody last asked
+            private mutable boolean mapCut;    // something was taken off the map since then
             // WHAT THE GATHERING DID, counted. A city whose store stays empty has to say which of
             // these it was: nobody sent, nothing within reach, or somebody else got there first.
             private mutable long sentOut;
@@ -83,6 +84,7 @@ public bundle Agents {
                 this.refusedWet = 0;
                 this.noPlot = 0;
                 this.changed = false;
+                this.mapCut = false;
                 this.sentOut = 0;
                 this.gathered = 0;
                 this.delivered = 0;
@@ -381,7 +383,19 @@ public bundle Agents {
                     mutable Agent* who = folk.at(one.residents.get(t));
                     if (who.errand == 0) {
                         int want = this.shortestOf(one);
-                        int found = this.nearestNode(g, one, Nodes.work(want));
+                        // SEARCHED FROM WHERE HE IS STANDING, not from the town centre.
+                        //
+                        // Searching from the centre gives every single person the same answer, so
+                        // the whole population walked to one tree in single file, came back, and
+                        // walked to the next one together. João watched it happen and asked
+                        // whether that was intended. It was not: it is one shared starting point
+                        // pretending to be a decision each of them made.
+                        //
+                        // From their own feet they get different answers, because they are
+                        // standing in different places -- and the crowd spreads over the wood
+                        // without anybody scheduling it.
+                        int found = this.nearestNode(g, cast<int>(who.x), cast<int>(who.y),
+                                                     Nodes.work(want));
                         if (found < 0) {
                             this.noNode = this.noNode + 1;
                             return;                          // nothing within reach; try next tick
@@ -414,17 +428,17 @@ public bundle Agents {
             // The nearest node of a given trade, searched outward from the city in rings of cells.
             // Bounded, and the refusal is counted: a city with no forest within reach has to be
             // able to say so rather than quietly gathering nothing.
-            private method nearestNode(Grid* g, City* one, int hclass) returns int {
+            private method nearestNode(Grid* g, int fromX, int fromY, int hclass) returns int {
                 mutable int ring = 0;
                 while (ring < 40) {
                     mutable int dx = 0 - ring;
                     while (dx <= ring) {
                         mutable int side = 0;
                         while (side < 2) {
-                            int gx = one.cx + dx;
-                            mutable int gy = one.cy - ring;
+                            int gx = fromX + dx;
+                            mutable int gy = fromY - ring;
                             if (side == 1) {
-                                gy = one.cy + ring;
+                                gy = fromY + ring;
                             }
                             side = side + 1;
                             if (gx < 0 || gy < 0 || gx >= this.w || gy >= this.h) {
@@ -440,11 +454,11 @@ public bundle Agents {
                     while (dy < ring) {
                         mutable int side = 0;
                         while (side < 2) {
-                            mutable int gx = one.cx - ring;
+                            mutable int gx = fromX - ring;
                             if (side == 1) {
-                                gx = one.cx + ring;
+                                gx = fromX + ring;
                             }
-                            int gy = one.cy + dy;
+                            int gy = fromY + dy;
                             side = side + 1;
                             if (gx < 0 || gy < 0 || gx >= this.w || gy >= this.h) {
                                 continue;
@@ -505,6 +519,9 @@ public bundle Agents {
                         }
                         who.holds = gives;
                         who.held = got;
+                        // The node has less in it than it did, and may now be gone. The picture is
+                        // told so it can stop drawing a tree that has been felled.
+                        this.mapCut = true;
                         who.errand = 2;
                         who.goX = one.cx;
                         who.goY = one.cy;
@@ -620,6 +637,14 @@ public bundle Agents {
             public method takeChanged() returns boolean {
                 boolean was = this.changed;
                 this.changed = false;
+                return was;
+            }
+
+            // Has anything been taken off the map since anybody last asked? The picture rebakes
+            // off this, so a felled tree stops being drawn.
+            public method takeMapCut() returns boolean {
+                boolean was = this.mapCut;
+                this.mapCut = false;
                 return was;
             }
 

@@ -2179,6 +2179,20 @@ public bundle Agents {
                 return;
             }
 
+            // THE MAP HAS CHANGED UNDER THE DETAIL BAKE, so bake it again.
+            //
+            // The resource nodes are baked once, with the terrain, on the reasoning that a forest
+            // does not move. It does not -- but it can be CUT DOWN, and a felled tree that goes on
+            // standing in the picture is the world showing one thing while the simulation believes
+            // another. That is the same pairing that made agents invisible and made a city grow on
+            // houses that were never built.
+            public method refreshDetail() returns void {
+                if (this.haveDetail) {
+                    this.beginBake(this.detX0, this.detY0);
+                }
+                return;
+            }
+
             public method setRealm(Realm* r, MeshAtlas* buildingArt, MeshAtlas* itemArt) returns void {
                 this.realm = r;
                 this.haveRealm = true;
@@ -2505,6 +2519,16 @@ public bundle Agents {
                     int tn = from.triCount[mord];
                     int verts = tn * 3;
                     this.mverts[k] = verts;
+                    // A LOAD IS SMALLER THAN THE PERSON CARRYING IT.
+                    //
+                    // The shader scales every instance by one uniform, so a crate of clay came out
+                    // the same size as the body underneath it and hid it completely -- the first
+                    // run showed boxes wandering the field with nobody attached. The item meshes
+                    // are shrunk here instead, once, on their way to the card.
+                    mutable float scale = 1.0;
+                    if (k >= 4) {
+                        scale = 0.34;
+                    }
                     address buf = Memory.alloc(cast<long>(verts * 10 * 4 + 4));
                     mutable int p = 0;
                     mutable int t = 0;
@@ -2520,9 +2544,9 @@ public bundle Agents {
                         mutable int j = 0;
                         while (j < 3) {
                             int vi = tri * 3 + j;
-                            Memory.write<float>(buf + cast<address>(p) * cast<address>(4), from.px[vi]);
-                            Memory.write<float>(buf + cast<address>(p + 1) * cast<address>(4), from.py[vi]);
-                            Memory.write<float>(buf + cast<address>(p + 2) * cast<address>(4), from.pz[vi]);
+                            Memory.write<float>(buf + cast<address>(p) * cast<address>(4), from.px[vi] * scale);
+                            Memory.write<float>(buf + cast<address>(p + 1) * cast<address>(4), from.py[vi] * scale);
+                            Memory.write<float>(buf + cast<address>(p + 2) * cast<address>(4), from.pz[vi] * scale);
                             Memory.write<float>(buf + cast<address>(p + 3) * cast<address>(4), from.nx[vi]);
                             Memory.write<float>(buf + cast<address>(p + 4) * cast<address>(4), from.ny[vi]);
                             Memory.write<float>(buf + cast<address>(p + 5) * cast<address>(4), from.nz[vi]);
@@ -2634,6 +2658,13 @@ public bundle Agents {
                             int ay = cast<int>(one.y);
                             if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
                                 want[one.klass] = want[one.klass] + 2;
+                                // AND THE THING IN HIS HANDS. Counted here or not drawn at all:
+                                // the emitting pass asks `putInstance` for a slot the counting
+                                // pass never sized, so every load was silently refused. The two
+                                // passes have to agree, and the way they disagree is quiet.
+                                if (one.held > 0 && one.holds < this.carrySlots) {
+                                    want[4 + one.holds] = want[4 + one.holds] + 1;
+                                }
                             }
                             i = this.folk.nextOf(i);
                         }
@@ -3092,8 +3123,16 @@ public bundle Agents {
                 // and each of them shows up as a different line here. Printed once, on a settled
                 // frame, because the answer is the same on every frame after the first.
                 this.diagFrame = this.diagFrame + 1;
-                if (this.diagFrame == 60) {
-                    System.IO.Console.println($"people: {this.icount[0] + this.icount[1] + this.icount[2] + this.icount[3]} instances in 4 draws, glError={Wgl.glGetError()}");
+                // ONCE EARLY AND ONCE LATE. The early one caught the crowd not appearing at all;
+                // it cannot catch the crowd thinning out, because at frame 60 there is no crowd
+                // yet -- a dozen founders draw exactly like a dozen founders should. Reading a
+                // settled world needs a reading taken from a settled world.
+                if (this.diagFrame == 60 || this.diagFrame == 900) {
+                    mutable int loads = 0;
+                    for (int s in 4..GlWorld3D.SLOTS) {
+                        loads = loads + this.icount[s];
+                    }
+                    System.IO.Console.println($"people@{this.diagFrame}: {this.icount[0] + this.icount[1] + this.icount[2] + this.icount[3]} body instances + {loads} loads, of {this.folk.count()} alive, window {this.detW}x{this.detH}, glError={Wgl.glGetError()}");
                 }
                 if (drewFolk) {
                     this.gl.bindVertexArray(0);
