@@ -93,9 +93,6 @@ public bundle Agents {
                 this.movedEver = 0;
             }
 
-            // HOW MUCH WORK THE MOVE ACTUALLY DID, over the whole run. Divided by the frame count
-            // it must come to n/SLICES; if it comes to n, the slicing is not slicing and every
-            // number measured about the movement is measuring something else.
             // EVERYBODY IS STILL IN THE INDEX, counted by walking it rather than assumed.
             //
             // The chains are what the renderer sees, and a bug in linking them does not crash: it
@@ -129,6 +126,9 @@ public bundle Agents {
                 return;
             }
 
+            // HOW MUCH WORK THE MOVE ACTUALLY DID, over the whole run. Divided by the frame count
+            // it must come to n/SLICES; if it comes to n, the slicing is not slicing and every
+            // number measured about the movement is measuring something else.
             public method moveWork(long frames) returns void {
                 if (frames <= 0) {
                     return;
@@ -174,6 +174,17 @@ public bundle Agents {
 
             public method rebinCount() returns long {
                 return this.rebinnings;
+            }
+
+            // Which block a whole cell falls in, with anybody outside the index going in the one
+            // spare bucket at the end rather than being dropped.
+            private method blockOfCell(int gx, int gy, int spare) returns int {
+                int bx = gx / Folk.BLOCK;
+                int by = gy / Folk.BLOCK;
+                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                    return spare;
+                }
+                return by * this.bw + bx;
             }
 
             private method blockIndexOf(float x, float y) returns int {
@@ -261,6 +272,19 @@ public bundle Agents {
                 for (int b in 0..this.bw * this.bh) {
                     this.head[b] = 0 - 1;
                 }
+                // WHERE EVERYBODY STANDS IS DECIDED BEFORE ANYBODY IS BUILT, so that the objects
+                // can be built in the order the move loop will walk them.
+                //
+                // Sorting the roll AFTER the fact was tried and made it worse: it reorders the
+                // pointers, and the objects stay where they were allocated. The walk then jumps at
+                // random through 2.4 GB of heap instead of climbing it in order -- 3.2 ms became
+                // 6.2. Locality of the 2.7 MB grid is worth having; not at the price of locality
+                // of the 2.4 GB the agents themselves occupy.
+                //
+                // Deciding the positions first costs two int arrays and buys both: neighbours in
+                // the world are neighbours in the roll AND neighbours in memory.
+                mutable int[] atX = new int[howMany]();
+                mutable int[] atY = new int[howMany]();
                 mutable int made = 0;
                 mutable int tries = 0;
                 mutable int wet = 0;
@@ -275,19 +299,67 @@ public bundle Agents {
                         wet = wet + 1;
                         continue;
                     }
-                    mutable Agent* one = new Agent(made + 1, cast<float>(gx) + 0.5,
-                                                  cast<float>(gy) + 0.5,
-                                                  made % AgentClass.count()) on heap;
-                    this.fill(one, made, memoryEach);
-                    this.roll[made] = one;
-                    this.link(made, this.blockIndexOf(one.x, one.y));
+                    atX[made] = gx;
+                    atY[made] = gy;
                     made = made + 1;
-                    if (made % 50000 == 0) {
-                        System.IO.Console.println($"  scattered {made} of {howMany}...");
-                    }
                 }
                 this.n = made;
-                System.IO.Console.println($"scatter: {made} agents placed, {tries} draws, {wet} fell in the sea");
+                // A counting sort of those positions by block: one pass to count, one over the
+                // blocks to turn the counts into starting offsets, one to place.
+                int blocks = this.bw * this.bh;
+                mutable int[] start = new int[blocks + 2]();
+                mutable int i = 0;
+                while (i < made) {
+                    start[this.blockOfCell(atX[i], atY[i], blocks)] =
+                        start[this.blockOfCell(atX[i], atY[i], blocks)] + 1;
+                    i = i + 1;
+                }
+                mutable int running = 0;
+                mutable int b2 = 0;
+                while (b2 <= blocks) {
+                    int here = start[b2];
+                    start[b2] = running;
+                    running = running + here;
+                    b2 = b2 + 1;
+                }
+                mutable int[] orderX = new int[made + 1]();
+                mutable int[] orderY = new int[made + 1]();
+                i = 0;
+                while (i < made) {
+                    int b = this.blockOfCell(atX[i], atY[i], blocks);
+                    orderX[start[b]] = atX[i];
+                    orderY[start[b]] = atY[i];
+                    start[b] = start[b] + 1;
+                    i = i + 1;
+                }
+                delete atX;
+                delete atY;
+                delete start;
+                // AND ONLY NOW ARE THEY BUILT, in block order, so consecutive agents are both
+                // neighbours in the world and climbing addresses in the heap.
+                i = 0;
+                while (i < made) {
+                    mutable Agent* one = new Agent(i + 1, cast<float>(orderX[i]) + 0.5,
+                                                  cast<float>(orderY[i]) + 0.5,
+                                                  i % AgentClass.count()) on heap;
+                    this.fill(one, i, memoryEach);
+                    this.roll[i] = one;
+                    i = i + 1;
+                    if (i % 50000 == 0) {
+                        System.IO.Console.println($"  built {i} of {made}...");
+                    }
+                }
+                delete orderX;
+                delete orderY;
+                // Linked BACKWARDS, because `link` pushes onto the head of a chain: going down the
+                // roll leaves every chain in ascending roll order, so walking a chain forwards
+                // walks memory forwards -- which is what the renderer does to it every frame.
+                mutable int k = made - 1;
+                while (k >= 0) {
+                    this.link(k, this.blockIndexOf(this.roll[k].x, this.roll[k].y));
+                    k = k - 1;
+                }
+                System.IO.Console.println($"scatter: {made} agents placed in block order, {tries} draws, {wet} fell in the sea");
                 return;
             }
 
