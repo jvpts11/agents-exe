@@ -4,6 +4,11 @@ import System.Collections.ArrayList;
 import Agents.World.Grid;
 import Agents.World.Biomes;
 import Agents.People.Folk;
+import Agents.People.Agent;
+import Agents.World.Nodes;
+import Agents.World.NodeKind;
+import Agents.World.Good;
+import Agents.World.Goods;
 import Agents.Nations.Nation;
 import Agents.Nations.Subdivision;
 import Agents.Nations.City;
@@ -53,6 +58,14 @@ public bundle Agents {
             private mutable long refusedWet;   // the ground beside it cannot be walked
             private mutable long noPlot;       // wanted a house, owned nowhere to put one
             private mutable boolean changed;   // ground changed hands since anybody last asked
+            // WHAT THE GATHERING DID, counted. A city whose store stays empty has to say which of
+            // these it was: nobody sent, nothing within reach, or somebody else got there first.
+            private mutable long sentOut;
+            private mutable long gathered;
+            private mutable long delivered;
+            private mutable long noNode;
+            private mutable long tooLate;
+            private mutable long yieldsNothing;
 
             public static fixed int FOG = 32;
 
@@ -70,6 +83,12 @@ public bundle Agents {
                 this.refusedWet = 0;
                 this.noPlot = 0;
                 this.changed = false;
+                this.sentOut = 0;
+                this.gathered = 0;
+                this.delivered = 0;
+                this.noNode = 0;
+                this.tooLate = 0;
+                this.yieldsNothing = 0;
                 this.nations = new ArrayList<Nation*>() on heap;
                 this.subs = new ArrayList<Subdivision*>() on heap;
                 this.cities = new ArrayList<City*>() on heap;
@@ -274,11 +293,25 @@ public bundle Agents {
             // thicken, which is the pressure §4 turns into colonists.
             public static fixed int PLOTS = 8;
 
+            // K, AND WHY IT IS EIGHT.
+            //
+            // A city settles where its entitlement and its density agree: tiles = K*sqrt(houses)
+            // and houses = tiles*PLOTS give tiles = K*K*PLOTS. K is therefore a QUADRATIC lever --
+            // three gave seventy cells, which João watched and called far too little for a
+            // continent, and eight gives five hundred and twelve. Seven times the ground for a
+            // number less than three times as large.
+            //
+            // It stays a ceiling rather than the thing that decides. What a city actually stops at
+            // is where the wood, the stone and the ground around it run out, and that is what the
+            // next run measures.
+            public static fixed int K = 8;
+
             private method sustained(int houses) returns int {
                 if (houses <= 0) {
                     return 1;                            // the founding cell, always
                 }
-                return cast<int>(3.0 * cast<float>(Math.sqrt(cast<double>(houses))));
+                return cast<int>(cast<float>(Realm.K)
+                                 * cast<float>(Math.sqrt(cast<double>(houses))));
             }
 
             // ONE STEP OF EVERY CITY: people are born, houses go up for them, and the ground
@@ -321,7 +354,170 @@ public bundle Agents {
                     } else {
                         this.atCeiling = this.atCeiling + 1;
                     }
+                    // AND THE WORK. Somebody idle is sent for what the city lacks; everybody on an
+                    // errand is asked whether they have arrived.
+                    this.sendOut(g, folk, one);
+                    this.settle(g, folk, one);
                     c = c + 1;
+                }
+                return;
+            }
+
+            // GOING AND GETTING IT.
+            //
+            // Nothing in the chain works without this. A city's buildings cost wood and stone, its
+            // workshops eat what the map holds, and until somebody walks out and brings it back
+            // every recipe in the catalogue is stalled at its first ingredient. That was the whole
+            // of João's objection to the last run: houses were integers, nothing stood in the
+            // world, and the agents did nothing but drift.
+            //
+            // A resident with no errand is given one for whatever the city is shortest of. He
+            // walks there, takes what the node will give, walks back, and puts it in the store.
+            // Producing includes delivering: that is his work from end to end and nothing takes
+            // him off it.
+            private method sendOut(Grid* g, Folk* folk, City* one) returns void {
+                mutable int t = 0;
+                while (t < one.residents.size()) {
+                    mutable Agent* who = folk.at(one.residents.get(t));
+                    if (who.errand == 0) {
+                        int want = this.shortestOf(one);
+                        int found = this.nearestNode(g, one, Nodes.work(want));
+                        if (found < 0) {
+                            this.noNode = this.noNode + 1;
+                            return;                          // nothing within reach; try next tick
+                        }
+                        who.goX = found % this.w;
+                        who.goY = found / this.w;
+                        who.errand = 1;
+                        this.sentOut = this.sentOut + 1;
+                        return;                              // one errand a tick per city
+                    }
+                    t = t + 1;
+                }
+                return;
+            }
+
+            // Which NodeKind the city is shortest of. Wood first because everything in era one is
+            // made of it, then stone, then the rest -- a preference, not a plan, and it goes when
+            // buildings ask for what they actually need.
+            private method shortestOf(City* one) returns int {
+                // `<=`, NOT `<`. With both stores empty -- which is the state every city starts in
+                // -- a strict less-than is false and the city went for stone every single time.
+                // It never sent anybody for wood at all, and the run said so: nine hundred errands
+                // and not one splinter of timber.
+                if (one.have(cast<int>(Good.Wood)) <= one.have(cast<int>(Good.Stone))) {
+                    return cast<int>(NodeKind.OakTree);
+                }
+                return cast<int>(NodeKind.StoneRock);
+            }
+
+            // The nearest node of a given trade, searched outward from the city in rings of cells.
+            // Bounded, and the refusal is counted: a city with no forest within reach has to be
+            // able to say so rather than quietly gathering nothing.
+            private method nearestNode(Grid* g, City* one, int hclass) returns int {
+                mutable int ring = 0;
+                while (ring < 40) {
+                    mutable int dx = 0 - ring;
+                    while (dx <= ring) {
+                        mutable int side = 0;
+                        while (side < 2) {
+                            int gx = one.cx + dx;
+                            mutable int gy = one.cy - ring;
+                            if (side == 1) {
+                                gy = one.cy + ring;
+                            }
+                            side = side + 1;
+                            if (gx < 0 || gy < 0 || gx >= this.w || gy >= this.h) {
+                                continue;
+                            }
+                            if (g.surface().nodeAt(gx, gy, hclass) >= 0) {
+                                return gy * this.w + gx;
+                            }
+                        }
+                        dx = dx + 1;
+                    }
+                    mutable int dy = 0 - ring + 1;
+                    while (dy < ring) {
+                        mutable int side = 0;
+                        while (side < 2) {
+                            mutable int gx = one.cx - ring;
+                            if (side == 1) {
+                                gx = one.cx + ring;
+                            }
+                            int gy = one.cy + dy;
+                            side = side + 1;
+                            if (gx < 0 || gy < 0 || gx >= this.w || gy >= this.h) {
+                                continue;
+                            }
+                            if (g.surface().nodeAt(gx, gy, hclass) >= 0) {
+                                return gy * this.w + gx;
+                            }
+                        }
+                        dy = dy + 1;
+                    }
+                    ring = ring + 1;
+                }
+                return 0 - 1;
+            }
+
+            // ARRIVING, AND WHAT HAPPENS THERE. Walked once a tick over the people on errands,
+            // which is what turns a heading into a job done.
+            private method settle(Grid* g, Folk* folk, City* one) returns void {
+                mutable int t = 0;
+                while (t < one.residents.size()) {
+                    mutable Agent* who = folk.at(one.residents.get(t));
+                    t = t + 1;
+                    if (who.errand == 0) {
+                        continue;
+                    }
+                    int atX = cast<int>(who.x);
+                    int atY = cast<int>(who.y);
+                    if (who.errand == 1) {
+                        if (atX != who.goX || atY != who.goY) {
+                            continue;                        // still walking
+                        }
+                        int node = g.surface().nodeAt(who.goX, who.goY,
+                                                    Nodes.work(cast<int>(NodeKind.OakTree)));
+                        mutable int use = node;
+                        if (use < 0) {
+                            use = g.surface().nodeAt(who.goX, who.goY,
+                                                   Nodes.work(cast<int>(NodeKind.StoneRock)));
+                        }
+                        if (use < 0) {
+                            who.errand = 0;                  // somebody else took it first
+                            this.tooLate = this.tooLate + 1;
+                            continue;
+                        }
+                        int got = g.surface().harvest(use, 6);
+                        if (got <= 0) {
+                            who.errand = 0;
+                            this.tooLate = this.tooLate + 1;
+                            continue;
+                        }
+                        int gives = Nodes.gives(g.surface().kindAt(use));
+                        if (gives == cast<int>(Good.Nothing)) {
+                            // A node that yields nothing is not a mistake in the catalogue -- some
+                            // kinds are scenery -- but carrying six units of it home and putting
+                            // them in the store is. The first run did exactly that.
+                            who.errand = 0;
+                            this.yieldsNothing = this.yieldsNothing + 1;
+                            continue;
+                        }
+                        who.holds = gives;
+                        who.held = got;
+                        who.errand = 2;
+                        who.goX = one.cx;
+                        who.goY = one.cy;
+                        this.gathered = this.gathered + cast<long>(got);
+                    } else {
+                        if (atX != one.cx || atY != one.cy) {
+                            continue;                        // still walking home
+                        }
+                        one.take(who.holds, who.held);
+                        this.delivered = this.delivered + cast<long>(who.held);
+                        who.held = 0;
+                        who.errand = 0;
+                    }
                 }
                 return;
             }
@@ -429,6 +625,25 @@ public bundle Agents {
 
             public method growthReport() returns void {
                 System.IO.Console.println($"growth: {this.atCeiling} ticks at the building ceiling, {this.refusedBoxed} boxed in, {this.refusedFar} refused for distance, {this.refusedWet} refused as unwalkable, {this.noPlot} with nowhere to build");
+                System.IO.Console.println($"gather: {this.sentOut} sent out, {this.gathered} taken off the map, {this.delivered} delivered to a store, {this.noNode} found nothing in reach, {this.tooLate} arrived at an empty node, {this.yieldsNothing} at a node that yields nothing");
+                mutable int c = 0;
+                while (c < this.cities.size()) {
+                    mutable City* one = this.cities.get(c);
+                    // EVERY GOOD THAT HAS ANY, not the two I expected to see. The first run
+                    // reported "0 wood, 0 stone" after delivering two thousand eight hundred
+                    // units, because a quarry trade brings back marble and clay and salt as
+                    // readily as stone -- the goods were in the store and the readout was looking
+                    // past them. A report that only prints what it went looking for will always
+                    // agree with whoever wrote it.
+                    mutable int gd = 0;
+                    while (gd < Goods.count()) {
+                        if (one.have(gd) > 0) {
+                            System.IO.Console.println($"  city {one.id} store: {one.have(gd)} {Goods.name(gd)}");
+                        }
+                        gd = gd + 1;
+                    }
+                    c = c + 1;
+                }
                 return;
             }
 
