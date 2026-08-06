@@ -399,6 +399,9 @@ public bundle Agents {
                 // two views of that fact -- the city's own list and the realm's per-cell layer --
                 // say the same thing. Growth, colonists and death come after, one at a time,
                 // against a foundation that has been checked rather than assumed.
+                Folk* folk = new Folk(4096, seed) on heap;
+                folk.sizeIndex(g);
+                r.setPeople(folk);
                 Realm* realm = new Realm(g, seed) on heap;
                 int where = Main.somewhereWalkable(g, seed);
                 if (where >= 0) {
@@ -414,14 +417,14 @@ public bundle Agents {
                     //   city 0 | city 1   same subdivision  -> thin, dashed
                     //   city 1 | city 2   same nation       -> medium, solid
                     //   the outside                         -> thick, solid
+                    // THE FOUNDERS. Twelve people, real agents on the roll, standing in the
+                    // capital. Everything after this is theirs: houses go up for them, the ground
+                    // follows the houses, and the children they have are what makes the town grow.
                     mutable City* seat = realm.cityAt(realm.nationAt(nid).capital);
-                    int sid0 = seat.subdivision;
-                    int sid1 = realm.openSubdivision(nid);
-                    int c1 = realm.foundCity(g, seat.cx + 5, seat.cy, sid0);
-                    int c2 = realm.foundCity(g, seat.cx + 10, seat.cy, sid1);
-                    Main.blockOut(realm, seat.id, seat.cx, seat.cy);
-                    Main.blockOut(realm, c1, seat.cx + 5, seat.cy);
-                    Main.blockOut(realm, c2, seat.cx + 10, seat.cy);
+                    for (int k in 0..12) {
+                        seat.residents.add(folk.spawn(cast<float>(seat.cx) + 0.5,
+                                                      cast<float>(seat.cy) + 0.5, k % 4));
+                    }
                 }
                 realm.report();
                 realm.audit();
@@ -444,6 +447,7 @@ public bundle Agents {
                 Hud* text = new Hud(win.gl, 14) on heap;
                 mutable int lastX = win.cursorX();
                 mutable int lastY = win.cursorY();
+                mutable int wanderTick = 0;
                 // THE WHOLE FRAME IS MEASURED, not the part the renderer happens to own. The meter
                 // used to be opened and closed inside `render`, which left the input, the moving of
                 // half a million people, the HUD and the buffer swap outside it -- and those turned
@@ -499,11 +503,17 @@ public bundle Agents {
                     // cost of a world full of people, paid honestly, before any of them is asked
                     // to think.
                     gauge.lap(cast<int>(Phase.Input));
-                    // Nobody to move yet. The phase stays in the meter rather than being taken out
-                    // of it: it comes back the moment there is a population, and a frame budget
-                    // that has to be re-plumbed every time something is added is a frame budget
-                    // that stops being kept.
+                    realm.grow(g, folk, wanderTick);
+                    folk.wander(g, 0.05, wanderTick);
+                    r.setFolkTick(wanderTick);
+                    wanderTick = wanderTick + 1;
                     gauge.lap(cast<int>(Phase.Moving));
+                    // The borders are rebuilt when the ground has changed hands and not otherwise.
+                    // Territory changes a few times a second at most; rebuilding it every frame
+                    // would be the sweep this project has already paid for twice.
+                    if (realm.takeChanged()) {
+                        r.bakeBorders();
+                    }
                     r.render(cw, ch);
                     // The frame rate, in the title and on the HUD. There is one clock now instead
                     // of two: with nothing being simulated there is no tick rate to fall out of
@@ -535,9 +545,12 @@ public bundle Agents {
                 // what have to still agree after the world has been running, which is the only
                 // version of that question worth asking once anything starts changing it.
                 realm.audit();
+                realm.report();
+                realm.growthReport();
                 delete text;
                 delete hud;
                 delete realm;
+                delete folk;
                 delete r;
                 delete rivers;
                 delete nodeMesh;

@@ -51,6 +51,7 @@ public bundle Agents {
             private mutable long rebinnings; // how often somebody actually changed block
             private mutable long groundLooks; // how often the world was actually asked about a cell
             private mutable long movedEver;   // how many agent-moves have actually been done
+            private mutable int cap;          // room on the roll, which grows as people are born
 
             public static fixed int BLOCK = 32;
 
@@ -79,10 +80,15 @@ public bundle Agents {
             public static fixed int SLICES = 16;
 
             public constructor Folk(int howMany, int withSeed) {
-                this.roll = new Agent*[howMany]();
-                this.nextIn = new int[howMany]();
-                this.prevIn = new int[howMany]();
-                this.blockOf = new int[howMany]();
+                mutable int room = howMany;
+                if (room < 16) {
+                    room = 16;
+                }
+                this.cap = room;
+                this.roll = new Agent*[room]();
+                this.nextIn = new int[room]();
+                this.prevIn = new int[room]();
+                this.blockOf = new int[room]();
                 this.head = new int[1]();
                 this.bw = 0;
                 this.bh = 0;
@@ -91,6 +97,73 @@ public bundle Agents {
                 this.rebinnings = 0;
                 this.groundLooks = 0;
                 this.movedEver = 0;
+            }
+
+            // ROOM FOR MORE PEOPLE, because a population that a game is running is not a number
+            // decided at the start.
+            //
+            // The experiment that built this class knew how many agents it wanted before it made
+            // any -- half a million, fixed. A world where people are born does not, and a fixed
+            // roll would mean either wasting memory for a population that never comes or a silent
+            // ceiling that stops births without saying so. Doubling costs one copy per doubling,
+            // which is nothing next to what the agents themselves carry.
+            private method reserve(int want) returns void {
+                if (want <= this.cap) {
+                    return;
+                }
+                mutable int room = this.cap;
+                while (room < want) {
+                    room = room * 2;
+                }
+                mutable Agent*[] biggerRoll = new Agent*[room]();
+                mutable int[] biggerNext = new int[room]();
+                mutable int[] biggerPrev = new int[room]();
+                mutable int[] biggerBlock = new int[room]();
+                mutable int i = 0;
+                while (i < this.n) {
+                    biggerRoll[i] = this.roll[i];
+                    biggerNext[i] = this.nextIn[i];
+                    biggerPrev[i] = this.prevIn[i];
+                    biggerBlock[i] = this.blockOf[i];
+                    i = i + 1;
+                }
+                delete this.roll;
+                delete this.nextIn;
+                delete this.prevIn;
+                delete this.blockOf;
+                this.roll = biggerRoll;
+                this.nextIn = biggerNext;
+                this.prevIn = biggerPrev;
+                this.blockOf = biggerBlock;
+                this.cap = room;
+                return;
+            }
+
+            // THE INDEX IS SIZED TO THE WORLD, which the constructor cannot do because it has not
+            // seen the world yet. Called by `scatter`, and separately by anyone who is going to
+            // spawn people one at a time instead of all at once -- a nation being founded, for
+            // instance, rather than an experiment being set up.
+            public method sizeIndex(Grid* g) returns void {
+                delete this.head;
+                this.bw = (g.width() + Folk.BLOCK - 1) / Folk.BLOCK;
+                this.bh = (g.height() + Folk.BLOCK - 1) / Folk.BLOCK;
+                this.head = new int[this.bw * this.bh]();
+                for (int b in 0..this.bw * this.bh) {
+                    this.head[b] = 0 - 1;
+                }
+                return;
+            }
+
+            // ONE PERSON, BORN WHERE THEY ARE BORN. Returns their place on the roll, which is how
+            // a city holds a resident and how the renderer finds them.
+            public method spawn(float atX, float atY, int kind) returns int {
+                this.reserve(this.n + 1);
+                int i = this.n;
+                mutable Agent* one = new Agent(i + 1, atX, atY, kind) on heap;
+                this.roll[i] = one;
+                this.n = i + 1;
+                this.link(i, this.blockIndexOf(atX, atY));
+                return i;
             }
 
             // EVERYBODY IS STILL IN THE INDEX, counted by walking it rather than assumed.
@@ -265,13 +338,7 @@ public bundle Agents {
                 // The index is sized to the world here rather than in the constructor, because the
                 // world is what decides how many blocks there are and the constructor has not seen
                 // it yet.
-                delete this.head;
-                this.bw = (w + Folk.BLOCK - 1) / Folk.BLOCK;
-                this.bh = (h + Folk.BLOCK - 1) / Folk.BLOCK;
-                this.head = new int[this.bw * this.bh]();
-                for (int b in 0..this.bw * this.bh) {
-                    this.head[b] = 0 - 1;
-                }
+                this.sizeIndex(g);
                 // WHERE EVERYBODY STANDS IS DECIDED BEFORE ANYBODY IS BUILT, so that the objects
                 // can be built in the order the move loop will walk them.
                 //
@@ -283,6 +350,7 @@ public bundle Agents {
                 //
                 // Deciding the positions first costs two int arrays and buys both: neighbours in
                 // the world are neighbours in the roll AND neighbours in memory.
+                this.reserve(howMany);
                 mutable int[] atX = new int[howMany]();
                 mutable int[] atY = new int[howMany]();
                 mutable int made = 0;

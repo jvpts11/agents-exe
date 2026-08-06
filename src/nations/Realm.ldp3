@@ -1,7 +1,9 @@
 import System.IO.Console;
+import System.Math.Math;
 import System.Collections.ArrayList;
 import Agents.World.Grid;
 import Agents.World.Biomes;
+import Agents.People.Folk;
 import Agents.Nations.Nation;
 import Agents.Nations.Subdivision;
 import Agents.Nations.City;
@@ -43,6 +45,14 @@ public bundle Agents {
             private mutable int seed;
             private mutable long claims;     // cells taken, over the run
             private mutable long releases;   // cells given back
+            // WHY A CITY STOPPED GROWING, counted rather than guessed at. A city that never
+            // expands has to name the condition that refused it.
+            private mutable long atCeiling;    // its buildings entitle it to no more
+            private mutable long refusedBoxed; // nothing free next to it at all
+            private mutable long refusedFar;   // past the hard radius
+            private mutable long refusedWet;   // the ground beside it cannot be walked
+            private mutable long noPlot;       // wanted a house, owned nowhere to put one
+            private mutable boolean changed;   // ground changed hands since anybody last asked
 
             public static fixed int FOG = 32;
 
@@ -54,6 +64,12 @@ public bundle Agents {
                 this.seed = withSeed;
                 this.claims = 0;
                 this.releases = 0;
+                this.atCeiling = 0;
+                this.refusedBoxed = 0;
+                this.refusedFar = 0;
+                this.refusedWet = 0;
+                this.noPlot = 0;
+                this.changed = false;
                 this.nations = new ArrayList<Nation*>() on heap;
                 this.subs = new ArrayList<Subdivision*>() on heap;
                 this.cities = new ArrayList<City*>() on heap;
@@ -224,6 +240,195 @@ public bundle Agents {
                     i = i + 1;
                 }
                 c.tiles.clear();
+                return;
+            }
+
+            // ---- growing ----
+
+            // WHAT A CITY'S BUILDINGS ENTITLE IT TO.
+            //
+            //     tilesSustained = K * sqrt(houses)
+            //
+            // Doubling the territory takes FOUR TIMES the buildings. The rising cost lives in the
+            // exponent rather than in a price, and that is the whole point: the first model priced
+            // expansion with a heuristic and was unusable, because a made-up price has nothing in
+            // the world to check it against. When the world came out wrong there was no telling
+            // whether the number, the recipe or the formula was at fault. Territory tracking
+            // buildings is a relation that can always be read back off the world.
+            //
+            // K and MAX_RADIUS are not chosen here. They are the two numbers this slice exists to
+            // MEASURE, and whatever is written below came off a run.
+            public static fixed int PER_HOUSE = 4;      // residents a house holds
+            public static fixed int MAX_RADIUS = 26;    // hard ceiling from the centre, in cells
+            // HOW MANY HOUSES STAND ON ONE CELL.
+            //
+            // This was one, and one is impossible. A house needs a cell, so a city with n houses
+            // needs n cells -- but its entitlement is K*sqrt(n), and K*sqrt(n) >= n only holds
+            // while n <= K*K. Past nine houses the city was owed less ground than its houses
+            // already stood on, and it locked: it could not build without more ground and could
+            // not claim ground without more buildings. The run showed it exactly, stuck at seven
+            // cells with `nowhere to build` firing seven thousand times.
+            //
+            // Cities are dense. A cell holds several houses, and the entitlement then holds up to
+            // (K*PLOTS) squared houses -- beyond which the city stops spreading and can only
+            // thicken, which is the pressure §4 turns into colonists.
+            public static fixed int PLOTS = 8;
+
+            private method sustained(int houses) returns int {
+                if (houses <= 0) {
+                    return 1;                            // the founding cell, always
+                }
+                return cast<int>(3.0 * cast<float>(Math.sqrt(cast<double>(houses))));
+            }
+
+            // ONE STEP OF EVERY CITY: people are born, houses go up for them, and the ground
+            // follows the houses. Three links, each one a plain relation, so that when the shape
+            // of a city comes out wrong it is possible to say which link did it.
+            public method grow(Grid* g, Folk* folk, int tick) returns void {
+                mutable int c = 0;
+                while (c < this.cities.size()) {
+                    mutable City* one = this.cities.get(c);
+                    // BIRTHS, AND THERE HAS TO BE A ROOF.
+                    //
+                    // The first version was a bare rate and it produced three hundred and ninety
+                    // seven thousand people in a town of seven cells -- exponential growth with
+                    // nothing on the other side of it. Housing is what a town's population is
+                    // actually against, so a child is born when there is somewhere to put it and
+                    // not otherwise, and the two links pull on each other instead of one running
+                    // away.
+                    //
+                    // Still crude, and still the piece most obviously standing in for something
+                    // real: people should be born to parents who met. That is agent depth, not
+                    // territory, and it comes when the agents do.
+                    int roof = one.buildings.size() * Realm.PER_HOUSE;
+                    if (one.residents.size() < roof && (tick + one.id) % 12 == 0) {
+                        int who = folk.spawn(cast<float>(one.cx) + 0.5,
+                                             cast<float>(one.cy) + 0.5, one.id % 4);
+                        one.residents.add(who);
+                    }
+                    // HOUSES, raised when the ones standing are full.
+                    if (one.residents.size() >= roof) {
+                        int plot = this.freePlot(one);
+                        if (plot >= 0) {
+                            one.buildings.add(plot);
+                        } else {
+                            this.noPlot = this.noPlot + 1;
+                        }
+                    }
+                    // GROUND, following the houses.
+                    if (one.tiles.size() < this.sustained(one.buildings.size())) {
+                        this.expand(g, one);
+                    } else {
+                        this.atCeiling = this.atCeiling + 1;
+                    }
+                    c = c + 1;
+                }
+                return;
+            }
+
+            // A cell the city owns that still has room for another house. Not an EMPTY cell -- a
+            // cell holds PLOTS of them, and a town that could only ever build on bare ground would
+            // be a town that cannot thicken.
+            //
+            // Walked rather than remembered. A city's tile list is hundreds long at most and this
+            // runs once a tick per city; the day that is not true it becomes a count per cell.
+            private method freePlot(City* one) returns int {
+                mutable int t = 0;
+                while (t < one.tiles.size()) {
+                    int at = one.tiles.get(t);
+                    mutable int standing = 0;
+                    mutable int b = 0;
+                    while (b < one.buildings.size()) {
+                        if (one.buildings.get(b) == at) {
+                            standing = standing + 1;
+                        }
+                        b = b + 1;
+                    }
+                    if (standing < Realm.PLOTS) {
+                        return at;
+                    }
+                    t = t + 1;
+                }
+                return 0 - 1;
+            }
+
+            // ONE CELL, AND THE NEAREST ONE TO THE CENTRE.
+            //
+            // Taking the first candidate found would grow the city in whatever direction its tile
+            // list happens to be ordered, which is a stripe rather than a town. Taking the nearest
+            // to the centre grows it outward roughly round, without anybody deciding what round is.
+            //
+            // Every refusal is counted. A city that stops growing has to be able to say WHY -- no
+            // free ground beside it, the hard radius, or the ceiling its buildings set -- because
+            // "it just stopped" is how this project lost days twice before.
+            private method expand(Grid* g, City* one) returns boolean {
+                mutable int bestAt = 0 - 1;
+                mutable int bestD = 0x7FFFFFFF;
+                mutable int t = 0;
+                while (t < one.tiles.size()) {
+                    int at = one.tiles.get(t);
+                    int gx = at % this.w;
+                    int gy = at / this.w;
+                    mutable int d = 0;
+                    while (d < 4) {
+                        int nx = gx + Realm.stepX(d);
+                        int ny = gy + Realm.stepY(d);
+                        d = d + 1;
+                        if (nx < 0 || ny < 0 || nx >= this.w || ny >= this.h) {
+                            continue;
+                        }
+                        if (this.cityOf[ny * this.w + nx] >= 0) {
+                            continue;                        // somebody's already
+                        }
+                        if (!Biomes.walkable(g.biomeAt(nx, ny))) {
+                            this.refusedWet = this.refusedWet + 1;
+                            continue;
+                        }
+                        int ddx = nx - one.cx;
+                        int ddy = ny - one.cy;
+                        int far = ddx * ddx + ddy * ddy;
+                        if (far > Realm.MAX_RADIUS * Realm.MAX_RADIUS) {
+                            this.refusedFar = this.refusedFar + 1;
+                            continue;
+                        }
+                        if (far < bestD) {
+                            bestD = far;
+                            bestAt = ny * this.w + nx;
+                        }
+                    }
+                    t = t + 1;
+                }
+                if (bestAt < 0) {
+                    this.refusedBoxed = this.refusedBoxed + 1;
+                    return false;
+                }
+                this.claim(one.id, bestAt % this.w, bestAt / this.w);
+                this.changed = true;
+                return true;
+            }
+
+            private static method stepX(int d) returns int {
+                if (d == 0) { return 1; }
+                if (d == 2) { return 0 - 1; }
+                return 0;
+            }
+
+            private static method stepY(int d) returns int {
+                if (d == 1) { return 1; }
+                if (d == 3) { return 0 - 1; }
+                return 0;
+            }
+
+            // Has the ground changed hands since the last time anybody asked? The renderer bakes
+            // its borders off this rather than every frame.
+            public method takeChanged() returns boolean {
+                boolean was = this.changed;
+                this.changed = false;
+                return was;
+            }
+
+            public method growthReport() returns void {
+                System.IO.Console.println($"growth: {this.atCeiling} ticks at the building ceiling, {this.refusedBoxed} boxed in, {this.refusedFar} refused for distance, {this.refusedWet} refused as unwalkable, {this.noPlot} with nowhere to build");
                 return;
             }
 
