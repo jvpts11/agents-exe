@@ -18,6 +18,7 @@ import Agents.World.Species;
 import Agents.World.Beasts;
 import Agents.Nations.Realm;
 import Agents.Nations.City;
+import Agents.World.Goods;
 import System.Memory;
 
 // True-3D GL renderer for the world, two-level LOD:
@@ -59,6 +60,8 @@ public bundle Agents {
             private mutable address obuf;
             private mutable Realm* realm;
             private mutable boolean haveRealm;
+            private mutable MeshAtlas* builds;   // the buildings atlas
+            private mutable int hallMesh;
             private mutable boolean haveSim;
             // Animals get the agents' treatment, not the buildings': they move, so their buffer is
             // rebuilt every frame. They are NOT tinted -- a deer belongs to nobody.
@@ -115,9 +118,14 @@ public bundle Agents {
             // position, rotation, colour and shade. The vertex shader does the turning that the
             // emitters used to do on the processor.
             //
-            // Four of everything, one per class, because an instanced draw takes one mesh and one
-            // run of instances: grouping by model is what makes it four draw calls instead of one
-            // per person.
+            // One slot per shape, because an instanced draw takes ONE mesh and a run of instances:
+            // grouping by model is what makes it a handful of draw calls instead of one per person.
+            //
+            // Slots 0..3 are the four agent bodies. Slots 4 upward are GOODS, indexed by their Good
+            // ordinal -- a load in somebody's hands is the same problem as a body with a different
+            // mesh, and widening the slot count costs nothing next to writing the mechanism twice.
+            public static fixed int SLOTS = 20;
+            private mutable int carrySlots;      // how many goods actually got a mesh
             private mutable int aProg;
             private mutable int[] mvao;         // per class: the vertex array
             private mutable int[] mvbo;         // per class: the body, uploaded once
@@ -317,13 +325,13 @@ public bundle Agents {
                 this.uAAlpha = gl.getUniformLocation(this.aProg, "uAlpha");
                 this.uAFlat = gl.getUniformLocation(this.aProg, "uFlat");
                 this.diagFrame = 0;
-                this.mvao = new int[4]();
-                this.mvbo = new int[4]();
-                this.ivbo = new int[4]();
-                this.mverts = new int[4]();
-                this.icount = new int[4]();
-                this.icap = new int[4]();
-                this.ibuf = new address[4]();
+                this.mvao = new int[GlWorld3D.SLOTS]();
+                this.mvbo = new int[GlWorld3D.SLOTS]();
+                this.ivbo = new int[GlWorld3D.SLOTS]();
+                this.mverts = new int[GlWorld3D.SLOTS]();
+                this.icount = new int[GlWorld3D.SLOTS]();
+                this.icap = new int[GlWorld3D.SLOTS]();
+                this.ibuf = new address[GlWorld3D.SLOTS]();
                 // Instancing is core in GL 3.3 and this window asks for 3.3, so it is taken as
                 // present rather than probed. If a driver ever lies about its version, the agents
                 // are what stops drawing, and that is loud enough to find without a flag for it.
@@ -344,7 +352,7 @@ public bundle Agents {
                 this.anverts = 0;
                 this.acap = 0;
                 this.abuf = cast<address>(0);
-                this.bodyModel = new int[4]();
+                this.bodyModel = new int[GlWorld3D.SLOTS]();
                 this.havePeople = false;
                 this.bvao = gl.genVertexArray();
                 this.bvbo = gl.genBuffer();
@@ -362,6 +370,7 @@ public bundle Agents {
                 this.ocap = 0;
                 this.obuf = cast<address>(0);
                 this.haveRealm = false;
+                this.hallMesh = 0 - 1;
                 this.haveSim = false;
                 this.showTerritory = true;
                 this.bakedClaim = 0 - 1;
@@ -2129,7 +2138,17 @@ public bundle Agents {
             public method setPeopleArt(MeshAtlas* art) returns void {
                 this.people = art;
                 delete this.bodyModel;
-                this.bodyModel = new int[AgentClass.count()]();
+                // ALL THE SLOTS, not just the four classes. This reallocated to exactly four and
+                // the upload pass walks all of them, so the goods slots were read off the end of
+                // the array -- the run died before its first frame, caught by the bounds check
+                // rather than reading somebody else's memory.
+                this.bodyModel = new int[GlWorld3D.SLOTS]();
+                for (int k in 0..GlWorld3D.SLOTS) {
+                    // -1, not 0. A fresh array is zeros and zero is a VALID mesh index, so the
+                    // empty goods slots would have asked an item atlas that does not exist yet for
+                    // its first model.
+                    this.bodyModel[k] = 0 - 1;
+                }
                 for (int k in 0..AgentClass.count()) {
                     this.bodyModel[k] = 0;
                 }
@@ -2160,10 +2179,81 @@ public bundle Agents {
                 return;
             }
 
-            public method setRealm(Realm* r) returns void {
+            public method setRealm(Realm* r, MeshAtlas* buildingArt, MeshAtlas* itemArt) returns void {
                 this.realm = r;
                 this.haveRealm = true;
+                this.builds = buildingArt;
+                this.items = itemArt;
+                this.hallMesh = buildingArt.ordOf("TownHall");
+                if (this.hallMesh < 0) {
+                    System.IO.Console.println("towns: no TownHall mesh; the seat will not be drawn");
+                }
+                // A MESH FOR EVERY GOOD THAT MIGHT BE CARRIED. The item atlas names its models
+                // after the goods, so the two catalogues line up by name -- and a good with no
+                // model is left empty rather than drawn as whatever sits at index zero.
+                this.carrySlots = GlWorld3D.SLOTS - 4;
+                mutable int made = 0;
+                for (int gd in 0..this.carrySlots) {
+                    mutable int found = 0 - 1;
+                    if (gd < Goods.count()) {
+                        found = itemArt.ordOf(Goods.name(gd));
+                    }
+                    this.bodyModel[4 + gd] = found;
+                    if (found >= 0) {
+                        made = made + 1;
+                    }
+                }
+                this.uploadBodies();
+                System.IO.Console.println($"carry: {made} goods have a mesh to be carried as");
                 this.bakeBorders();
+                this.bakeTowns();
+                return;
+            }
+
+            // THE SEAT OF EVERY CITY, STANDING ON THE GROUND.
+            //
+            // The catalogue calls the town hall "placed free at founding", so a city has one from
+            // the moment it exists -- and that is what makes a city a thing you can see rather
+            // than a colour on the map. Rebuilt with the borders, when ground changes hands.
+            public method bakeTowns() returns void {
+                this.bnverts = 0;
+                if (!this.haveRealm || this.hallMesh < 0) {
+                    return;
+                }
+                int tris = this.builds.triCount[this.hallMesh] * this.realm.cityCount();
+                if (tris == 0) {
+                    return;
+                }
+                if (tris > this.bcap) {
+                    if (this.bcap > 0) {
+                        Memory.free(this.bbuf);
+                    }
+                    this.bcap = tris * 2;
+                    this.bbuf = Memory.alloc(cast<long>(this.bcap * 27 * 4 + 4));
+                }
+                this.wrCap = tris * 27;
+                mutable int w = 0;
+                mutable int c = 0;
+                while (c < this.realm.cityCount()) {
+                    mutable City* one = this.realm.cityAt(c);
+                    float z = this.groundTopAt(one.cx, one.cy);
+                    w = this.emitTintedTurned(this.builds, this.bbuf, w, this.hallMesh,
+                                              cast<float>(one.cx) * 2.0 + 1.0,
+                                              cast<float>(one.cy) * 2.0 + 1.0,
+                                              z, 0.9, 1.0, 1.0, 1.0,
+                                              this.shadeAt(one.cx, one.cy, 1,
+                                                           this.stackLvl(this.grid.biomeAt(one.cx, one.cy),
+                                                                         one.cx, one.cy)),
+                                              1.0, 0.0);
+                    c = c + 1;
+                }
+                this.gl.bindVertexArray(this.bvao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.bvbo);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(w * 4), cast<long>(this.bbuf),
+                                   GL.DYNAMIC_DRAW);
+                this.gl.bindVertexArray(0);
+                this.bnverts = w / 9;
+                System.IO.Console.println($"towns: {this.realm.cityCount()} seats standing, {this.bnverts} vertices");
                 return;
             }
 
@@ -2397,10 +2487,22 @@ public bundle Agents {
             // can live in the shader at all -- `grp[tri] >= 1000` is a fact about the model, so it
             // travels with the model instead of being re-decided per person per frame.
             private method uploadBodies() returns void {
-                for (int k in 0..4) {
+                for (int k in 0..GlWorld3D.SLOTS) {
                     int mord = this.bodyModel[k];
-                    int t0 = this.people.triStart[mord];
-                    int tn = this.people.triCount[mord];
+                    // Bodies come from the agent atlas, loads from the item atlas. A slot with no
+                    // mesh behind it yet is left at zero vertices and simply never drawn -- which
+                    // is what lets the bodies go up at startup and the goods follow when the item
+                    // atlas arrives, without either waiting on the other.
+                    mutable MeshAtlas* from = this.people;
+                    if (k >= 4) {
+                        from = this.items;
+                    }
+                    if (mord < 0) {
+                        this.mverts[k] = 0;
+                        continue;
+                    }
+                    int t0 = from.triStart[mord];
+                    int tn = from.triCount[mord];
                     int verts = tn * 3;
                     this.mverts[k] = verts;
                     address buf = Memory.alloc(cast<long>(verts * 10 * 4 + 4));
@@ -2408,22 +2510,22 @@ public bundle Agents {
                     mutable int t = 0;
                     while (t < tn) {
                         int tri = t0 + t;
-                        float cr = cast<float>(this.people.cr[tri]) / 255.0;
-                        float cg = cast<float>(this.people.cg[tri]) / 255.0;
-                        float cb = cast<float>(this.people.cb[tri]) / 255.0;
+                        float cr = cast<float>(from.cr[tri]) / 255.0;
+                        float cg = cast<float>(from.cg[tri]) / 255.0;
+                        float cb = cast<float>(from.cb[tri]) / 255.0;
                         mutable float tint = 0.0;
-                        if (this.people.grp[tri] >= 1000) {
+                        if (from.grp[tri] >= 1000) {
                             tint = 1.0;
                         }
                         mutable int j = 0;
                         while (j < 3) {
                             int vi = tri * 3 + j;
-                            Memory.write<float>(buf + cast<address>(p) * cast<address>(4), this.people.px[vi]);
-                            Memory.write<float>(buf + cast<address>(p + 1) * cast<address>(4), this.people.py[vi]);
-                            Memory.write<float>(buf + cast<address>(p + 2) * cast<address>(4), this.people.pz[vi]);
-                            Memory.write<float>(buf + cast<address>(p + 3) * cast<address>(4), this.people.nx[vi]);
-                            Memory.write<float>(buf + cast<address>(p + 4) * cast<address>(4), this.people.ny[vi]);
-                            Memory.write<float>(buf + cast<address>(p + 5) * cast<address>(4), this.people.nz[vi]);
+                            Memory.write<float>(buf + cast<address>(p) * cast<address>(4), from.px[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 1) * cast<address>(4), from.py[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 2) * cast<address>(4), from.pz[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 3) * cast<address>(4), from.nx[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 4) * cast<address>(4), from.ny[vi]);
+                            Memory.write<float>(buf + cast<address>(p + 5) * cast<address>(4), from.nz[vi]);
                             Memory.write<float>(buf + cast<address>(p + 6) * cast<address>(4), cr);
                             Memory.write<float>(buf + cast<address>(p + 7) * cast<address>(4), cg);
                             Memory.write<float>(buf + cast<address>(p + 8) * cast<address>(4), cb);
@@ -2502,7 +2604,7 @@ public bundle Agents {
             // person: the body, and the shadow it stands on. Counted first so each buffer is sized
             // for what it will hold, then written in the same order.
             private method bakeAgents() returns void {
-                for (int k in 0..4) {
+                for (int k in 0..GlWorld3D.SLOTS) {
                     this.icount[k] = 0;
                 }
                 if (!this.havePeople || !this.haveInstancing) {
@@ -2520,7 +2622,7 @@ public bundle Agents {
                 int by0 = y0 / bs;
                 int bx1 = (x1 + bs - 1) / bs;
                 int by1 = (y1 + bs - 1) / bs;
-                mutable int[] want = new int[4]();
+                mutable int[] want = new int[GlWorld3D.SLOTS]();
                 mutable int by = by0;
                 while (by < by1) {
                     mutable int bx = bx0;
@@ -2539,7 +2641,7 @@ public bundle Agents {
                     }
                     by = by + 1;
                 }
-                for (int k in 0..4) {
+                for (int k in 0..GlWorld3D.SLOTS) {
                     if (want[k] > this.icap[k]) {
                         if (this.icap[k] > 0) {
                             Memory.free(this.ibuf[k]);
@@ -2597,6 +2699,18 @@ public bundle Agents {
                                                  ca, sa, GlWorld3D.hueOf(c, 0),
                                                  GlWorld3D.hueOf(c, 1), GlWorld3D.hueOf(c, 2),
                                                  0.0, shade);
+                                // WHAT HE IS CARRYING, IN HIS HANDS.
+                                //
+                                // Without this an errand is a number in a report: the gathering
+                                // ran, three thousand units came off the map and reached a store,
+                                // and the window showed people drifting exactly as before. The
+                                // load rides above the shoulder and turns with him, so a town
+                                // fetching wood LOOKS like a town fetching wood.
+                                if (one.held > 0 && one.holds < this.carrySlots) {
+                                    this.putInstance(4 + one.holds, fx * 2.0, fy * 2.0,
+                                                     topZ + lift + 0.42, ca, sa,
+                                                     1.0, 1.0, 1.0, 0.0, shade);
+                                }
                             }
                             i = this.folk.nextOf(i);
                         }
@@ -2605,7 +2719,7 @@ public bundle Agents {
                     by = by + 1;
                 }
                 delete want;
-                for (int k in 0..4) {
+                for (int k in 0..GlWorld3D.SLOTS) {
                     if (this.icount[k] > 0) {
                         this.gl.bindBuffer(GL.ARRAY_BUFFER, this.ivbo[k]);
                         this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(this.icount[k] * 40),
@@ -2956,7 +3070,7 @@ public bundle Agents {
                 // The program is swapped back afterwards -- everything drawn after this expects
                 // the world's own shader bound and its uniforms live.
                 mutable boolean drewFolk = false;
-                for (int k in 0..4) {
+                for (int k in 0..GlWorld3D.SLOTS) {
                     if (this.icount[k] > 0 && this.mverts[k] > 0) {
                         if (!drewFolk) {
                             this.gl.useProgram(this.aProg);
