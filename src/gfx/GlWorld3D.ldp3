@@ -16,6 +16,8 @@ import Agents.Sim.Meter;
 import Agents.Sim.Phase;
 import Agents.World.Species;
 import Agents.World.Beasts;
+import Agents.Nations.Realm;
+import Agents.Nations.City;
 import System.Memory;
 
 // True-3D GL renderer for the world, two-level LOD:
@@ -40,14 +42,23 @@ public bundle Agents {
             private mutable int uTime;
             private mutable int uAlpha;
             private mutable int uFlat;
-            // The map overlay: where each community's land is, washed in its colour with a hard
-            // edge where it meets somebody else's. Its own buffer, rebuilt when the claim changes.
+            // THE BORDERS: lines where the ground changes hands, and nothing else.
+            //
+            // What stood here was a translucent WASH over each community's land, and that wash is
+            // exactly what made borders turn beige over water: a pale colour at fifteen per cent
+            // alpha over dark blue is beige, and no amount of choosing a better colour fixes a
+            // mechanism. An opaque line with the lighting switched off is the colour it was asked
+            // for, over grass, over snow, over sea.
+            //
+            // Its own buffer, rebuilt when the claim changes -- territory changes a few times a
+            // minute and the terrain bake and the block index already work that way.
             private mutable int ovao;
             private mutable int ovbo;
-            private mutable int onverts;      // fill triangles
-            private mutable int oedge;        // where the border triangles start, in vertices
+            private mutable int onverts;      // border line vertices
             private mutable int ocap;
             private mutable address obuf;
+            private mutable Realm* realm;
+            private mutable boolean haveRealm;
             private mutable boolean haveSim;
             // Animals get the agents' treatment, not the buildings': they move, so their buffer is
             // rebuilt every frame. They are NOT tinted -- a deer belongs to nobody.
@@ -348,9 +359,9 @@ public bundle Agents {
                 this.ovbo = gl.genBuffer();
                 this.setupVao(this.ovao, this.ovbo);
                 this.onverts = 0;
-                this.oedge = 0;
                 this.ocap = 0;
                 this.obuf = cast<address>(0);
+                this.haveRealm = false;
                 this.haveSim = false;
                 this.showTerritory = true;
                 this.bakedClaim = 0 - 1;
@@ -2149,6 +2160,231 @@ public bundle Agents {
                 return;
             }
 
+            public method setRealm(Realm* r) returns void {
+                this.realm = r;
+                this.haveRealm = true;
+                this.bakeBorders();
+                return;
+            }
+
+            // WHICH BORDER AN EDGE IS: the level at which the two sides first differ.
+            //
+            //   3  different nations, or nobody on the other side  -- thick, solid
+            //   2  same nation, different subdivisions             -- medium, solid
+            //   1  same subdivision, different cities              -- thin, DASHED
+            //   0  same city                                       -- nothing
+            //
+            // Only the highest is drawn. On the outer edge of a country all three coincide, and
+            // stacking them would give every coastline a fat line that means nothing.
+            private method edgeLevel(int mine, int theirs) returns int {
+                if (mine == theirs) {
+                    return 0;
+                }
+                if (theirs < 0) {
+                    return 3;                                  // nobody owns the far side
+                }
+                if (this.realm.nationOfCity(mine) != this.realm.nationOfCity(theirs)) {
+                    return 3;
+                }
+                if (this.realm.subOfCity(mine) != this.realm.subOfCity(theirs)) {
+                    return 2;
+                }
+                return 1;
+            }
+
+            // ONE COLOUR PER NATION, and the whole hierarchy wears it. The level is read off the
+            // STROKE, not the hue: thirty cities in thirty colours is a map you cannot find a
+            // country in.
+            private method nationTint(int nation, int level, int channel) returns float {
+                mutable int k = nation;
+                if (k < 0) {
+                    k = 0;
+                }
+                k = k % 8;
+                mutable float v = 0.5;
+                if (channel == 0) {
+                    if (k == 0) { v = 0.87; } else if (k == 1) { v = 0.30; }
+                    else if (k == 2) { v = 0.95; } else if (k == 3) { v = 0.55; }
+                    else if (k == 4) { v = 0.20; } else if (k == 5) { v = 0.90; }
+                    else if (k == 6) { v = 0.65; } else { v = 0.25; }
+                } else if (channel == 1) {
+                    if (k == 0) { v = 0.25; } else if (k == 1) { v = 0.55; }
+                    else if (k == 2) { v = 0.75; } else if (k == 3) { v = 0.20; }
+                    else if (k == 4) { v = 0.70; } else if (k == 5) { v = 0.60; }
+                    else if (k == 6) { v = 0.85; } else { v = 0.35; }
+                } else {
+                    if (k == 0) { v = 0.25; } else if (k == 1) { v = 0.90; }
+                    else if (k == 2) { v = 0.25; } else if (k == 3) { v = 0.70; }
+                    else if (k == 4) { v = 0.35; } else if (k == 5) { v = 0.20; }
+                    else if (k == 6) { v = 0.40; } else { v = 0.75; }
+                }
+                // The inner levels are lighter, which reinforces the stroke without carrying the
+                // meaning on its own.
+                mutable float lift = 0.0;
+                if (level == 2) {
+                    lift = 0.18;
+                } else if (level == 1) {
+                    lift = 0.34;
+                }
+                mutable float out = v + (1.0 - v) * lift;
+                if (out > 1.0) {
+                    out = 1.0;
+                }
+                return out;
+            }
+
+            // THE BORDERS, BUILT WHEN THE GROUND CHANGES HANDS AND NOT BEFORE.
+            //
+            // One pass over the cells every city owns, four neighbours each, deciding the level of
+            // every edge. Proportional to TERRITORY, not to the map, so a world with one duchy in
+            // it costs a duchy's worth of work.
+            //
+            // The line sits on the ground and follows the step, because the terrain is stepped and
+            // a border that ignored that would float over a slope or sink into it -- the same
+            // thing the props' shadows had to learn.
+            public method bakeBorders() returns void {
+                this.onverts = 0;
+                if (!this.haveRealm) {
+                    return;
+                }
+                mutable int edges = 0;
+                mutable int c = 0;
+                while (c < this.realm.cityCount()) {
+                    mutable City* one = this.realm.cityAt(c);
+                    mutable int t = 0;
+                    while (t < one.tiles.size()) {
+                        int at = one.tiles.get(t);
+                        int gx = at % this.srcW;
+                        int gy = at / this.srcW;
+                        mutable int d = 0;
+                        while (d < 4) {
+                            if (this.borderStroke(one.id, gx, gy, d) > 0.0) {
+                                edges = edges + 1;
+                            }
+                            d = d + 1;
+                        }
+                        t = t + 1;
+                    }
+                    c = c + 1;
+                }
+                if (edges == 0) {
+                    System.IO.Console.println("borders: nothing to draw -- no cell has a neighbour with a different owner");
+                    return;
+                }
+                int need = edges * 6 * 9;                       // two triangles an edge, nine floats a vertex
+                if (need > this.ocap) {
+                    if (this.ocap > 0) {
+                        Memory.free(this.obuf);
+                    }
+                    this.ocap = need * 2;
+                    this.obuf = Memory.alloc(cast<long>(this.ocap * 4 + 4));
+                }
+                this.wrCap = this.ocap;
+                mutable int w = 0;
+                c = 0;
+                while (c < this.realm.cityCount()) {
+                    mutable City* one = this.realm.cityAt(c);
+                    int nation = this.realm.nationOfCity(one.id);
+                    mutable int t = 0;
+                    while (t < one.tiles.size()) {
+                        int at = one.tiles.get(t);
+                        int gx = at % this.srcW;
+                        int gy = at / this.srcW;
+                        mutable int d = 0;
+                        while (d < 4) {
+                            float half = this.borderStroke(one.id, gx, gy, d);
+                            if (half > 0.0) {
+                                int lvl = this.edgeLevel(one.id,
+                                                         this.realm.ownerOf(gx + GlWorld3D.stepX(d),
+                                                                            gy + GlWorld3D.stepY(d)));
+                                w = this.emitBorder(this.obuf, w, gx, gy, d, half,
+                                                    this.nationTint(nation, lvl, 0),
+                                                    this.nationTint(nation, lvl, 1),
+                                                    this.nationTint(nation, lvl, 2));
+                            }
+                            d = d + 1;
+                        }
+                        t = t + 1;
+                    }
+                    c = c + 1;
+                }
+                this.gl.bindVertexArray(this.ovao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.ovbo);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(w * 4), cast<long>(this.obuf),
+                                   GL.DYNAMIC_DRAW);
+                this.gl.bindVertexArray(0);
+                this.onverts = w / 9;
+                System.IO.Console.println($"borders: {edges} edges over {this.realm.cityCount()} cities, {this.onverts} vertices");
+                return;
+            }
+
+            private static method stepX(int d) returns int {
+                if (d == 0) { return 1; }
+                if (d == 2) { return 0 - 1; }
+                return 0;
+            }
+
+            private static method stepY(int d) returns int {
+                if (d == 1) { return 1; }
+                if (d == 3) { return 0 - 1; }
+                return 0;
+            }
+
+            // How thick this edge's line is, or 0 for no line at all. The dashes for the lowest
+            // level live here too: a city border is drawn on every other cell along its run, which
+            // is what makes it read as dashed at any distance instead of as a thinner solid line
+            // that vanishes when you pull back.
+            private method borderStroke(int mine, int gx, int gy, int d) returns float {
+                int level = this.edgeLevel(mine, this.realm.ownerOf(gx + GlWorld3D.stepX(d),
+                                                                   gy + GlWorld3D.stepY(d)));
+                if (level == 3) {
+                    return 0.30;
+                }
+                if (level == 2) {
+                    return 0.17;
+                }
+                if (level == 1) {
+                    if ((gx + gy) % 2 != 0) {
+                        return 0.0;                            // the gap in the dash
+                    }
+                    return 0.10;
+                }
+                return 0.0;
+            }
+
+            // One edge of one cell, as a flat quad lying on that cell's own ground. The world is
+            // drawn at two units a cell, so the edge runs the full two and the thickness is
+            // measured from the boundary inwards -- a border belongs to the land that owns it.
+            private method emitBorder(address buf, int at, int gx, int gy, int d, float half,
+                                      float r, float g, float b) returns int {
+                float z = this.groundTopAt(gx, gy) + 0.02;
+                float x0 = cast<float>(gx) * 2.0;
+                float y0 = cast<float>(gy) * 2.0;
+                mutable float ax = x0;
+                mutable float ay = y0;
+                mutable float bx = x0;
+                mutable float by = y0;
+                mutable float ix = 0.0;
+                mutable float iy = 0.0;
+                if (d == 0) {                                  // +x edge
+                    ax = x0 + 2.0; ay = y0; bx = x0 + 2.0; by = y0 + 2.0; ix = 0.0 - half * 2.0;
+                } else if (d == 1) {                           // +y edge
+                    ax = x0; ay = y0 + 2.0; bx = x0 + 2.0; by = y0 + 2.0; iy = 0.0 - half * 2.0;
+                } else if (d == 2) {                           // -x edge
+                    ax = x0; ay = y0; bx = x0; by = y0 + 2.0; ix = half * 2.0;
+                } else {                                       // -y edge
+                    ax = x0; ay = y0; bx = x0 + 2.0; by = y0; iy = half * 2.0;
+                }
+                mutable int w = at;
+                w = this.wr(buf, w, ax, ay, z, 0.0, 0.0, 1.0, r, g, b);
+                w = this.wr(buf, w, bx, by, z, 0.0, 0.0, 1.0, r, g, b);
+                w = this.wr(buf, w, bx + ix, by + iy, z, 0.0, 0.0, 1.0, r, g, b);
+                w = this.wr(buf, w, ax, ay, z, 0.0, 0.0, 1.0, r, g, b);
+                w = this.wr(buf, w, bx + ix, by + iy, z, 0.0, 0.0, 1.0, r, g, b);
+                w = this.wr(buf, w, ax + ix, ay + iy, z, 0.0, 0.0, 1.0, r, g, b);
+                return w;
+            }
+
             // Which movement tick the world is on, so the crowd can be drawn between the position
             // it was moved from and the one it was moved to.
             public method setFolkTick(int t) returns void {
@@ -2754,23 +2990,22 @@ public bundle Agents {
                     this.gl.uniform1f(this.uAlpha, 1.0);
                     this.gl.uniform1f(this.uFlat, 0.0);
                 }
-                // The map overlay goes on LAST and see-through, over everything including the
-                // people, because it is a thing drawn on a map rather than a thing in the world.
-                // Depth writes are off for it so one wash cannot punch a hole in the next.
+                // THE BORDERS, OPAQUE AND UNLIT.
+                //
+                // No blending. That is the whole fix for the beige: a wash at fifteen per cent
+                // over dark water comes out the colour of the water, and no better choice of
+                // colour repairs a mechanism. A solid line is the colour it was given, on grass,
+                // on snow, on sea.
+                //
+                // Unlit (`uFlat`) for the same reason at a different angle -- a border is a thing
+                // drawn ON the world, not a surface in it, and it must not pick up a highlight
+                // from the sun and change shade as the camera turns.
                 if (this.onverts > 0) {
-                    Wgl.glEnable(GL.BLEND);
-                    Wgl.glBlendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA);
-                    Wgl.glDepthMask(cast<byte>(0));
                     this.gl.uniform1f(this.uFlat, 1.0);
-                    this.gl.bindVertexArray(this.ovao);
-                    this.gl.uniform1f(this.uAlpha, 0.15);
-                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.oedge);
-                    this.gl.uniform1f(this.uAlpha, 0.85);
-                    Wgl.glDrawArrays(GL.TRIANGLES, this.oedge, this.onverts - this.oedge);
                     this.gl.uniform1f(this.uAlpha, 1.0);
+                    this.gl.bindVertexArray(this.ovao);
+                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.onverts);
                     this.gl.uniform1f(this.uFlat, 0.0);
-                    Wgl.glDepthMask(cast<byte>(1));
-                    Wgl.glDisable(GL.BLEND);
                 }
                 this.gl.bindVertexArray(0);
                 this.gauge.lap(cast<int>(Phase.Draw));

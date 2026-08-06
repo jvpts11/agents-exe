@@ -278,6 +278,17 @@ public bundle Agents {
             // camera loop runs when a real window is present.
             // Find assets/models regardless of the working directory (double-click runs from the exe's
             // folder, the terminal from the repo root). Returns "" if none of the candidates has it.
+            // Five by five of ground for one city, through the one method allowed to claim. Part
+            // of the scaffolding above and goes with it.
+            private static method blockOut(Realm* realm, int city, int atX, int atY) returns void {
+                for (int dy in 0 - 2..3) {
+                    for (int dx in 0 - 2..3) {
+                        realm.claim(city, atX + dx, atY + dy);
+                    }
+                }
+                return;
+            }
+
             // A walkable cell, drawn the same way `Folk.scatter` draws them, so that "where does
             // the first nation stand" needs no new idea. Returns the packed cell, or -1 if the
             // world has no walkable ground at all -- which is a worldgen failure and says so.
@@ -394,20 +405,41 @@ public bundle Agents {
                     int nid = realm.foundNation(g, where % g.width(), where / g.width(),
                                                 cast<int>(Government.Monarchy),
                                                 cast<int>(Ideology.Feudalism));
-                    // A first square of ground, claimed cell by cell through the one method that
-                    // is allowed to claim. Twenty-five cells is not a rule -- it is enough ground
-                    // to see on the map and to check the audit against.
+                    // SCAFFOLDING, AND IT SAYS SO. Three cities in two subdivisions, laid out by
+                    // hand in a row, for one reason: it is the only arrangement that puts all
+                    // three kinds of border on screen at once, and a border nobody has looked at
+                    // is a border nobody has checked. It goes when NAT-3 makes cities grow on
+                    // their own.
+                    //
+                    //   city 0 | city 1   same subdivision  -> thin, dashed
+                    //   city 1 | city 2   same nation       -> medium, solid
+                    //   the outside                         -> thick, solid
                     mutable City* seat = realm.cityAt(realm.nationAt(nid).capital);
-                    for (int dy in 0 - 2..3) {
-                        for (int dx in 0 - 2..3) {
-                            realm.claim(seat.id, seat.cx + dx, seat.cy + dy);
-                        }
-                    }
+                    int sid0 = seat.subdivision;
+                    int sid1 = realm.openSubdivision(nid);
+                    int c1 = realm.foundCity(g, seat.cx + 5, seat.cy, sid0);
+                    int c2 = realm.foundCity(g, seat.cx + 10, seat.cy, sid1);
+                    Main.blockOut(realm, seat.id, seat.cx, seat.cy);
+                    Main.blockOut(realm, c1, seat.cx + 5, seat.cy);
+                    Main.blockOut(realm, c2, seat.cx + 10, seat.cy);
                 }
                 realm.report();
                 realm.audit();
-                // The camera is left where `setup` framed it -- the whole world, facing north --
-                // which is where it opened before the crowd experiment aimed it at a person.
+                r.setRealm(realm);
+                // THE CAMERA OPENS ON THE CAPITAL WHEN THERE IS ONE, and on the whole world when
+                // there is not. `setup` frames the entire map, which is the right opening shot for
+                // a world with nothing in it -- but a duchy of twenty-five cells in a world 2560
+                // across is one pixel of that shot, and a window that cannot show you the thing it
+                // just built is not much of a window.
+                if (realm.nationCount() > 0) {
+                    mutable City* seat = realm.cityAt(realm.nationAt(0).capital);
+                    r.aimAt(seat.cx, seat.cy);
+                    // DEGREES. `camEl` is converted with pi/180 at render time, so the 0.55 that
+                    // was here read as half a degree of elevation -- a camera lying on the floor,
+                    // which is what every screenshot taken today was showing. Forty degrees is a
+                    // view of a place; half a degree is a view of the horizon.
+                    r.setView(35.0, 40.0, 55.0);
+                }
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 Hud* text = new Hud(win.gl, 14) on heap;
                 mutable int lastX = win.cursorX();
