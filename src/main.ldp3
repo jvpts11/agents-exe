@@ -342,38 +342,24 @@ public bundle Agents {
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
                 // THE WORLD, AND NOTHING LIVING IN IT YET.
                 //
-                // Everything that used to be built here -- fifty thousand agents, the simulation,
-                // the buildings raised on it, the roads worn into it, the fauna -- has been deleted
-                // to be written again. What is left is exactly the part that was never the problem:
-                // the world is generated, audited and drawn, and it will stay drawable while the
-                // new model is built against it one piece at a time.
-                // HALF A MILLION PEOPLE, IN THE REAL GAME. Measured headless first at 2.4 GB and
-                // 23 ms a tick, which is the number that settled objects against columns. This is
-                // the same population in the window that actually draws, which is the only test
-                // that decides whether it holds.
-                Folk* folk = new Folk(500000, seed) on heap;
-                folk.scatter(g, 500000, 12);
-                folk.report();
-                r.setPeople(folk, peopleMesh);
-                // THE CAMERA OPENS ON A PERSON, not on the middle of the map.
+                // The half a million agents that stood here were an EXPERIMENT, not the game: they
+                // existed to settle whether an agent should be an object or a row in a column, and
+                // to find out what a world full of people costs to draw and to move. They settled
+                // both -- 2.4 GB, and a frame that went from eleven to a hundred and forty-four
+                // frames a second once the drawing was instanced and the movement sliced -- and a
+                // measurement that has given its answer should not be left running as scenery.
                 //
-                // The middle of a generated world is as likely to be open ocean as anything else,
-                // and a window that opens on empty water while half a million people stand
-                // somewhere off screen is a window that reports "there is nobody here" about a
-                // world that is full. Looking at somebody is the only opening shot that cannot
-                // lie about whether anybody exists.
-                if (folk.count() > 0) {
-                    Agent* first = folk.at(0);
-                    r.aimAt(cast<int>(first.x), cast<int>(first.y));
-                    r.setView(0.7, 0.55, 90.0);
-                    System.IO.Console.println($"camera: opening on agent 1 at {cast<int>(first.x)},{cast<int>(first.y)}");
-                }
+                // What stays is everything that experiment built and the real game needs: `Agent`
+                // and `Folk`, the block index, the instanced draw, the interpolation between one
+                // move and the next, and the counters that proved each of them honest. The
+                // population that fills them next is a nation, not a number.
+                r.setPeopleArt(peopleMesh);
+                // The camera is left where `setup` framed it -- the whole world, facing north --
+                // which is where it opened before the crowd experiment aimed it at a person.
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 Hud* text = new Hud(win.gl, 14) on heap;
                 mutable int lastX = win.cursorX();
                 mutable int lastY = win.cursorY();
-                mutable int wanderTick = 0;
-                mutable long frameOpened = Time.nanos();   // when this frame's drawing began
                 // THE WHOLE FRAME IS MEASURED, not the part the renderer happens to own. The meter
                 // used to be opened and closed inside `render`, which left the input, the moving of
                 // half a million people, the HUD and the buffer swap outside it -- and those turned
@@ -429,13 +415,11 @@ public bundle Agents {
                     // cost of a world full of people, paid honestly, before any of them is asked
                     // to think.
                     gauge.lap(cast<int>(Phase.Input));
-                    folk.wander(g, 0.05, wanderTick);
+                    // Nobody to move yet. The phase stays in the meter rather than being taken out
+                    // of it: it comes back the moment there is a population, and a frame budget
+                    // that has to be re-plumbed every time something is added is a frame budget
+                    // that stops being kept.
                     gauge.lap(cast<int>(Phase.Moving));
-                    // The tick the crowd was just moved on, not the next one: the renderer draws
-                    // each agent part-way through ITS interval, and an off-by-one here would show
-                    // everybody an eighth of a step ahead of where they are.
-                    r.setFolkTick(wanderTick);
-                    wanderTick = wanderTick + 1;
                     r.render(cw, ch);
                     // The frame rate, in the title and on the HUD. There is one clock now instead
                     // of two: with nothing being simulated there is no tick rate to fall out of
@@ -460,14 +444,11 @@ public bundle Agents {
                 // real load is, and a profile you have to remember to ask for is a profile nobody
                 // reads.
                 r.frameMeter().report("frame");
-                folk.moveWork(r.frameMeter().frameCount());
-                folk.auditIndex();
                 if (r.overruns() > 0) {
                     System.IO.Console.println($"renderer: {r.overruns()} vertex writes refused past the end of a buffer -- a counting pass and its emitting pass disagreed");
                 }
                 delete text;
                 delete hud;
-                delete folk;
                 delete r;
                 delete rivers;
                 delete nodeMesh;
