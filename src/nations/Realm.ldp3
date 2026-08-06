@@ -1,0 +1,272 @@
+import System.IO.Console;
+import System.Collections.ArrayList;
+import Agents.World.Grid;
+import Agents.World.Biomes;
+import Agents.Nations.Nation;
+import Agents.Nations.Subdivision;
+import Agents.Nations.City;
+
+// EVERY POLITICAL THING IN THE WORLD, AND WHO OWNS EACH CELL.
+//
+// The register lives apart from the Grid on purpose. The Grid is the PHYSICAL world -- elevation,
+// biome, what is buried under a cell -- and none of that changes because somebody drew a border.
+// Who owns a cell is not a physical fact, so it does not belong in the description of the rock.
+//
+// NOTHING IS EVER MERGED. Not cities, not subdivisions, not nations. There is no merge counter and
+// no guard here because there is nothing to guard against: no such code is written. Merging is not
+// something a program does by accident -- it takes a function that moves one place's tiles onto
+// another, and nobody writes that without meaning to. A place that runs out of people ceases to
+// exist and its ground goes back to having no owner, which is `disband` below.
+program AgentsExe;
+
+public bundle Agents {
+    public namespace Nations {
+
+        public class Realm {
+            private mutable ArrayList<Nation*>* nations;
+            private mutable ArrayList<Subdivision*>* subs;
+            private mutable ArrayList<City*>* cities;
+            // WHOSE IS THIS CELL, as a city id, or -1 for nobody's.
+            //
+            // The city keeps its own list of cells because it needs to walk what is hers. This
+            // keeps the reverse, because the renderer asks "whose is this cell" for every cell on
+            // screen every frame, and answering that by searching every city's list is the sweep
+            // this project has already paid for twice.
+            //
+            // Two views of one fact drift apart. So exactly one method writes them (`claim`) and
+            // exactly one unwrites them (`release`), and `audit` checks that they still agree.
+            private mutable int[] cityOf;
+            private mutable int w;
+            private mutable int h;
+            private mutable int bw;          // fog blocks across
+            private mutable int bh;
+            private mutable int seed;
+            private mutable long claims;     // cells taken, over the run
+            private mutable long releases;   // cells given back
+
+            public static fixed int FOG = 32;
+
+            public constructor Realm(Grid* g, int withSeed) {
+                this.w = g.width();
+                this.h = g.height();
+                this.bw = (this.w + Realm.FOG - 1) / Realm.FOG;
+                this.bh = (this.h + Realm.FOG - 1) / Realm.FOG;
+                this.seed = withSeed;
+                this.claims = 0;
+                this.releases = 0;
+                this.nations = new ArrayList<Nation*>() on heap;
+                this.subs = new ArrayList<Subdivision*>() on heap;
+                this.cities = new ArrayList<City*>() on heap;
+                this.cityOf = new int[this.w * this.h]();
+                mutable int i = 0;
+                int n = this.w * this.h;
+                while (i < n) {
+                    this.cityOf[i] = 0 - 1;
+                    i = i + 1;
+                }
+            }
+
+            // The lists hold POINTERS, so deleting a list frees the list and not what is in it.
+            // Everything the realm made, the realm frees.
+            public destructor ~Realm() returns void {
+                mutable int i = 0;
+                while (i < this.cities.size()) {
+                    delete this.cities.get(i);
+                    i = i + 1;
+                }
+                i = 0;
+                while (i < this.subs.size()) {
+                    delete this.subs.get(i);
+                    i = i + 1;
+                }
+                i = 0;
+                while (i < this.nations.size()) {
+                    delete this.nations.get(i);
+                    i = i + 1;
+                }
+                delete this.nations;
+                delete this.subs;
+                delete this.cities;
+                delete this.cityOf;
+                return;
+            }
+
+            // ---- reading ----
+
+            public method fogBlocks() returns int {
+                return this.bw * this.bh;
+            }
+
+            public method nationCount() returns int {
+                return this.nations.size();
+            }
+
+            public method subCount() returns int {
+                return this.subs.size();
+            }
+
+            public method cityCount() returns int {
+                return this.cities.size();
+            }
+
+            public method nationAt(int i) returns Nation* {
+                return this.nations.get(i);
+            }
+
+            public method subAt(int i) returns Subdivision* {
+                return this.subs.get(i);
+            }
+
+            public method cityAt(int i) returns City* {
+                return this.cities.get(i);
+            }
+
+            // Whose cell is this? -1 for nobody's. The renderer's question, answered by a lookup.
+            public method ownerOf(int x, int y) returns int {
+                if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
+                    return 0 - 1;
+                }
+                return this.cityOf[y * this.w + x];
+            }
+
+            // ---- founding ----
+
+            public method foundNation(Grid* g, int atX, int atY, int government,
+                                      int ideology) returns int {
+                int nid = this.nations.size();
+                mutable Nation* n = new Nation(nid, this.bw * this.bh) on heap;
+                n.government = government;
+                n.ideology = ideology;
+                this.nations.add(n);
+                // A nation begins as ONE subdivision holding the capital.
+                int sid = this.openSubdivision(nid);
+                int cid = this.foundCity(g, atX, atY, sid);
+                n.capital = cid;
+                return nid;
+            }
+
+            // A subdivision holds between four and eight cities, rolled here and fixed for its
+            // life. It is why two nations the same size are not administered the same way.
+            public method openSubdivision(int nation) returns int {
+                int sid = this.subs.size();
+                int span = 4 + ((this.seed * 2654435761 + sid * 40503) & 0x7FFFFFFF) % 5;
+                mutable Subdivision* s = new Subdivision(sid, nation, span) on heap;
+                this.subs.add(s);
+                this.nations.get(nation).subdivisions.add(sid);
+                return sid;
+            }
+
+            public method foundCity(Grid* g, int atX, int atY, int inSub) returns int {
+                int cid = this.cities.size();
+                mutable City* c = new City(cid, atX, atY, inSub) on heap;
+                this.cities.add(c);
+                this.subs.get(inSub).cities.add(cid);
+                // The founding cell is the city's first ground, so a city always owns at least the
+                // square it stands on -- there is no moment where a city exists nowhere.
+                this.claim(cid, atX, atY);
+                return cid;
+            }
+
+            // ---- the only two ways ground changes hands ----
+
+            // THE ONE PLACE A CELL IS TAKEN. Both views are written here and nowhere else.
+            public method claim(int city, int x, int y) returns boolean {
+                if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
+                    return false;
+                }
+                int at = y * this.w + x;
+                if (this.cityOf[at] >= 0) {
+                    return false;                       // already somebody's; never taken by force here
+                }
+                this.cityOf[at] = city;
+                this.cities.get(city).tiles.add(at);
+                this.claims = this.claims + 1;
+                return true;
+            }
+
+            // THE ONE PLACE A CELL IS GIVEN BACK. Only ever called for the whole of a city at once
+            // (see `disband`) -- there is no partial retreat in this model.
+            private method release(int city, int at) returns void {
+                if (this.cityOf[at] == city) {
+                    this.cityOf[at] = 0 - 1;
+                    this.releases = this.releases + 1;
+                }
+                return;
+            }
+
+            // A CITY THAT RAN OUT OF PEOPLE STOPS EXISTING, and every cell it held goes back to
+            // having no owner. It is not absorbed by a neighbour, it is not merged, and nobody
+            // inherits it. Whatever was built on that ground stays standing as ruins -- the
+            // buildings are not touched here.
+            public method disband(int city) returns void {
+                mutable City* c = this.cities.get(city);
+                mutable int i = 0;
+                while (i < c.tiles.size()) {
+                    this.release(city, c.tiles.get(i));
+                    i = i + 1;
+                }
+                c.tiles.clear();
+                return;
+            }
+
+            // ---- the check that keeps the two views honest ----
+
+            // THE CITY LISTS AND THE CELL LAYER MUST SAY THE SAME THING.
+            //
+            // A bug in claiming does not crash: it makes ground quietly belong to nobody, or to two
+            // cities at once, which reads as a rendering problem and is not. So the two are counted
+            // against each other rather than trusted, exactly as Folk.auditIndex counts the block
+            // chains against the roll.
+            public method audit() returns boolean {
+                mutable long onLayer = 0;
+                mutable int i = 0;
+                int n = this.w * this.h;
+                while (i < n) {
+                    if (this.cityOf[i] >= 0) {
+                        onLayer = onLayer + 1;
+                    }
+                    i = i + 1;
+                }
+                mutable long onLists = 0;
+                mutable int wrong = 0;
+                mutable int c = 0;
+                while (c < this.cities.size()) {
+                    mutable City* one = this.cities.get(c);
+                    onLists = onLists + cast<long>(one.tiles.size());
+                    mutable int t = 0;
+                    while (t < one.tiles.size()) {
+                        if (this.cityOf[one.tiles.get(t)] != one.id) {
+                            wrong = wrong + 1;
+                        }
+                        t = t + 1;
+                    }
+                    c = c + 1;
+                }
+                boolean ok = onLayer == onLists && wrong == 0;
+                System.IO.Console.println($"territory: {onLayer} cells owned on the layer, {onLists} on the city lists, {wrong} disagree");
+                if (!ok) {
+                    System.IO.Console.println("territory: THE LAYER AND THE LISTS DISAGREE -- a cell is owned twice or by nobody");
+                }
+                return ok;
+            }
+
+            public method report() returns void {
+                System.IO.Console.println($"realm: {this.nations.size()} nations, {this.subs.size()} subdivisions, {this.cities.size()} cities");
+                mutable int i = 0;
+                while (i < this.nations.size()) {
+                    mutable Nation* n = this.nations.get(i);
+                    System.IO.Console.println($"  nation {n.id}: {n.title()}, {n.subdivisions.size()} subdivisions, capital is city {n.capital}");
+                    i = i + 1;
+                }
+                mutable int c = 0;
+                while (c < this.cities.size()) {
+                    mutable City* one = this.cities.get(c);
+                    System.IO.Console.println($"  city {one.id} at {one.cx},{one.cy}: {one.area()} cells, {one.population()} residents, {one.houses()} buildings");
+                    c = c + 1;
+                }
+                System.IO.Console.println($"realm: {this.claims} cells claimed and {this.releases} given back over the run");
+                return;
+            }
+        }
+    }
+}

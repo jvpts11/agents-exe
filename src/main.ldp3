@@ -8,6 +8,12 @@ import opengl.gl.Wgl;
 import Agents.World.Grid;
 import Agents.World.WorldGen;
 import Agents.World.Biomes;
+import Agents.World.LandMath;
+import Agents.Nations.Realm;
+import Agents.Nations.Nation;
+import Agents.Nations.Government;
+import Agents.Nations.Ideology;
+import Agents.Nations.City;
 import Agents.World.Nodes;
 import Agents.People.Folk;
 import Agents.People.Agent;
@@ -272,6 +278,27 @@ public bundle Agents {
             // camera loop runs when a real window is present.
             // Find assets/models regardless of the working directory (double-click runs from the exe's
             // folder, the terminal from the repo root). Returns "" if none of the candidates has it.
+            // A walkable cell, drawn the same way `Folk.scatter` draws them, so that "where does
+            // the first nation stand" needs no new idea. Returns the packed cell, or -1 if the
+            // world has no walkable ground at all -- which is a worldgen failure and says so.
+            private static method somewhereWalkable(Grid* g, int seed) returns int {
+                int w = g.width();
+                int h = g.height();
+                mutable int tries = 0;
+                while (tries < 20000) {
+                    tries = tries + 1;
+                    int gx = cast<int>(LandMath.hash01(seed ^ 0x7A11, tries, 3)
+                                       * cast<float>(w - 1));
+                    int gy = cast<int>(LandMath.hash01(seed ^ 0x3C5D, tries, 5)
+                                       * cast<float>(h - 1));
+                    if (Biomes.walkable(g.biomeAt(gx, gy))) {
+                        return gy * w + gx;
+                    }
+                }
+                System.IO.Console.println("realm: found nowhere walkable to found a nation in 20000 draws");
+                return 0 - 1;
+            }
+
             private static method assetRoot() returns String {
                 if (File.readAll("assets/models/terrain.index").length() > 0) {
                     return "assets/models";
@@ -354,6 +381,31 @@ public bundle Agents {
                 // move and the next, and the counters that proved each of them honest. The
                 // population that fills them next is a nation, not a number.
                 r.setPeopleArt(peopleMesh);
+                // ONE NATION, FOUNDED BY HAND, OWNING A HANDFUL OF CELLS.
+                //
+                // Nothing expands, nobody lives in it, and that is the point of this slice: the
+                // question it answers is whether ground can have an owner at all and whether the
+                // two views of that fact -- the city's own list and the realm's per-cell layer --
+                // say the same thing. Growth, colonists and death come after, one at a time,
+                // against a foundation that has been checked rather than assumed.
+                Realm* realm = new Realm(g, seed) on heap;
+                int where = Main.somewhereWalkable(g, seed);
+                if (where >= 0) {
+                    int nid = realm.foundNation(g, where % g.width(), where / g.width(),
+                                                cast<int>(Government.Monarchy),
+                                                cast<int>(Ideology.Feudalism));
+                    // A first square of ground, claimed cell by cell through the one method that
+                    // is allowed to claim. Twenty-five cells is not a rule -- it is enough ground
+                    // to see on the map and to check the audit against.
+                    mutable City* seat = realm.cityAt(realm.nationAt(nid).capital);
+                    for (int dy in 0 - 2..3) {
+                        for (int dx in 0 - 2..3) {
+                            realm.claim(seat.id, seat.cx + dx, seat.cy + dy);
+                        }
+                    }
+                }
+                realm.report();
+                realm.audit();
                 // The camera is left where `setup` framed it -- the whole world, facing north --
                 // which is where it opened before the crowd experiment aimed it at a person.
                 Batch2D* hud = new Batch2D(win.gl) on heap;
@@ -447,8 +499,13 @@ public bundle Agents {
                 if (r.overruns() > 0) {
                     System.IO.Console.println($"renderer: {r.overruns()} vertex writes refused past the end of a buffer -- a counting pass and its emitting pass disagreed");
                 }
+                // Checked again on the way out, not only at startup: the two views of who owns
+                // what have to still agree after the world has been running, which is the only
+                // version of that question worth asking once anything starts changing it.
+                realm.audit();
                 delete text;
                 delete hud;
+                delete realm;
                 delete r;
                 delete rivers;
                 delete nodeMesh;
