@@ -96,7 +96,7 @@ public bundle Agents {
             public static fixed int FOG = 32;
             // How many frames a city may have open at once. A cap, so it is announced: a town with
             // eight half-built things and no finished ones is a town that built nothing.
-            public static fixed int MAX_SITES = 4;
+            public static fixed int MAX_SITES = 24;
             // How many the hall itself shelters.
             public static fixed int SEATS = 24;
             // One builder per this many residents, and not more. The first run taught the trade to
@@ -387,7 +387,10 @@ public bundle Agents {
             public static fixed int EXPAND_RATE = 24;
             // Fruitless node searches one city may pay for in one tick. Each miss walks six
             // thousand tiles, so this is the difference between a frame and a slideshow.
-            public static fixed int SEARCH_TRIES = 3;
+            public static fixed int SEARCH_TRIES = 48;
+            // Errands a town may hand out in one pass. A settlement does not queue its workforce
+            // single file: one at a time meant 1605 of 1620 people standing about.
+            public static fixed int SEND_RATE = 64;
             // How far from his own town a gatherer may be before he is simply lost. Measured in
             // tiles walked, not as the crow flies, and generous -- a forest can be a long way off.
             // Past it he goes home rather than searching for a node further out still.
@@ -554,7 +557,17 @@ public bundle Agents {
                     // trade, the city decides what to raise next, a gatherer is sent for what his
                     // own trade consumes, a builder goes to a site, and everybody already walking
                     // is asked whether they have arrived.
-                    this.teach(folk, one, tick);
+                    // Several a pass: a town that teaches one trade per pass leaves most of its
+                    // people trade-less forever, and the trade-less are never sent anywhere.
+                    mutable int lessons = 1 + one.residents.size() / 24;
+                    if (lessons > 32) {
+                        lessons = 32;
+                    }
+                    mutable int ls = 0;
+                    while (ls < lessons) {
+                        this.teach(folk, one, tick + ls * 977);
+                        ls = ls + 1;
+                    }
                     this.order(g, one, tick);
                     this.sendOut(g, folk, one, tick);
                     this.raise(folk, one);
@@ -588,9 +601,19 @@ public bundle Agents {
                 // A few tries a tick is enough: somebody gets sent, and the ones who found nothing
                 // will be asked again next tick from wherever they have wandered to.
                 mutable int tries = 0;
+                mutable int sent = 0;
                 mutable int t = 0;
                 while (t < one.residents.size()) {
                     mutable Agent* who = folk.at(one.residents.get(t));
+                    // A FRUITLESS SEARCH NO LONGER ENDS THE WHOLE PASS.
+                    //
+                    // Three misses used to `return`, so a town whose diggers had no ore near them
+                    // never reached the wrights standing behind them in the list -- 1299 of 1308
+                    // idle. The bound is on how many searches are PAID FOR, not on where the walk
+                    // over the residents stops.
+                    if (tries >= Realm.SEARCH_TRIES) {
+                        return;
+                    }
                     if (who.errand == 0 && Gathers.isGatherer(who.trade)) {
                         // WHAT HIS OWN TRADE CONSUMES, not what the city happens to be shortest of.
                         //
@@ -630,11 +653,8 @@ public bundle Agents {
                             who.lastAct = 10;
                             who.lastTick = tick;
                             tries = tries + 1;
-                            if (tries >= Realm.SEARCH_TRIES) {
-                                return;           // enough searching for one tick
-                            }
                             t = t + 1;
-                            continue;             // no timber near HIM; a mason may still find rock
+                            continue;
                         }
                         who.goX = found % this.w;
                         who.goY = found / this.w;
@@ -642,7 +662,18 @@ public bundle Agents {
                         who.lastAct = 1;
                         who.lastTick = tick;
                         this.sentOut = this.sentOut + 1;
-                        return;                              // one errand a tick per city
+                        // AS MANY AS THE TOWN HAS IDLE HANDS FOR.
+                        //
+                        // This sent ONE and returned, and with the town thinking every eighth
+                        // tick that is one errand per eight ticks for sixteen hundred people:
+                        // 1605 of 1620 standing about doing nothing, which is the crowd in the
+                        // window. A settlement does not queue its workforce single file.
+                        sent = sent + 1;
+                        if (sent >= Realm.SEND_RATE) {
+                            return;
+                        }
+                        t = t + 1;
+                        continue;
                     }
                     t = t + 1;
                 }
@@ -770,10 +801,21 @@ public bundle Agents {
                 if (one.residents.size() < 1) {
                     return;
                 }
-                int pick = (tick * 7 + one.id * 13) % one.residents.size();
-                mutable Agent* learner = folk.at(one.residents.get(pick));
-                if (learner.trade != cast<int>(Craft.NoCraft)) {
-                    return;                                 // he has one, and he keeps it
+                // SEVERAL LEARN PER PASS, not one. One a pass over a town of sixteen hundred
+                // left most of them trade-less for the whole run, and a man with no trade is
+                // never sent anywhere -- which is the crowd standing about doing nothing.
+                mutable nullable Agent* learner = null;
+                mutable int look = 0;
+                while (look < 32 && learner == null) {
+                    int pick = (tick * 7 + one.id * 13 + look * 131) % one.residents.size();
+                    mutable Agent* cand = folk.at(one.residents.get(pick));
+                    if (cand.trade == cast<int>(Craft.NoCraft)) {
+                        learner = cand;
+                    }
+                    look = look + 1;
+                }
+                if (learner == null) {
+                    return;
                 }
                 // WHAT THE CITY IS SHORTEST OF, among the trades that matter in era one. A learner
                 // takes up the scarcest, which is the pull the design doc describes -- nobody is
@@ -803,8 +845,12 @@ public bundle Agents {
                         // thousand of them away at the site in one arc, and every one of those
                         // was somebody not gathering. A trade nobody can practise is the lower
                         // engine of section 4 pointed at the town's own feet.
+                        // BUILDERS FOLLOW PLACES, NOT POPULATION. A town of sixteen hundred was
+                        // making a hundred and thirty of them for twelve places at the sites,
+                        // and the surplus stood still for the whole run -- a trade nobody can
+                        // practise, which is worse than no trade at all.
                         if (c == cast<int>(Craft.Builder)
-                            && have >= 1 + one.residents.size() / Realm.PER_BUILDER) {
+                            && have >= 2 + (2 + one.residents.size() / 40) * 3) {
                             c = c + 1;
                             continue;
                         }
@@ -882,7 +928,14 @@ public bundle Agents {
                 // Now it fills every free slot it can pay for on the tick it can pay for them,
                 // and `nextWanted` skips what is already being built. A village puts up its store
                 // and two huts at the same time, as a village would.
-                while (one.sites.size() < Realm.MAX_SITES) {
+                // Frames open at once scales with the town. Four was a hamlet's number and it
+                // left a hundred and thirty builders standing idle for twenty thousand ticks
+                // with twelve places between them -- the crowd standing about doing nothing.
+                mutable int slots = 2 + one.residents.size() / 40;
+                if (slots > Realm.MAX_SITES) {
+                    slots = Realm.MAX_SITES;
+                }
+                while (one.sites.size() < slots) {
                     if (!this.orderOne(g, one)) {
                         return;                              // cannot pay, or nowhere to put it
                     }
@@ -1646,7 +1699,15 @@ public bundle Agents {
                     mutable int dy = a.goY - cast<int>(a.y);
                     if (dx < 0) { dx = 0 - dx; }
                     if (dy < 0) { dy = 0 - dy; }
-                    System.IO.Console.println($"t{tick} a{who} pos={a.x},{a.y} was={a.px},{a.py} face={a.hx},{a.hy} errand={a.errand} goto={a.goX},{a.goY} togo={dx + dy} home={a.homeX},{a.homeY} d2home={hx + hy} trade={a.trade} holds={a.holds} held={a.held} site={a.site} did={a.lastAct}@{a.lastTick} idle={tick - a.lastTick}");
+                    // WHAT HE WILL DO WHEN HE GETS THERE. Read off the errand, so the trace says
+                    // intention and not only position.
+                    mutable String next = "drift";
+                    if (a.errand == 1) { next = "take from node"; }
+                    if (a.errand == 2) { next = "put in store"; }
+                    if (a.errand == 3) { next = "draw from store"; }
+                    if (a.errand == 4) { next = "drop at site"; }
+                    if (a.errand == 5) { next = "swing"; }
+                    System.IO.Console.println($"t{tick} a{who} pos={a.x},{a.y} was={a.px},{a.py} face={a.hx},{a.hy} errand={a.errand} goto={a.goX},{a.goY} togo={dx + dy} next={next} home={a.homeX},{a.homeY} d2home={hx + hy} trade={a.trade} holds={a.holds} held={a.held} site={a.site} did={a.lastAct}@{a.lastTick} idle={tick - a.lastTick}");
                     t = t + 1;
                 }
                 return;
