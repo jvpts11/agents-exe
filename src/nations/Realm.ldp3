@@ -351,9 +351,36 @@ public bundle Agents {
             // K and MAX_RADIUS are not chosen here. They are the two numbers this slice exists to
             // MEASURE, and whatever is written below came off a run.
             public static fixed int PER_HOUSE = 4;      // residents a house holds
-            public static fixed int MAX_RADIUS = 60;
+            public static fixed int MAX_RADIUS = 90;
+            // How much a tile's own fixed value may bend the frontier, in squared tiles. Large
+            // enough that the edge wanders by several tiles, small enough that the claim still
+            // grows outward from the town rather than off across the map.
+            public static fixed int WOBBLE = 900;
+            // How hard each already-owned neighbour pulls a tile forward. Larger than the whole
+            // wobble range on purpose: three owned neighbours must beat any amount of wobble, so
+            // a hole is always closed before the frontier advances again.
+            public static fixed int ENCLOSED = 1200;
+            // The eight neighbours, as offsets. Written once here rather than inline in three
+            // loops that could drift apart.
+            private static mutable int[] RX;
+            private static mutable int[] RY;
+
+            onClassLoad {
+                Realm.RX = new int[8]();
+                Realm.RY = new int[8]();
+                Realm.RX[0] = 1;  Realm.RY[0] = 0;
+                Realm.RX[1] = 0 - 1; Realm.RY[1] = 0;
+                Realm.RX[2] = 0;  Realm.RY[2] = 1;
+                Realm.RX[3] = 0;  Realm.RY[3] = 0 - 1;
+                Realm.RX[4] = 1;  Realm.RY[4] = 1;
+                Realm.RX[5] = 1;  Realm.RY[5] = 0 - 1;
+                Realm.RX[6] = 0 - 1; Realm.RY[6] = 1;
+                Realm.RX[7] = 0 - 1; Realm.RY[7] = 0 - 1;
+            }
             // Tiles a city may claim in one tick. A bound, so it is announced rather than assumed.
-            public static fixed int EXPAND_RATE = 8;
+            // FAST, because the claim starts as a camp and has to become a country. The bound
+            // exists so a founding cannot take a province in one frame, not to make growth slow.
+            public static fixed int EXPAND_RATE = 24;
             // Fruitless node searches one city may pay for in one tick. Each miss walks six
             // thousand tiles, so this is the difference between a frame and a slideshow.
             public static fixed int SEARCH_TRIES = 3;
@@ -419,7 +446,14 @@ public bundle Agents {
             // Doubling it quadruples the territory, so this is the one lever worth turning rather
             // than a dozen small ones. At eight, a town of a hundred and fifteen buildings held
             // eighty-five cells and its houses sat in one clump.
-            public static fixed int K = 20;
+            public static fixed int K = 110;
+            // The hinterland a settlement holds whatever it has built: the fields and woods it
+            // works, not the ground under its houses. Added to the earned figure, never max'd
+            // with it -- see sustained.
+            // A camp, not a county. Twelve founders own the ground they can see and no more; the
+            // earned part below is what turns that into a country, and it does so quickly because
+            // K is large and the claim advances many tiles a tick.
+            public static fixed int BASE = 30;
 
             // GROUND A TOWN IS ENTITLED TO, from what it has built -- WITH A FLOOR.
             //
@@ -431,15 +465,18 @@ public bundle Agents {
             //
             // A settlement is founded with room for its first street.
             private method sustained(int houses) returns int {
-                mutable int t = Realm.FLOOR;
-                if (houses > 0) {
-                    int earned = cast<int>(cast<float>(Realm.K)
-                                           * cast<float>(Math.sqrt(cast<double>(houses))));
-                    if (earned > t) {
-                        t = earned;
-                    }
-                }
-                return t;
+                // BASE PLUS EARNED, not the larger of the two.
+                //
+                // A floor that competes with the earned figure becomes a ceiling the moment it is
+                // the bigger of the two, which is what froze the border at a fixed size. Adding
+                // them instead means the base is the hinterland every settlement holds -- fields,
+                // woods, the ground it walks -- and the earned part is what its buildings add on
+                // top. The claim always grows and never stalls.
+                //
+                // The scale is from the window: a town of twenty buildings held a disc a fifth of
+                // the width of what it should, which is a thirtieth of the area.
+                return Realm.BASE + cast<int>(cast<float>(Realm.K)
+                                              * cast<float>(Math.sqrt(cast<double>(houses))));
             }
 
             // ONE STEP OF EVERY CITY: people are born, houses go up for them, and the ground
@@ -835,21 +872,37 @@ public bundle Agents {
             // nothing reserved does not start -- so an order the city cannot afford is simply not
             // given, rather than opening a hole for material to fall into for the rest of the run.
             private method order(Grid* g, City* one, int tick) returns void {
-                if ((tick + one.id) % 8 != 0) {
-                    return;                                  // an order is an event, not a stream
+                // ORDERS ARE GIVEN IN PARALLEL, and this is the fix for a town that raised its
+                // buildings strictly one after another.
+                //
+                // A city holds up to MAX_SITES frames at once and builders spread across all of
+                // them -- but only if the orders are actually GIVEN. This gate let one order
+                // through every eight ticks, and `nextWanted` returns the same kind until that
+                // kind is standing, so in practice the town opened one frame, waited for it, and
+                // opened the next. Four slots and one ever used.
+                //
+                // Now it fills every free slot it can pay for on the tick it can pay for them,
+                // and `nextWanted` skips what is already being built. A village puts up its store
+                // and two huts at the same time, as a village would.
+                while (one.sites.size() < Realm.MAX_SITES) {
+                    if (!this.orderOne(g, one)) {
+                        return;                              // cannot pay, or nowhere to put it
+                    }
                 }
-                if (one.sites.size() >= Realm.MAX_SITES) {
-                    this.sitesFull = this.sitesFull + 1;
-                    return;
-                }
+                this.sitesFull = this.sitesFull + 1;
+                return;
+            }
+
+            // ONE ORDER. Returns whether a frame went down, so the caller can keep filling slots.
+            private method orderOne(Grid* g, City* one) returns boolean {
                 int what = this.nextWanted(one);
                 if (what == cast<int>(BuildingKind.NoBuilding)) {
-                    return;
+                    return false;
                 }
                 int plot = this.freePlot(one);
                 if (plot < 0) {
                     this.noPlot = this.noPlot + 1;
-                    return;
+                    return false;
                 }
                 // CAN THE CITY PAY? Asked over the whole bill before a single unit moves, because
                 // paying for half of a building is how a store empties into three frames that
@@ -865,7 +918,7 @@ public bundle Agents {
                     || one.have(cast<int>(Good.Stone)) < stone
                     || (thirdN > 0 && one.have(third) < thirdN)) {
                     this.cannotAfford = this.cannotAfford + 1;
-                    return;
+                    return false;
                 }
                 one.draw(cast<int>(Good.Wood), wood);
                 one.draw(cast<int>(Good.Stone), stone);
@@ -880,7 +933,7 @@ public bundle Agents {
                 // The picture has to be rebuilt: a frame is a thing standing in the world from
                 // this instant, and a site nobody can see is a pending flag with extra steps.
                 this.townsCut = true;
-                return;
+                return true;
             }
 
             // The next kind this city wants. Era one only, in the order a real settlement would
@@ -896,15 +949,24 @@ public bundle Agents {
                     housed = housed + Builds.roof(one.kinds.get(b));
                     b = b + 1;
                 }
-                if (housed < roof && one.building(cast<int>(BuildingKind.Hut)) < 3) {
-                    return cast<int>(BuildingKind.Hut);
-                }
-                // THE STORE. First thing anybody built to keep food in, and the thing that turns
-                // the builder's fetch from a walk to the forest into a walk across town.
+                // THE STORE COMES FIRST. Before housing, not after it.
+                //
+                // Housing was ahead of it while anybody lacked a roof -- and people are born
+                // continuously, so that condition never went false and the pit was reached last
+                // or never. It is the building every other building depends on: with it a
+                // builder's fetch is a walk across town, and without it he walks to the forest
+                // himself for every plank. Putting it behind an endless queue of huts starved
+                // the whole chain to pay for shelter nobody could stock.
                 if (!one.has(cast<int>(BuildingKind.StoragePit))
                     && one.building(cast<int>(BuildingKind.StoragePit)) == 0) {
                     return cast<int>(BuildingKind.StoragePit);
                 }
+                if (housed < roof && one.building(cast<int>(BuildingKind.Hut)) < 3) {
+                    return cast<int>(BuildingKind.Hut);
+                }
+                // AND THE WORKSHOPS, skipping any already standing OR already being built --
+                // `building()` is what makes the parallel orders pick four different things
+                // instead of four copies of the first.
                 mutable int k = 0;
                 while (k < Realm.ERA1_N) {
                     int want = this.era1[k];
@@ -1332,11 +1394,43 @@ public bundle Agents {
                         }
                         int ddx = nx - one.cx;
                         int ddy = ny - one.cy;
-                        int far = ddx * ddx + ddy * ddy;
+                        mutable int far = ddx * ddx + ddy * ddy;
                         if (far > Realm.MAX_RADIUS * Realm.MAX_RADIUS) {
                             this.refusedFar = this.refusedFar + 1;
                             continue;
                         }
+                        // A COUNTRY IS NOT A DISC -- AND IT HAS NO HOLES IN IT.
+                        //
+                        // Always taking the nearest free tile grows a perfect circle, because
+                        // that IS the definition of a circle. So the distance is warped by a
+                        // value fixed to the tile, and the frontier advances in tongues.
+                        //
+                        // But warping alone punched holes: a tile the wobble pushed back was
+                        // passed over, the claim closed around it, and it stayed unpicked forever
+                        // because the same fixed value pushed it back every time it was
+                        // considered. A country with gaps in the middle of it.
+                        //
+                        // So ENCLOSURE OUTRANKS EVERYTHING. The more of a tile's neighbours the
+                        // city already owns, the more it is pulled forward -- and a tile with
+                        // most of its neighbours owned is a hole, taken before any frontier tile
+                        // whatever the wobble says. The edge stays ragged; the inside stays
+                        // solid.
+                        mutable int held = 0;
+                        mutable int k = 0;
+                        while (k < 8) {
+                            int sx = nx + Realm.RX[k];
+                            int sy = ny + Realm.RY[k];
+                            k = k + 1;
+                            if (sx < 0 || sy < 0 || sx >= this.w || sy >= this.h) {
+                                continue;
+                            }
+                            if (this.cityOf[sy * this.w + sx] == one.id) {
+                                held = held + 1;
+                            }
+                        }
+                        int n = ((nx * 374761393) ^ (ny * 668265263)) & 0x7FFFFFFF;
+                        far = far + (n % Realm.WOBBLE) - (Realm.WOBBLE / 2);
+                        far = far - held * Realm.ENCLOSED;
                         if (far < bestD) {
                             bestD = far;
                             bestAt = ny * this.w + nx;
@@ -1430,8 +1524,46 @@ public bundle Agents {
             //
             // A census of a sample rather than of everybody: a thousand lines is readable and a
             // hundred thousand is not, and the ones behaving strangely are not rare.
+            // WHERE THEY ARE, EVERY TICK.
+            //
+            // The end-of-run dump is a photograph, and a photograph cannot show a man walking
+            // back and forth or standing still -- for that you need the same agent's position at
+            // tick after tick, side by side. This is that: a fixed handful of agents, traced
+            // every tick, so their path can be read straight down the column.
+            //
+            // A handful and not everybody, because two hundred lines a tick at sixty-four ticks a
+            // frame is not a log anybody can read. The SAME handful every time, by index, so the
+            // rows line up.
+            public method trace(Folk* folk, int tick, int many) returns void {
+                if (this.cities.size() < 1) {
+                    return;
+                }
+                mutable City* one = this.cities.get(0);
+                mutable int t = 0;
+                while (t < many && t < one.residents.size()) {
+                    int who = one.residents.get(t);
+                    mutable Agent* a = folk.at(who);
+                    mutable int hx = cast<int>(a.x) - one.cx;
+                    mutable int hy = cast<int>(a.y) - one.cy;
+                    if (hx < 0) { hx = 0 - hx; }
+                    if (hy < 0) { hy = 0 - hy; }
+                    System.IO.Console.println($"trace {tick} agent {who} x={a.x} y={a.y} errand={a.errand} goto={a.goX},{a.goY} home={hx + hy} trade={a.trade} held={a.held}");
+                    t = t + 1;
+                }
+                return;
+            }
+
             public method agentDump(Folk* folk, int many) returns void {
-                System.IO.Console.println("agent dump: id trade errand at from goto holds held site");
+                // WHERE EVERY TOWN IS, first, because every position below is only meaningful
+                // against it -- the last dump printed people at 1121,755 and it took reading the
+                // city line separately to see that was a hundred and ninety tiles from home.
+                mutable int q = 0;
+                while (q < this.cities.size()) {
+                    mutable City* it = this.cities.get(q);
+                    System.IO.Console.println($"city {it.id} centre {it.cx},{it.cy}, {it.tiles.size()} tiles, {it.residents.size()} people, {it.buildings.size()} buildings");
+                    q = q + 1;
+                }
+                System.IO.Console.println("agent dump: id trade errand at was goto d home holds held site");
                 mutable int printed = 0;
                 mutable int c = 0;
                 while (c < this.cities.size() && printed < many) {
@@ -1445,7 +1577,13 @@ public bundle Agents {
                         // question, and it cannot be read off a counter.
                         int dx = a.goX - cast<int>(a.x);
                         int dy = a.goY - cast<int>(a.y);
-                        System.IO.Console.println($"  {who} trade={a.trade} errand={a.errand} at={cast<int>(a.x)},{cast<int>(a.y)} was={cast<int>(a.px)},{cast<int>(a.py)} goto={a.goX},{a.goY} d={dx},{dy} holds={a.holds} held={a.held} site={a.site}");
+                        // AND HOW FAR HE IS FROM HIS OWN TOWN, which is the number that told us
+                        // the strange ones are simply lost.
+                        mutable int hx = cast<int>(a.x) - one.cx;
+                        mutable int hy = cast<int>(a.y) - one.cy;
+                        if (hx < 0) { hx = 0 - hx; }
+                        if (hy < 0) { hy = 0 - hy; }
+                        System.IO.Console.println($"  {who} trade={a.trade} errand={a.errand} at={cast<int>(a.x)},{cast<int>(a.y)} was={cast<int>(a.px)},{cast<int>(a.py)} goto={a.goX},{a.goY} d={dx},{dy} home={hx + hy} holds={a.holds} held={a.held} site={a.site}");
                         printed = printed + 1;
                         t = t + 1;
                     }

@@ -125,6 +125,10 @@ public bundle Agents {
             // ordinal -- a load in somebody's hands is the same problem as a body with a different
             // mesh, and widening the slot count costs nothing next to writing the mechanism twice.
             public static fixed int SLOTS = 20;
+            // How far the camera may be before buildings stop being drawn. Past it a hut is under
+            // a pixel and the town reads better as the border and the ground than as a scatter of
+            // white specks.
+            public static fixed float FAR_BUILDINGS = 420.0;
             private mutable int carrySlots;      // how many goods actually got a mesh
             // Whether to draw people between where they were and where they are. True only when
             // the world advanced exactly one tick this frame -- see the note at the call site.
@@ -2922,12 +2926,22 @@ public bundle Agents {
                             // every Folk.SLICES frames, so its stored position is a staircase;
                             // this is what turns the staircase back into walking. Paid only for
                             // the couple of thousand agents on screen, not for the half million.
-                            mutable float f = 1.0;
-                            if (this.smooth) {
-                                f = this.folk.moveFraction(i, this.folkTick);
-                            }
-                            float fx = one.px + (one.x - one.px) * f;
-                            float fy = one.py + (one.y - one.py) * f;
+                            // PEOPLE ARE DRAWN WHERE THEY ARE. The interpolation is gone.
+                            //
+                            // It existed to smooth a body that is moved once every SLICES ticks,
+                            // and it is the ghost: `px,py` is only rewritten on the tick a man
+                            // actually moves, so on the frame after that the fraction resets to
+                            // zero against a `px` that is still the OLD position -- and he is
+                            // drawn one frame back where he came from before setting off again.
+                            // Walk, snap back, walk. Exactly what was reported, and only at gear
+                            // 1, which is the only gear where the smoothing was still on.
+                            //
+                            // Two attempts to keep it and gate it both failed. A stutter from
+                            // sliced movement is a smaller lie than a man teleporting backwards
+                            // every sixteenth tick, and the honest fix for the stutter is to move
+                            // people more often, not to draw them where they are not.
+                            float fx = one.x;
+                            float fy = one.y;
                             int ax = cast<int>(fx);
                             int ay = cast<int>(fy);
                             if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
@@ -3316,7 +3330,16 @@ public bundle Agents {
                     this.gl.bindVertexArray(this.hvao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.hnverts);
                 }
-                if (this.bnverts > 0) {
+                // BUILDINGS ARE NOT DRAWN FROM ORBIT.
+                //
+                // They were drawn at every distance, so pulling back to see a continent still
+                // rendered every hut in every town -- and a hut is under a pixel from there. The
+                // window showed a scatter of white dots where a settlement should read as a mark
+                // on the land, and the frame paid full price for it.
+                //
+                // The same cut the people already have: past this distance a building is smaller
+                // than what it is drawn on.
+                if (this.bnverts > 0 && this.camDist < GlWorld3D.FAR_BUILDINGS) {
                     this.gl.bindVertexArray(this.bvao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.bnverts);
                 }
@@ -3360,6 +3383,14 @@ public bundle Agents {
                 // it cannot catch the crowd thinning out, because at frame 60 there is no crowd
                 // yet -- a dozen founders draw exactly like a dozen founders should. Reading a
                 // settled world needs a reading taken from a settled world.
+                // IS THE SMOOTHING EVEN ON? Two attempts at the ghost have assumed it was the
+                // interpolation, and the second one is still being reported. Before a third
+                // guess, the flag says what it actually is on a settled frame -- if it is false
+                // and people still trail, the interpolation is innocent and the cause is
+                // elsewhere.
+                if (this.diagFrame == 300) {
+                    System.IO.Console.println($"draw: smooth={this.smooth} folkTick={this.folkTick} detail window {this.detX0},{this.detY0} {this.detW}x{this.detH} baking={this.baking}");
+                }
                 if (this.diagFrame == 60 || this.diagFrame == 900) {
                     mutable int loads = 0;
                     for (int s in 4..GlWorld3D.SLOTS) {
