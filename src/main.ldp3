@@ -348,7 +348,23 @@ public bundle Agents {
                 return 300.0;
             }
 
-            private static method renderGlWorld(int seed, float pace, String tracePath) returns void {
+            // The number on the key, back from the pace it selects. The argument and the key have
+            // to name the same thing, so the HUD can say which gear a run started in.
+            private static method gearOf(float pace) returns int {
+                if (pace >= 300.0) { return 6; }
+                if (pace >= 60.0) { return 5; }
+                if (pace >= 20.0) { return 4; }
+                if (pace >= 5.0) { return 3; }
+                if (pace >= 2.0) { return 2; }
+                return 1;
+            }
+
+            // At most this many world ticks in one frame. Without it, gear 6 on a slow machine
+            // spends the whole frame simulating and the window stops answering the keyboard --
+            // including the key that would slow it back down.
+            public static fixed int TICK_CAP = 64;
+
+            private static method renderGlWorld(int seed, float startPace, String tracePath) returns void {
                 int w = 2560;
                 int h = 1440;
                 System.IO.Console.println("agents.exe: generating the world...");
@@ -450,6 +466,13 @@ public bundle Agents {
                 mutable int lastX = win.cursorX();
                 mutable int lastY = win.cursorY();
                 mutable int wanderTick = 0;
+                // The gear the world is running at, the fraction of a tick carried over from the
+                // last frame, and how many ticks the machine could not keep up with.
+                mutable float pace = startPace;
+                mutable int gear = Main.gearOf(pace);
+                mutable boolean paused = false;
+                mutable float owed = 0.0;
+                mutable long behind = 0;
                 // THE WHOLE FRAME IS MEASURED, not the part the renderer happens to own. The meter
                 // used to be opened and closed inside `render`, which left the input, the moving of
                 // half a million people, the HUD and the buffer swap outside it -- and those turned
@@ -484,10 +507,26 @@ public bundle Agents {
                             if (ev.vk == 0x50) {                           // P: the pixel filter
                                 r.pixelate = !r.pixelate;
                             }
-                            // THE GEARS AND THE PAUSE ARE GONE WITH THE CLOCK THEY DROVE. Speed
-                            // controls for a world with nothing happening in it would be three
-                            // keys that do nothing, which is worse than three keys that are not
-                            // there. They come back with the simulation.
+                            // THE GEARS AND THE PAUSE, BACK NOW THAT THERE IS A WORLD TO RUN.
+                            //
+                            // They were taken out when nothing happened in the world -- three keys
+                            // that do nothing are worse than three keys that are not there. The
+                            // world builds and gathers now, so they belong here again.
+                            //
+                            // And the pace they set was DEAD until this: `paceOf` computed a
+                            // number, `renderGlWorld` took it as a parameter, and no line of code
+                            // read it. Every run this project has done, at every gear, ran at one
+                            // tick a frame. A speed control nothing is wired to is worse than no
+                            // speed control, because the runs get labelled with a speed they
+                            // never ran at.
+                            if (ev.vk >= 0x31 && ev.vk <= 0x36) {          // 1..6: the gears
+                                gear = ev.vk - 0x30;
+                                pace = Main.paceOf(gear);
+                                paused = false;
+                            }
+                            if (ev.vk == 0x20) {                           // space: pause
+                                paused = !paused;
+                            }
                         }
                         delete ev;
                     }
@@ -505,10 +544,33 @@ public bundle Agents {
                     // cost of a world full of people, paid honestly, before any of them is asked
                     // to think.
                     gauge.lap(cast<int>(Phase.Input));
-                    realm.grow(g, folk, wanderTick);
-                    folk.wander(g, 0.05, wanderTick);
+                    // THE GEAR, PAID IN WHOLE TICKS.
+                    //
+                    // Owed rather than rounded: at gear 1 with a frame to spare the world must
+                    // still advance exactly once, and at gear 3 it must advance five times in the
+                    // same second whatever the frame rate happens to be. An accumulator is the
+                    // only version of that which does not silently change speed when the frame
+                    // rate does.
+                    //
+                    // Capped per frame, and the shortfall is counted. A gear the machine cannot
+                    // keep up with has to say so, rather than quietly running slower than the
+                    // number on the screen -- which is the same defect as the pace nobody read.
+                    if (!paused) {
+                        owed = owed + pace;
+                    }
+                    mutable int ran = 0;
+                    while (owed >= 1.0 && ran < Main.TICK_CAP) {
+                        realm.grow(g, folk, wanderTick);
+                        folk.wander(g, 0.05, wanderTick);
+                        wanderTick = wanderTick + 1;
+                        owed = owed - 1.0;
+                        ran = ran + 1;
+                    }
+                    if (owed >= 1.0) {
+                        behind = behind + cast<long>(owed);
+                        owed = 0.0;                      // do not let a backlog build up forever
+                    }
                     r.setFolkTick(wanderTick);
-                    wanderTick = wanderTick + 1;
                     gauge.lap(cast<int>(Phase.Moving));
                     // The borders are rebuilt when the ground has changed hands and not otherwise.
                     // Territory changes a few times a second at most; rebuilding it every frame
@@ -535,7 +597,14 @@ public bundle Agents {
                     // step with the frame rate, and a second number that always agreed with the
                     // first would be a number nobody reads.
                     if (gauge.roll()) {
-                        win.setTitle($"agents.exe -- world  |  {gauge.fps()} fps  [drag/arrows rotate | wheel zoom | WASD pan | P pixels | ESC]");
+                        // THE GEAR IS ON THE SCREEN. A speed you cannot read off the window is a
+                        // speed you cannot report a run at -- which is how three minutes of world
+                        // got written down as "gear 6" when it ran at one tick a frame.
+                        mutable String at = $"x{gear}";
+                        if (paused) {
+                            at = "PAUSED";
+                        }
+                        win.setTitle($"agents.exe -- world  |  {gauge.fps()} fps  |  {at}  |  tick {wanderTick}  [1-6 speed | space pause | drag/arrows rotate | wheel zoom | WASD pan | P pixels | ESC]");
                     }
                     hud.begin(cw, ch, 0);
                     r.drawCompass(hud, cw, ch);
