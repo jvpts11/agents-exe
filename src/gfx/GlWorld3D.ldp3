@@ -126,6 +126,9 @@ public bundle Agents {
             // mesh, and widening the slot count costs nothing next to writing the mechanism twice.
             public static fixed int SLOTS = 20;
             private mutable int carrySlots;      // how many goods actually got a mesh
+            // Whether to draw people between where they were and where they are. True only when
+            // the world advanced exactly one tick this frame -- see the note at the call site.
+            private mutable boolean smooth;
             private mutable int aProg;
             private mutable int[] mvao;         // per class: the vertex array
             private mutable int[] mvbo;         // per class: the body, uploaded once
@@ -2340,9 +2343,15 @@ public bundle Agents {
             // Fixed rather than random, because the bake runs again whenever a building changes
             // and a house that hops six inches every time one goes up across town is worse than a
             // lattice.
+            // `up` is HOW FAR OUT OF THE GROUND IT IS, 0..1 -- not how big it is.
+            //
+            // It was being passed as the scale, so a site with no hashes yet drew a building at
+            // twelve per cent of its size: a doll's house on the grass, not a frame. A building
+            // under construction is the same size it will be finished; what changes is how much
+            // of it is above ground.
             private method putBuilding(int w, int mesh, int cx, int cy, float up,
                                        float r, float gg, float b) returns int {
-                float z = this.groundTopAt(cx, cy);
+                float z = this.groundTopAt(cx, cy) - (1.0 - up) * 2.2;
                 float sh = this.shadeAt(cx, cy, 1,
                                         this.stackLvl(this.grid.biomeAt(cx, cy), cx, cy));
                 // A tile is two units across; the house sits within a third of a unit of centre.
@@ -2352,7 +2361,7 @@ public bundle Agents {
                 return this.emitTintedTurned(this.builds, this.bbuf, w, mesh,
                                              cast<float>(cx) * 2.0 + 1.0 + ox,
                                              cast<float>(cy) * 2.0 + 1.0 + oy,
-                                             z, 0.9 * up, r, gg, b, sh, 1.0, 0.0);
+                                             z, 0.9, r, gg, b, sh, 1.0, 0.0);
             }
 
             // The mesh a BuildingKind draws with. The catalogue names it, and a kind whose mesh is
@@ -2587,6 +2596,11 @@ public bundle Agents {
                 return;
             }
 
+            public method setSmooth(boolean yes) returns void {
+                this.smooth = yes;
+                return;
+            }
+
             // EACH BODY TO THE CARD, ONCE. Ten floats a vertex: position, normal, the mesh's own
             // colour, and whether this triangle takes a tint. That last one is why the tint rule
             // can live in the shader at all -- `grp[tri] >= 1000` is a fact about the model, so it
@@ -2783,7 +2797,10 @@ public bundle Agents {
                             // every Folk.SLICES frames, so its stored position is a staircase;
                             // this is what turns the staircase back into walking. Paid only for
                             // the couple of thousand agents on screen, not for the half million.
-                            float f = this.folk.moveFraction(i, this.folkTick);
+                            mutable float f = 1.0;
+                            if (this.smooth) {
+                                f = this.folk.moveFraction(i, this.folkTick);
+                            }
                             float fx = one.px + (one.x - one.px) * f;
                             float fy = one.py + (one.y - one.py) * f;
                             int ax = cast<int>(fx);
