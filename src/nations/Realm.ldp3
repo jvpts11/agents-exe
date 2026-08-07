@@ -893,6 +893,23 @@ public bundle Agents {
                 return;
             }
 
+            // WHETHER THE STORE HOLDS THE WHOLE BILL. Asked before a kind is chosen, so an
+            // unaffordable one is skipped rather than blocking every kind behind it.
+            private method canAfford(City* one, int what) returns boolean {
+                if (one.have(cast<int>(Good.Wood)) < Builds.woodCost(what)) {
+                    return false;
+                }
+                if (one.have(cast<int>(Good.Stone)) < Builds.stoneCost(what)) {
+                    return false;
+                }
+                int third = Builds.matCost(what);
+                if (third != cast<int>(Good.Nothing)
+                    && one.have(third) < Builds.matCostN(what)) {
+                    return false;
+                }
+                return true;
+            }
+
             // ONE ORDER. Returns whether a frame went down, so the caller can keep filling slots.
             private method orderOne(Grid* g, City* one) returns boolean {
                 int what = this.nextWanted(one);
@@ -949,33 +966,59 @@ public bundle Agents {
                     housed = housed + Builds.roof(one.kinds.get(b));
                     b = b + 1;
                 }
-                // THE STORE COMES FIRST. Before housing, not after it.
+                // THERE IS NO PRIORITY BETWEEN KINDS.
                 //
-                // Housing was ahead of it while anybody lacked a roof -- and people are born
-                // continuously, so that condition never went false and the pit was reached last
-                // or never. It is the building every other building depends on: with it a
-                // builder's fetch is a walk across town, and without it he walks to the forest
-                // himself for every plank. Putting it behind an endless queue of huts starved
-                // the whole chain to pay for shelter nobody could stock.
+                // Both earlier versions had one and both were wrong. Housing first starved the
+                // store, because people are born continuously so "somebody lacks a roof" never
+                // goes false. Store first walled off the whole era behind a material the ground
+                // did not have. An ordering makes ONE unaffordable thing block everything after
+                // it, whichever thing it is.
+                //
+                // A settlement builds what it has the ground and the material for. A store may go
+                // up before a hut or after it; nothing waits in a queue for a kind that cannot be
+                // paid for today. What limits the town is what it can gather, which is the honest
+                // limit and the one that makes gathering matter.
+                //
+                // Wanted at all means: not standing, not already being built, and -- for housing
+                // only -- that there is somebody without a roof. That last is a NEED, not a
+                // priority: a town does not raise its ninth hut for nobody.
+                mutable int[] could = new int[Realm.ERA1_N + 2]();
+                mutable int many = 0;
+                if (housed < roof && one.building(cast<int>(BuildingKind.Hut)) < 3) {
+                    could[many] = cast<int>(BuildingKind.Hut);
+                    many = many + 1;
+                }
                 if (!one.has(cast<int>(BuildingKind.StoragePit))
                     && one.building(cast<int>(BuildingKind.StoragePit)) == 0) {
-                    return cast<int>(BuildingKind.StoragePit);
+                    could[many] = cast<int>(BuildingKind.StoragePit);
+                    many = many + 1;
                 }
-                if (housed < roof && one.building(cast<int>(BuildingKind.Hut)) < 3) {
-                    return cast<int>(BuildingKind.Hut);
-                }
-                // AND THE WORKSHOPS, skipping any already standing OR already being built --
-                // `building()` is what makes the parallel orders pick four different things
-                // instead of four copies of the first.
                 mutable int k = 0;
                 while (k < Realm.ERA1_N) {
                     int want = this.era1[k];
                     if (!one.has(want) && one.building(want) == 0) {
-                        return want;
+                        could[many] = want;
+                        many = many + 1;
                     }
                     k = k + 1;
                 }
-                return cast<int>(BuildingKind.NoBuilding);
+                // The first of them the town can actually pay for -- walked from a rotating
+                // start so no kind sits permanently behind another in the scan order either.
+                mutable int found = cast<int>(BuildingKind.NoBuilding);
+                if (many > 0) {
+                    int from = ((this.nextSite * 2654435761 + one.id * 40503) & 0x7FFFFFFF) % many;
+                    mutable int j = 0;
+                    while (j < many) {
+                        int what = could[(from + j) % many];
+                        j = j + 1;
+                        if (this.canAfford(one, what)) {
+                            found = what;
+                            j = many;
+                        }
+                    }
+                }
+                delete could;
+                return found;
             }
 
             // THE BUILDERS.
