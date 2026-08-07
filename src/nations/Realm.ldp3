@@ -9,6 +9,12 @@ import Agents.World.Nodes;
 import Agents.World.NodeKind;
 import Agents.World.Good;
 import Agents.World.Goods;
+import Agents.World.Harvest;
+import Agents.World.Craft;
+import Agents.World.Gathers;
+import Agents.World.Builds;
+import Agents.World.BuildingKind;
+import Agents.Nations.Site;
 import Agents.Nations.Nation;
 import Agents.Nations.Subdivision;
 import Agents.Nations.City;
@@ -67,8 +73,36 @@ public bundle Agents {
             private mutable long noNode;
             private mutable long tooLate;
             private mutable long yieldsNothing;
+            // WHAT THE TRADES AND THE SITES DID. Same discipline: a city that raises nothing has
+            // to name which gate stopped it -- no plot, no material, no builder, or a site that
+            // was already at its ceiling of hands.
+            private mutable long learned;        // took a trade off somebody who had it
+            private mutable long selfTaught;     // nobody in the city had it; the founders' road
+            private mutable long ordered;        // frames put on the ground
+            private mutable long raised;         // frames that became buildings
+            private mutable long cannotAfford;   // wanted one, could not pay the bill
+            private mutable long sitesFull;      // too many frames open at once
+            private mutable long siteFull;       // a builder turned away, ceiling reached
+            private mutable long hashes;         // work done at sites, over the run
+            private mutable long hauled;         // loads carried store -> site
+            private mutable long gaveBack;       // temporary builders returned to being trade-less
+            private mutable int nextSite;
+            private mutable boolean townsCut;    // a building or a frame changed since anybody asked
+            // THE ERA-ONE MENU, in the order a settlement wants it. Housing and the store are
+            // handled ahead of this list because they are not preferences.
+            private mutable int[] era1;
 
             public static fixed int FOG = 32;
+            // How many frames a city may have open at once. A cap, so it is announced: a town with
+            // eight half-built things and no finished ones is a town that built nothing.
+            public static fixed int MAX_SITES = 4;
+            // How many the hall itself shelters.
+            public static fixed int SEATS = 24;
+            // One builder per this many residents, and not more. The first run taught the trade to
+            // a hundred and seventy-six people for three places on one hut, and turned nine
+            // hundred thousand of them away at the site in a single arc.
+            public static fixed int PER_BUILDER = 12;
+            public static fixed int ERA1_N = 6;
 
             public constructor Realm(Grid* g, int withSeed) {
                 this.w = g.width();
@@ -91,6 +125,27 @@ public bundle Agents {
                 this.noNode = 0;
                 this.tooLate = 0;
                 this.yieldsNothing = 0;
+                this.learned = 0;
+                this.selfTaught = 0;
+                this.ordered = 0;
+                this.raised = 0;
+                this.cannotAfford = 0;
+                this.sitesFull = 0;
+                this.siteFull = 0;
+                this.hashes = 0;
+                this.hauled = 0;
+                this.gaveBack = 0;
+                this.nextSite = 0;
+                this.townsCut = false;
+                // The era-one workshops, after housing and the store. Sawmill first because the
+                // wrights are already felling and the planks have nowhere to be made.
+                this.era1 = new int[Realm.ERA1_N]();
+                this.era1[0] = cast<int>(BuildingKind.Sawmill);
+                this.era1[1] = cast<int>(BuildingKind.Kiln);
+                this.era1[2] = cast<int>(BuildingKind.Pottery);
+                this.era1[3] = cast<int>(BuildingKind.CharcoalKiln);
+                this.era1[4] = cast<int>(BuildingKind.StoneCircle);
+                this.era1[5] = cast<int>(BuildingKind.Harbor);
                 this.nations = new ArrayList<Nation*>() on heap;
                 this.subs = new ArrayList<Subdivision*>() on heap;
                 this.cities = new ArrayList<City*>() on heap;
@@ -335,30 +390,34 @@ public bundle Agents {
                     // Still crude, and still the piece most obviously standing in for something
                     // real: people should be born to parents who met. That is agent depth, not
                     // territory, and it comes when the agents do.
-                    int roof = one.buildings.size() * Realm.PER_HOUSE;
+                    // THE SEAT HOUSES THE FOUNDERS. Without this the model deadlocks the instant
+                    // housing stopped being conjured: no building means no roof, no roof means no
+                    // birth, no birth means nobody to learn a trade, and nobody with a trade means
+                    // no hut is ever raised. A settlement starts with a hall and people in it.
+                    int roof = Realm.SEATS + one.buildings.size() * Realm.PER_HOUSE;
                     if (one.residents.size() < roof && (tick + one.id) % 12 == 0) {
                         int who = folk.spawn(cast<float>(one.cx) + 0.5,
                                              cast<float>(one.cy) + 0.5, one.id % 4);
                         one.residents.add(who);
                     }
-                    // HOUSES, raised when the ones standing are full.
-                    if (one.residents.size() >= roof) {
-                        int plot = this.freePlot(one);
-                        if (plot >= 0) {
-                            one.buildings.add(plot);
-                        } else {
-                            this.noPlot = this.noPlot + 1;
-                        }
-                    }
+                    // HOUSES ARE NO LONGER CONJURED. A hut used to appear here as an integer the
+                    // moment the town was full, which is exactly the thing João objected to: four
+                    // hundred "buildings" and an empty field. Housing is ordered like everything
+                    // else now -- see `order` -- and it costs wood and stone and takes hashes.
                     // GROUND, following the houses.
                     if (one.tiles.size() < this.sustained(one.buildings.size())) {
                         this.expand(g, one);
                     } else {
                         this.atCeiling = this.atCeiling + 1;
                     }
-                    // AND THE WORK. Somebody idle is sent for what the city lacks; everybody on an
-                    // errand is asked whether they have arrived.
+                    // AND THE WORK. In the order the work actually happens in: somebody learns a
+                    // trade, the city decides what to raise next, a gatherer is sent for what his
+                    // own trade consumes, a builder goes to a site, and everybody already walking
+                    // is asked whether they have arrived.
+                    this.teach(folk, one, tick);
+                    this.order(g, one, tick);
                     this.sendOut(g, folk, one);
+                    this.raise(folk, one);
                     this.settle(g, folk, one);
                     c = c + 1;
                 }
@@ -381,8 +440,17 @@ public bundle Agents {
                 mutable int t = 0;
                 while (t < one.residents.size()) {
                     mutable Agent* who = folk.at(one.residents.get(t));
-                    if (who.errand == 0) {
-                        int want = this.shortestOf(one);
+                    if (who.errand == 0 && Gathers.isGatherer(who.trade)) {
+                        // WHAT HIS OWN TRADE CONSUMES, not what the city happens to be shortest of.
+                        //
+                        // This is the other half of the queue João saw. Fixing the search origin
+                        // spread them over the field; it did not stop every single person in the
+                        // town being eligible for every single errand, because nobody had a trade
+                        // and so nothing distinguished one resident from the next. A wright fetches
+                        // timber. A mason fetches stone. The rule in section 8 is not a policy the
+                        // scheduler applies -- it is that there is no line of code here that could
+                        // send him for anything else.
+                        int want = Gathers.takes(who.trade);
                         // SEARCHED FROM WHERE HE IS STANDING, not from the town centre.
                         //
                         // Searching from the centre gives every single person the same answer, so
@@ -394,11 +462,11 @@ public bundle Agents {
                         // From their own feet they get different answers, because they are
                         // standing in different places -- and the crowd spreads over the wood
                         // without anybody scheduling it.
-                        int found = this.nearestNode(g, cast<int>(who.x), cast<int>(who.y),
-                                                     Nodes.work(want));
+                        int found = this.nearestNode(g, cast<int>(who.x), cast<int>(who.y), want);
                         if (found < 0) {
                             this.noNode = this.noNode + 1;
-                            return;                          // nothing within reach; try next tick
+                            t = t + 1;
+                            continue;             // no timber near HIM; a mason may still find rock
                         }
                         who.goX = found % this.w;
                         who.goY = found / this.w;
@@ -411,18 +479,412 @@ public bundle Agents {
                 return;
             }
 
-            // Which NodeKind the city is shortest of. Wood first because everything in era one is
-            // made of it, then stone, then the rest -- a preference, not a plan, and it goes when
-            // buildings ask for what they actually need.
-            private method shortestOf(City* one) returns int {
-                // `<=`, NOT `<`. With both stores empty -- which is the state every city starts in
-                // -- a strict less-than is false and the city went for stone every single time.
-                // It never sent anybody for wood at all, and the run said so: nine hundred errands
-                // and not one splinter of timber.
-                if (one.have(cast<int>(Good.Wood)) <= one.have(cast<int>(Good.Stone))) {
-                    return cast<int>(NodeKind.OakTree);
+            // A BUILDER, WHEREVER HE IS IN HIS OWN LOOP.
+            //
+            //   3  walking to the store, owed `-held` of `holds`
+            //   4  walking to the site with it on his shoulder
+            //   5  standing at the site, swinging
+            //
+            // Three legs and not one, because that is what it looks like from outside: a man
+            // crossing town empty-handed, a man crossing it carrying something, and a man working.
+            // Collapsing them into "he is building" is what made the last version a number.
+            private method atSite(Folk* folk, City* one, Agent* who, int atX, int atY) returns void {
+                mutable nullable Site* mine = this.siteById(one, who.site);
+                if (mine == null) {
+                    who.errand = 0;                          // his site finished without him
+                    who.site = 0 - 1;
+                    who.held = 0;
+                    return;
                 }
-                return cast<int>(NodeKind.StoneRock);
+                if (atX != who.goX || atY != who.goY) {
+                    return;                                  // still walking
+                }
+                if (who.errand == 3) {
+                    int many = 0 - who.held;
+                    if (!one.draw(who.holds, many)) {
+                        // The store did not have it after all -- somebody else's site drew it
+                        // first. The promise is released so the shortfall is real again.
+                        mine.forget(who.holds, many);
+                        who.errand = 0;
+                        who.held = 0;
+                        who.site = 0 - 1;
+                        return;
+                    }
+                    who.held = many;                         // now actually in hand
+                    who.goX = mine.x;
+                    who.goY = mine.y;
+                    who.errand = 4;
+                    return;
+                }
+                if (who.errand == 4) {
+                    mine.deliver(who.holds, who.held);
+                    this.hauled = this.hauled + cast<long>(who.held);
+                    who.held = 0;
+                    who.holds = cast<int>(Good.Nothing);
+                    who.errand = 5;
+                    this.townsCut = true;                    // the pile on the site grew
+                    return;
+                }
+                // errand 5 -- at the site, making hashes. Only once the material is all here: a
+                // wall does not rise faster because somebody is swinging at bare ground.
+                if (!mine.stocked()) {
+                    who.errand = 0;
+                    who.site = 0 - 1;
+                    return;                                  // go back and fetch the rest
+                }
+                mine.done = mine.done + 1;
+                this.hashes = this.hashes + 1;
+                if (!mine.finished()) {
+                    return;
+                }
+                // IT STANDS. The frame becomes a building, the builders are let go, and a
+                // temporary builder goes back to being what he was.
+                one.buildings.add(mine.y * this.w + mine.x);
+                one.kinds.add(mine.kind);
+                this.raised = this.raised + 1;
+                this.townsCut = true;
+                this.closeSite(folk, one, mine);
+                return;
+            }
+
+            // Everybody working this site is let go and the frame comes off the ground.
+            //
+            // A temporary builder goes back to what he was, which for him is trade-less -- the
+            // town does not quietly gain a permanent builder every time it puts up a hut. A real
+            // builder stays a builder: he did not borrow the job, it is his life.
+            private method closeSite(Folk* folk, City* one, Site* done) returns void {
+                mutable int r = 0;
+                while (r < one.residents.size()) {
+                    mutable Agent* hand = folk.at(one.residents.get(r));
+                    r = r + 1;
+                    if (hand.site != done.id) {
+                        continue;
+                    }
+                    hand.site = 0 - 1;
+                    hand.errand = 0;
+                    hand.held = 0;
+                    hand.holds = cast<int>(Good.Nothing);
+                    if (hand.wasCraft != cast<int>(Craft.NoCraft)) {
+                        hand.trade = hand.wasCraft;
+                        hand.wasCraft = cast<int>(Craft.NoCraft);
+                        this.gaveBack = this.gaveBack + 1;
+                    }
+                }
+                mutable int s = 0;
+                while (s < one.sites.size()) {
+                    if (one.sites.get(s).id == done.id) {
+                        one.sites.removeAt(s);
+                        break;
+                    }
+                    s = s + 1;
+                }
+                delete done;
+                return;
+            }
+
+            // LEARNING A TRADE FROM SOMEBODY WHO HAS ONE.
+            //
+            // Not assigned. The city does not hand out jobs -- an agent without a trade picks one
+            // up from a neighbour who has it, which is how trades actually spread and also why a
+            // shortage fills itself: the city pulls harder for what it is short of by making that
+            // the trade a learner is most likely to be standing next to somebody practising.
+            //
+            // The seed is the founders. An expedition carries its crafts (section 4), so the first
+            // twelve arrive knowing things, and everybody after them learns from those twelve.
+            // Without a seed nobody could ever learn anything and the city would stay a crowd.
+            private method teach(Folk* folk, City* one, int tick) returns void {
+                if (one.residents.size() < 1) {
+                    return;
+                }
+                int pick = (tick * 7 + one.id * 13) % one.residents.size();
+                mutable Agent* learner = folk.at(one.residents.get(pick));
+                if (learner.trade != cast<int>(Craft.NoCraft)) {
+                    return;                                 // he has one, and he keeps it
+                }
+                // WHAT THE CITY IS SHORTEST OF, among the trades that matter in era one. A learner
+                // takes up the scarcest, which is the pull the design doc describes -- nobody is
+                // posted anywhere, but a town short of masons makes masons.
+                mutable int want = cast<int>(Craft.NoCraft);
+                mutable int fewest = 0x7FFFFFFF;
+                mutable int c = 1;
+                while (c < Gathers.crafts()) {
+                    if (this.needed(one, c)) {
+                        int have = this.countTrade(folk, one, c);
+                        // ENOUGH BUILDERS IS ENOUGH. A hut takes three hands; a town that taught
+                        // the trade to a hundred and seventy-six people turned nine hundred
+                        // thousand of them away at the site in one arc, and every one of those
+                        // was somebody not gathering. A trade nobody can practise is the lower
+                        // engine of section 4 pointed at the town's own feet.
+                        if (c == cast<int>(Craft.Builder)
+                            && have >= 1 + one.residents.size() / Realm.PER_BUILDER) {
+                            c = c + 1;
+                            continue;
+                        }
+                        if (have < fewest) {
+                            fewest = have;
+                            want = c;
+                        }
+                    }
+                    c = c + 1;
+                }
+                if (want == cast<int>(Craft.NoCraft)) {
+                    return;
+                }
+                // AND SOMEBODY NEAR HIM HAS TO HAVE IT -- unless nobody in the city does, in which
+                // case the founders' generation is what he learns from and the check would deadlock
+                // a town that lost its last mason. Counted either way, so the two roads are visible
+                // rather than one of them quietly carrying everything.
+                if (fewest > 0) {
+                    this.learned = this.learned + 1;
+                } else {
+                    this.selfTaught = this.selfTaught + 1;
+                }
+                learner.trade = want;
+                return;
+            }
+
+            // Whether a trade is worth having here yet. Era one has no chemists, and a city that
+            // taught chemistry to a third of its people would starve while they waited for a plant
+            // that cannot be built for two ages.
+            private method needed(City* one, int craft) returns boolean {
+                if (Gathers.isGatherer(craft)) {
+                    return true;                            // somebody must bring things in
+                }
+                if (craft == cast<int>(Craft.Builder)) {
+                    // Somebody must put them up -- but a town does not need one builder per
+                    // person. A site takes three hands for a hut and sixteen for a cathedral;
+                    // teaching the trade to everybody just fills the ceiling queue.
+                    return true;
+                }
+                // Otherwise: only if the city has, or is raising, a building of that craft.
+                mutable int b = 0;
+                while (b < one.kinds.size()) {
+                    if (Builds.craft(one.kinds.get(b)) == craft) {
+                        return true;
+                    }
+                    b = b + 1;
+                }
+                mutable int s = 0;
+                while (s < one.sites.size()) {
+                    if (Builds.craft(one.sites.get(s).kind) == craft) {
+                        return true;
+                    }
+                    s = s + 1;
+                }
+                return false;
+            }
+
+            // WHAT TO RAISE NEXT, AND PAYING FOR IT BEFORE BREAKING GROUND.
+            //
+            // The order does two things and they happen together on purpose: a frame appears on
+            // the map, and the material comes OUT of the store into that site's name. A site with
+            // nothing reserved does not start -- so an order the city cannot afford is simply not
+            // given, rather than opening a hole for material to fall into for the rest of the run.
+            private method order(Grid* g, City* one, int tick) returns void {
+                if ((tick + one.id) % 8 != 0) {
+                    return;                                  // an order is an event, not a stream
+                }
+                if (one.sites.size() >= Realm.MAX_SITES) {
+                    this.sitesFull = this.sitesFull + 1;
+                    return;
+                }
+                int what = this.nextWanted(one);
+                if (what == cast<int>(BuildingKind.NoBuilding)) {
+                    return;
+                }
+                int plot = this.freePlot(one);
+                if (plot < 0) {
+                    this.noPlot = this.noPlot + 1;
+                    return;
+                }
+                // CAN THE CITY PAY? Asked over the whole bill before a single unit moves, because
+                // paying for half of a building is how a store empties into three frames that
+                // never finish.
+                int wood = Builds.woodCost(what);
+                int stone = Builds.stoneCost(what);
+                int third = Builds.matCost(what);
+                mutable int thirdN = 0;
+                if (third != cast<int>(Good.Nothing)) {
+                    thirdN = Builds.matCostN(what);
+                }
+                if (one.have(cast<int>(Good.Wood)) < wood
+                    || one.have(cast<int>(Good.Stone)) < stone
+                    || (thirdN > 0 && one.have(third) < thirdN)) {
+                    this.cannotAfford = this.cannotAfford + 1;
+                    return;
+                }
+                one.draw(cast<int>(Good.Wood), wood);
+                one.draw(cast<int>(Good.Stone), stone);
+                if (thirdN > 0) {
+                    one.draw(third, thirdN);
+                }
+                mutable Site* frame = new Site(this.nextSite, what, one.id,
+                                               plot % this.w, plot / this.w) on heap;
+                this.nextSite = this.nextSite + 1;
+                one.sites.add(frame);
+                this.ordered = this.ordered + 1;
+                // The picture has to be rebuilt: a frame is a thing standing in the world from
+                // this instant, and a site nobody can see is a pending flag with extra steps.
+                this.townsCut = true;
+                return;
+            }
+
+            // The next kind this city wants. Era one only, in the order a real settlement would
+            // want them: somewhere to sleep, somewhere to keep food, somewhere to saw what the
+            // wrights fell, somewhere to fire what they dig, and somewhere to believe.
+            //
+            // Housing first and by a wide margin, because a roof is what a birth is against.
+            private method nextWanted(City* one) returns int {
+                int roof = one.residents.size() + 4;
+                mutable int housed = 0;
+                mutable int b = 0;
+                while (b < one.kinds.size()) {
+                    housed = housed + Builds.roof(one.kinds.get(b));
+                    b = b + 1;
+                }
+                if (housed < roof && one.building(cast<int>(BuildingKind.Hut)) < 3) {
+                    return cast<int>(BuildingKind.Hut);
+                }
+                // THE STORE. First thing anybody built to keep food in, and the thing that turns
+                // the builder's fetch from a walk to the forest into a walk across town.
+                if (!one.has(cast<int>(BuildingKind.StoragePit))
+                    && one.building(cast<int>(BuildingKind.StoragePit)) == 0) {
+                    return cast<int>(BuildingKind.StoragePit);
+                }
+                mutable int k = 0;
+                while (k < Realm.ERA1_N) {
+                    int want = this.era1[k];
+                    if (!one.has(want) && one.building(want) == 0) {
+                        return want;
+                    }
+                    k = k + 1;
+                }
+                return cast<int>(BuildingKind.NoBuilding);
+            }
+
+            // THE BUILDERS.
+            //
+            // Two jobs, both his own, and the split is the model João chose: fetching from the
+            // store to the site IS the builder's work, so there is no carrier role for anybody
+            // idle to be pulled into -- because there is no being pulled into a job here at all.
+            //
+            //   short of material -> walk to the store, draw it, walk to the site, drop it
+            //   material all there -> stand at the site and make hashes
+            private method raise(Folk* folk, City* one) returns void {
+                if (one.sites.size() < 1) {
+                    return;
+                }
+                mutable int s = 0;
+                while (s < one.sites.size()) {
+                    one.sites.get(s).hands = 0;
+                    s = s + 1;
+                }
+                mutable int t = 0;
+                while (t < one.residents.size()) {
+                    mutable Agent* who = folk.at(one.residents.get(t));
+                    t = t + 1;
+                    if (who.trade != cast<int>(Craft.Builder)) {
+                        continue;                            // and nothing here can change that
+                    }
+                    if (who.errand != 0 && who.site >= 0) {
+                        mutable nullable Site* mine = this.siteById(one, who.site);
+                        if (mine != null) {
+                            mine.hands = mine.hands + 1;
+                        }
+                        continue;                            // already on it
+                    }
+                    if (who.errand != 0) {
+                        continue;
+                    }
+                    mutable nullable Site* pick = this.siteNeeding(one);
+                    if (pick == null) {
+                        continue;
+                    }
+                    if (pick.hands >= pick.ceiling) {
+                        this.siteFull = this.siteFull + 1;
+                        continue;                            // sixteen at most, and fewer than that
+                    }
+                    who.site = pick.id;
+                    pick.hands = pick.hands + 1;
+                    int lack = pick.wants();
+                    if (lack != cast<int>(Good.Nothing)) {
+                        // Fetch. He goes to the store first, which is the town centre until there
+                        // is a StoragePit and the pit once there is.
+                        mutable int many = pick.short(lack);
+                        if (many > 8) {
+                            many = 8;                        // what a person can carry
+                        }
+                        pick.promise(lack, many);
+                        who.holds = lack;
+                        who.held = 0 - many;                 // negative: owed, not yet in hand
+                        who.errand = 3;
+                        this.storeWalk(one, who);
+                    } else {
+                        who.goX = pick.x;
+                        who.goY = pick.y;
+                        who.errand = 4;                      // nothing to fetch; go and work
+                        who.holds = cast<int>(Good.Nothing);
+                        who.held = 0;
+                    }
+                }
+                return;
+            }
+
+            // WHERE THE STORE IS. The town centre until a StoragePit stands, and the pit after
+            // that. The design doc asked for this to be FELT rather than declared: with a pit the
+            // fetch is a walk across town, without one it is the whole width of the territory.
+            private method storeWalk(City* one, Agent* who) returns void {
+                mutable int b = 0;
+                while (b < one.kinds.size()) {
+                    if (one.kinds.get(b) == cast<int>(BuildingKind.StoragePit)) {
+                        int cell = one.buildings.get(b);
+                        who.goX = cell % this.w;
+                        who.goY = cell / this.w;
+                        return;
+                    }
+                    b = b + 1;
+                }
+                who.goX = one.cx;
+                who.goY = one.cy;
+                return;
+            }
+
+            private method siteById(City* one, int id) returns nullable Site* {
+                mutable int s = 0;
+                while (s < one.sites.size()) {
+                    if (one.sites.get(s).id == id) {
+                        return one.sites.get(s);
+                    }
+                    s = s + 1;
+                }
+                return null;
+            }
+
+            // The first site not finished. Oldest first, on purpose: a town that spread its
+            // builders evenly over four frames finishes none of them, and half a granary keeps
+            // nothing dry.
+            private method siteNeeding(City* one) returns nullable Site* {
+                mutable int s = 0;
+                while (s < one.sites.size()) {
+                    mutable Site* it = one.sites.get(s);
+                    if (!it.finished()) {
+                        return it;
+                    }
+                    s = s + 1;
+                }
+                return null;
+            }
+
+            private method countTrade(Folk* folk, City* one, int craft) returns int {
+                mutable int n = 0;
+                mutable int t = 0;
+                while (t < one.residents.size()) {
+                    if (folk.at(one.residents.get(t)).trade == craft) {
+                        n = n + 1;
+                    }
+                    t = t + 1;
+                }
+                return n;
             }
 
             // The nearest node of a given trade, searched outward from the city in rings of cells.
@@ -486,17 +948,25 @@ public bundle Agents {
                     }
                     int atX = cast<int>(who.x);
                     int atY = cast<int>(who.y);
+                    // ---- the builder's three legs ----
+                    if (who.errand >= 3) {
+                        this.atSite(folk, one, who, atX, atY);
+                        continue;
+                    }
                     if (who.errand == 1) {
                         if (atX != who.goX || atY != who.goY) {
                             continue;                        // still walking
                         }
-                        int node = g.surface().nodeAt(who.goX, who.goY,
-                                                    Nodes.work(cast<int>(NodeKind.OakTree)));
-                        mutable int use = node;
-                        if (use < 0) {
-                            use = g.surface().nodeAt(who.goX, who.goY,
-                                                   Nodes.work(cast<int>(NodeKind.StoneRock)));
-                        }
+                        // THE HARVEST HIS OWN TRADE TAKES, which is the one he was sent for.
+                        //
+                        // This asked for a tree, and failing that a rock, whoever was standing
+                        // there. Once trades existed and a digger was sent to an ore vein, the
+                        // arrival looked for timber on it, found none, and turned round -- which
+                        // the run reported as twenty-three thousand empty nodes against two and a
+                        // half thousand loads. The going and the arriving have to agree on what
+                        // he went for.
+                        int use = g.surface().nodeAt(who.goX, who.goY,
+                                                     Gathers.takes(who.trade));
                         if (use < 0) {
                             who.errand = 0;                  // somebody else took it first
                             this.tooLate = this.tooLate + 1;
@@ -556,6 +1026,17 @@ public bundle Agents {
                             standing = standing + 1;
                         }
                         b = b + 1;
+                    }
+                    // AND THE FRAMES ALREADY ON IT. Without this the same cell is handed to every
+                    // order in a row -- the run put two huts on 938,830 -- because a site does not
+                    // become a building until it is finished and the plot looks free the whole
+                    // time it is being built.
+                    mutable int s = 0;
+                    while (s < one.sites.size()) {
+                        if (one.sites.get(s).y * this.w + one.sites.get(s).x == at) {
+                            standing = standing + 1;
+                        }
+                        s = s + 1;
                     }
                     if (standing < Realm.PLOTS) {
                         return at;
@@ -667,10 +1148,63 @@ public bundle Agents {
                         }
                         gd = gd + 1;
                     }
+                    // WHAT IS ACTUALLY STANDING, by kind. Four hundred integers in a list said
+                    // nothing; this says whether the town has a sawmill.
+                    mutable int k = 0;
+                    while (k < BuildingKind.count()) {
+                        int n = one.howMany(k);
+                        if (n > 0) {
+                            System.IO.Console.println($"  city {one.id} has {n} {Builds.name(k)}");
+                        }
+                        k = k + 1;
+                    }
+                    mutable int s = 0;
+                    while (s < one.sites.size()) {
+                        mutable Site* it = one.sites.get(s);
+                        System.IO.Console.println($"  city {one.id} site: {Builds.name(it.kind)} at {it.x},{it.y} -- {it.done}/{it.work} hashes, {it.hands} builders");
+                        s = s + 1;
+                    }
                     c = c + 1;
                 }
                 return;
             }
+
+            // WHO DOES WHAT, over the whole realm. The census that says whether the trades took.
+            public method trades(Folk* folk) returns void {
+                System.IO.Console.println($"trades: {this.learned} learned from a neighbour, {this.selfTaught} with nobody to learn from, {this.gaveBack} temporary builders released");
+                System.IO.Console.println($"sites: {this.ordered} ordered, {this.raised} raised, {this.hashes} hashes, {this.hauled} carried store to site; refused {this.cannotAfford} could not pay, {this.sitesFull} too many open, {this.siteFull} site at its ceiling");
+                mutable int[] tally = new int[Gathers.crafts()]();
+                mutable int c = 0;
+                while (c < this.cities.size()) {
+                    mutable City* one = this.cities.get(c);
+                    mutable int t = 0;
+                    while (t < one.residents.size()) {
+                        int cr = folk.at(one.residents.get(t)).trade;
+                        tally[cr] = tally[cr] + 1;
+                        t = t + 1;
+                    }
+                    c = c + 1;
+                }
+                mutable int k = 0;
+                while (k < Gathers.crafts()) {
+                    if (tally[k] > 0) {
+                        System.IO.Console.println($"  trade {k}: {tally[k]} people");
+                    }
+                    k = k + 1;
+                }
+                delete tally;
+                return;
+            }
+
+            // Whether a building or a frame changed since anybody last asked, so the renderer
+            // knows to rebuild the town layer. Same shape as `changed` and `mapCut`: asking
+            // clears it, because two readers of one flag is a bug waiting to be written.
+            public method takeTownsCut() returns boolean {
+                boolean was = this.townsCut;
+                this.townsCut = false;
+                return was;
+            }
+
 
             // ---- the check that keeps the two views honest ----
 

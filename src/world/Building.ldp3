@@ -281,7 +281,72 @@ public bundle Agents {
             Chemistry,       // Gasworks, OilRefinery, ChemicalPlant, PlasticsPlant, DrugFactory
             Machining,       // MachineShop, Factory, Arsenal, AmmoFactory, CarFactory, Robotics
             Powering,        // CoalPowerPlant, SolarFarm, NuclearPlant, ChipFactory -- the mains
-            Healing          // Apothecary, Bathhouse, Hospital -- the trade against dying of it
+            Healing,         // Apothecary, Bathhouse, Hospital -- the trade against dying of it
+            // The three the design doc found missing, which closes the list at sixteen. Each one
+            // already had a building in the catalogue and nobody to work it.
+            Sailor,          // Harbor -- and the far side of the water
+            Priest,          // StoneCircle, Shrine, and the rungs above them
+            Builder          // every site in the city, and no building of its own
+        }
+
+        // WHAT A TRADE TAKES OFF THE MAP WITH ITS OWN HANDS.
+        //
+        // Raw material has to come from somewhere, and until this existed everybody fetched
+        // everything -- the entire population walking to the same wood, because nothing in the
+        // model said who the wood was for. A trade gathers what its own workshops consume, and
+        // that is also why nothing else may: the wright fells the tree he is going to saw and
+        // carries it home himself. Section 8's rule -- producing includes delivering -- read from
+        // the other end.
+        //
+        // Five of the sixteen gather. The other eleven work what the five bring in, and a city of
+        // nothing but weavers starves however hard they weave.
+        public class Gathers {
+            private static mutable int[] TAKES;   // Craft ordinal -> Harvest ordinal
+
+            onClassLoad {
+                Gathers.TAKES = new int[Gathers.crafts()]();
+                mutable int c = 0;
+                while (c < Gathers.crafts()) {
+                    Gathers.TAKES[c] = cast<int>(Harvest.Nothing);
+                    c = c + 1;
+                }
+                // Wood and earth: the wright fells his own timber and digs his own clay.
+                Gathers.TAKES[cast<int>(Craft.Wright)] = cast<int>(Harvest.Timber);
+                // Stone, gathered loose long before there is a quarry to cut it out of.
+                Gathers.TAKES[cast<int>(Craft.Masonry)] = cast<int>(Harvest.Quarry);
+                // Ore, likewise, from whatever is lying at the surface.
+                Gathers.TAKES[cast<int>(Craft.Digging)] = cast<int>(Harvest.Mine);
+                // Off the land itself -- berries, herbs, wild grain, reeds.
+                Gathers.TAKES[cast<int>(Craft.Tilling)] = cast<int>(Harvest.Forage);
+                // Out of the water. The smokehouse is a victualler's building.
+                Gathers.TAKES[cast<int>(Craft.Victualler)] = cast<int>(Harvest.Fishing);
+            }
+
+            public static method crafts() returns int {
+                return cast<int>(Craft.Builder) + 1;
+            }
+
+            public static method takes(int craft) returns int {
+                return Gathers.TAKES[craft];
+            }
+
+            public static method isGatherer(int craft) returns boolean {
+                return Gathers.TAKES[craft] != cast<int>(Harvest.Nothing);
+            }
+
+            // The trade whose own hands bring this Harvest home. The inverse of the table above,
+            // and the question the city actually asks: it is short of stone, so who does it need
+            // more of? Answering it from the same array is what stops the two directions drifting.
+            public static method whoTakes(int harvest) returns int {
+                mutable int c = 0;
+                while (c < Gathers.crafts()) {
+                    if (Gathers.TAKES[c] == harvest) {
+                        return c;
+                    }
+                    c = c + 1;
+                }
+                return cast<int>(Craft.NoCraft);
+            }
         }
 
         // Where a building may stand. Almost everything goes in the village and asks nothing of the
@@ -713,8 +778,9 @@ public bundle Agents {
                 // recipe and an era, and in twenty generations not one length of rope was ever made
                 // -- because nothing downstream asked for any. A want that nothing consumes is a
                 // dead branch of the chain however correct its recipe is.
-                Builds.put(cast<int>(BuildingKind.Harbor), "Harbor", cast<int>(Craft.NoCraft),
-                           60, 20, 0, none, 0, none, 0, none, 0, 0.0);
+                // A harbour with nobody in it is a jetty. The sailor is the trade it was missing.
+                Builds.put(cast<int>(BuildingKind.Harbor), "Harbor", cast<int>(Craft.Sailor),
+                           60, 20, 4, none, 0, none, 0, none, 0, 0.0);
                 Builds.ERA[cast<int>(BuildingKind.Harbor)] = 1;
                 Builds.SITE[cast<int>(BuildingKind.Harbor)] = cast<int>(Ground.Coast);
                 Builds.MAT[cast<int>(BuildingKind.Harbor)] = cast<int>(Good.Rope);
@@ -923,7 +989,10 @@ public bundle Agents {
                 // ---- and the ladder of learning, below the shrine ----
                 Builds.put(cast<int>(BuildingKind.Totem), "Totem", letter,
                            8, 0, 1, none, 0, none, 0, none, 0, 0.0);
-                Builds.put(cast<int>(BuildingKind.StoneCircle), "StoneCircle", letter,
+                // The priest, not the scribe. A stone circle is worked by somebody who believes
+                // something about it, and lettering is a different life.
+                Builds.put(cast<int>(BuildingKind.StoneCircle), "StoneCircle",
+                           cast<int>(Craft.Priest),
                            0, 20, 1, none, 0, none, 0, none, 0, 0.0);
                 Builds.put(cast<int>(BuildingKind.Monastery), "Monastery", letter,
                            55, 60, 3, none, 0, none, 0, none, 0, 0.0);
@@ -1675,6 +1744,48 @@ public bundle Agents {
 
             public static method hands(int ord) returns int {
                 return Builds.HANDS[ord];
+            }
+
+            // HOW BIG A JOB IT IS, as one number.
+            //
+            // Two things come out of it -- the total work a site takes and the ceiling on builders
+            // -- and they come out of the SAME number on purpose. Held apart they drift, and a
+            // cathedral that admitted sixteen builders while wanting a hut's worth of work would
+            // go up as fast as a hut.
+            //
+            // It is read off what the thing is made of rather than typed in a hundred and
+            // forty-five times, because a number typed in beside a cost can disagree with that
+            // cost and this one cannot. A hut is fourteen wood and four stone: eighteen. A wall
+            // or a cathedral is hundreds.
+            public static method complexity(int ord) returns int {
+                mutable int c = Builds.WOOD[ord] + Builds.STONE[ord];
+                if (Builds.MAT[ord] != cast<int>(Good.Nothing)) {
+                    c = c + Builds.MATN[ord];
+                }
+                if (c < 1) {
+                    return 1;
+                }
+                return c;
+            }
+
+            // The work a site takes, in hashes. Four to the unit of material, so a hut is seventy
+            // two hashes and not eighteen -- putting a thing up is more work than carrying it.
+            public static method totalWork(int ord) returns int {
+                return Builds.complexity(ord) * 4;
+            }
+
+            // How many builders may stand at one site, from the same number, capped at sixteen.
+            // A hut takes three; nothing takes more than sixteen however large it is, because a
+            // site is a place with edges and not a spreadsheet.
+            public static method builderCeiling(int ord) returns int {
+                mutable int m = Builds.complexity(ord) / 6;
+                if (m < 1) {
+                    m = 1;
+                }
+                if (m > 16) {
+                    m = 16;
+                }
+                return m;
             }
 
             public static method in1(int ord) returns int {

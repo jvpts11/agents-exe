@@ -2234,7 +2234,37 @@ public bundle Agents {
                 if (!this.haveRealm || this.hallMesh < 0) {
                     return;
                 }
-                int tris = this.builds.triCount[this.hallMesh] * this.realm.cityCount();
+                // EVERY BUILDING, NOT JUST THE SEAT.
+                //
+                // This used to draw one dome per city, which is why a town of four hundred
+                // buildings looked like an empty field with a hut in the middle: the buildings
+                // existed as integers and the picture had no way to know what any of them was.
+                // Now the city carries a kind per building, so each one draws with its own mesh --
+                // and a frame not yet finished draws too, sunk into the ground by how far it has
+                // to go.
+                mutable int tris = 0;
+                mutable int c = 0;
+                while (c < this.realm.cityCount()) {
+                    mutable City* one = this.realm.cityAt(c);
+                    tris = tris + this.builds.triCount[this.hallMesh];
+                    mutable int b = 0;
+                    while (b < one.kinds.size()) {
+                        int m = this.meshFor(one.kinds.get(b));
+                        if (m >= 0) {
+                            tris = tris + this.builds.triCount[m];
+                        }
+                        b = b + 1;
+                    }
+                    mutable int s = 0;
+                    while (s < one.sites.size()) {
+                        int m = this.meshFor(one.sites.get(s).kind);
+                        if (m >= 0) {
+                            tris = tris + this.builds.triCount[m];
+                        }
+                        s = s + 1;
+                    }
+                    c = c + 1;
+                }
                 if (tris == 0) {
                     return;
                 }
@@ -2247,18 +2277,39 @@ public bundle Agents {
                 }
                 this.wrCap = tris * 27;
                 mutable int w = 0;
-                mutable int c = 0;
+                mutable int standing = 0;
+                mutable int frames = 0;
+                c = 0;
                 while (c < this.realm.cityCount()) {
                     mutable City* one = this.realm.cityAt(c);
-                    float z = this.groundTopAt(one.cx, one.cy);
-                    w = this.emitTintedTurned(this.builds, this.bbuf, w, this.hallMesh,
-                                              cast<float>(one.cx) * 2.0 + 1.0,
-                                              cast<float>(one.cy) * 2.0 + 1.0,
-                                              z, 0.9, 1.0, 1.0, 1.0,
-                                              this.shadeAt(one.cx, one.cy, 1,
-                                                           this.stackLvl(this.grid.biomeAt(one.cx, one.cy),
-                                                                         one.cx, one.cy)),
-                                              1.0, 0.0);
+                    w = this.putBuilding(w, this.hallMesh, one.cx, one.cy, 1.0, 1.0, 1.0, 1.0);
+                    mutable int b = 0;
+                    while (b < one.kinds.size()) {
+                        int cell = one.buildings.get(b);
+                        int bx = cell % this.grid.width();
+                        int by = cell / this.grid.width();
+                        int m = this.meshFor(one.kinds.get(b));
+                        if (m >= 0) {
+                            w = this.putBuilding(w, m, bx, by, 1.0, 1.0, 1.0, 1.0);
+                            standing = standing + 1;
+                        }
+                        b = b + 1;
+                    }
+                    // THE FRAMES. Raw timber colour and sunk into the ground by what is left to do,
+                    // so a site reads as unfinished at a glance and rises as the hashes land. This
+                    // is the difference between a building being ordered and a building appearing.
+                    mutable int s = 0;
+                    while (s < one.sites.size()) {
+                        mutable Site* it = one.sites.get(s);
+                        int m = this.meshFor(it.kind);
+                        if (m >= 0) {
+                            float p = it.progress();
+                            w = this.putBuilding(w, m, it.x, it.y, 0.12 + p * 0.88,
+                                                 0.72, 0.55, 0.34);
+                            frames = frames + 1;
+                        }
+                        s = s + 1;
+                    }
                     c = c + 1;
                 }
                 this.gl.bindVertexArray(this.bvao);
@@ -2267,8 +2318,28 @@ public bundle Agents {
                                    GL.DYNAMIC_DRAW);
                 this.gl.bindVertexArray(0);
                 this.bnverts = w / 9;
-                System.IO.Console.println($"towns: {this.realm.cityCount()} seats standing, {this.bnverts} vertices");
+                System.IO.Console.println($"towns: {this.realm.cityCount()} seats, {standing} buildings, {frames} sites under construction, {this.bnverts} vertices");
                 return;
+            }
+
+            // One building at a cell, tinted and scaled. `up` is how much of it shows: 1.0 for a
+            // finished thing, less for a frame, which sinks it into the ground.
+            private method putBuilding(int w, int mesh, int cx, int cy, float up,
+                                       float r, float gg, float b) returns int {
+                float z = this.groundTopAt(cx, cy);
+                float sh = this.shadeAt(cx, cy, 1,
+                                        this.stackLvl(this.grid.biomeAt(cx, cy), cx, cy));
+                return this.emitTintedTurned(this.builds, this.bbuf, w, mesh,
+                                             cast<float>(cx) * 2.0 + 1.0,
+                                             cast<float>(cy) * 2.0 + 1.0,
+                                             z, 0.9 * up, r, gg, b, sh, 1.0, 0.0);
+            }
+
+            // The mesh a BuildingKind draws with. The catalogue names it, and a kind whose mesh is
+            // not in the atlas returns -1 rather than drawing something else -- a kiln that quietly
+            // renders as a hut is worse than a kiln that is missing, because it looks correct.
+            private method meshFor(int kind) returns int {
+                return this.builds.ordOf(Builds.mesh(kind));
             }
 
             // WHICH BORDER AN EDGE IS: the level at which the two sides first differ.

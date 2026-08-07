@@ -1,6 +1,7 @@
 import System.IO.Console;
 import System.Collections.ArrayList;
 import Agents.World.Goods;
+import Agents.Nations.Site;
 
 // THE ONLY THING IN THE GAME THAT OWNS GROUND.
 //
@@ -29,6 +30,14 @@ public bundle Agents {
             // against each other by another -- see Realm.
             public mutable ArrayList<int>* tiles;
             public mutable ArrayList<int>* buildings;
+            // WHAT EACH ONE IS, parallel to `buildings`. Until this existed a city held four
+            // hundred cell indices and nothing said whether they were huts, kilns or the town hall
+            // -- so the renderer could only ever draw the seat, and the economy could only count.
+            public mutable ArrayList<int>* kinds;
+            // THE ONES NOT UP YET. A frame on the ground is a building in progress, and it stands
+            // in the world from the moment the order is given rather than appearing finished out
+            // of nothing. See Site.
+            public mutable ArrayList<Site*>* sites;
             public mutable ArrayList<int>* residents;
 
             // WHAT THE CITY HAS IN HAND, by Good ordinal.
@@ -47,16 +56,76 @@ public bundle Agents {
                 this.name = 0 - 1;
                 this.tiles = new ArrayList<int>() on heap;
                 this.buildings = new ArrayList<int>() on heap;
+                this.kinds = new ArrayList<int>() on heap;
+                this.sites = new ArrayList<Site*>() on heap;
                 this.residents = new ArrayList<int>() on heap;
                 this.stock = new int[Goods.count()]();
             }
 
             public destructor ~City() returns void {
+                mutable int s = 0;
+                while (s < this.sites.size()) {
+                    delete this.sites.get(s);
+                    s = s + 1;
+                }
+                delete this.sites;
                 delete this.tiles;
                 delete this.buildings;
+                delete this.kinds;
                 delete this.residents;
                 delete this.stock;
                 return;
+            }
+
+            // A building of this kind, standing. Asked before ordering another one, and asked by
+            // the store to find out whether there is a StoragePit to keep anything in.
+            public method has(int kind) returns boolean {
+                mutable int b = 0;
+                while (b < this.kinds.size()) {
+                    if (this.kinds.get(b) == kind) {
+                        return true;
+                    }
+                    b = b + 1;
+                }
+                return false;
+            }
+
+            public method howMany(int kind) returns int {
+                mutable int n = 0;
+                mutable int b = 0;
+                while (b < this.kinds.size()) {
+                    if (this.kinds.get(b) == kind) {
+                        n = n + 1;
+                    }
+                    b = b + 1;
+                }
+                return n;
+            }
+
+            // Counting the frames as well as the finished ones. Without this a city orders a
+            // second kiln every tick until the first one is up, because "do I have a kiln" is
+            // false the whole time it is being built.
+            public method building(int kind) returns int {
+                mutable int n = 0;
+                mutable int s = 0;
+                while (s < this.sites.size()) {
+                    if (this.sites.get(s).kind == kind) {
+                        n = n + 1;
+                    }
+                    s = s + 1;
+                }
+                return n;
+            }
+
+            // Taken OUT of the store, and it fails rather than going negative. Reserving material
+            // for a site is the one place that matters: a reservation that silently overdraws is
+            // the same as no reservation at all.
+            public method draw(int good, int many) returns boolean {
+                if (this.stock[good] < many) {
+                    return false;
+                }
+                this.stock[good] = this.stock[good] - many;
+                return true;
             }
 
             public method have(int good) returns int {
