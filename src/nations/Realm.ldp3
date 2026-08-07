@@ -103,6 +103,8 @@ public bundle Agents {
             // a hundred and seventy-six people for three places on one hut, and turned nine
             // hundred thousand of them away at the site in a single arc.
             public static fixed int PER_BUILDER = 12;
+            // People served by one store. A town of hundreds keeps several.
+            public static fixed int PER_PIT = 60;
             public static fixed int ERA1_N = 6;
 
             public constructor Realm(Grid* g, int withSeed) {
@@ -387,7 +389,10 @@ public bundle Agents {
             // How far from his own town a gatherer may be before he is simply lost. Measured in
             // tiles walked, not as the crow flies, and generous -- a forest can be a long way off.
             // Past it he goes home rather than searching for a node further out still.
-            public static fixed int HOME_REACH = 60;    // hard ceiling from the centre, in cells
+            public static fixed int HOME_REACH = 60;
+            // How far a town looks for work, in tiles. Well past its border: a settlement has no
+            // guarantee of clay or rock inside its own ground.
+            public static fixed int WORK_REACH = 110;    // hard ceiling from the centre, in cells
             // HOW MANY HOUSES STAND ON ONE CELL.
             //
             // This was one, and one is impossible. A house needs a cell, so a city with n houses
@@ -514,6 +519,9 @@ public bundle Agents {
                         int who = folk.spawn(cast<float>(one.cx) + 0.5,
                                              cast<float>(one.cy) + 0.5, one.id % 4);
                         one.residents.add(who);
+                        mutable Agent* born = folk.at(who);
+                        born.homeX = one.cx;
+                        born.homeY = one.cy;
                     }
                     // HOUSES ARE NO LONGER CONJURED. A hut used to appear here as an integer the
                     // moment the town was full, which is exactly the thing João objected to: four
@@ -546,9 +554,9 @@ public bundle Agents {
                     // is asked whether they have arrived.
                     this.teach(folk, one, tick);
                     this.order(g, one, tick);
-                    this.sendOut(g, folk, one);
+                    this.sendOut(g, folk, one, tick);
                     this.raise(folk, one);
-                    this.settle(g, folk, one);
+                    this.settle(g, folk, one, tick);
                     c = c + 1;
                 }
                 return;
@@ -566,7 +574,7 @@ public bundle Agents {
             // walks there, takes what the node will give, walks back, and puts it in the store.
             // Producing includes delivering: that is his work from end to end and nothing takes
             // him off it.
-            private method sendOut(Grid* g, Folk* folk, City* one) returns void {
+            private method sendOut(Grid* g, Folk* folk, City* one, int tick) returns void {
                 // HOW MANY FRUITLESS SEARCHES ONE TICK MAY PAY FOR.
                 //
                 // `nearestNode` walks rings out to forty tiles: six thousand tiles for one answer,
@@ -603,36 +611,22 @@ public bundle Agents {
                         // From their own feet they get different answers, because they are
                         // standing in different places -- and the crowd spreads over the wood
                         // without anybody scheduling it.
-                        // AND HE STARTS FROM HOME IF HE HAS DRIFTED.
+                        // THE SEARCH STARTS AT THE TOWN AND REACHES WELL PAST ITS BORDER.
                         //
-                        // Searching from where he stands is right -- it is what broke the queue.
-                        // But nothing was pulling him back, so a man who wandered fifty tiles out
-                        // found a node fifty tiles out, walked further to reach it, and searched
-                        // from there next time. The dump caught people a hundred and ninety tiles
-                        // from a town at 937,834, with a hundred and three tiles still to walk on
-                        // average and half of them beyond anything the search can even see.
+                        // It used to start from where the man was standing, and that made
+                        // gathering depend on WANDERING: a resource was found only if somebody
+                        // had happened to drift near it, so idling -- the state of doing nothing
+                        // -- was secretly what fed the town. Leash the drift and the economy
+                        // stops, which is how it became visible.
                         //
-                        // A man that far out is lost, not working. He is sent home, and the
-                        // errand starts again from a place his town can actually supply.
-                        mutable int fx = cast<int>(who.x);
-                        mutable int fy = cast<int>(who.y);
-                        mutable int hx = fx - one.cx;
-                        mutable int hy = fy - one.cy;
-                        if (hx < 0) { hx = 0 - hx; }
-                        if (hy < 0) { hy = 0 - hy; }
-                        if (hx + hy > Realm.HOME_REACH) {
-                            who.goX = one.cx;
-                            who.goY = one.cy;
-                            who.errand = 2;                  // walk home, carrying nothing
-                            who.held = 0;
-                            who.holds = cast<int>(Good.Nothing);
-                            this.strayed = this.strayed + 1;
-                            t = t + 1;
-                            continue;
-                        }
-                        int found = this.nearestNode(g, fx, fy, want);
+                        // Nor is it the territory: a settlement is not guaranteed to have clay or
+                        // rock inside its own border, and most of the time a gatherer must leave
+                        // it. The town looks out from its centre as far as a person will walk.
+                        int found = this.nearestNode(g, one.cx, one.cy, want, who.id + tick);
                         if (found < 0) {
                             this.noNode = this.noNode + 1;
+                            who.lastAct = 10;
+                            who.lastTick = tick;
                             tries = tries + 1;
                             if (tries >= Realm.SEARCH_TRIES) {
                                 return;           // enough searching for one tick
@@ -643,6 +637,8 @@ public bundle Agents {
                         who.goX = found % this.w;
                         who.goY = found / this.w;
                         who.errand = 1;
+                        who.lastAct = 1;
+                        who.lastTick = tick;
                         this.sentOut = this.sentOut + 1;
                         return;                              // one errand a tick per city
                     }
@@ -988,8 +984,11 @@ public bundle Agents {
                     could[many] = cast<int>(BuildingKind.Hut);
                     many = many + 1;
                 }
-                if (!one.has(cast<int>(BuildingKind.StoragePit))
-                    && one.building(cast<int>(BuildingKind.StoragePit)) == 0) {
+                // A store per PER_PIT people. One pit for a town of hundreds was the model saying
+                // a settlement has exactly one shed however large it grows.
+                int pits = one.howMany(cast<int>(BuildingKind.StoragePit))
+                         + one.building(cast<int>(BuildingKind.StoragePit));
+                if (pits < 1 + one.residents.size() / Realm.PER_PIT) {
                     could[many] = cast<int>(BuildingKind.StoragePit);
                     many = many + 1;
                 }
@@ -1154,9 +1153,25 @@ public bundle Agents {
             // The nearest node of a given trade, searched outward from the city in rings of cells.
             // Bounded, and the refusal is counted: a city with no forest within reach has to be
             // able to say so rather than quietly gathering nothing.
-            private method nearestNode(Grid* g, int fromX, int fromY, int hclass) returns int {
+            // A NODE OF THIS HARVEST, NEAR THE TOWN BUT NOT NECESSARILY THE NEAREST ONE.
+            //
+            // `stir` scatters the choice: rings are searched outward as before, but once a ring
+            // holds anything the pick within it depends on the asker. Everybody gets a node about
+            // as close as the closest, and not the SAME one -- which is the queue gone without
+            // needing anybody to have wandered anywhere first.
+            //
+            // The reach is far past the border on purpose. A settlement is not guaranteed clay or
+            // rock inside its own ground, and a gatherer leaving the territory is the normal case.
+            private method nearestNode(Grid* g, int fromX, int fromY, int hclass,
+                                       int stir) returns int {
+                // Everything found in a ring is kept, and one of them is taken. Two people asking
+                // in the same tick get different nodes at the same distance.
+                mutable int best = 0 - 1;
+                mutable int seen = 0;
                 mutable int ring = 0;
-                while (ring < 40) {
+                while (ring < Realm.WORK_REACH) {
+                    seen = 0;
+                    best = 0 - 1;
                     mutable int dx = 0 - ring;
                     while (dx <= ring) {
                         mutable int side = 0;
@@ -1171,7 +1186,10 @@ public bundle Agents {
                                 continue;
                             }
                             if (g.surface().nodeAt(gx, gy, hclass) >= 0) {
-                                return gy * this.w + gx;
+                                seen = seen + 1;
+                                if (((stir * 2654435761 + seen * 40503) & 0x7FFFFFFF) % seen == 0) {
+                                    best = gy * this.w + gx;
+                                }
                             }
                         }
                         dx = dx + 1;
@@ -1190,10 +1208,16 @@ public bundle Agents {
                                 continue;
                             }
                             if (g.surface().nodeAt(gx, gy, hclass) >= 0) {
-                                return gy * this.w + gx;
+                                seen = seen + 1;
+                                if (((stir * 2654435761 + seen * 40503) & 0x7FFFFFFF) % seen == 0) {
+                                    best = gy * this.w + gx;
+                                }
                             }
                         }
                         dy = dy + 1;
+                    }
+                    if (best >= 0) {
+                        return best;
                     }
                     ring = ring + 1;
                 }
@@ -1202,7 +1226,7 @@ public bundle Agents {
 
             // ARRIVING, AND WHAT HAPPENS THERE. Walked once a tick over the people on errands,
             // which is what turns a heading into a job done.
-            private method settle(Grid* g, Folk* folk, City* one) returns void {
+            private method settle(Grid* g, Folk* folk, City* one, int tick) returns void {
                 mutable int t = 0;
                 while (t < one.residents.size()) {
                     mutable Agent* who = folk.at(one.residents.get(t));
@@ -1259,6 +1283,8 @@ public bundle Agents {
                         who.errand = 2;
                         who.goX = one.cx;
                         who.goY = one.cy;
+                        who.lastAct = 2;
+                        who.lastTick = tick;
                         this.gathered = this.gathered + cast<long>(got);
                     } else {
                         if (atX != one.cx || atY != one.cy) {
@@ -1268,6 +1294,8 @@ public bundle Agents {
                         this.delivered = this.delivered + cast<long>(who.held);
                         who.held = 0;
                         who.errand = 0;
+                        who.lastAct = 3;
+                        who.lastTick = tick;
                     }
                 }
                 return;
@@ -1600,7 +1628,11 @@ public bundle Agents {
                     mutable int hy = cast<int>(a.y) - one.cy;
                     if (hx < 0) { hx = 0 - hx; }
                     if (hy < 0) { hy = 0 - hy; }
-                    System.IO.Console.println($"trace {tick} agent {who} x={a.x} y={a.y} errand={a.errand} goto={a.goX},{a.goY} home={hx + hy} trade={a.trade} held={a.held}");
+                    mutable int dx = a.goX - cast<int>(a.x);
+                    mutable int dy = a.goY - cast<int>(a.y);
+                    if (dx < 0) { dx = 0 - dx; }
+                    if (dy < 0) { dy = 0 - dy; }
+                    System.IO.Console.println($"t{tick} a{who} pos={a.x},{a.y} was={a.px},{a.py} face={a.hx},{a.hy} errand={a.errand} goto={a.goX},{a.goY} togo={dx + dy} home={a.homeX},{a.homeY} d2home={hx + hy} trade={a.trade} holds={a.holds} held={a.held} site={a.site} did={a.lastAct}@{a.lastTick} idle={tick - a.lastTick}");
                     t = t + 1;
                 }
                 return;
