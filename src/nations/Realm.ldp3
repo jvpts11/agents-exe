@@ -361,7 +361,9 @@ public bundle Agents {
             // How hard each already-owned neighbour pulls a tile forward. Larger than the whole
             // wobble range on purpose: three owned neighbours must beat any amount of wobble, so
             // a hole is always closed before the frontier advances again.
-            public static fixed int ENCLOSED = 1200;
+            // Per-block bend: whole stretches of frontier advance or hold back together.
+            public static fixed int SWELL = 5000;
+            public static fixed int ENCLOSED = 9000;
             // The eight neighbours, as offsets. Written once here rather than inline in three
             // loops that could drift apart.
             private static mutable int[] RX;
@@ -1506,8 +1508,20 @@ public bundle Agents {
                                 held = held + 1;
                             }
                         }
+                        // Two scales. The per-tile value roughens the edge; the per-BLOCK value
+                        // moves whole stretches of frontier in or out together, which is what
+                        // makes tongues and bays instead of a fuzzy circle.
                         int n = ((nx * 374761393) ^ (ny * 668265263)) & 0x7FFFFFFF;
-                        far = far + (n % Realm.WOBBLE) - (Realm.WOBBLE / 2);
+                        int bx = nx >> 3;
+                        int by = ny >> 3;
+                        int nb = ((bx * 2654435761) ^ (by * 40503)) & 0x7FFFFFFF;
+                        // The bend is PROPORTIONAL to how far out the tile already is. A fixed
+                        // offset near the middle drags the whole settlement off its hall -- the
+                        // centroid came out fifteen tiles south of the seat. Scaled, the core
+                        // stays a circle centred on the town and only the far edge wanders.
+                        int bend = far / 24;
+                        far = far + ((n % Realm.WOBBLE) - (Realm.WOBBLE / 2)) * bend / 1000;
+                        far = far + ((nb % Realm.SWELL) - (Realm.SWELL / 2)) * bend / 1000;
                         far = far - held * Realm.ENCLOSED;
                         if (far < bestD) {
                             bestD = far;
@@ -1645,7 +1659,24 @@ public bundle Agents {
                 mutable int q = 0;
                 while (q < this.cities.size()) {
                     mutable City* it = this.cities.get(q);
-                    System.IO.Console.println($"city {it.id} centre {it.cx},{it.cy}, {it.tiles.size()} tiles, {it.residents.size()} people, {it.buildings.size()} buildings");
+                    // Where the ground actually sits against where the hall stands. If the two
+                    // drift apart the claim is growing lopsided and the seat is not its centre.
+                    mutable long sx = 0;
+                    mutable long sy = 0;
+                    mutable int z = 0;
+                    while (z < it.tiles.size()) {
+                        int at = it.tiles.get(z);
+                        sx = sx + cast<long>(at % this.w);
+                        sy = sy + cast<long>(at / this.w);
+                        z = z + 1;
+                    }
+                    mutable int mx = it.cx;
+                    mutable int my = it.cy;
+                    if (it.tiles.size() > 0) {
+                        mx = cast<int>(sx / cast<long>(it.tiles.size()));
+                        my = cast<int>(sy / cast<long>(it.tiles.size()));
+                    }
+                    System.IO.Console.println($"city {it.id} centre {it.cx},{it.cy}, ground centroid {mx},{my} (off by {mx - it.cx},{my - it.cy}), {it.tiles.size()} tiles, {it.residents.size()} people, {it.buildings.size()} buildings");
                     q = q + 1;
                 }
                 System.IO.Console.println("agent dump: id trade errand at was goto d home holds held site");
