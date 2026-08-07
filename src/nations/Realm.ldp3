@@ -73,6 +73,7 @@ public bundle Agents {
             private mutable long noNode;
             private mutable long tooLate;
             private mutable long yieldsNothing;
+            private mutable long strayed;        // sent home for having wandered out of reach
             // WHAT THE TRADES AND THE SITES DID. Same discipline: a city that raises nothing has
             // to name which gate stopped it -- no plot, no material, no builder, or a site that
             // was already at its ceiling of hands.
@@ -125,6 +126,7 @@ public bundle Agents {
                 this.noNode = 0;
                 this.tooLate = 0;
                 this.yieldsNothing = 0;
+                this.strayed = 0;
                 this.learned = 0;
                 this.selfTaught = 0;
                 this.ordered = 0;
@@ -354,7 +356,11 @@ public bundle Agents {
             public static fixed int EXPAND_RATE = 8;
             // Fruitless node searches one city may pay for in one tick. Each miss walks six
             // thousand tiles, so this is the difference between a frame and a slideshow.
-            public static fixed int SEARCH_TRIES = 3;    // hard ceiling from the centre, in cells
+            public static fixed int SEARCH_TRIES = 3;
+            // How far from his own town a gatherer may be before he is simply lost. Measured in
+            // tiles walked, not as the crow flies, and generous -- a forest can be a long way off.
+            // Past it he goes home rather than searching for a node further out still.
+            public static fixed int HOME_REACH = 60;    // hard ceiling from the centre, in cells
             // HOW MANY HOUSES STAND ON ONE CELL.
             //
             // This was one, and one is impossible. A house needs a cell, so a city with n houses
@@ -369,11 +375,25 @@ public bundle Agents {
             // thicken, which is the pressure §4 turns into colonists.
             // TILES OF CLEAR GROUND REQUIRED BETWEEN TWO BUILDINGS, measured on each axis. Two
             // means a building and its neighbour have two empty tiles between them.
-            public static fixed int GAP = 2;
+            // THE CLOSEST TWO BUILDINGS MAY EVER STAND, in tiles on each axis. A floor and
+            // nothing more: it says how near they MAY be, never how near they should be.
+            public static fixed int GAP = 1;
+            // How far past the closest legal spot a new building may be put, in squared tiles.
+            // This is the width of the band chosen from at random -- the difference between a
+            // town and a grid.
+            public static fixed int SPREAD = 40;
             // The ground a settlement holds on the day it is founded, before it has built
             // anything. With GAP=2 each building needs a 5x5 of its own, so this is room for
             // roughly a dozen -- a village's worth of street before the claim has to grow.
-            public static fixed int FLOOR = 300;
+            // A FLOOR THAT DOES NOT BECOME A CEILING.
+            //
+            // Three hundred was enough ground for a village on the day it was founded -- and a
+            // town of sixty-five buildings earns a hundred and sixty-one, which is LESS. So the
+            // floor won forever: the claim jumped to three hundred in the first seconds and never
+            // moved again, which read as a border that is born full size and does not grow.
+            //
+            // Small enough that a couple of buildings pass it: `sustained(2)` is twenty-eight.
+            public static fixed int FLOOR = 25;
             // ONE BUILDING PER TILE. Not a tunable -- a rule.
             //
             // This was eight, which was invented and wrong on both counts: the model let eight
@@ -546,7 +566,34 @@ public bundle Agents {
                         // From their own feet they get different answers, because they are
                         // standing in different places -- and the crowd spreads over the wood
                         // without anybody scheduling it.
-                        int found = this.nearestNode(g, cast<int>(who.x), cast<int>(who.y), want);
+                        // AND HE STARTS FROM HOME IF HE HAS DRIFTED.
+                        //
+                        // Searching from where he stands is right -- it is what broke the queue.
+                        // But nothing was pulling him back, so a man who wandered fifty tiles out
+                        // found a node fifty tiles out, walked further to reach it, and searched
+                        // from there next time. The dump caught people a hundred and ninety tiles
+                        // from a town at 937,834, with a hundred and three tiles still to walk on
+                        // average and half of them beyond anything the search can even see.
+                        //
+                        // A man that far out is lost, not working. He is sent home, and the
+                        // errand starts again from a place his town can actually supply.
+                        mutable int fx = cast<int>(who.x);
+                        mutable int fy = cast<int>(who.y);
+                        mutable int hx = fx - one.cx;
+                        mutable int hy = fy - one.cy;
+                        if (hx < 0) { hx = 0 - hx; }
+                        if (hy < 0) { hy = 0 - hy; }
+                        if (hx + hy > Realm.HOME_REACH) {
+                            who.goX = one.cx;
+                            who.goY = one.cy;
+                            who.errand = 2;                  // walk home, carrying nothing
+                            who.held = 0;
+                            who.holds = cast<int>(Good.Nothing);
+                            this.strayed = this.strayed + 1;
+                            t = t + 1;
+                            continue;
+                        }
+                        int found = this.nearestNode(g, fx, fy, want);
                         if (found < 0) {
                             this.noNode = this.noNode + 1;
                             tries = tries + 1;
@@ -1172,8 +1219,18 @@ public bundle Agents {
             // It follows that a city has far more ground than buildings, which is correct: not
             // all of a settlement's territory is built on.
             private method freePlot(City* one) returns int {
-                mutable int best = 0 - 1;
-                mutable int bestD = 0x7FFFFFFF;
+                // THE MINIMUM IS A FLOOR, NOT A LATTICE.
+                //
+                // Taking the nearest tile that satisfies the gap is an optimal packing, and an
+                // optimal packing is a grid: every house exactly as far from its neighbours as
+                // the rule allows and not one tile further. That is a warehouse yard, not a town.
+                //
+                // So: find how close a house COULD go, then choose at random among everything
+                // within a band beyond that. Near the hall still wins -- the band is narrow and
+                // measured from the closest legal spot -- but which of the legal spots gets built
+                // on is not decided by an ordering. Houses end up at one, two and four tiles
+                // apart, which is what a place people built looks like.
+                mutable int nearest = 0x7FFFFFFF;
                 mutable int t = 0;
                 while (t < one.tiles.size()) {
                     int at = one.tiles.get(t);
@@ -1183,16 +1240,62 @@ public bundle Agents {
                     int dx = ax - one.cx;
                     int dy = ay - one.cy;
                     int d = dx * dx + dy * dy;
-                    if (d >= bestD) {
-                        continue;                     // already have a closer one
+                    if (d < nearest && !this.tooClose(one, at)) {
+                        nearest = d;
+                    }
+                }
+                if (nearest == 0x7FFFFFFF) {
+                    return 0 - 1;                     // nowhere in town is far enough from a wall
+                }
+                // Everything from the closest legal spot out to a band beyond it is a candidate.
+                // Counted first, then one of them taken -- two passes rather than a list, because
+                // a city's tile list is walked twice cheaply and held once expensively.
+                int band = nearest + Realm.SPREAD;
+                mutable int many = 0;
+                t = 0;
+                while (t < one.tiles.size()) {
+                    int at = one.tiles.get(t);
+                    t = t + 1;
+                    int ax = at % this.w;
+                    int ay = at / this.w;
+                    int dx = ax - one.cx;
+                    int dy = ay - one.cy;
+                    if (dx * dx + dy * dy > band) {
+                        continue;
                     }
                     if (this.tooClose(one, at)) {
                         continue;
                     }
-                    bestD = d;
-                    best = at;
+                    many = many + 1;
                 }
-                return best;
+                if (many < 1) {
+                    return 0 - 1;
+                }
+                // Which one. Stirred by the order number and the city, so two towns founded in
+                // the same tick do not lay themselves out identically.
+                int pick = ((this.nextSite * 2654435761 + one.id * 40503 + this.seed * 97)
+                            & 0x7FFFFFFF) % many;
+                mutable int seen = 0;
+                t = 0;
+                while (t < one.tiles.size()) {
+                    int at = one.tiles.get(t);
+                    t = t + 1;
+                    int ax = at % this.w;
+                    int ay = at / this.w;
+                    int dx = ax - one.cx;
+                    int dy = ay - one.cy;
+                    if (dx * dx + dy * dy > band) {
+                        continue;
+                    }
+                    if (this.tooClose(one, at)) {
+                        continue;
+                    }
+                    if (seen == pick) {
+                        return at;
+                    }
+                    seen = seen + 1;
+                }
+                return 0 - 1;
             }
 
             // ONE CELL, AND THE NEAREST ONE TO THE CENTRE.
@@ -1357,7 +1460,10 @@ public bundle Agents {
             // and if most sit at 1 they are walking to somewhere they never reach.
             public method errands(Folk* folk) returns void {
                 mutable int[] byErrand = new int[8]();
-                mutable int stuck = 0;
+                mutable int atTarget = 0;
+                mutable int farOff = 0;
+                mutable int onErrand = 0;
+                mutable long reach = 0;
                 mutable int c = 0;
                 while (c < this.cities.size()) {
                     mutable City* one = this.cities.get(c);
@@ -1369,16 +1475,44 @@ public bundle Agents {
                             e = 7;
                         }
                         byErrand[e] = byErrand[e] + 1;
-                        // Standing exactly where he stood last slice, with somewhere to be.
-                        if (a.errand != 0 && cast<int>(a.x) == cast<int>(a.px)
-                            && cast<int>(a.y) == cast<int>(a.py)) {
-                            stuck = stuck + 1;
+                        // HOW FAR HE IS FROM WHERE HE IS GOING -- not whether he moved since the
+                        // last slice.
+                        //
+                        // The first version of this compared x against px and called it stuck.
+                        // That measures nothing: an agent is moved once every SLICES ticks, so in
+                        // fifteen ticks out of sixteen x IS px and everybody looks frozen. It
+                        // reported a hundred and nineteen of two hundred and forty stuck and the
+                        // number meant only that the dump landed between moves.
+                        //
+                        // Distance to the destination is the honest question, and it splits the
+                        // two real failures apart: a man far from a target he will never reach,
+                        // and a man standing ON his target with the arrival never firing.
+                        if (a.errand != 0) {
+                            int dx = a.goX - cast<int>(a.x);
+                            int dy = a.goY - cast<int>(a.y);
+                            mutable int ad = dx;
+                            if (ad < 0) { ad = 0 - ad; }
+                            mutable int bd = dy;
+                            if (bd < 0) { bd = 0 - bd; }
+                            if (ad + bd == 0) {
+                                atTarget = atTarget + 1;     // arrived, and nothing happened
+                            }
+                            if (ad + bd > 40) {
+                                farOff = farOff + 1;         // further than the search ever looks
+                            }
+                            reach = reach + cast<long>(ad + bd);
+                            onErrand = onErrand + 1;
                         }
                         t = t + 1;
                     }
                     c = c + 1;
                 }
-                System.IO.Console.println($"errands: {byErrand[0]} idle, {byErrand[1]} out to a node, {byErrand[2]} carrying home, {byErrand[3]} to the store, {byErrand[4]} to a site, {byErrand[5]} working a site, {stuck} on an errand and not moving");
+                mutable long avg = 0;
+                if (onErrand > 0) {
+                    avg = reach / cast<long>(onErrand);
+                }
+                System.IO.Console.println($"errands: {byErrand[0]} idle, {byErrand[1]} out to a node, {byErrand[2]} carrying home, {byErrand[3]} to the store, {byErrand[4]} to a site, {byErrand[5]} working a site");
+                System.IO.Console.println($"  of {onErrand} on an errand: {atTarget} standing ON their target with nothing happening, {farOff} further away than the search ever looks, {avg} tiles to go on average, {this.strayed} sent home over the run for straying");
                 delete byErrand;
                 return;
             }
