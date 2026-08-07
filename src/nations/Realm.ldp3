@@ -410,7 +410,9 @@ public bundle Agents {
             public static fixed int HOME_REACH = 60;
             // How far a town looks for work, in tiles. Well past its border: a settlement has no
             // guarantee of clay or rock inside its own ground.
-            public static fixed int WORK_REACH = 110;    // hard ceiling from the centre, in cells
+            public static fixed int WORK_REACH = 110;
+            // The short look around a remembered patch, before the country-wide sweep.
+            public static fixed int NEAR_REACH = 14;    // hard ceiling from the centre, in cells
             // HOW MANY HOUSES STAND ON ONE CELL.
             //
             // This was one, and one is impossible. A house needs a cell, so a city with n houses
@@ -432,6 +434,10 @@ public bundle Agents {
             // This is the width of the band chosen from at random -- the difference between a
             // town and a grid.
             public static fixed int SPREAD = 40;
+            // How wide the built-up part grows against the square root of what is standing. The
+            // claim uses K, which is far larger -- that gap is the fields and woods between the
+            // last house and the border.
+            public static fixed int SPRAWL = 2;
             // The ground a settlement holds on the day it is founded, before it has built
             // anything. With GAP=2 each building needs a 5x5 of its own, so this is room for
             // roughly a dozen -- a village's worth of street before the claim has to grow.
@@ -469,7 +475,7 @@ public bundle Agents {
             // Doubling it quadruples the territory, so this is the one lever worth turning rather
             // than a dozen small ones. At eight, a town of a hundred and fifteen buildings held
             // eighty-five cells and its houses sat in one clump.
-            public static fixed int K = 110;
+            public static fixed int K = 340;
             // The hinterland a settlement holds whatever it has built: the fields and woods it
             // works, not the ground under its houses. Added to the earned figure, never max'd
             // with it -- see sustained.
@@ -576,11 +582,7 @@ public bundle Agents {
                     if (lessons > 32) {
                         lessons = 32;
                     }
-                    mutable int ls = 0;
-                    while (ls < lessons) {
-                        this.teach(folk, one, tick + ls * 977);
-                        ls = ls + 1;
-                    }
+                    this.teachMany(folk, one, tick, lessons);
                     this.order(g, one, tick);
                     this.sendOut(g, folk, one, tick);
                     this.raise(folk, one);
@@ -660,7 +662,22 @@ public bundle Agents {
                         // Nor is it the territory: a settlement is not guaranteed to have clay or
                         // rock inside its own border, and most of the time a gatherer must leave
                         // it. The town looks out from its centre as far as a person will walk.
-                        int found = this.nearestNode(g, one.cx, one.cy, want, who.id + tick);
+                        // FROM WHERE THE TOWN LAST FOUND THIS WORK, with a short reach, before
+                        // sweeping the whole country. A hit costs a few hundred tiles instead of
+                        // fifty thousand, and resources come in patches, so the hit is the case.
+                        mutable int found = 0 - 1;
+                        int seen = one.lastFound[want];
+                        if (seen >= 0) {
+                            found = this.nodeNear(g, seen % this.w, seen / this.w, want,
+                                                  who.id + tick, Realm.NEAR_REACH);
+                        }
+                        if (found < 0) {
+                            found = this.nodeNear(g, one.cx, one.cy, want, who.id + tick,
+                                                  Realm.WORK_REACH);
+                        }
+                        if (found >= 0) {
+                            one.lastFound[want] = found;
+                        }
                         if (found < 0) {
                             this.noNode = this.noNode + 1;
                             who.lastAct = 10;
@@ -810,10 +827,35 @@ public bundle Agents {
             // The seed is the founders. An expedition carries its crafts (section 4), so the first
             // twelve arrive knowing things, and everybody after them learns from those twelve.
             // Without a seed nobody could ever learn anything and the city would stay a crowd.
-            private method teach(Folk* folk, City* one, int tick) returns void {
+            // THE TALLY IS TAKEN ONCE FOR THE WHOLE PASS.
+            //
+            // `teach` counted every trade in the town from scratch, and the pass ran it fifty-nine
+            // times over fourteen hundred people -- eighty thousand reads to hand out fifty-nine
+            // trades. The frame meter, once the walk and the thinking were measured apart, put
+            // ninety-six per cent of the frame here and seven per cent in the walking.
+            //
+            // One sweep, then the lessons are given against it and the count kept up by hand.
+            private method teachMany(Folk* folk, City* one, int tick, int lessons) returns void {
                 if (one.residents.size() < 1) {
                     return;
                 }
+                mutable int[] tally = new int[Gathers.crafts()]();
+                mutable int q = 0;
+                while (q < one.residents.size()) {
+                    tally[folk.at(one.residents.get(q)).trade] =
+                        tally[folk.at(one.residents.get(q)).trade] + 1;
+                    q = q + 1;
+                }
+                mutable int ls = 0;
+                while (ls < lessons) {
+                    this.teachOne(folk, one, tick + ls * 977, tally);
+                    ls = ls + 1;
+                }
+                delete tally;
+                return;
+            }
+
+            private method teachOne(Folk* folk, City* one, int tick, int[] tally) returns void {
                 // SEVERAL LEARN PER PASS, not one. One a pass over a town of sixteen hundred
                 // left most of them trade-less for the whole run, and a man with no trade is
                 // never sent anywhere -- which is the crowd standing about doing nothing.
@@ -833,20 +875,6 @@ public bundle Agents {
                 // WHAT THE CITY IS SHORTEST OF, among the trades that matter in era one. A learner
                 // takes up the scarcest, which is the pull the design doc describes -- nobody is
                 // posted anywhere, but a town short of masons makes masons.
-                // COUNTED ONCE, NOT SIXTEEN TIMES.
-                //
-                // This asked `countTrade` per craft, and each of those walked the whole resident
-                // list: sixteen sweeps of seventeen hundred people, every tick, times sixty-four
-                // ticks a frame at the top gear. The window dropped to three frames a second and
-                // spent ninety-eight per cent of each one in here. One sweep filling a tally is
-                // the same answer for a sixteenth of the work.
-                mutable int[] tally = new int[Gathers.crafts()]();
-                mutable int q = 0;
-                while (q < one.residents.size()) {
-                    int cr = folk.at(one.residents.get(q)).trade;
-                    tally[cr] = tally[cr] + 1;
-                    q = q + 1;
-                }
                 mutable int want = cast<int>(Craft.NoCraft);
                 mutable int fewest = 0x7FFFFFFF;
                 mutable int c = 1;
@@ -874,7 +902,6 @@ public bundle Agents {
                     }
                     c = c + 1;
                 }
-                delete tally;
                 if (want == cast<int>(Craft.NoCraft)) {
                     return;
                 }
@@ -888,6 +915,10 @@ public bundle Agents {
                     this.selfTaught = this.selfTaught + 1;
                 }
                 learner.trade = want;
+                // The shared tally is kept honest by hand, so the next lesson in this pass sees
+                // the trade that was just handed out rather than the count from before it.
+                tally[cast<int>(Craft.NoCraft)] = tally[cast<int>(Craft.NoCraft)] - 1;
+                tally[want] = tally[want] + 1;
                 return;
             }
 
@@ -1230,14 +1261,14 @@ public bundle Agents {
             //
             // The reach is far past the border on purpose. A settlement is not guaranteed clay or
             // rock inside its own ground, and a gatherer leaving the territory is the normal case.
-            private method nearestNode(Grid* g, int fromX, int fromY, int hclass,
-                                       int stir) returns int {
+            private method nodeNear(Grid* g, int fromX, int fromY, int hclass,
+                                    int stir, int reach) returns int {
                 // Everything found in a ring is kept, and one of them is taken. Two people asking
                 // in the same tick get different nodes at the same distance.
                 mutable int best = 0 - 1;
                 mutable int seen = 0;
                 mutable int ring = 0;
-                while (ring < Realm.WORK_REACH) {
+                while (ring < reach) {
                     seen = 0;
                     best = 0 - 1;
                     mutable int dx = 0 - ring;
@@ -1431,6 +1462,21 @@ public bundle Agents {
                 // measured from the closest legal spot -- but which of the legal spots gets built
                 // on is not decided by an ordering. Houses end up at one, two and four tiles
                 // apart, which is what a place people built looks like.
+                // THE BUILT-UP PART IS NOT THE WHOLE TERRITORY.
+                //
+                // A town's ground is its fields, woods and roads as well as its houses, and the
+                // houses sit in the middle of it. Without a bound they spread to the border and
+                // the settlement becomes a solid disc of roofs out to the frontier -- which is
+                // what a megalopolis looks like, not a village. Empty ground inside a claim is
+                // normal and it is most of it.
+                //
+                // The built radius grows with what is standing, but far more slowly than the
+                // claim does: doubling the buildings widens the town by root two and the country
+                // by a great deal more.
+                int reach = 6 + cast<int>(cast<float>(Realm.SPRAWL)
+                                          * cast<float>(Math.sqrt(cast<double>(
+                                              1 + one.buildings.size()))));
+                int reach2 = reach * reach;
                 mutable int nearest = 0x7FFFFFFF;
                 mutable int t = 0;
                 while (t < one.tiles.size()) {
@@ -1441,6 +1487,9 @@ public bundle Agents {
                     int dx = ax - one.cx;
                     int dy = ay - one.cy;
                     int d = dx * dx + dy * dy;
+                    if (d > reach2) {
+                        continue;                     // outside the town, inside the country
+                    }
                     if (d < nearest && !this.tooClose(one, at)) {
                         nearest = d;
                     }
@@ -1461,7 +1510,8 @@ public bundle Agents {
                     int ay = at / this.w;
                     int dx = ax - one.cx;
                     int dy = ay - one.cy;
-                    if (dx * dx + dy * dy > band) {
+                    int d = dx * dx + dy * dy;
+                    if (d > band || d > reach2) {
                         continue;
                     }
                     if (this.tooClose(one, at)) {
@@ -1485,7 +1535,8 @@ public bundle Agents {
                     int ay = at / this.w;
                     int dx = ax - one.cx;
                     int dy = ay - one.cy;
-                    if (dx * dx + dy * dy > band) {
+                    int d = dx * dx + dy * dy;
+                    if (d > band || d > reach2) {
                         continue;
                     }
                     if (this.tooClose(one, at)) {
