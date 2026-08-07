@@ -287,6 +287,7 @@ public bundle Agents {
                 // those questions answers itself.
                 c.buildings.add(atY * this.w + atX);
                 c.kinds.add(cast<int>(BuildingKind.TownHall));
+                c.facing.add(0);
                 return cid;
             }
 
@@ -366,6 +367,13 @@ public bundle Agents {
             // Cities are dense. A cell holds several houses, and the entitlement then holds up to
             // (K*PLOTS) squared houses -- beyond which the city stops spreading and can only
             // thicken, which is the pressure §4 turns into colonists.
+            // TILES OF CLEAR GROUND REQUIRED BETWEEN TWO BUILDINGS, measured on each axis. Two
+            // means a building and its neighbour have two empty tiles between them.
+            public static fixed int GAP = 2;
+            // The ground a settlement holds on the day it is founded, before it has built
+            // anything. With GAP=2 each building needs a 5x5 of its own, so this is room for
+            // roughly a dozen -- a village's worth of street before the claim has to grow.
+            public static fixed int FLOOR = 300;
             // ONE BUILDING PER TILE. Not a tunable -- a rule.
             //
             // This was eight, which was invented and wrong on both counts: the model let eight
@@ -393,12 +401,25 @@ public bundle Agents {
             // eighty-five cells and its houses sat in one clump.
             public static fixed int K = 20;
 
+            // GROUND A TOWN IS ENTITLED TO, from what it has built -- WITH A FLOOR.
+            //
+            // The floor is not generosity, it is what breaks a deadlock: territory follows
+            // buildings, a building needs a tile two clear of every other, and a founding owns
+            // twenty tiles in a disc barely two wide. The gap rule refuses all twenty, so nothing
+            // is ordered, so the territory never grows, so nothing is ever ordered. The run froze
+            // at one hall and twenty-four people and stayed there.
+            //
+            // A settlement is founded with room for its first street.
             private method sustained(int houses) returns int {
-                if (houses <= 0) {
-                    return 1;                            // the founding cell, always
+                mutable int t = Realm.FLOOR;
+                if (houses > 0) {
+                    int earned = cast<int>(cast<float>(Realm.K)
+                                           * cast<float>(Math.sqrt(cast<double>(houses))));
+                    if (earned > t) {
+                        t = earned;
+                    }
                 }
-                return cast<int>(cast<float>(Realm.K)
-                                 * cast<float>(Math.sqrt(cast<double>(houses))));
+                return t;
             }
 
             // ONE STEP OF EVERY CITY: people are born, houses go up for them, and the ground
@@ -611,6 +632,7 @@ public bundle Agents {
                 // temporary builder goes back to being what he was.
                 one.buildings.add(mine.y * this.w + mine.x);
                 one.kinds.add(mine.kind);
+                one.facing.add(mine.facing);       // the way the frame stood is the way it stands
                 this.raised = this.raised + 1;
                 this.townsCut = true;
                 this.closeSite(folk, one, mine);
@@ -1103,35 +1125,74 @@ public bundle Agents {
             //
             // Walked rather than remembered. A city's tile list is hundreds long at most and this
             // runs once a tick per city; the day that is not true it becomes a flag per tile.
+            // TWO TILES OF DAYLIGHT BETWEEN ANY TWO BUILDINGS.
+            //
+            // Without it a town packs its whole territory solid and comes out as a lattice of
+            // roofs with no ground between them. With it there are lanes, yards and gaps, and a
+            // town that owns three hundred tiles has buildings on a third of them -- which is
+            // what a settlement looks like, because not all of a city's ground is built on.
+            private method tooClose(City* one, int at) returns boolean {
+                int ax = at % this.w;
+                int ay = at / this.w;
+                mutable int b = 0;
+                while (b < one.buildings.size()) {
+                    int o = one.buildings.get(b);
+                    mutable int dx = o % this.w - ax;
+                    mutable int dy = o / this.w - ay;
+                    if (dx < 0) { dx = 0 - dx; }
+                    if (dy < 0) { dy = 0 - dy; }
+                    if (dx <= Realm.GAP && dy <= Realm.GAP) {
+                        return true;
+                    }
+                    b = b + 1;
+                }
+                // And the frames, which are buildings that have not finished yet.
+                mutable int s = 0;
+                while (s < one.sites.size()) {
+                    mutable Site* it = one.sites.get(s);
+                    mutable int dx = it.x - ax;
+                    mutable int dy = it.y - ay;
+                    if (dx < 0) { dx = 0 - dx; }
+                    if (dy < 0) { dy = 0 - dy; }
+                    if (dx <= Realm.GAP && dy <= Realm.GAP) {
+                        return true;
+                    }
+                    s = s + 1;
+                }
+                return false;
+            }
+
+            // THE TILE NEAREST THE CENTRE THAT IS FAR ENOUGH FROM EVERYTHING ELSE.
+            //
+            // Two rules, and they are what makes a settlement read as one. NEAREST THE CENTRE,
+            // because a town grows out from its hall and does not sprinkle huts over its whole
+            // province. And TWO TILES CLEAR of any other building or frame, because a town packed
+            // solid is a lattice of roofs with no ground between them.
+            //
+            // It follows that a city has far more ground than buildings, which is correct: not
+            // all of a settlement's territory is built on.
             private method freePlot(City* one) returns int {
+                mutable int best = 0 - 1;
+                mutable int bestD = 0x7FFFFFFF;
                 mutable int t = 0;
                 while (t < one.tiles.size()) {
                     int at = one.tiles.get(t);
-                    mutable int standing = 0;
-                    mutable int b = 0;
-                    while (b < one.buildings.size()) {
-                        if (one.buildings.get(b) == at) {
-                            standing = standing + 1;
-                        }
-                        b = b + 1;
-                    }
-                    // AND THE FRAMES ALREADY ON IT. Without this the same cell is handed to every
-                    // order in a row -- the run put two huts on 938,830 -- because a site does not
-                    // become a building until it is finished and the plot looks free the whole
-                    // time it is being built.
-                    mutable int s = 0;
-                    while (s < one.sites.size()) {
-                        if (one.sites.get(s).y * this.w + one.sites.get(s).x == at) {
-                            standing = standing + 1;
-                        }
-                        s = s + 1;
-                    }
-                    if (standing < Realm.PLOTS) {
-                        return at;
-                    }
                     t = t + 1;
+                    int ax = at % this.w;
+                    int ay = at / this.w;
+                    int dx = ax - one.cx;
+                    int dy = ay - one.cy;
+                    int d = dx * dx + dy * dy;
+                    if (d >= bestD) {
+                        continue;                     // already have a closer one
+                    }
+                    if (this.tooClose(one, at)) {
+                        continue;
+                    }
+                    bestD = d;
+                    best = at;
                 }
-                return 0 - 1;
+                return best;
             }
 
             // ONE CELL, AND THE NEAREST ONE TO THE CENTRE.
@@ -1254,6 +1315,71 @@ public bundle Agents {
                     }
                     c = c + 1;
                 }
+                return;
+            }
+
+            // EVERY AGENT, EVERY FIELD THAT DECIDES WHAT HE DOES.
+            //
+            // Written because a handful of them behave in ways nothing in the counters explains --
+            // standing still, walking back and forth, circling a node -- and guessing at it from
+            // the outside has been wrong twice. This is the state itself: where he is, where he
+            // was, where he is going, what he holds, what he is, and what he is on.
+            //
+            // A census of a sample rather than of everybody: a thousand lines is readable and a
+            // hundred thousand is not, and the ones behaving strangely are not rare.
+            public method agentDump(Folk* folk, int many) returns void {
+                System.IO.Console.println("agent dump: id trade errand at from goto holds held site");
+                mutable int printed = 0;
+                mutable int c = 0;
+                while (c < this.cities.size() && printed < many) {
+                    mutable City* one = this.cities.get(c);
+                    mutable int t = 0;
+                    while (t < one.residents.size() && printed < many) {
+                        int who = one.residents.get(t);
+                        mutable Agent* a = folk.at(who);
+                        // Distance from where he is to where he says he is going. A man on an
+                        // errand who is not getting closer over successive dumps is the whole
+                        // question, and it cannot be read off a counter.
+                        int dx = a.goX - cast<int>(a.x);
+                        int dy = a.goY - cast<int>(a.y);
+                        System.IO.Console.println($"  {who} trade={a.trade} errand={a.errand} at={cast<int>(a.x)},{cast<int>(a.y)} was={cast<int>(a.px)},{cast<int>(a.py)} goto={a.goX},{a.goY} d={dx},{dy} holds={a.holds} held={a.held} site={a.site}");
+                        printed = printed + 1;
+                        t = t + 1;
+                    }
+                    c = c + 1;
+                }
+                System.IO.Console.println($"agent dump: {printed} of {folk.count()} alive");
+                return;
+            }
+
+            // WHAT THE WHOLE POPULATION IS DOING, by errand. The shape of the answer to "why is
+            // nobody doing anything": if most of them sit at errand 0 the sending is the problem,
+            // and if most sit at 1 they are walking to somewhere they never reach.
+            public method errands(Folk* folk) returns void {
+                mutable int[] byErrand = new int[8]();
+                mutable int stuck = 0;
+                mutable int c = 0;
+                while (c < this.cities.size()) {
+                    mutable City* one = this.cities.get(c);
+                    mutable int t = 0;
+                    while (t < one.residents.size()) {
+                        mutable Agent* a = folk.at(one.residents.get(t));
+                        mutable int e = a.errand;
+                        if (e < 0 || e > 7) {
+                            e = 7;
+                        }
+                        byErrand[e] = byErrand[e] + 1;
+                        // Standing exactly where he stood last slice, with somewhere to be.
+                        if (a.errand != 0 && cast<int>(a.x) == cast<int>(a.px)
+                            && cast<int>(a.y) == cast<int>(a.py)) {
+                            stuck = stuck + 1;
+                        }
+                        t = t + 1;
+                    }
+                    c = c + 1;
+                }
+                System.IO.Console.println($"errands: {byErrand[0]} idle, {byErrand[1]} out to a node, {byErrand[2]} carrying home, {byErrand[3]} to the store, {byErrand[4]} to a site, {byErrand[5]} working a site, {stuck} on an errand and not moving");
+                delete byErrand;
                 return;
             }
 

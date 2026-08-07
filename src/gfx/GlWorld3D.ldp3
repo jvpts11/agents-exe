@@ -198,6 +198,9 @@ public bundle Agents {
             private mutable int bkTris;
             private mutable int bkW;
             private mutable int bkRow;
+            // A refresh asked for while a bake was still running. Held rather than dropped, and
+            // rather than restarting the pass in flight -- see refreshDetail.
+            private mutable boolean reBake;
             private mutable int bkOx;
             private mutable int bkOy;
             private mutable int bkPhase;        // 0 = counting, 1 = emitting
@@ -2026,7 +2029,7 @@ public bundle Agents {
                 this.detX0 = ox;
                 this.detY0 = oy;
                 this.haveDetail = true;
-                this.baking = false;
+                this.bakeSettled();
                 return;
             }
 
@@ -2125,6 +2128,81 @@ public bundle Agents {
                 return p;
             }
 
+            // A BUILDING THAT IS PART BUILT: SOLID BELOW THE WORK LINE, A GHOST ABOVE IT.
+            //
+            // `built` is 0..1. Every triangle of the finished building is emitted at its finished
+            // place -- so an ordered building shows its own shape, at its own size, standing where
+            // it will stand, from the moment the ground is broken. What changes is the COLOUR:
+            // below the line it is the building's own, above it is washed out towards the sky.
+            //
+            // Washed out and not transparent, and that is a real limit rather than a choice: the
+            // vertex format here carries position, normal and colour, with no alpha channel, and
+            // giving it one means changing the shader and the buffer layout for every mesh in the
+            // world. This reads as a ghost filling in from the ground up; true see-through glass
+            // is a shader change and it is not pretended here.
+            private method emitBuilt(MeshAtlas* a, address buf, int w, int mord,
+                                     float wx, float wy, float wz,
+                                     float scale, float cr, float cg, float cb,
+                                     float shade, float ca, float sa, float built) returns int {
+                int t0 = a.triStart[mord];
+                int tn = a.triCount[mord];
+                // The work line, in the mesh's own vertical units. A building rises to `hi`, so
+                // the line sweeps from its foot to its ridge as the hashes land.
+                mutable float hi = 0.0;
+                mutable int q = 0;
+                while (q < tn * 3) {
+                    float pz = a.pz[t0 * 3 + q];
+                    if (pz > hi) {
+                        hi = pz;
+                    }
+                    q = q + 1;
+                }
+                float line = hi * built;
+                mutable int p = w;
+                mutable int t = 0;
+                while (t < tn) {
+                    int tri = t0 + t;
+                    int vb = tri * 3;
+                    mutable float r = cast<float>(a.cr[tri]) / 255.0;
+                    mutable float g = cast<float>(a.cg[tri]) / 255.0;
+                    mutable float b = cast<float>(a.cb[tri]) / 255.0;
+                    if (a.grp[tri] >= 1000) {
+                        r = r * cr;
+                        g = g * cg;
+                        b = b * cb;
+                    }
+                    r = r * shade;
+                    g = g * shade;
+                    b = b * shade;
+                    mutable int k = 0;
+                    while (k < 3) {
+                        int vi = vb + k;
+                        float lx = a.px[vi] * scale;
+                        float ly = a.py[vi] * scale;
+                        float bx = a.nx[vi];
+                        float by = a.ny[vi];
+                        // PER VERTEX, so the line cuts across a triangle rather than snapping it
+                        // whole -- the fill climbs smoothly instead of in slabs.
+                        mutable float vr = r;
+                        mutable float vg = g;
+                        mutable float vb2 = b;
+                        if (a.pz[vi] > line) {
+                            vr = r * 0.25 + 0.72;
+                            vg = g * 0.25 + 0.74;
+                            vb2 = b * 0.25 + 0.78;
+                        }
+                        p = this.wr(buf, p, lx * ca - ly * sa + wx,
+                                    lx * sa + ly * ca + wy,
+                                    a.pz[vi] * scale + wz,
+                                    bx * ca - by * sa, bx * sa + by * ca, a.nz[vi],
+                                    vr, vg, vb2);
+                        k = k + 1;
+                    }
+                    t = t + 1;
+                }
+                return p;
+            }
+
             // THE BODIES, AND SEPARATELY THE PEOPLE IN THEM.
             //
             // These used to be one call, and they are not one thing: the ART is what the card
@@ -2189,8 +2267,33 @@ public bundle Agents {
             // standing in the picture is the world showing one thing while the simulation believes
             // another. That is the same pairing that made agents invisible and made a city grow on
             // houses that were never built.
+            // A NODE THAT WAS TAKEN OFF THE MAP STOPS BEING DRAWN.
+            //
+            // The detail bake is sliced across frames, and this restarted it. With a busy town
+            // something comes off the map most ticks, so the restart landed before the previous
+            // pass had finished and the bake never completed once -- which is why a felled tree
+            // and an emptied clay pit stayed standing for the whole run.
+            //
+            // The request is REMEMBERED instead. A bake in flight is allowed to finish, and the
+            // next one starts when it has; nothing is dropped and nothing is restarted mid-pass.
             public method refreshDetail() returns void {
-                if (this.haveDetail) {
+                if (!this.haveDetail) {
+                    return;
+                }
+                if (this.baking) {
+                    this.reBake = true;              // finish this pass, then go round again
+                    return;
+                }
+                this.beginBake(this.detX0, this.detY0);
+                return;
+            }
+
+            // Called by the bake when a pass completes. If the world changed while it was running,
+            // it goes round once more -- so the picture always catches up, however busy the town.
+            private method bakeSettled() returns void {
+                this.baking = false;
+                if (this.reBake) {
+                    this.reBake = false;
                     this.beginBake(this.detX0, this.detY0);
                 }
                 return;
@@ -2293,7 +2396,8 @@ public bundle Agents {
                         int by = cell / this.grid.width();
                         int m = this.meshFor(one.kinds.get(b));
                         if (m >= 0) {
-                            w = this.putBuilding(w, m, bx, by, 1.0, 1.0, 1.0, 1.0);
+                            w = this.putBuilding(w, m, bx, by, one.facing.get(b),
+                                                 1.0, 1.0, 1.0, 1.0);
                             standing = standing + 1;
                         } else {
                             // NOT DRAWN, AND SAID SO. A kind whose mesh is missing from the atlas
@@ -2312,9 +2416,10 @@ public bundle Agents {
                         mutable Site* it = one.sites.get(s);
                         int m = this.meshFor(it.kind);
                         if (m >= 0) {
-                            float p = it.progress();
-                            w = this.putBuilding(w, m, it.x, it.y,
-                                                 0.12 + p * 0.88, 0.72, 0.55, 0.34);
+                            // The finished building's own shape and colours, filling in from the
+                            // ground as the hashes land. No brown marker: the thing itself.
+                            w = this.putBuilding(w, m, it.x, it.y, it.facing,
+                                                 it.progress(), 1.0, 1.0, 1.0);
                             frames = frames + 1;
                         } else {
                             missing = missing + 1;
@@ -2343,25 +2448,37 @@ public bundle Agents {
             // Fixed rather than random, because the bake runs again whenever a building changes
             // and a house that hops six inches every time one goes up across town is worse than a
             // lattice.
-            // `up` is HOW FAR OUT OF THE GROUND IT IS, 0..1 -- not how big it is.
+            // A BUILDING, AT FULL SIZE, TURNED, AND AS SOLID AS IT HAS BEEN BUILT.
             //
-            // It was being passed as the scale, so a site with no hashes yet drew a building at
-            // twelve per cent of its size: a doll's house on the grass, not a frame. A building
-            // under construction is the same size it will be finished; what changes is how much
-            // of it is above ground.
-            private method putBuilding(int w, int mesh, int cx, int cy, float up,
+            // `up` is how far along the work is, 0..1, and it does NOT change the size or the
+            // height. A site shows the finished building's own shape, ghosted, standing where it
+            // will stand -- and it fills in from the ground up as the hashes land, so what you
+            // watch is the thing itself becoming real rather than a marker growing.
+            //
+            // Two earlier attempts at this were both wrong: `up` as the scale drew a doll's house,
+            // and `up` as a Z offset buried it in the dirt.
+            //
+            // `face` is 0..3 -- north, east, south, west. Buildings sit square on their tile.
+            private method putBuilding(int w, int mesh, int cx, int cy, int face, float up,
                                        float r, float gg, float b) returns int {
-                float z = this.groundTopAt(cx, cy) - (1.0 - up) * 2.2;
+                float z = this.groundTopAt(cx, cy);
                 float sh = this.shadeAt(cx, cy, 1,
                                         this.stackLvl(this.grid.biomeAt(cx, cy), cx, cy));
                 // A tile is two units across; the house sits within a third of a unit of centre.
                 int hx = (cx * 73856093) ^ (cy * 19349663);
                 float ox = cast<float>((hx >> 3) & 15) * 0.0433 - 0.325;
                 float oy = cast<float>((hx >> 11) & 15) * 0.0433 - 0.325;
-                return this.emitTintedTurned(this.builds, this.bbuf, w, mesh,
-                                             cast<float>(cx) * 2.0 + 1.0 + ox,
-                                             cast<float>(cy) * 2.0 + 1.0 + oy,
-                                             z, 0.9, r, gg, b, sh, 1.0, 0.0);
+                // The four quarter turns, as the cosine/sine pair the emitter wants. No trig: a
+                // right angle has exact components and a table of four is clearer than a formula.
+                mutable float ca = 1.0;
+                mutable float sa = 0.0;
+                if (face == 1) { ca = 0.0; sa = 1.0; }
+                if (face == 2) { ca = 0.0 - 1.0; sa = 0.0; }
+                if (face == 3) { ca = 0.0; sa = 0.0 - 1.0; }
+                return this.emitBuilt(this.builds, this.bbuf, w, mesh,
+                                      cast<float>(cx) * 2.0 + 1.0 + ox,
+                                      cast<float>(cy) * 2.0 + 1.0 + oy,
+                                      z, 0.9, r, gg, b, sh, ca, sa, up);
             }
 
             // The mesh a BuildingKind draws with. The catalogue names it, and a kind whose mesh is
