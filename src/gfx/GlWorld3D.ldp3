@@ -2278,6 +2278,7 @@ public bundle Agents {
                 mutable int w = 0;
                 mutable int standing = 0;
                 mutable int frames = 0;
+                mutable int missing = 0;
                 c = 0;
                 while (c < this.realm.cityCount()) {
                     // The hall is in the list with everything else now, so it is not drawn twice.
@@ -2291,6 +2292,12 @@ public bundle Agents {
                         if (m >= 0) {
                             w = this.putBuilding(w, m, bx, by, 1.0, 1.0, 1.0, 1.0);
                             standing = standing + 1;
+                        } else {
+                            // NOT DRAWN, AND SAID SO. A kind whose mesh is missing from the atlas
+                            // used to be skipped without a word -- which is why a StoragePit was
+                            // standing in the model and absent from the window, and why the
+                            // report and the screen disagreed about what the town had.
+                            missing = missing + 1;
                         }
                         b = b + 1;
                     }
@@ -2303,9 +2310,11 @@ public bundle Agents {
                         int m = this.meshFor(it.kind);
                         if (m >= 0) {
                             float p = it.progress();
-                            w = this.putBuilding(w, m, it.x, it.y, 0.12 + p * 0.88,
-                                                 0.72, 0.55, 0.34);
+                            w = this.putBuilding(w, m, it.x, it.y,
+                                                 0.12 + p * 0.88, 0.72, 0.55, 0.34);
                             frames = frames + 1;
+                        } else {
+                            missing = missing + 1;
                         }
                         s = s + 1;
                     }
@@ -2317,20 +2326,32 @@ public bundle Agents {
                                    GL.DYNAMIC_DRAW);
                 this.gl.bindVertexArray(0);
                 this.bnverts = w / 9;
-                System.IO.Console.println($"towns: {this.realm.cityCount()} seats, {standing} buildings, {frames} sites under construction, {this.bnverts} vertices");
+                System.IO.Console.println($"towns: {this.realm.cityCount()} seats, {standing} buildings, {frames} sites under construction, {missing} NOT DRAWN for want of a mesh, {this.bnverts} vertices");
                 return;
             }
 
             // One building at a cell, tinted and scaled. `up` is how much of it shows: 1.0 for a
             // finished thing, less for a frame, which sinks it into the ground.
+            //
+            // ONE BUILDING, ON ITS OWN TILE. A tile holds one, so there is no plot index here and
+            // no ring of them: what makes a town stop looking surveyed is that each building sits
+            // a little off the middle of its own tile, by an amount fixed by the tile itself.
+            //
+            // Fixed rather than random, because the bake runs again whenever a building changes
+            // and a house that hops six inches every time one goes up across town is worse than a
+            // lattice.
             private method putBuilding(int w, int mesh, int cx, int cy, float up,
                                        float r, float gg, float b) returns int {
                 float z = this.groundTopAt(cx, cy);
                 float sh = this.shadeAt(cx, cy, 1,
                                         this.stackLvl(this.grid.biomeAt(cx, cy), cx, cy));
+                // A tile is two units across; the house sits within a third of a unit of centre.
+                int hx = (cx * 73856093) ^ (cy * 19349663);
+                float ox = cast<float>((hx >> 3) & 15) * 0.0433 - 0.325;
+                float oy = cast<float>((hx >> 11) & 15) * 0.0433 - 0.325;
                 return this.emitTintedTurned(this.builds, this.bbuf, w, mesh,
-                                             cast<float>(cx) * 2.0 + 1.0,
-                                             cast<float>(cy) * 2.0 + 1.0,
+                                             cast<float>(cx) * 2.0 + 1.0 + ox,
+                                             cast<float>(cy) * 2.0 + 1.0 + oy,
                                              z, 0.9 * up, r, gg, b, sh, 1.0, 0.0);
             }
 

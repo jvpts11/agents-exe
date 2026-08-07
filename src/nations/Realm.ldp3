@@ -348,7 +348,12 @@ public bundle Agents {
             // K and MAX_RADIUS are not chosen here. They are the two numbers this slice exists to
             // MEASURE, and whatever is written below came off a run.
             public static fixed int PER_HOUSE = 4;      // residents a house holds
-            public static fixed int MAX_RADIUS = 26;    // hard ceiling from the centre, in cells
+            public static fixed int MAX_RADIUS = 60;
+            // Tiles a city may claim in one tick. A bound, so it is announced rather than assumed.
+            public static fixed int EXPAND_RATE = 8;
+            // Fruitless node searches one city may pay for in one tick. Each miss walks six
+            // thousand tiles, so this is the difference between a frame and a slideshow.
+            public static fixed int SEARCH_TRIES = 3;    // hard ceiling from the centre, in cells
             // HOW MANY HOUSES STAND ON ONE CELL.
             //
             // This was one, and one is impossible. A house needs a cell, so a city with n houses
@@ -361,7 +366,15 @@ public bundle Agents {
             // Cities are dense. A cell holds several houses, and the entitlement then holds up to
             // (K*PLOTS) squared houses -- beyond which the city stops spreading and can only
             // thicken, which is the pressure §4 turns into colonists.
-            public static fixed int PLOTS = 8;
+            // ONE BUILDING PER TILE. Not a tunable -- a rule.
+            //
+            // This was eight, which was invented and wrong on both counts: the model let eight
+            // buildings share a tile, and the renderer drew all eight at that tile's exact centre.
+            // A town of two hundred and eighty-one buildings showed forty domes with seven hidden
+            // inside each, so the report and the window disagreed and the report was believed.
+            //
+            // A tile holds one building, or part of one large building. Never two.
+            public static fixed int PLOTS = 1;
 
             // K, AND WHY IT IS EIGHT.
             //
@@ -374,7 +387,11 @@ public bundle Agents {
             // It stays a ceiling rather than the thing that decides. What a city actually stops at
             // is where the wood, the stone and the ground around it run out, and that is what the
             // next run measures.
-            public static fixed int K = 8;
+            // HOW MUCH GROUND A BUILDING ENTITLES A TOWN TO, in the exponent: tiles = K^2 * PLOTS.
+            // Doubling it quadruples the territory, so this is the one lever worth turning rather
+            // than a dozen small ones. At eight, a town of a hundred and fifteen buildings held
+            // eighty-five cells and its houses sat in one clump.
+            public static fixed int K = 20;
 
             private method sustained(int houses) returns int {
                 if (houses <= 0) {
@@ -425,10 +442,25 @@ public bundle Agents {
                     // hundred "buildings" and an empty field. Housing is ordered like everything
                     // else now -- see `order` -- and it costs wood and stone and takes hashes.
                     // GROUND, following the houses.
-                    if (one.tiles.size() < this.sustained(one.buildings.size())) {
-                        this.expand(g, one);
-                    } else {
+                    // GROUND, FOLLOWING THE HOUSES -- and catching up rather than trickling.
+                    //
+                    // One cell a tick meant a town entitled to two hundred cells took two hundred
+                    // ticks to claim them, so the border was always far behind what the buildings
+                    // had earned and the houses had nowhere to spread to. It takes as many as it
+                    // is owed, up to a bound per tick so a founding does not claim a province in
+                    // one frame.
+                    mutable int owed = this.sustained(one.buildings.size()) - one.tiles.size();
+                    if (owed > Realm.EXPAND_RATE) {
+                        owed = Realm.EXPAND_RATE;
+                    }
+                    if (owed <= 0) {
                         this.atCeiling = this.atCeiling + 1;
+                    }
+                    while (owed > 0) {
+                        if (!this.expand(g, one)) {
+                            break;                    // boxed in, past the radius, or in the sea
+                        }
+                        owed = owed - 1;
                     }
                     // AND THE WORK. In the order the work actually happens in: somebody learns a
                     // trade, the city decides what to raise next, a gatherer is sent for what his
@@ -457,6 +489,17 @@ public bundle Agents {
             // Producing includes delivering: that is his work from end to end and nothing takes
             // him off it.
             private method sendOut(Grid* g, Folk* folk, City* one) returns void {
+                // HOW MANY FRUITLESS SEARCHES ONE TICK MAY PAY FOR.
+                //
+                // `nearestNode` walks rings out to forty tiles: six thousand tiles for one answer,
+                // and a miss costs the whole six thousand. This loop used to give up on a miss and
+                // move to the next resident, so a town whose diggers had no ore near them paid
+                // that search once per digger per tick -- four million misses in one arc, and the
+                // frame meter put ninety-eight per cent of the frame right here.
+                //
+                // A few tries a tick is enough: somebody gets sent, and the ones who found nothing
+                // will be asked again next tick from wherever they have wandered to.
+                mutable int tries = 0;
                 mutable int t = 0;
                 while (t < one.residents.size()) {
                     mutable Agent* who = folk.at(one.residents.get(t));
@@ -485,6 +528,10 @@ public bundle Agents {
                         int found = this.nearestNode(g, cast<int>(who.x), cast<int>(who.y), want);
                         if (found < 0) {
                             this.noNode = this.noNode + 1;
+                            tries = tries + 1;
+                            if (tries >= Realm.SEARCH_TRIES) {
+                                return;           // enough searching for one tick
+                            }
                             t = t + 1;
                             continue;             // no timber near HIM; a mason may still find rock
                         }
@@ -542,7 +589,10 @@ public bundle Agents {
                     who.held = 0;
                     who.holds = cast<int>(Good.Nothing);
                     who.errand = 5;
-                    this.townsCut = true;                    // the pile on the site grew
+                    // NOT a rebake. A load landing on a site changes nothing anybody can see --
+                    // the frame's height comes from the hashes, not the pile. Raising the flag
+                    // here made `bakeTowns` run every frame, which reallocated the town buffer
+                    // every frame and ran the machine out of memory at seventy-two megabytes.
                     return;
                 }
                 // errand 5 -- at the site, making hashes. Only once the material is all here: a
@@ -624,12 +674,26 @@ public bundle Agents {
                 // WHAT THE CITY IS SHORTEST OF, among the trades that matter in era one. A learner
                 // takes up the scarcest, which is the pull the design doc describes -- nobody is
                 // posted anywhere, but a town short of masons makes masons.
+                // COUNTED ONCE, NOT SIXTEEN TIMES.
+                //
+                // This asked `countTrade` per craft, and each of those walked the whole resident
+                // list: sixteen sweeps of seventeen hundred people, every tick, times sixty-four
+                // ticks a frame at the top gear. The window dropped to three frames a second and
+                // spent ninety-eight per cent of each one in here. One sweep filling a tally is
+                // the same answer for a sixteenth of the work.
+                mutable int[] tally = new int[Gathers.crafts()]();
+                mutable int q = 0;
+                while (q < one.residents.size()) {
+                    int cr = folk.at(one.residents.get(q)).trade;
+                    tally[cr] = tally[cr] + 1;
+                    q = q + 1;
+                }
                 mutable int want = cast<int>(Craft.NoCraft);
                 mutable int fewest = 0x7FFFFFFF;
                 mutable int c = 1;
                 while (c < Gathers.crafts()) {
                     if (this.needed(one, c)) {
-                        int have = this.countTrade(folk, one, c);
+                        int have = tally[c];
                         // ENOUGH BUILDERS IS ENOUGH. A hut takes three hands; a town that taught
                         // the trade to a hundred and seventy-six people turned nine hundred
                         // thousand of them away at the site in one arc, and every one of those
@@ -647,6 +711,7 @@ public bundle Agents {
                     }
                     c = c + 1;
                 }
+                delete tally;
                 if (want == cast<int>(Craft.NoCraft)) {
                     return;
                 }
@@ -1029,12 +1094,10 @@ public bundle Agents {
                 return;
             }
 
-            // A cell the city owns that still has room for another house. Not an EMPTY cell -- a
-            // cell holds PLOTS of them, and a town that could only ever build on bare ground would
-            // be a town that cannot thicken.
+            // AN EMPTY TILE THE CITY OWNS. Empty means empty: one building per tile.
             //
             // Walked rather than remembered. A city's tile list is hundreds long at most and this
-            // runs once a tick per city; the day that is not true it becomes a count per cell.
+            // runs once a tick per city; the day that is not true it becomes a flag per tile.
             private method freePlot(City* one) returns int {
                 mutable int t = 0;
                 while (t < one.tiles.size()) {
