@@ -52,6 +52,7 @@ public bundle Agents {
             private mutable long rebinnings; // how often somebody actually changed block
             private mutable long groundLooks; // how often the world was actually asked about a cell
             private mutable long movedEver;   // how many agent-moves have actually been done
+            private mutable long unwedged;    // errands given up for being pinned against terrain
             private mutable int cap;          // room on the roll, which grows as people are born
 
             public static fixed int BLOCK = 32;
@@ -94,6 +95,8 @@ public bundle Agents {
             public static fixed int SLICES = 1;
             // How far from his own town an idle agent may drift before he turns back.
             public static fixed float LEASH = 14.0;
+            // Ticks pinned in one spot on an errand before it is given up as unreachable.
+            public static fixed int WEDGE_LIMIT = 240;
 
             public constructor Folk(int howMany, int withSeed) {
                 mutable int room = howMany;
@@ -113,6 +116,7 @@ public bundle Agents {
                 this.rebinnings = 0;
                 this.groundLooks = 0;
                 this.movedEver = 0;
+                this.unwedged = 0;
             }
 
             // ROOM FOR MORE PEOPLE, because a population that a game is running is not a number
@@ -332,6 +336,10 @@ public bundle Agents {
                 return;
             }
 
+            public method stuckGaveUp() returns long {
+                return this.unwedged;
+            }
+
             public method count() returns int {
                 return this.n;
             }
@@ -544,9 +552,28 @@ public bundle Agents {
                     // -- the same size, the same test against the ground -- so an errand does not
                     // buy the right to walk through a river.
                     mutable float turn = (LandMath.hash01(this.seed ^ 0x77A3, i, tick) - 0.5) * 0.6;
-                    // IDLE DRIFT STAYS IN TOWN. Past the leash he turns for home instead of
-                    // drifting further -- an idle man does not walk to another province.
+                    mutable boolean still = false;
+                    // IDLE IS A WALK, A PAUSE, AND A NEW DIRECTION -- inside the town, never out
+                    // of it. Not a continuous random turn, which reads as drifting; a person with
+                    // nothing to do crosses the place, stops for a while, then sets off elsewhere.
                     if (one.errand == 0) {
+                        if (one.rest > 0) {
+                            one.rest = one.rest - 1;
+                            still = true;
+                        } else if (one.hold > 0) {
+                            one.hold = one.hold - 1;
+                            turn = 0.0;                      // hold the line he chose
+                        } else {
+                            float pickA = LandMath.hash01(this.seed ^ 0x51E7, i, tick);
+                            float pickB = LandMath.hash01(this.seed ^ 0x93B1, i, tick);
+                            one.rest = 40 + cast<int>(pickA * 160.0);
+                            one.hold = 60 + cast<int>(pickB * 220.0);
+                            float ang = pickB * 6.2831853;
+                            hx = cast<float>(Math.cos(cast<double>(ang)));
+                            hy = cast<float>(Math.sin(cast<double>(ang)));
+                            turn = 0.0;
+                        }
+                        // And never out of his own town. Past the leash the new direction is home.
                         float ohx = cast<float>(one.homeX) + 0.5 - px;
                         float ohy = cast<float>(one.homeY) + 0.5 - py;
                         float out2 = ohx * ohx + ohy * ohy;
@@ -555,7 +582,17 @@ public bundle Agents {
                             hx = ohx * inv;
                             hy = ohy * inv;
                             turn = 0.0;
+                            still = false;
+                            one.rest = 0;
                         }
+                    }
+                    if (still) {
+                        one.px = wasX;
+                        one.py = wasY;
+                        one.hx = hx;
+                        one.hy = hy;
+                        i = i + 1;
+                        continue;
                     }
                     if (one.errand != 0) {
                         float wantX = cast<float>(one.goX) + 0.5;
@@ -660,6 +697,28 @@ public bundle Agents {
                     one.y = py;
                     one.hx = hx;
                     one.hy = hy;
+                    // WEDGED AGAINST SOMETHING HE CANNOT GET ROUND.
+                    //
+                    // The trace caught four agents at 982.95,864.8 -- the same position to three
+                    // decimals, the same heading, fourteen thousand ticks without moving, all
+                    // aimed at one node across a body of water and all facing away from it. The
+                    // obstacle walk turns to go round, and where turning does not help it turns
+                    // forever against the same wall.
+                    //
+                    // A man who has not moved at all for this long is not walking. He gives the
+                    // errand up and the town sends him somewhere reachable instead.
+                    if (one.errand != 0 && px == wasX && py == wasY) {
+                        one.wedged = one.wedged + 1;
+                        if (one.wedged > Folk.WEDGE_LIMIT) {
+                            one.wedged = 0;
+                            one.errand = 0;
+                            one.held = 0;
+                            one.site = 0 - 1;
+                            this.unwedged = this.unwedged + 1;
+                        }
+                    } else {
+                        one.wedged = 0;
+                    }
                     // The index is touched once per interval rather than once per step, and only
                     // when the block actually changed.
                     int nowIn = this.blockIndexOf(px, py);
