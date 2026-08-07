@@ -14,6 +14,8 @@ import Agents.World.Craft;
 import Agents.World.Gathers;
 import Agents.World.Builds;
 import Agents.World.BuildingKind;
+import Agents.Sim.Meter;
+import Agents.Sim.Phase;
 import Agents.Nations.Site;
 import Agents.Nations.Nation;
 import Agents.Nations.Subdivision;
@@ -92,6 +94,10 @@ public bundle Agents {
             // THE ERA-ONE MENU, in the order a settlement wants it. Housing and the store are
             // handled ahead of this list because they are not preferences.
             private mutable int[] era1;
+            // The frame meter, so each of the town's five passes can be timed apart. Held rather
+            // than passed: `grow` is called from one place and threading a meter through five
+            // methods to answer one question is worse than a field.
+            private mutable nullable Meter* clock;
 
             public static fixed int FOG = 32;
             // How many frames a city may have open at once. A cap, so it is announced: a town with
@@ -141,6 +147,7 @@ public bundle Agents {
                 this.gaveBack = 0;
                 this.nextSite = 0;
                 this.townsCut = false;
+                this.clock = null;
                 // The era-one workshops, after housing and the store. Sawmill first because the
                 // wrights are already felling and the planks have nowhere to be made.
                 this.era1 = new int[Realm.ERA1_N]();
@@ -412,7 +419,10 @@ public bundle Agents {
             // guarantee of clay or rock inside its own ground.
             public static fixed int WORK_REACH = 110;
             // The short look around a remembered patch, before the country-wide sweep.
-            public static fixed int NEAR_REACH = 14;    // hard ceiling from the centre, in cells
+            public static fixed int NEAR_REACH = 14;
+            // Country-wide sweeps a town may pay for in one pass. Each reads about fifty thousand
+            // tiles, so this is the single number that decides the frame rate.
+            public static fixed int WIDE_SWEEPS = 2;    // hard ceiling from the centre, in cells
             // HOW MANY HOUSES STAND ON ONE CELL.
             //
             // This was one, and one is impossible. A house needs a cell, so a city with n houses
@@ -511,6 +521,11 @@ public bundle Agents {
             // ONE STEP OF EVERY CITY: people are born, houses go up for them, and the ground
             // follows the houses. Three links, each one a plain relation, so that when the shape
             // of a city comes out wrong it is possible to say which link did it.
+            public method useClock(Meter* m) returns void {
+                this.clock = m;
+                return;
+            }
+
             public method grow(Grid* g, Folk* folk, int tick) returns void {
                 mutable int c = 0;
                 while (c < this.cities.size()) {
@@ -583,10 +598,15 @@ public bundle Agents {
                         lessons = 32;
                     }
                     this.teachMany(folk, one, tick, lessons);
+                    this.clock.lap(cast<int>(Phase.Teaching));
                     this.order(g, one, tick);
+                    this.clock.lap(cast<int>(Phase.Ordering));
                     this.sendOut(g, folk, one, tick);
+                    this.clock.lap(cast<int>(Phase.Sending));
                     this.raise(folk, one);
+                    this.clock.lap(cast<int>(Phase.Building));
                     this.settle(g, folk, one, tick);
+                    this.clock.lap(cast<int>(Phase.Settling));
                     c = c + 1;
                 }
                 return;
@@ -617,6 +637,7 @@ public bundle Agents {
                 // will be asked again next tick from wherever they have wandered to.
                 mutable int tries = 0;
                 mutable int sent = 0;
+                mutable int wide = 0;
                 mutable int t = 0;
                 while (t < one.residents.size()) {
                     mutable Agent* who = folk.at(one.residents.get(t));
@@ -671,7 +692,18 @@ public bundle Agents {
                             found = this.nodeNear(g, seen % this.w, seen / this.w, want,
                                                   who.id + tick, Realm.NEAR_REACH);
                         }
-                        if (found < 0) {
+                        // THE WIDE SWEEP IS RATIONED, WIN OR LOSE.
+                        //
+                        // `tries` counted only the searches that FAILED, and a hundred-tile sweep
+                        // costs fifty thousand tiles whether it finds anything or not. Sixty-four
+                        // errands a pass, eight passes a frame: twenty-four million tiles read per
+                        // frame, and the meter -- once the town's five passes were timed apart --
+                        // put 966 of 1000 right here and 1.4% in the other four combined.
+                        //
+                        // The short look around the remembered patch stays free: it is fourteen
+                        // rings and it answers most of the time.
+                        if (found < 0 && wide < Realm.WIDE_SWEEPS) {
+                            wide = wide + 1;
                             found = this.nodeNear(g, one.cx, one.cy, want, who.id + tick,
                                                   Realm.WORK_REACH);
                         }
