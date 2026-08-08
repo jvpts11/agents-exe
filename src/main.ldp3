@@ -9,14 +9,7 @@ import Agents.World.Grid;
 import Agents.World.WorldGen;
 import Agents.World.Biomes;
 import Agents.World.LandMath;
-import Agents.Nations.Realm;
-import Agents.Nations.Nation;
-import Agents.Nations.Government;
-import Agents.Nations.Ideology;
-import Agents.Nations.City;
 import Agents.World.Nodes;
-import Agents.People.Folk;
-import Agents.People.Agent;
 import Agents.Sim.Meter;
 import Agents.Sim.Phase;
 import System.Time.Stopwatch;
@@ -78,8 +71,8 @@ public bundle Agents {
                         Main.forestShot();
                         return;
                     }
-                    // `folkshot` and `simrun` lived here. Both drove the simulation headlessly and
-                    // both went with it; whatever the new model needs in order to be watched
+                    // `folkshot`, `simrun` and `weigh` lived here. All three drove a population
+                    // that no longer exists; whatever the new model needs in order to be watched
                     // without a window gets written against the new model, rather than kept as the
                     // shape the old one happened to leave behind.
                     if (args[0].equals("probe")) {
@@ -98,36 +91,6 @@ public bundle Agents {
                     }
                     if (args[0].equals("iso2d")) {
                         Main.runIso2d();
-                        return;
-                    }
-                    // THE WEIGH-IN. Half a million agents as real objects, scattered over the
-                    // world, each carrying a life's worth of memory, all of them wandering. It
-                    // exists to answer one question with a number instead of an argument: what
-                    // does the object model cost.
-                    if (args[0].equals("weigh")) {
-                        mutable int howMany = 500000;
-                        if (args.length() > 1) {
-                            mutable Scanner hs = new Scanner(args[1]) on heap;
-                            if (hs.hasNext()) {
-                                int got = hs.nextInt();
-                                if (got > 0) {
-                                    howMany = got;
-                                }
-                            }
-                            delete hs;
-                        }
-                        mutable int deep = 12;
-                        if (args.length() > 2) {
-                            mutable Scanner ds = new Scanner(args[2]) on heap;
-                            if (ds.hasNext()) {
-                                int got = ds.nextInt();
-                                if (got > 0) {
-                                    deep = got;
-                                }
-                            }
-                            delete ds;
-                        }
-                        Main.weigh(howMany, deep);
                         return;
                     }
                 }
@@ -278,20 +241,8 @@ public bundle Agents {
             // camera loop runs when a real window is present.
             // Find assets/models regardless of the working directory (double-click runs from the exe's
             // folder, the terminal from the repo root). Returns "" if none of the candidates has it.
-            // Five by five of ground for one city, through the one method allowed to claim. Part
-            // of the scaffolding above and goes with it.
-            private static method blockOut(Realm* realm, int city, int atX, int atY) returns void {
-                for (int dy in 0 - 2..3) {
-                    for (int dx in 0 - 2..3) {
-                        realm.claim(city, atX + dx, atY + dy);
-                    }
-                }
-                return;
-            }
-
-            // A walkable cell, drawn the same way `Folk.scatter` draws them, so that "where does
-            // the first nation stand" needs no new idea. Returns the packed cell, or -1 if the
-            // world has no walkable ground at all -- which is a worldgen failure and says so.
+            // A walkable cell, uniformly drawn. Returns the packed cell, or -1 if the world has no
+            // walkable ground at all -- which is a worldgen failure and says so.
             private static method somewhereWalkable(Grid* g, int seed) returns int {
                 int w = g.width();
                 int h = g.height();
@@ -393,77 +344,25 @@ public bundle Agents {
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
                 MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* peopleMesh = MeshAtlas.loadNamed(root, "agents.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                // THE WORLD, AND NOTHING LIVING IN IT YET.
+                // THE WORLD, AND NOTHING LIVING IN IT.
                 //
-                // The half a million agents that stood here were an EXPERIMENT, not the game: they
-                // existed to settle whether an agent should be an object or a row in a column, and
-                // to find out what a world full of people costs to draw and to move. They settled
-                // both -- 2.4 GB, and a frame that went from eleven to a hundred and forty-four
-                // frames a second once the drawing was instanced and the movement sliced -- and a
-                // measurement that has given its answer should not be left running as scenery.
+                // The people, the towns and the borders were taken out on purpose. The agent they
+                // all stood on was not the one that was specified -- it was one class per agent,
+                // which the design rules out in as many words -- and everything raised on top of
+                // it was tuned against a walker that bounces off a shoreline instead of going
+                // round it. Code that survives a wrong foundation is code whose every constant was
+                // fitted to the wrong world.
                 //
-                // What stays is everything that experiment built and the real game needs: `Agent`
-                // and `Folk`, the block index, the instanced draw, the interpolation between one
-                // move and the next, and the counters that proved each of them honest. The
-                // population that fills them next is a nation, not a number.
-                r.setPeopleArt(peopleMesh);
-                // ONE NATION, FOUNDED BY HAND, OWNING A HANDFUL OF CELLS.
+                // What is left is what was never in question: the world, how it is drawn, and the
+                // catalogues of what can be built and gathered. The agent is written next, on its
+                // own, against the design -- and behaviour comes back after it, one verb at a
+                // time, each one measured against a world that works.
                 //
-                // Nothing expands, nobody lives in it, and that is the point of this slice: the
-                // question it answers is whether ground can have an owner at all and whether the
-                // two views of that fact -- the city's own list and the realm's per-cell layer --
-                // say the same thing. Growth, colonists and death come after, one at a time,
-                // against a foundation that has been checked rather than assumed.
-                Folk* folk = new Folk(4096, seed) on heap;
-                folk.sizeIndex(g);
-                r.setPeople(folk);
-                Realm* realm = new Realm(g, seed) on heap;
-                int where = Main.somewhereWalkable(g, seed);
-                if (where >= 0) {
-                    int nid = realm.foundNation(g, where % g.width(), where / g.width(),
-                                                cast<int>(Government.Monarchy),
-                                                cast<int>(Ideology.Feudalism));
-                    // SCAFFOLDING, AND IT SAYS SO. Three cities in two subdivisions, laid out by
-                    // hand in a row, for one reason: it is the only arrangement that puts all
-                    // three kinds of border on screen at once, and a border nobody has looked at
-                    // is a border nobody has checked. It goes when NAT-3 makes cities grow on
-                    // their own.
-                    //
-                    //   city 0 | city 1   same subdivision  -> thin, dashed
-                    //   city 1 | city 2   same nation       -> medium, solid
-                    //   the outside                         -> thick, solid
-                    // THE FOUNDERS. Twelve people, real agents on the roll, standing in the
-                    // capital. Everything after this is theirs: houses go up for them, the ground
-                    // follows the houses, and the children they have are what makes the town grow.
-                    mutable City* seat = realm.cityAt(realm.nationAt(nid).capital);
-                    for (int k in 0..12) {
-                        seat.residents.add(folk.spawn(cast<float>(seat.cx) + 0.5,
-                                                      cast<float>(seat.cy) + 0.5, k % 4));
-                    }
-                }
-                realm.report();
-                realm.audit();
-                MeshAtlas* buildMesh = MeshAtlas.loadNamed(root, "buildings.index");
-                MeshAtlas* itemMesh = MeshAtlas.loadNamed(root, "items.index");
-                r.setRealm(realm, buildMesh, itemMesh);
-                // THE CAMERA OPENS ON THE CAPITAL WHEN THERE IS ONE, and on the whole world when
-                // there is not. `setup` frames the entire map, which is the right opening shot for
-                // a world with nothing in it -- but a duchy of twenty-five cells in a world 2560
-                // across is one pixel of that shot, and a window that cannot show you the thing it
-                // just built is not much of a window.
-                if (realm.nationCount() > 0) {
-                    mutable City* seat = realm.cityAt(realm.nationAt(0).capital);
-                    r.aimAt(seat.cx, seat.cy);
-                    // DEGREES. `camEl` is converted with pi/180 at render time, so the 0.55 that
-                    // was here read as half a degree of elevation -- a camera lying on the floor,
-                    // which is what every screenshot taken today was showing. Forty degrees is a
-                    // view of a place; half a degree is a view of the horizon.
-                    r.setView(35.0, 40.0, 55.0);
-                }
+                // The camera therefore opens on the whole map, because there is nothing smaller
+                // worth opening on.
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 Hud* text = new Hud(win.gl, 14) on heap;
                 mutable int lastX = win.cursorX();
@@ -487,7 +386,6 @@ public bundle Agents {
                 // out to be most of the frame. The clock now opens here and every stretch between
                 // one `lap` and the next belongs to a named phase.
                 Meter* gauge = r.frameMeter();
-                realm.useClock(gauge);
                 while (win.isOpen()) {
                     gauge.begin();
                     win.pump();
@@ -567,24 +465,15 @@ public bundle Agents {
                     if (!paused) {
                         owed = owed + pace;
                     }
+                    // THE CLOCK STILL RUNS, AND IT DRIVES NOTHING YET.
+                    //
+                    // The gear, the accumulator and the shortfall count are kept because they are
+                    // about TIME, not about the model that was taken out: whatever the world is
+                    // asked to do next is asked to do it a whole number of times a second, and
+                    // that machinery took three attempts to get right. The tick advances; nothing
+                    // is subscribed to it. The first verb of the new agent subscribes here.
                     mutable int ran = 0;
                     while (owed >= 1.0 && ran < Main.TICK_CAP) {
-                        // Everybody moves every tick -- that is what makes a walk a walk. The
-                        // town's DECISIONS do not need the same rate: births, orders, errands and
-                        // hashes are events, and running them sixty-four times a frame was eighty
-                        // five per cent of the frame for no visible gain.
-                        if ((wanderTick & 7) == 0) {
-                            realm.grow(g, folk, wanderTick);
-                        }
-                        folk.wander(g, 0.05, wanderTick);
-                        gauge.lap(cast<int>(Phase.Moving));
-                        // EVERY TICK, not once at the end. A photograph cannot show a man walking
-                        // back and forth; only the same agent's position tick after tick can.
-                        // Off by default -- `agents.exe <seed> <gear> trace` turns it on -- since
-                        // it is thousands of lines a second and belongs to a diagnosis, not a run.
-                        if (traceOn) {
-                            realm.trace(folk, wanderTick, 0);
-                        }
                         wanderTick = wanderTick + 1;
                         owed = owed - 1.0;
                         ran = ran + 1;
@@ -593,53 +482,16 @@ public bundle Agents {
                         behind = behind + cast<long>(owed);
                         owed = 0.0;                      // do not let a backlog build up forever
                     }
-                    r.setFolkTick(wanderTick);
-                    // INTERPOLATION IS FOR ONE TICK A FRAME, AND NOTHING ELSE.
-                    //
-                    // An agent is moved once every SLICES ticks and the renderer draws it between
-                    // where it was and where it is. That is honest at gear 1. Run sixty-four ticks
-                    // in a frame and the position it is interpolating FROM is four whole passes
-                    // old, so a walker is drawn as a smear with a ghost trailing behind it -- and
-                    // the faster the world runs, the further back the ghost sits. Above a tick a
-                    // frame there is nothing to interpolate between: draw people where they are.
-                    // WHEN NO TICK RAN THIS FRAME, THERE IS NOTHING TO INTERPOLATE TOWARDS.
-                    //
-                    // `ran <= 1` was true for BOTH one tick and zero ticks, and zero is the case
-                    // that produces the ghost: no tick ran, so `px,py` still holds where the agent
-                    // was a whole slice ago, the fraction is recomputed against a tick that did
-                    // not advance, and the man is drawn back at his old position for one frame
-                    // before carrying on. That is the flick -- walking, snapping back, walking.
-                    //
-                    // Smoothing belongs to gear 1 and nowhere else: it is the only gear where a
-                    // frame reliably advances the world exactly once.
-                    r.setSmooth(pace <= 1.0 && !paused && ran == 1);
                     gauge.lap(cast<int>(Phase.Moving));
-                    // The borders are rebuilt when the ground has changed hands and not otherwise.
-                    // Territory changes a few times a second at most; rebuilding it every frame
-                    // would be the sweep this project has already paid for twice.
-                    if (realm.takeChanged()) {
-                        r.bakeBorders();
-                        r.bakeTowns();
-                    } else if (realm.takeTownsCut()) {
-                        // A frame went up, a building finished, or material landed on a site. The
-                        // ground did not change hands, so the borders are still right -- but the
-                        // town layer is not, and a building that appears only when a border moves
-                        // is a building nobody sees go up.
-                        r.bakeTowns();
-                    }
-                    // A felled tree stops being drawn. The detail bake is sliced across frames, so
-                    // this costs a slice rather than a hitch -- the same machinery that draws the
-                    // terrain draws the world it has left.
                     // A felled node stops being drawn -- but NOT on every frame that something
-                    // comes off the map, which in a busy town is most of them. The bake is sliced
+                    // comes off the map, which in a busy world is most of them. The bake is sliced
                     // across frames and starting one every frame leaves the camera's own bake no
                     // turn, which is what stopped the level of detail changing on zoom.
-                    if (realm.takeMapCut()) {
-                        cutPending = true;
-                    }
-                    // Spaced by FRAMES, not by ticks. At gear 6 sixty-four ticks pass in one
-                    // frame, so a tick-based gap of sixty-four fired every single frame and the
-                    // detail rebake alone was seventeen per cent of the frame.
+                    //
+                    // Nothing takes anything off the map at the moment, so nothing sets this. It
+                    // stays because the world is what asks for the rebake, not the town: the
+                    // moment anything fells a tree again, this is the line that already knows what
+                    // to do about it.
                     cutFrames = cutFrames + 1;
                     if (cutPending && cutFrames >= 90) {
                         cutPending = false;
@@ -680,76 +532,15 @@ public bundle Agents {
                 if (r.overruns() > 0) {
                     System.IO.Console.println($"renderer: {r.overruns()} vertex writes refused past the end of a buffer -- a counting pass and its emitting pass disagreed");
                 }
-                // Checked again on the way out, not only at startup: the two views of who owns
-                // what have to still agree after the world has been running, which is the only
-                // version of that question worth asking once anything starts changing it.
-                realm.audit();
-                realm.report();
-                realm.growthReport(g, folk);
-                realm.trades(folk);
-                realm.errands(folk);
-                realm.agentDump(folk, 60);
                 delete text;
                 delete hud;
-                delete realm;
-                delete folk;
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete peopleMesh;
                 delete props;
                 delete terr;
                 delete g;
                 delete win;
-                return;
-            }
-
-            // WHAT THE OBJECT MODEL WEIGHS, measured rather than argued.
-            //
-            // Half a million agents, each a real object with its own memory object and eleven
-            // growable lists, spread evenly over the walkable world and then all wandering. The
-            // build time, the tick time and the memory are printed; the caller reads the process's
-            // working set from outside, because a program measuring its own footprint is a program
-            // that can be wrong about it in the flattering direction.
-            //
-            // The number to compare against: Worldbox, in C++, at 2.5 GB with two thousand sapient
-            // agents.
-            private static method weigh(int howMany, int deep) returns void {
-                int w = 2560;
-                int h = 1440;
-                System.IO.Console.println($"weigh: {howMany} agents as objects, {deep} deep in memory each");
-                long t0 = Time.nanos();
-                WorldGen gen = new WorldGen(42) on stack;
-                gen.setWorld(0, 0.0 - 1.0);
-                Grid* g = gen.generate(w, h);
-                long t1 = Time.nanos();
-                System.IO.Console.println($"world: {(t1 - t0) / 1000000} ms");
-                Folk* folk = new Folk(howMany, 42) on heap;
-                folk.scatter(g, howMany, deep);
-                long t2 = Time.nanos();
-                System.IO.Console.println($"spawn: {(t2 - t1) / 1000000} ms");
-                folk.report();
-                // Twenty ticks of everybody wandering. Enough to time the pass without the run
-                // becoming about the wandering.
-                mutable int tick = 0;
-                while (tick < 20) {
-                    folk.wander(g, 0.05, tick);
-                    tick = tick + 1;
-                }
-                long t3 = Time.nanos();
-                System.IO.Console.println($"wander: {(t3 - t2) / 1000000} ms for 20 ticks of {folk.count()} agents");
-                System.IO.Console.println($"wander: {(t3 - t2) / 20000000} ms a tick");
-                System.IO.Console.println("HOLDING -- read the working set now");
-                // Held alive on purpose while the caller reads the process's memory from outside.
-                // Freeing first would measure a program that had already given the answer back.
-                long until = Time.nanos() + 8000000000;
-                mutable long spins = 0;
-                while (Time.nanos() < until) {
-                    spins = spins + 1;
-                }
-                System.IO.Console.println($"still holding {folk.count()} agents");
-                delete folk;
-                delete g;
                 return;
             }
 
@@ -838,7 +629,6 @@ public bundle Agents {
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
                 MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* peopleMesh = MeshAtlas.loadNamed(root, "agents.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
@@ -879,7 +669,6 @@ public bundle Agents {
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete peopleMesh;
                 delete props;
                 delete terr;
                 delete g;
@@ -944,7 +733,6 @@ public bundle Agents {
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
                 MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* peopleMesh = MeshAtlas.loadNamed(root, "agents.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
@@ -967,7 +755,6 @@ public bundle Agents {
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete peopleMesh;
                 delete props;
                 delete terr;
                 delete g;
@@ -1061,7 +848,6 @@ public bundle Agents {
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
                 MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* peopleMesh = MeshAtlas.loadNamed(root, "agents.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
@@ -1077,7 +863,6 @@ public bundle Agents {
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete peopleMesh;
                 delete props;
                 delete terr;
                 delete g;
@@ -1139,7 +924,6 @@ public bundle Agents {
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
                 MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* peopleMesh = MeshAtlas.loadNamed(root, "agents.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
@@ -1171,7 +955,6 @@ public bundle Agents {
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete peopleMesh;
                 delete props;
                 delete terr;
                 delete g;
@@ -1227,7 +1010,6 @@ public bundle Agents {
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
                 MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* peopleMesh = MeshAtlas.loadNamed(root, "agents.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
@@ -1259,7 +1041,6 @@ public bundle Agents {
                 delete r;
                 delete rivers;
                 delete nodeMesh;
-                delete peopleMesh;
                 delete props;
                 delete terr;
                 delete g;
@@ -1334,7 +1115,6 @@ public bundle Agents {
                 MeshAtlas* terr = MeshAtlas.loadTerrain(root);
                 MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
                 MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* peopleMesh = MeshAtlas.loadNamed(root, "agents.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 int sw = cols * tw;
                 int sh = rows * th;
@@ -1374,7 +1154,6 @@ public bundle Agents {
                 delete sheet;
                 delete rivers;
                 delete nodeMesh;
-                delete peopleMesh;
                 delete props;
                 delete terr;
                 delete win;

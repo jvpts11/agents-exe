@@ -9,15 +9,10 @@ import Agents.World.NodeField;
 import Agents.World.NodeAtlas;
 import Agents.World.BuildingKind;
 import Agents.World.Builds;
-import Agents.People.Folk;
-import Agents.People.Agent;
-import Agents.People.AgentClass;
 import Agents.Sim.Meter;
 import Agents.Sim.Phase;
 import Agents.World.Species;
 import Agents.World.Beasts;
-import Agents.Nations.Realm;
-import Agents.Nations.City;
 import Agents.World.Goods;
 import System.Memory;
 
@@ -53,32 +48,13 @@ public bundle Agents {
             //
             // Its own buffer, rebuilt when the claim changes -- territory changes a few times a
             // minute and the terrain bake and the block index already work that way.
-            private mutable int ovao;
-            private mutable int ovbo;
-            private mutable int onverts;      // border line vertices
-            private mutable int ocap;
-            private mutable address obuf;
             private mutable Realm* realm;
-            private mutable boolean haveRealm;
-            private mutable MeshAtlas* builds;   // the buildings atlas
-            private mutable int hallMesh;
-            private mutable boolean haveSim;
             // Animals get the agents' treatment, not the buildings': they move, so their buffer is
             // rebuilt every frame. They are NOT tinted -- a deer belongs to nobody.
-            private mutable int fvao;
-            private mutable int fvbo;
-            private mutable int fnverts;
-            private mutable int fcap;
-            private mutable address fbuf;
-            private mutable MeshAtlas* beastArt;
-            private mutable int[] speciesModel;
-            private mutable boolean haveFauna;
             // What the frame costs, by part. The renderer keeps its own rather than sharing the
             // simulation's, because it has to work in the shot modes where there is no simulation
             // at all -- and because "the frame is slow" and "the tick is slow" are two questions.
             private mutable Meter* gauge;
-            private mutable boolean showTerritory;
-            private mutable int bakedClaim;
             private mutable int uFog;
             private mutable float timeSec;
             // coarse (whole world) and detail (near window) batches
@@ -94,82 +70,19 @@ public bundle Agents {
             // People get a buffer of their own, rebuilt every frame. They move, and the terrain bake
             // is sliced across frames precisely because it is too big to redo -- so the two cannot
             // share one. Only the agents inside the detail window are ever emitted.
-            private mutable int avao;
-            private mutable int avbo;
-            private mutable int anverts;
-            private mutable int acap;           // triangles the agent buffer can hold
-            private mutable address abuf;
-            private mutable MeshAtlas* people;
-            private mutable int[] bodyModel;    // AgentClass ordinal -> model index in the atlas
-            private mutable boolean havePeople;
             private mutable Folk* folk;
             private mutable int folkTick;       // which movement tick the world is on
-            // ---- the instanced path for agents ----
-            //
-            // ONE MESH ON THE CARD, AND NINE NUMBERS A PERSON A FRAME.
-            //
-            // Measured before this existed: after the block index the agent bake was still 679 of
-            // a thousand of the frame at 9.7 ms a call, because every visible agent was rebuilt
-            // vertex by vertex, body and shadow, every frame -- about seven million float writes.
-            // None of that was waste in the sense the sweep had been; it was real work, done over
-            // and over on geometry that never changes.
-            //
-            // So each of the four bodies goes to the card ONCE, and per frame each agent costs
-            // position, rotation, colour and shade. The vertex shader does the turning that the
-            // emitters used to do on the processor.
-            //
-            // One slot per shape, because an instanced draw takes ONE mesh and a run of instances:
-            // grouping by model is what makes it a handful of draw calls instead of one per person.
-            //
-            // Slots 0..3 are the four agent bodies. Slots 4 upward are GOODS, indexed by their Good
-            // ordinal -- a load in somebody's hands is the same problem as a body with a different
-            // mesh, and widening the slot count costs nothing next to writing the mechanism twice.
-            public static fixed int SLOTS = 20;
-            // How far the camera may be before buildings stop being drawn. Past it a hut is under
-            // a pixel and the town reads better as the border and the ground than as a scatter of
-            // white specks.
-            public static fixed float FAR_BUILDINGS = 420.0;
-            // How deep a swimmer sits. Enough that the surface cuts him about the waist and the
-            // head and shoulders stay clear -- the whole read of "he is in the water" is this
-            // number and the halved bob that goes with it.
-            public static fixed float WADE = 0.34;
-            private mutable int carrySlots;      // how many goods actually got a mesh
             // Whether to draw people between where they were and where they are. True only when
             // the world advanced exactly one tick this frame -- see the note at the call site.
-            private mutable boolean smooth;
-            private mutable int aProg;
-            private mutable int[] mvao;         // per class: the vertex array
-            private mutable int[] mvbo;         // per class: the body, uploaded once
-            private mutable int[] ivbo;         // per class: this frame's instances
-            private mutable int[] mverts;       // per class: vertices in the body
-            private mutable int[] icount;       // per class: instances this frame
-            private mutable int[] icap;         // per class: instances the buffer can hold
-            private mutable address[] ibuf;     // per class: where they are built
-            private mutable int uAProj;
-            private mutable int uAView;
-            private mutable int uAScale;
             // The agent program shares the world's FRAGMENT shader, so it inherits that shader's
             // uniforms too -- and an unset uniform is zero, not "the sensible default". uAlpha at
             // zero means every person is drawn fully transparent the moment anything turns
             // blending on. Bound here so the crowd cannot depend on the blend state of whatever
             // pass happened to run before it.
-            private mutable int uAAlpha;
-            private mutable int uAFlat;
-            private mutable boolean haveInstancing;
-            private mutable int diagFrame;
             // Buildings get their own buffer for the opposite reason to people: they do NOT move, so
             // it could in principle live with the terrain -- but the terrain bake is sliced across
             // frames and a village that goes up mid-slice would be half drawn until the sweep came
             // round again. Its own buffer is rebaked whenever the count changes, which is rarely.
-            private mutable int bvao;
-            private mutable int bvbo;
-            private mutable int bnverts;
-            private mutable int bcap;
-            private mutable address bbuf;
-            private mutable MeshAtlas* housing;
-            private mutable int[] kindModel;    // BuildingKind ordinal -> model index
-            private mutable boolean haveTown;
-            private mutable int bakedTown;      // the table's stamp at the last bake
             // world + sources
             private mutable Grid* grid;
             private mutable MeshAtlas* terr;
@@ -216,30 +129,12 @@ public bundle Agents {
             // The roads. One atlas for all four surfaces, because their names already carry which
             // one they are -- four atlases would have been four fields, four lookups and four more
             // parameters through `setup` for nothing.
-            private mutable MeshAtlas* wayArt;
             // (surface, neighbour mask) -> atlas ordinal, resolved once at setup. A thousand and
             // twenty name lookups per FRAME is a thousand and twenty string comparisons; a table is
             // an array read, and the whole thing is five kilobytes.
-            private mutable int[] wayOrd;
-            private mutable int[] dWayC;        // detail bake scratch: way variant per cell, or -1
             // What people carry and what marks a leader.
-            private mutable MeshAtlas* items;
-            private mutable int starModel;
-            private mutable int[] goodModel;    // Good ordinal -> item atlas ordinal, or -1
-            private mutable int[] toolModel;    // Job ordinal  -> item atlas ordinal, or -1
             // What moves goods. Drawn where the simulation actually has one: a cart under a carter
             // who is hauling, a hull at a quay that can put to sea.
-            private mutable MeshAtlas* vehicles;
-            private mutable int cartModel;
-            private mutable int wagonModel;
-            private mutable int bargeModel;
-            private mutable int sailModel;
-            private mutable int steamModel;
-            private mutable int locoModel;
-            private mutable int railcarModel;
-            private mutable int planeModel;
-            private mutable int[] hullModel;    // era -> Barge / Sailship / Steamship
-            private mutable int wayVersion;     // what the last bake saw, so a new road rebakes
             private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
             private mutable int[] dNodeA;       // detail bake scratch: first node instance of each row
             private mutable int[] dNodeB;       // detail bake scratch: one past the last
@@ -329,27 +224,6 @@ public bundle Agents {
             public constructor GlWorld3D(Gl gl) {
                 this.gl = gl;
                 this.prog = Shader.fromSource(gl, GlWorld3D.vertSrc(), GlWorld3D.fragSrc());
-                // The agents get their own program, sharing the world's fragment shader: the
-                // lighting and the flat-shading rule must be the same, or a crowd would be lit
-                // differently from the ground it stands on.
-                this.aProg = Shader.fromSource(gl, GlWorld3D.agentVertSrc(), GlWorld3D.fragSrc());
-                this.uAProj = gl.getUniformLocation(this.aProg, "uProj");
-                this.uAView = gl.getUniformLocation(this.aProg, "uView");
-                this.uAScale = gl.getUniformLocation(this.aProg, "uScale");
-                this.uAAlpha = gl.getUniformLocation(this.aProg, "uAlpha");
-                this.uAFlat = gl.getUniformLocation(this.aProg, "uFlat");
-                this.diagFrame = 0;
-                this.mvao = new int[GlWorld3D.SLOTS]();
-                this.mvbo = new int[GlWorld3D.SLOTS]();
-                this.ivbo = new int[GlWorld3D.SLOTS]();
-                this.mverts = new int[GlWorld3D.SLOTS]();
-                this.icount = new int[GlWorld3D.SLOTS]();
-                this.icap = new int[GlWorld3D.SLOTS]();
-                this.ibuf = new address[GlWorld3D.SLOTS]();
-                // Instancing is core in GL 3.3 and this window asks for 3.3, so it is taken as
-                // present rather than probed. If a driver ever lies about its version, the agents
-                // are what stops drawing, and that is loud enough to find without a flag for it.
-                this.haveInstancing = true;
                 this.vao = gl.genVertexArray();
                 this.vbo = gl.genBuffer();
                 this.setupVao(this.vao, this.vbo);
@@ -360,42 +234,6 @@ public bundle Agents {
                 this.hvbo = gl.genBuffer();
                 this.setupVao(this.hvao, this.hvbo);
                 this.hnverts = 0;
-                this.avao = gl.genVertexArray();
-                this.avbo = gl.genBuffer();
-                this.setupVao(this.avao, this.avbo);
-                this.anverts = 0;
-                this.acap = 0;
-                this.abuf = cast<address>(0);
-                this.bodyModel = new int[GlWorld3D.SLOTS]();
-                this.havePeople = false;
-                this.bvao = gl.genVertexArray();
-                this.bvbo = gl.genBuffer();
-                this.setupVao(this.bvao, this.bvbo);
-                this.bnverts = 0;
-                this.bcap = 0;
-                this.bbuf = cast<address>(0);
-                this.kindModel = new int[BuildingKind.count()]();
-                this.haveTown = false;
-                this.bakedTown = 0 - 1;
-                this.ovao = gl.genVertexArray();
-                this.ovbo = gl.genBuffer();
-                this.setupVao(this.ovao, this.ovbo);
-                this.onverts = 0;
-                this.ocap = 0;
-                this.obuf = cast<address>(0);
-                this.haveRealm = false;
-                this.hallMesh = 0 - 1;
-                this.haveSim = false;
-                this.showTerritory = true;
-                this.bakedClaim = 0 - 1;
-                this.fvao = gl.genVertexArray();
-                this.fvbo = gl.genBuffer();
-                this.setupVao(this.fvao, this.fvbo);
-                this.fnverts = 0;
-                this.fcap = 0;
-                this.fbuf = cast<address>(0);
-                this.speciesModel = new int[Species.count()]();
-                this.haveFauna = false;
                 this.gauge = new Meter() on heap;
                 this.projM = new GlMat4() on heap;
                 this.viewM = new GlMat4() on heap;
@@ -416,21 +254,6 @@ public bundle Agents {
                 this.bkOy = 0;
                 this.bkPhase = 0;
                 this.dRiverC = new int[1]();
-                this.wayOrd = new int[1]();
-                this.dWayC = new int[1]();
-                this.wayVersion = 0 - 1;
-                this.starModel = 0 - 1;
-                this.goodModel = new int[1]();
-                this.toolModel = new int[1]();
-                this.cartModel = 0 - 1;
-                this.wagonModel = 0 - 1;
-                this.bargeModel = 0 - 1;
-                this.sailModel = 0 - 1;
-                this.steamModel = 0 - 1;
-                this.locoModel = 0 - 1;
-                this.railcarModel = 0 - 1;
-                this.planeModel = 0 - 1;
-                this.hullModel = new int[1]();
                 this.dPropC = new int[1]();
                 this.dNodeA = new int[1]();
                 this.dNodeB = new int[1]();
@@ -490,19 +313,10 @@ public bundle Agents {
                 delete this.sMilli;
                 delete this.sScale;
                 delete this.dRiverC;
-                delete this.wayOrd;
-                delete this.dWayC;
-                delete this.goodModel;
-                delete this.toolModel;
-                delete this.hullModel;
                 delete this.dPropC;
                 delete this.dNodeA;
                 delete this.dNodeB;
                 delete this.dNodeK;
-                delete this.bodyModel;
-                if (this.acap > 0) {
-                    Memory.free(this.abuf);
-                }
                 delete this.nModel;
                 delete this.nInProps;
                 delete this.nScale;
@@ -1770,10 +1584,8 @@ public bundle Agents {
                 int dn = this.detW * this.detH;
                 if (this.dRiverC.length() != dn) {
                     delete this.dRiverC;
-                    delete this.dWayC;
                     delete this.dPropC;
                     this.dRiverC = new int[dn]();
-                    this.dWayC = new int[dn]();
                     this.dPropC = new int[dn]();
                 }
                 if (this.dNodeA.length() != this.detH) {
@@ -1826,12 +1638,6 @@ public bundle Agents {
                             this.dRiverC[slot] = 0 - 1;
                             tris = tris + this.countTile(ord, false, this.thinDecor(ord, gx, gy)) + 8;
                         }
-                        // NO ROADS. They were worn into the ground by agents walking the same line
-                        // twice, and both the agents and the Ways they wore are gone. The slot
-                        // stays and reads -1 so the terrain bake's shape is unchanged: whatever
-                        // marks the ground in the new model can fill it without this pass being
-                        // rewritten around it.
-                        this.dWayC[slot] = 0 - 1;
                         // Decorative clutter only: the resource nodes are instances with their own
                         // positions and are counted per ROW, below.
                         int p = this.detailPropAt(gx, gy, ord);
@@ -1953,15 +1759,6 @@ public bundle Agents {
                             w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false,
                                               this.thinDecor(ord, gx, gy), shade);
                         }
-                        // The road goes down before anything that stands on the ground, and at the
-                        // ground's own height: a way is authored from z=0 up, unlike a river tile,
-                        // which brings its own block. That is what lets one road cross a desert, a
-                        // meadow and a snowfield without carrying any of their colours with it.
-                        int wv = this.dWayC[slot];
-                        if (wv >= 0) {
-                            w = this.emitMesh(this.wayArt, buf, w, wv, wx, wy,
-                                              this.tileTop[ord] + zOff, 1.0, shade);
-                        }
                         int p = this.dPropC[slot];
                         if (p >= 0) {
                             float topZ = this.tileTop[ord] + zOff;
@@ -2042,9 +1839,6 @@ public bundle Agents {
                 this.gl.bindVertexArray(0);
                 this.dnverts = this.bkTris * 3;
                 Memory.free(buf);
-                // The window moved, so whatever was baked for the old one is the wrong set.
-                this.bakedTown = 0 - 1;
-                this.bakedClaim = 0 - 1;
                 this.detX0 = ox;
                 this.detY0 = oy;
                 this.haveDetail = true;
@@ -2087,141 +1881,6 @@ public bundle Agents {
                 return this.detY0 + this.detH;
             }
 
-            // The people, and the art that draws them. A separate call rather than more arguments on
-            // setup(): the world can be rendered with nobody in it, and every capture path would
-            // otherwise have to know about a population it does not use.
-            // What this person is holding, as an ordinal into the item atlas, or -1.
-            //
-            // A load on the way home beats the tool that got it: somebody walking back with an
-            // armful of wood is carrying wood, and the axe is over their shoulder. Which model a
-            // load draws is the good itself -- there is one for every good in the catalogue, and
-            // the whole point of exporting them is that a woodcutter and a fisher stop walking
-            // home identically.
-            private method emitTinted(MeshAtlas* a, address buf, int w, int mord,
-                                      float wx, float wy, float wz,
-                                      float scale, float cr, float cg, float cb,
-                                      float shade) returns int {
-                return this.emitTintedTurned(a, buf, w, mord, wx, wy, wz, scale,
-                                             cr, cg, cb, shade, 1.0, 0.0);
-            }
-
-            // And the same, facing somewhere -- this is the one every PERSON is drawn with.
-            private method emitTintedTurned(MeshAtlas* a, address buf, int w, int mord,
-                                            float wx, float wy, float wz,
-                                            float scale, float cr, float cg, float cb,
-                                            float shade, float ca, float sa) returns int {
-                int t0 = a.triStart[mord];
-                int tn = a.triCount[mord];
-                mutable int p = w;
-                mutable int t = 0;
-                while (t < tn) {
-                    int tri = t0 + t;
-                    int vb = tri * 3;
-                    mutable float r = cast<float>(a.cr[tri]) / 255.0;
-                    mutable float g = cast<float>(a.cg[tri]) / 255.0;
-                    mutable float b = cast<float>(a.cb[tri]) / 255.0;
-                    if (a.grp[tri] >= 1000) {
-                        r = r * cr;
-                        g = g * cg;
-                        b = b * cb;
-                    }
-                    r = r * shade;
-                    g = g * shade;
-                    b = b * shade;
-                    mutable int k = 0;
-                    while (k < 3) {
-                        int vi = vb + k;
-                        float lx = a.px[vi] * scale;
-                        float ly = a.py[vi] * scale;
-                        float bx = a.nx[vi];
-                        float by = a.ny[vi];
-                        p = this.wr(buf, p, lx * ca - ly * sa + wx,
-                                    lx * sa + ly * ca + wy,
-                                    a.pz[vi] * scale + wz,
-                                    bx * ca - by * sa, bx * sa + by * ca, a.nz[vi],
-                                    r, g, b);
-                        k = k + 1;
-                    }
-                    t = t + 1;
-                }
-                return p;
-            }
-
-            // A BUILDING THAT IS PART BUILT: SOLID BELOW THE WORK LINE, A GHOST ABOVE IT.
-            //
-            // `built` is 0..1. Every triangle of the finished building is emitted at its finished
-            // place -- so an ordered building shows its own shape, at its own size, standing where
-            // it will stand, from the moment the ground is broken. What changes is the COLOUR:
-            // below the line it is the building's own, above it is washed out towards the sky.
-            //
-            // Washed out and not transparent, and that is a real limit rather than a choice: the
-            // vertex format here carries position, normal and colour, with no alpha channel, and
-            // giving it one means changing the shader and the buffer layout for every mesh in the
-            // world. This reads as a ghost filling in from the ground up; true see-through glass
-            // is a shader change and it is not pretended here.
-            private method emitBuilt(MeshAtlas* a, address buf, int w, int mord,
-                                     float wx, float wy, float wz,
-                                     float scale, float cr, float cg, float cb,
-                                     float shade, float ca, float sa, float built) returns int {
-                int t0 = a.triStart[mord];
-                int tn = a.triCount[mord];
-                // The work line, in the mesh's own vertical units. A building rises to `hi`, so
-                // the line sweeps from its foot to its ridge as the hashes land.
-                mutable float hi = 0.0;
-                mutable int q = 0;
-                while (q < tn * 3) {
-                    float pz = a.pz[t0 * 3 + q];
-                    if (pz > hi) {
-                        hi = pz;
-                    }
-                    q = q + 1;
-                }
-                float line = hi * built;
-                mutable int p = w;
-                mutable int t = 0;
-                while (t < tn) {
-                    int tri = t0 + t;
-                    int vb = tri * 3;
-                    mutable float r = cast<float>(a.cr[tri]) / 255.0;
-                    mutable float g = cast<float>(a.cg[tri]) / 255.0;
-                    mutable float b = cast<float>(a.cb[tri]) / 255.0;
-                    if (a.grp[tri] >= 1000) {
-                        r = r * cr;
-                        g = g * cg;
-                        b = b * cb;
-                    }
-                    r = r * shade;
-                    g = g * shade;
-                    b = b * shade;
-                    mutable int k = 0;
-                    while (k < 3) {
-                        int vi = vb + k;
-                        float lx = a.px[vi] * scale;
-                        float ly = a.py[vi] * scale;
-                        float bx = a.nx[vi];
-                        float by = a.ny[vi];
-                        // PER VERTEX, so the line cuts across a triangle rather than snapping it
-                        // whole -- the fill climbs smoothly instead of in slabs.
-                        mutable float vr = r;
-                        mutable float vg = g;
-                        mutable float vb2 = b;
-                        if (a.pz[vi] > line) {
-                            vr = r * 0.25 + 0.72;
-                            vg = g * 0.25 + 0.74;
-                            vb2 = b * 0.25 + 0.78;
-                        }
-                        p = this.wr(buf, p, lx * ca - ly * sa + wx,
-                                    lx * sa + ly * ca + wy,
-                                    a.pz[vi] * scale + wz,
-                                    bx * ca - by * sa, bx * sa + by * ca, a.nz[vi],
-                                    vr, vg, vb2);
-                        k = k + 1;
-                    }
-                    t = t + 1;
-                }
-                return p;
-            }
-
             // THE BODIES, AND SEPARATELY THE PEOPLE IN THEM.
             //
             // These used to be one call, and they are not one thing: the ART is what the card
@@ -2235,66 +1894,6 @@ public bundle Agents {
             // those drew something the old simulation knew and this one does not yet, and drawing
             // them against invented data is how a picture starts lying about the world behind it.
             // They come back as the systems that feed them do.
-            public method setPeopleArt(MeshAtlas* art) returns void {
-                this.people = art;
-                delete this.bodyModel;
-                // ALL THE SLOTS, not just the four classes. This reallocated to exactly four and
-                // the upload pass walks all of them, so the goods slots were read off the end of
-                // the array -- the run died before its first frame, caught by the bounds check
-                // rather than reading somebody else's memory.
-                this.bodyModel = new int[GlWorld3D.SLOTS]();
-                for (int k in 0..GlWorld3D.SLOTS) {
-                    // -1, not 0. A fresh array is zeros and zero is a VALID mesh index, so the
-                    // empty goods slots would have asked an item atlas that does not exist yet for
-                    // its first model.
-                    this.bodyModel[k] = 0 - 1;
-                }
-                for (int k in 0..AgentClass.count()) {
-                    this.bodyModel[k] = 0;
-                }
-                // The atlas names its models; the class ordinals are matched to them by name so
-                // that reordering the enum cannot silently give every soldier a civilian's body.
-                this.bodyModel[cast<int>(AgentClass.Civilian)] = art.ordOf("Civil");
-                this.bodyModel[cast<int>(AgentClass.Soldier)] = art.ordOf("Soldier");
-                this.bodyModel[cast<int>(AgentClass.Scout)] = art.ordOf("Scout");
-                this.bodyModel[cast<int>(AgentClass.Protagonist)] = art.ordOf("Protagonist");
-                for (int k in 0..AgentClass.count()) {
-                    if (this.bodyModel[k] < 0) {
-                        System.IO.Console.println($"people: no mesh for class {k}; it will draw as the first model");
-                        this.bodyModel[k] = 0;
-                    }
-                }
-                this.folkTick = 0;
-                this.uploadBodies();
-                return;
-            }
-
-            // Give the renderer a population to draw. Until this is called the bodies are on the
-            // card and nobody is standing in them, which is exactly the state a world has before
-            // its first nation is founded.
-            public method setPeople(Folk* who) returns void {
-                this.folk = who;
-                this.havePeople = true;
-                this.folkTick = 0;
-                return;
-            }
-
-            // THE MAP HAS CHANGED UNDER THE DETAIL BAKE, so bake it again.
-            //
-            // The resource nodes are baked once, with the terrain, on the reasoning that a forest
-            // does not move. It does not -- but it can be CUT DOWN, and a felled tree that goes on
-            // standing in the picture is the world showing one thing while the simulation believes
-            // another. That is the same pairing that made agents invisible and made a city grow on
-            // houses that were never built.
-            // A NODE THAT WAS TAKEN OFF THE MAP STOPS BEING DRAWN.
-            //
-            // The detail bake is sliced across frames, and this restarted it. With a busy town
-            // something comes off the map most ticks, so the restart landed before the previous
-            // pass had finished and the bake never completed once -- which is why a felled tree
-            // and an emptied clay pit stayed standing for the whole run.
-            //
-            // The request is REMEMBERED instead. A bake in flight is allowed to finish, and the
-            // next one starts when it has; nothing is dropped and nothing is restarted mid-pass.
             public method refreshDetail() returns void {
                 if (!this.haveDetail) {
                     return;
@@ -2324,755 +1923,6 @@ public bundle Agents {
             private method bakeSettled() returns void {
                 this.baking = false;
                 return;
-            }
-
-            public method setRealm(Realm* r, MeshAtlas* buildingArt, MeshAtlas* itemArt) returns void {
-                this.realm = r;
-                this.haveRealm = true;
-                this.builds = buildingArt;
-                this.items = itemArt;
-                this.hallMesh = buildingArt.ordOf("TownHall");
-                if (this.hallMesh < 0) {
-                    System.IO.Console.println("towns: no TownHall mesh; the seat will not be drawn");
-                }
-                // A MESH FOR EVERY GOOD THAT MIGHT BE CARRIED. The item atlas names its models
-                // after the goods, so the two catalogues line up by name -- and a good with no
-                // model is left empty rather than drawn as whatever sits at index zero.
-                this.carrySlots = GlWorld3D.SLOTS - 4;
-                mutable int made = 0;
-                for (int gd in 0..this.carrySlots) {
-                    mutable int found = 0 - 1;
-                    if (gd < Goods.count()) {
-                        found = itemArt.ordOf(Goods.name(gd));
-                    }
-                    this.bodyModel[4 + gd] = found;
-                    if (found >= 0) {
-                        made = made + 1;
-                    }
-                }
-                this.uploadBodies();
-                System.IO.Console.println($"carry: {made} goods have a mesh to be carried as");
-                this.bakeBorders();
-                this.bakeTowns();
-                return;
-            }
-
-            // THE SEAT OF EVERY CITY, STANDING ON THE GROUND.
-            //
-            // The catalogue calls the town hall "placed free at founding", so a city has one from
-            // the moment it exists -- and that is what makes a city a thing you can see rather
-            // than a colour on the map. Rebuilt with the borders, when ground changes hands.
-            public method bakeTowns() returns void {
-                this.bnverts = 0;
-                if (!this.haveRealm || this.hallMesh < 0) {
-                    return;
-                }
-                // EVERY BUILDING, NOT JUST THE SEAT.
-                //
-                // This used to draw one dome per city, which is why a town of four hundred
-                // buildings looked like an empty field with a hut in the middle: the buildings
-                // existed as integers and the picture had no way to know what any of them was.
-                // Now the city carries a kind per building, so each one draws with its own mesh --
-                // and a frame not yet finished draws too, sunk into the ground by how far it has
-                // to go.
-                mutable int tris = 0;
-                mutable int c = 0;
-                while (c < this.realm.cityCount()) {
-                    mutable City* one = this.realm.cityAt(c);
-                    mutable int b = 0;
-                    while (b < one.kinds.size()) {
-                        int m = this.meshFor(one.kinds.get(b));
-                        if (m >= 0) {
-                            tris = tris + this.builds.triCount[m];
-                        }
-                        b = b + 1;
-                    }
-                    mutable int s = 0;
-                    while (s < one.sites.size()) {
-                        int m = this.meshFor(one.sites.get(s).kind);
-                        if (m >= 0) {
-                            tris = tris + this.builds.triCount[m];
-                        }
-                        s = s + 1;
-                    }
-                    c = c + 1;
-                }
-                if (tris == 0) {
-                    return;
-                }
-                if (tris > this.bcap) {
-                    if (this.bcap > 0) {
-                        Memory.free(this.bbuf);
-                    }
-                    this.bcap = tris * 2;
-                    this.bbuf = Memory.alloc(cast<long>(this.bcap * 27 * 4 + 4));
-                }
-                this.wrCap = tris * 27;
-                mutable int w = 0;
-                mutable int standing = 0;
-                mutable int frames = 0;
-                mutable int missing = 0;
-                c = 0;
-                while (c < this.realm.cityCount()) {
-                    // The hall is in the list with everything else now, so it is not drawn twice.
-                    mutable City* one = this.realm.cityAt(c);
-                    mutable int b = 0;
-                    while (b < one.kinds.size()) {
-                        int cell = one.buildings.get(b);
-                        int bx = cell % this.grid.width();
-                        int by = cell / this.grid.width();
-                        int m = this.meshFor(one.kinds.get(b));
-                        if (m >= 0) {
-                            w = this.putBuilding(w, m, bx, by, one.facing.get(b),
-                                                 1.0, 1.0, 1.0, 1.0);
-                            standing = standing + 1;
-                        } else {
-                            // NOT DRAWN, AND SAID SO. A kind whose mesh is missing from the atlas
-                            // used to be skipped without a word -- which is why a StoragePit was
-                            // standing in the model and absent from the window, and why the
-                            // report and the screen disagreed about what the town had.
-                            missing = missing + 1;
-                        }
-                        b = b + 1;
-                    }
-                    // THE FRAMES. Raw timber colour and sunk into the ground by what is left to do,
-                    // so a site reads as unfinished at a glance and rises as the hashes land. This
-                    // is the difference between a building being ordered and a building appearing.
-                    mutable int s = 0;
-                    while (s < one.sites.size()) {
-                        mutable Site* it = one.sites.get(s);
-                        int m = this.meshFor(it.kind);
-                        if (m >= 0) {
-                            // The finished building's own shape and colours, filling in from the
-                            // ground as the hashes land. No brown marker: the thing itself.
-                            w = this.putBuilding(w, m, it.x, it.y, it.facing,
-                                                 it.progress(), 1.0, 1.0, 1.0);
-                            frames = frames + 1;
-                        } else {
-                            missing = missing + 1;
-                        }
-                        s = s + 1;
-                    }
-                    c = c + 1;
-                }
-                this.gl.bindVertexArray(this.bvao);
-                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.bvbo);
-                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(w * 4), cast<long>(this.bbuf),
-                                   GL.DYNAMIC_DRAW);
-                this.gl.bindVertexArray(0);
-                this.bnverts = w / 9;
-                System.IO.Console.println($"towns: {this.realm.cityCount()} seats, {standing} buildings, {frames} sites under construction, {missing} NOT DRAWN for want of a mesh, {this.bnverts} vertices");
-                return;
-            }
-
-            // One building at a cell, tinted and scaled. `up` is how much of it shows: 1.0 for a
-            // finished thing, less for a frame, which sinks it into the ground.
-            //
-            // ONE BUILDING, ON ITS OWN TILE. A tile holds one, so there is no plot index here and
-            // no ring of them: what makes a town stop looking surveyed is that each building sits
-            // a little off the middle of its own tile, by an amount fixed by the tile itself.
-            //
-            // Fixed rather than random, because the bake runs again whenever a building changes
-            // and a house that hops six inches every time one goes up across town is worse than a
-            // lattice.
-            // A BUILDING, AT FULL SIZE, TURNED, AND AS SOLID AS IT HAS BEEN BUILT.
-            //
-            // `up` is how far along the work is, 0..1, and it does NOT change the size or the
-            // height. A site shows the finished building's own shape, ghosted, standing where it
-            // will stand -- and it fills in from the ground up as the hashes land, so what you
-            // watch is the thing itself becoming real rather than a marker growing.
-            //
-            // Two earlier attempts at this were both wrong: `up` as the scale drew a doll's house,
-            // and `up` as a Z offset buried it in the dirt.
-            //
-            // `face` is 0..3 -- north, east, south, west. Buildings sit square on their tile.
-            private method putBuilding(int w, int mesh, int cx, int cy, int face, float up,
-                                       float r, float gg, float b) returns int {
-                float z = this.groundTopAt(cx, cy);
-                float sh = this.shadeAt(cx, cy, 1,
-                                        this.stackLvl(this.grid.biomeAt(cx, cy), cx, cy));
-                // A tile is two units across; the house sits within a third of a unit of centre.
-                int hx = (cx * 73856093) ^ (cy * 19349663);
-                float ox = cast<float>((hx >> 3) & 15) * 0.0433 - 0.325;
-                float oy = cast<float>((hx >> 11) & 15) * 0.0433 - 0.325;
-                // The four quarter turns, as the cosine/sine pair the emitter wants. No trig: a
-                // right angle has exact components and a table of four is clearer than a formula.
-                mutable float ca = 1.0;
-                mutable float sa = 0.0;
-                if (face == 1) { ca = 0.0; sa = 1.0; }
-                if (face == 2) { ca = 0.0 - 1.0; sa = 0.0; }
-                if (face == 3) { ca = 0.0; sa = 0.0 - 1.0; }
-                return this.emitBuilt(this.builds, this.bbuf, w, mesh,
-                                      cast<float>(cx) * 2.0 + 1.0 + ox,
-                                      cast<float>(cy) * 2.0 + 1.0 + oy,
-                                      z, 0.9, r, gg, b, sh, ca, sa, up);
-            }
-
-            // The mesh a BuildingKind draws with. The catalogue names it, and a kind whose mesh is
-            // not in the atlas returns -1 rather than drawing something else -- a kiln that quietly
-            // renders as a hut is worse than a kiln that is missing, because it looks correct.
-            private method meshFor(int kind) returns int {
-                return this.builds.ordOf(Builds.mesh(kind));
-            }
-
-            // WHICH BORDER AN EDGE IS: the level at which the two sides first differ.
-            //
-            //   3  different nations, or nobody on the other side  -- thick, solid
-            //   2  same nation, different subdivisions             -- medium, solid
-            //   1  same subdivision, different cities              -- thin, DASHED
-            //   0  same city                                       -- nothing
-            //
-            // Only the highest is drawn. On the outer edge of a country all three coincide, and
-            // stacking them would give every coastline a fat line that means nothing.
-            private method edgeLevel(int mine, int theirs) returns int {
-                if (mine == theirs) {
-                    return 0;
-                }
-                if (theirs < 0) {
-                    return 3;                                  // nobody owns the far side
-                }
-                if (this.realm.nationOfCity(mine) != this.realm.nationOfCity(theirs)) {
-                    return 3;
-                }
-                if (this.realm.subOfCity(mine) != this.realm.subOfCity(theirs)) {
-                    return 2;
-                }
-                return 1;
-            }
-
-            // ONE COLOUR PER NATION, and the whole hierarchy wears it. The level is read off the
-            // STROKE, not the hue: thirty cities in thirty colours is a map you cannot find a
-            // country in.
-            private method nationTint(int nation, int level, int channel) returns float {
-                mutable int k = nation;
-                if (k < 0) {
-                    k = 0;
-                }
-                k = k % 8;
-                mutable float v = 0.5;
-                if (channel == 0) {
-                    if (k == 0) { v = 0.87; } else if (k == 1) { v = 0.30; }
-                    else if (k == 2) { v = 0.95; } else if (k == 3) { v = 0.55; }
-                    else if (k == 4) { v = 0.20; } else if (k == 5) { v = 0.90; }
-                    else if (k == 6) { v = 0.65; } else { v = 0.25; }
-                } else if (channel == 1) {
-                    if (k == 0) { v = 0.25; } else if (k == 1) { v = 0.55; }
-                    else if (k == 2) { v = 0.75; } else if (k == 3) { v = 0.20; }
-                    else if (k == 4) { v = 0.70; } else if (k == 5) { v = 0.60; }
-                    else if (k == 6) { v = 0.85; } else { v = 0.35; }
-                } else {
-                    if (k == 0) { v = 0.25; } else if (k == 1) { v = 0.90; }
-                    else if (k == 2) { v = 0.25; } else if (k == 3) { v = 0.70; }
-                    else if (k == 4) { v = 0.35; } else if (k == 5) { v = 0.20; }
-                    else if (k == 6) { v = 0.40; } else { v = 0.75; }
-                }
-                // The inner levels are lighter, which reinforces the stroke without carrying the
-                // meaning on its own.
-                mutable float lift = 0.0;
-                if (level == 2) {
-                    lift = 0.18;
-                } else if (level == 1) {
-                    lift = 0.34;
-                }
-                mutable float out = v + (1.0 - v) * lift;
-                if (out > 1.0) {
-                    out = 1.0;
-                }
-                return out;
-            }
-
-            // THE BORDERS, BUILT WHEN THE GROUND CHANGES HANDS AND NOT BEFORE.
-            //
-            // One pass over the cells every city owns, four neighbours each, deciding the level of
-            // every edge. Proportional to TERRITORY, not to the map, so a world with one duchy in
-            // it costs a duchy's worth of work.
-            //
-            // The line sits on the ground and follows the step, because the terrain is stepped and
-            // a border that ignored that would float over a slope or sink into it -- the same
-            // thing the props' shadows had to learn.
-            public method bakeBorders() returns void {
-                this.onverts = 0;
-                if (!this.haveRealm) {
-                    return;
-                }
-                mutable int edges = 0;
-                mutable int c = 0;
-                while (c < this.realm.cityCount()) {
-                    mutable City* one = this.realm.cityAt(c);
-                    mutable int t = 0;
-                    while (t < one.tiles.size()) {
-                        int at = one.tiles.get(t);
-                        int gx = at % this.srcW;
-                        int gy = at / this.srcW;
-                        mutable int d = 0;
-                        while (d < 4) {
-                            if (this.borderStroke(one.id, gx, gy, d) > 0.0) {
-                                edges = edges + 1;
-                            }
-                            d = d + 1;
-                        }
-                        t = t + 1;
-                    }
-                    c = c + 1;
-                }
-                if (edges == 0) {
-                    System.IO.Console.println("borders: nothing to draw -- no cell has a neighbour with a different owner");
-                    return;
-                }
-                int need = edges * 6 * 9;                       // two triangles an edge, nine floats a vertex
-                if (need > this.ocap) {
-                    if (this.ocap > 0) {
-                        Memory.free(this.obuf);
-                    }
-                    this.ocap = need * 2;
-                    this.obuf = Memory.alloc(cast<long>(this.ocap * 4 + 4));
-                }
-                this.wrCap = this.ocap;
-                mutable int w = 0;
-                c = 0;
-                while (c < this.realm.cityCount()) {
-                    mutable City* one = this.realm.cityAt(c);
-                    int nation = this.realm.nationOfCity(one.id);
-                    mutable int t = 0;
-                    while (t < one.tiles.size()) {
-                        int at = one.tiles.get(t);
-                        int gx = at % this.srcW;
-                        int gy = at / this.srcW;
-                        mutable int d = 0;
-                        while (d < 4) {
-                            float half = this.borderStroke(one.id, gx, gy, d);
-                            if (half > 0.0) {
-                                int lvl = this.edgeLevel(one.id,
-                                                         this.realm.ownerOf(gx + GlWorld3D.stepX(d),
-                                                                            gy + GlWorld3D.stepY(d)));
-                                w = this.emitBorder(this.obuf, w, gx, gy, d, half,
-                                                    this.nationTint(nation, lvl, 0),
-                                                    this.nationTint(nation, lvl, 1),
-                                                    this.nationTint(nation, lvl, 2));
-                            }
-                            d = d + 1;
-                        }
-                        t = t + 1;
-                    }
-                    c = c + 1;
-                }
-                this.gl.bindVertexArray(this.ovao);
-                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.ovbo);
-                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(w * 4), cast<long>(this.obuf),
-                                   GL.DYNAMIC_DRAW);
-                this.gl.bindVertexArray(0);
-                this.onverts = w / 9;
-                System.IO.Console.println($"borders: {edges} edges over {this.realm.cityCount()} cities, {this.onverts} vertices");
-                return;
-            }
-
-            private static method stepX(int d) returns int {
-                if (d == 0) { return 1; }
-                if (d == 2) { return 0 - 1; }
-                return 0;
-            }
-
-            private static method stepY(int d) returns int {
-                if (d == 1) { return 1; }
-                if (d == 3) { return 0 - 1; }
-                return 0;
-            }
-
-            // How thick this edge's line is, or 0 for no line at all. The dashes for the lowest
-            // level live here too: a city border is drawn on every other cell along its run, which
-            // is what makes it read as dashed at any distance instead of as a thinner solid line
-            // that vanishes when you pull back.
-            private method borderStroke(int mine, int gx, int gy, int d) returns float {
-                int level = this.edgeLevel(mine, this.realm.ownerOf(gx + GlWorld3D.stepX(d),
-                                                                   gy + GlWorld3D.stepY(d)));
-                if (level == 3) {
-                    return 0.30;
-                }
-                if (level == 2) {
-                    return 0.17;
-                }
-                if (level == 1) {
-                    if ((gx + gy) % 2 != 0) {
-                        return 0.0;                            // the gap in the dash
-                    }
-                    return 0.10;
-                }
-                return 0.0;
-            }
-
-            // One edge of one cell, as a flat quad lying on that cell's own ground. The world is
-            // drawn at two units a cell, so the edge runs the full two and the thickness is
-            // measured from the boundary inwards -- a border belongs to the land that owns it.
-            private method emitBorder(address buf, int at, int gx, int gy, int d, float half,
-                                      float r, float g, float b) returns int {
-                float z = this.groundTopAt(gx, gy) + 0.02;
-                float x0 = cast<float>(gx) * 2.0;
-                float y0 = cast<float>(gy) * 2.0;
-                mutable float ax = x0;
-                mutable float ay = y0;
-                mutable float bx = x0;
-                mutable float by = y0;
-                mutable float ix = 0.0;
-                mutable float iy = 0.0;
-                if (d == 0) {                                  // +x edge
-                    ax = x0 + 2.0; ay = y0; bx = x0 + 2.0; by = y0 + 2.0; ix = 0.0 - half * 2.0;
-                } else if (d == 1) {                           // +y edge
-                    ax = x0; ay = y0 + 2.0; bx = x0 + 2.0; by = y0 + 2.0; iy = 0.0 - half * 2.0;
-                } else if (d == 2) {                           // -x edge
-                    ax = x0; ay = y0; bx = x0; by = y0 + 2.0; ix = half * 2.0;
-                } else {                                       // -y edge
-                    ax = x0; ay = y0; bx = x0 + 2.0; by = y0; iy = half * 2.0;
-                }
-                mutable int w = at;
-                w = this.wr(buf, w, ax, ay, z, 0.0, 0.0, 1.0, r, g, b);
-                w = this.wr(buf, w, bx, by, z, 0.0, 0.0, 1.0, r, g, b);
-                w = this.wr(buf, w, bx + ix, by + iy, z, 0.0, 0.0, 1.0, r, g, b);
-                w = this.wr(buf, w, ax, ay, z, 0.0, 0.0, 1.0, r, g, b);
-                w = this.wr(buf, w, bx + ix, by + iy, z, 0.0, 0.0, 1.0, r, g, b);
-                w = this.wr(buf, w, ax + ix, ay + iy, z, 0.0, 0.0, 1.0, r, g, b);
-                return w;
-            }
-
-            // Which movement tick the world is on, so the crowd can be drawn between the position
-            // it was moved from and the one it was moved to.
-            public method setFolkTick(int t) returns void {
-                this.folkTick = t;
-                return;
-            }
-
-            public method setSmooth(boolean yes) returns void {
-                this.smooth = yes;
-                return;
-            }
-
-            // EACH BODY TO THE CARD, ONCE. Ten floats a vertex: position, normal, the mesh's own
-            // colour, and whether this triangle takes a tint. That last one is why the tint rule
-            // can live in the shader at all -- `grp[tri] >= 1000` is a fact about the model, so it
-            // travels with the model instead of being re-decided per person per frame.
-            private method uploadBodies() returns void {
-                for (int k in 0..GlWorld3D.SLOTS) {
-                    int mord = this.bodyModel[k];
-                    // Bodies come from the agent atlas, loads from the item atlas. A slot with no
-                    // mesh behind it yet is left at zero vertices and simply never drawn -- which
-                    // is what lets the bodies go up at startup and the goods follow when the item
-                    // atlas arrives, without either waiting on the other.
-                    mutable MeshAtlas* from = this.people;
-                    if (k >= 4) {
-                        from = this.items;
-                    }
-                    if (mord < 0) {
-                        this.mverts[k] = 0;
-                        continue;
-                    }
-                    int t0 = from.triStart[mord];
-                    int tn = from.triCount[mord];
-                    int verts = tn * 3;
-                    this.mverts[k] = verts;
-                    // A LOAD IS SMALLER THAN THE PERSON CARRYING IT.
-                    //
-                    // The shader scales every instance by one uniform, so a crate of clay came out
-                    // the same size as the body underneath it and hid it completely -- the first
-                    // run showed boxes wandering the field with nobody attached. The item meshes
-                    // are shrunk here instead, once, on their way to the card.
-                    mutable float scale = 1.0;
-                    if (k >= 4) {
-                        scale = 0.34;
-                    }
-                    address buf = Memory.alloc(cast<long>(verts * 10 * 4 + 4));
-                    mutable int p = 0;
-                    mutable int t = 0;
-                    while (t < tn) {
-                        int tri = t0 + t;
-                        float cr = cast<float>(from.cr[tri]) / 255.0;
-                        float cg = cast<float>(from.cg[tri]) / 255.0;
-                        float cb = cast<float>(from.cb[tri]) / 255.0;
-                        mutable float tint = 0.0;
-                        if (from.grp[tri] >= 1000) {
-                            tint = 1.0;
-                        }
-                        mutable int j = 0;
-                        while (j < 3) {
-                            int vi = tri * 3 + j;
-                            Memory.write<float>(buf + cast<address>(p) * cast<address>(4), from.px[vi] * scale);
-                            Memory.write<float>(buf + cast<address>(p + 1) * cast<address>(4), from.py[vi] * scale);
-                            Memory.write<float>(buf + cast<address>(p + 2) * cast<address>(4), from.pz[vi] * scale);
-                            Memory.write<float>(buf + cast<address>(p + 3) * cast<address>(4), from.nx[vi]);
-                            Memory.write<float>(buf + cast<address>(p + 4) * cast<address>(4), from.ny[vi]);
-                            Memory.write<float>(buf + cast<address>(p + 5) * cast<address>(4), from.nz[vi]);
-                            Memory.write<float>(buf + cast<address>(p + 6) * cast<address>(4), cr);
-                            Memory.write<float>(buf + cast<address>(p + 7) * cast<address>(4), cg);
-                            Memory.write<float>(buf + cast<address>(p + 8) * cast<address>(4), cb);
-                            Memory.write<float>(buf + cast<address>(p + 9) * cast<address>(4), tint);
-                            p = p + 10;
-                            j = j + 1;
-                        }
-                        t = t + 1;
-                    }
-                    if (this.mvbo[k] == 0) {
-                        this.mvbo[k] = this.gl.genBuffer();
-                        this.ivbo[k] = this.gl.genBuffer();
-                        this.mvao[k] = this.gl.genVertexArray();
-                    }
-                    this.gl.bindBuffer(GL.ARRAY_BUFFER, this.mvbo[k]);
-                    this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(verts * 10 * 4),
-                                       cast<long>(buf), GL.STATIC_DRAW);
-                    Memory.free(buf);
-                    // The vertex array remembers both bindings AND the divisors, so this is said
-                    // once here rather than every frame at draw time.
-                    this.gl.bindVertexArray(this.mvao[k]);
-                    this.gl.bindBuffer(GL.ARRAY_BUFFER, this.mvbo[k]);
-                    this.gl.vertexAttribPointer(0, 3, GL.FLOAT, cast<byte>(0), 40, 0);
-                    this.gl.enableVertexAttribArray(0);
-                    this.gl.vertexAttribPointer(1, 3, GL.FLOAT, cast<byte>(0), 40, 12);
-                    this.gl.enableVertexAttribArray(1);
-                    this.gl.vertexAttribPointer(2, 3, GL.FLOAT, cast<byte>(0), 40, 24);
-                    this.gl.enableVertexAttribArray(2);
-                    this.gl.vertexAttribPointer(3, 1, GL.FLOAT, cast<byte>(0), 40, 36);
-                    this.gl.enableVertexAttribArray(3);
-                    this.gl.bindBuffer(GL.ARRAY_BUFFER, this.ivbo[k]);
-                    this.gl.vertexAttribPointer(4, 3, GL.FLOAT, cast<byte>(0), 40, 0);
-                    this.gl.enableVertexAttribArray(4);
-                    this.gl.vertexAttribDivisor(4, 1);
-                    this.gl.vertexAttribPointer(5, 2, GL.FLOAT, cast<byte>(0), 40, 12);
-                    this.gl.enableVertexAttribArray(5);
-                    this.gl.vertexAttribDivisor(5, 1);
-                    this.gl.vertexAttribPointer(6, 4, GL.FLOAT, cast<byte>(0), 40, 20);
-                    this.gl.enableVertexAttribArray(6);
-                    this.gl.vertexAttribDivisor(6, 1);
-                    this.gl.vertexAttribPointer(7, 1, GL.FLOAT, cast<byte>(0), 40, 36);
-                    this.gl.enableVertexAttribArray(7);
-                    this.gl.vertexAttribDivisor(7, 1);
-                    this.gl.bindVertexArray(0);
-                }
-                System.IO.Console.println($"people: 4 bodies uploaded once ({this.mverts[0]}, {this.mverts[1]}, {this.mverts[2]}, {this.mverts[3]} vertices)");
-                return;
-            }
-
-            // Ten floats for one instance: where, which way, what colour, how lit.
-            private method putInstance(int k, float x, float y, float z, float ca, float sa,
-                                       float r, float g, float b, float mode,
-                                       float shade) returns void {
-                if (this.icount[k] >= this.icap[k]) {
-                    return;                                  // counted short: the caller sized it
-                }
-                address at = this.ibuf[k] + cast<address>(this.icount[k]) * cast<address>(40);
-                Memory.write<float>(at, x);
-                Memory.write<float>(at + cast<address>(4), y);
-                Memory.write<float>(at + cast<address>(8), z);
-                Memory.write<float>(at + cast<address>(12), ca);
-                Memory.write<float>(at + cast<address>(16), sa);
-                Memory.write<float>(at + cast<address>(20), r);
-                Memory.write<float>(at + cast<address>(24), g);
-                Memory.write<float>(at + cast<address>(28), b);
-                Memory.write<float>(at + cast<address>(32), mode);
-                Memory.write<float>(at + cast<address>(36), shade);
-                this.icount[k] = this.icount[k] + 1;
-                return;
-            }
-
-            // WHERE EVERY VISIBLE PERSON IS, THIS FRAME. Not their geometry -- ten numbers each,
-            // and the card already has the shape.
-            //
-            // Only the blocks the window covers are visited, and within them only two instances a
-            // person: the body, and the shadow it stands on. Counted first so each buffer is sized
-            // for what it will hold, then written in the same order.
-            private method bakeAgents() returns void {
-                for (int k in 0..GlWorld3D.SLOTS) {
-                    this.icount[k] = 0;
-                }
-                if (!this.havePeople || !this.haveInstancing) {
-                    return;
-                }
-                if (!this.detailOn || !this.haveDetail) {
-                    return;                                    // far out, a person is under a pixel
-                }
-                int x0 = this.detX0;
-                int y0 = this.detY0;
-                int x1 = x0 + this.detW;
-                int y1 = y0 + this.detH;
-                int bs = Folk.BLOCK;
-                int bx0 = x0 / bs;
-                int by0 = y0 / bs;
-                int bx1 = (x1 + bs - 1) / bs;
-                int by1 = (y1 + bs - 1) / bs;
-                mutable int[] want = new int[GlWorld3D.SLOTS]();
-                mutable int by = by0;
-                while (by < by1) {
-                    mutable int bx = bx0;
-                    while (bx < bx1) {
-                        mutable int i = this.folk.headAt(bx, by);
-                        while (i >= 0) {
-                            Agent* one = this.folk.at(i);
-                            int ax = cast<int>(one.x);
-                            int ay = cast<int>(one.y);
-                            if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
-                                want[one.klass] = want[one.klass] + 2;
-                                // AND THE THING IN HIS HANDS. Counted here or not drawn at all:
-                                // the emitting pass asks `putInstance` for a slot the counting
-                                // pass never sized, so every load was silently refused. The two
-                                // passes have to agree, and the way they disagree is quiet.
-                                if (one.held > 0 && one.holds < this.carrySlots) {
-                                    want[4 + one.holds] = want[4 + one.holds] + 1;
-                                }
-                            }
-                            i = this.folk.nextOf(i);
-                        }
-                        bx = bx + 1;
-                    }
-                    by = by + 1;
-                }
-                for (int k in 0..GlWorld3D.SLOTS) {
-                    if (want[k] > this.icap[k]) {
-                        if (this.icap[k] > 0) {
-                            Memory.free(this.ibuf[k]);
-                        }
-                        this.icap[k] = want[k] * 2;    // headroom: a crowd must not realloc a frame
-                        this.ibuf[k] = Memory.alloc(cast<long>(this.icap[k] * 40 + 4));
-                    }
-                }
-                by = by0;
-                while (by < by1) {
-                    mutable int bx = bx0;
-                    while (bx < bx1) {
-                        mutable int i = this.folk.headAt(bx, by);
-                        while (i >= 0) {
-                            Agent* one = this.folk.at(i);
-                            // DRAWN BETWEEN WHERE IT WAS AND WHERE IT IS. An agent is moved once
-                            // every Folk.SLICES frames, so its stored position is a staircase;
-                            // this is what turns the staircase back into walking. Paid only for
-                            // the couple of thousand agents on screen, not for the half million.
-                            // PEOPLE ARE DRAWN WHERE THEY ARE. The interpolation is gone.
-                            //
-                            // It existed to smooth a body that is moved once every SLICES ticks,
-                            // and it is the ghost: `px,py` is only rewritten on the tick a man
-                            // actually moves, so on the frame after that the fraction resets to
-                            // zero against a `px` that is still the OLD position -- and he is
-                            // drawn one frame back where he came from before setting off again.
-                            // Walk, snap back, walk. Exactly what was reported, and only at gear
-                            // 1, which is the only gear where the smoothing was still on.
-                            //
-                            // Two attempts to keep it and gate it both failed. A stutter from
-                            // sliced movement is a smaller lie than a man teleporting backwards
-                            // every sixteenth tick, and the honest fix for the stutter is to move
-                            // people more often, not to draw them where they are not.
-                            float fx = one.x;
-                            float fy = one.y;
-                            int ax = cast<int>(fx);
-                            int ay = cast<int>(fy);
-                            if (ax >= x0 && ay >= y0 && ax < x1 && ay < y1) {
-                                int k = one.klass;
-                                int ord = this.grid.biomeAt(ax, ay);
-                                int lvl = this.stackLvl(ord, ax, ay);
-                                float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
-                                float topZ = this.tileTop[ord] + zOff;
-                                float shade = this.shadeAt(ax, ay, 1, lvl);
-                                // The shadow darkens the GROUND's own colour rather than being
-                                // black: a shadow on sand and a shadow on snow are different
-                                // colours, and a flat black disc under everybody is what makes a
-                                // world look pasted together.
-                                int ut = this.terr.triStart[ord] + 8;
-                                float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
-                                float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
-                                float gb = cast<float>(this.terr.cb[ut]) / 255.0 * shade * 0.55;
-                                // A mesh is modelled +Y forward, so the heading IS the rotation:
-                                // ca = hy, sa = -hx, and no trigonometry anywhere.
-                                float ca = one.hy;
-                                float sa = 0.0 - one.hx;
-                                // They hover clear of the ground and breathe, rather than sliding
-                                // along the dirt like a chess piece. A parabola over a wrapped
-                                // phase, not a sine: the sine range-reduces in a loop and costs
-                                // more every hour the window stays open.
-                                float ph = this.timeSec * 1.35 + cast<float>(i) * 0.37;
-                                float fr = ph - cast<float>(cast<int>(ph));
-                                mutable float lift = 0.14 + fr * (1.0 - fr) * 4.0 * 0.07;
-                                // SWIMMING IS DRAWN, NOT JUST ALLOWED.
-                                //
-                                // He is dropped until the water takes him to the waist and only
-                                // the head and shoulders ride above it -- the bob is halved too,
-                                // because a man in water does not stride. Without this, crossing
-                                // a lake looks exactly like walking over one.
-                                boolean wet = one.swimming;
-                                if (wet) {
-                                    lift = 0.0 - GlWorld3D.WADE + fr * (1.0 - fr) * 4.0 * 0.03;
-                                }
-                                // No shadow on open water: there is no ground under him to darken.
-                                if (!wet) {
-                                    this.putInstance(k, fx * 2.0, fy * 2.0, topZ + 0.012,
-                                                     ca, sa, gr, gg, gb, 1.0, 1.0);
-                                }
-                                int c = one.culture;
-                                this.putInstance(k, fx * 2.0, fy * 2.0, topZ + lift,
-                                                 ca, sa, GlWorld3D.hueOf(c, 0),
-                                                 GlWorld3D.hueOf(c, 1), GlWorld3D.hueOf(c, 2),
-                                                 0.0, shade);
-                                // WHAT HE IS CARRYING, IN HIS HANDS.
-                                //
-                                // Without this an errand is a number in a report: the gathering
-                                // ran, three thousand units came off the map and reached a store,
-                                // and the window showed people drifting exactly as before. The
-                                // load rides above the shoulder and turns with him, so a town
-                                // fetching wood LOOKS like a town fetching wood.
-                                if (one.held > 0 && one.holds < this.carrySlots) {
-                                    this.putInstance(4 + one.holds, fx * 2.0, fy * 2.0,
-                                                     topZ + lift + 0.42, ca, sa,
-                                                     1.0, 1.0, 1.0, 0.0, shade);
-                                }
-                            }
-                            i = this.folk.nextOf(i);
-                        }
-                        bx = bx + 1;
-                    }
-                    by = by + 1;
-                }
-                delete want;
-                for (int k in 0..GlWorld3D.SLOTS) {
-                    if (this.icount[k] > 0) {
-                        this.gl.bindBuffer(GL.ARRAY_BUFFER, this.ivbo[k]);
-                        this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(this.icount[k] * 40),
-                                           cast<long>(this.ibuf[k]), GL.DYNAMIC_DRAW);
-                    }
-                }
-                return;
-            }
-
-            // Six plain colours, so that a crowd is legible before anything in the world has an
-            // opinion about who belongs to whom. Deliberately not derived from a nation's banner:
-            // there are no nations, and inventing one to colour by would be the picture claiming
-            // something the world does not know.
-            private static method hueOf(int c, int channel) returns float {
-                mutable int k = c;
-                if (k < 0) {
-                    k = 0;
-                }
-                k = k % 6;
-                if (k == 0) {
-                    if (channel == 0) { return 0.85; }
-                    if (channel == 1) { return 0.72; }
-                    return 0.45;
-                }
-                if (k == 1) {
-                    if (channel == 0) { return 0.45; }
-                    if (channel == 1) { return 0.68; }
-                    return 0.85;
-                }
-                if (k == 2) {
-                    if (channel == 0) { return 0.55; }
-                    if (channel == 1) { return 0.80; }
-                    return 0.52;
-                }
-                if (k == 3) {
-                    if (channel == 0) { return 0.88; }
-                    if (channel == 1) { return 0.55; }
-                    return 0.50;
-                }
-                if (k == 4) {
-                    if (channel == 0) { return 0.78; }
-                    if (channel == 1) { return 0.60; }
-                    return 0.85;
-                }
-                if (channel == 0) { return 0.90; }
-                if (channel == 1) { return 0.85; }
-                return 0.62;
             }
 
             // Finish the detail bake in one go rather than a slice a frame. Used by the headless
@@ -3153,10 +2003,6 @@ public bundle Agents {
                 if (this.detailOn) {
                     if (need > this.detailCap * 5 / 4) {
                         this.detailOn = false;
-                        // The overlay is a different drawing at each level -- cells in a window
-                        // near, blocks over the whole world far -- so crossing the threshold makes
-                        // whatever is baked the wrong one, exactly as moving the window does.
-                        this.bakedClaim = 0 - 1;
                         return;
                     }
                 } else {
@@ -3164,7 +2010,6 @@ public bundle Agents {
                         return;
                     }
                     this.detailOn = true;
-                    this.bakedClaim = 0 - 1;
                 }
                 // THE WINDOW HAS TO COVER WHAT THE CAMERA CAN SEE, and how much that is depends on
                 // how high the camera is. Fixed at 144 cells it spanned 288 world units, while at
@@ -3304,12 +2149,12 @@ public bundle Agents {
                     this.stepBake();
                 }
                 this.gauge.lap(cast<int>(Phase.Terrain));
-                this.bakeAgents();
-                this.gauge.lap(cast<int>(Phase.People));
-                // The fauna, town and border bakes stood here too. All three fed off the simulation
-                // and are gone with it; their phases stay in the enum and their laps come back one
-                // at a time as the new model gives the renderer something to draw again -- which is
-                // how the frame budget stays honest while it grows.
+                // The people, fauna, town and border bakes stood here. All four fed off a
+                // simulation that has been taken out, and drawing a thing the world no longer
+                // knows about is how a picture starts lying about what is behind it. Their phases
+                // stay in the enum and their laps come back ONE AT A TIME, as the new model gives
+                // the renderer something real to draw -- which is how the frame budget stays
+                // honest while it grows back.
                 if (this.pixelate) {
                     if (this.fbo == 0) {
                         this.initPost(640, 400);
@@ -3357,100 +2202,6 @@ public bundle Agents {
                 } else {
                     this.gl.bindVertexArray(this.hvao);
                     Wgl.glDrawArrays(GL.TRIANGLES, 0, this.hnverts);
-                }
-                // BUILDINGS ARE NOT DRAWN FROM ORBIT.
-                //
-                // They were drawn at every distance, so pulling back to see a continent still
-                // rendered every hut in every town -- and a hut is under a pixel from there. The
-                // window showed a scatter of white dots where a settlement should read as a mark
-                // on the land, and the frame paid full price for it.
-                //
-                // The same cut the people already have: past this distance a building is smaller
-                // than what it is drawn on.
-                if (this.bnverts > 0 && this.camDist < GlWorld3D.FAR_BUILDINGS) {
-                    this.gl.bindVertexArray(this.bvao);
-                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.bnverts);
-                }
-                if (this.fnverts > 0) {
-                    this.gl.bindVertexArray(this.fvao);
-                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.fnverts);
-                }
-                // THE PEOPLE, FOUR DRAWS FOR HOWEVER MANY OF THEM THERE ARE.
-                //
-                // Their own program, because the turning that used to be done per vertex on the
-                // processor is done per vertex on the card now. One draw per class: an instanced
-                // draw takes ONE mesh and a run of instances, so grouping by body is what turns
-                // "one draw per person" into four.
-                //
-                // The program is swapped back afterwards -- everything drawn after this expects
-                // the world's own shader bound and its uniforms live.
-                mutable boolean drewFolk = false;
-                for (int k in 0..GlWorld3D.SLOTS) {
-                    if (this.icount[k] > 0 && this.mverts[k] > 0) {
-                        if (!drewFolk) {
-                            this.gl.useProgram(this.aProg);
-                            this.gl.uniformMatrix4fv(this.uAProj, 1, cast<byte>(0), this.projM.ptr());
-                            this.gl.uniformMatrix4fv(this.uAView, 1, cast<byte>(0), this.viewM.ptr());
-                            this.gl.uniform1f(this.uAScale, 0.30);
-                            this.gl.uniform1f(this.uAAlpha, 1.0);
-                            this.gl.uniform1f(this.uAFlat, 0.0);
-                            drewFolk = true;
-                        }
-                        this.gl.bindVertexArray(this.mvao[k]);
-                        this.gl.drawArraysInstanced(GL.TRIANGLES, 0, this.mverts[k],
-                                                    this.icount[k]);
-                    }
-                }
-                // ONE FRAME'S WORTH OF WHAT THE CARD WAS ACTUALLY TOLD. A crowd that does not
-                // appear has only a few possible causes -- nobody baked, the program did not link,
-                // the uniforms are not where the program says, or the driver rejected the call --
-                // and each of them shows up as a different line here. Printed once, on a settled
-                // frame, because the answer is the same on every frame after the first.
-                this.diagFrame = this.diagFrame + 1;
-                // ONCE EARLY AND ONCE LATE. The early one caught the crowd not appearing at all;
-                // it cannot catch the crowd thinning out, because at frame 60 there is no crowd
-                // yet -- a dozen founders draw exactly like a dozen founders should. Reading a
-                // settled world needs a reading taken from a settled world.
-                // IS THE SMOOTHING EVEN ON? Two attempts at the ghost have assumed it was the
-                // interpolation, and the second one is still being reported. Before a third
-                // guess, the flag says what it actually is on a settled frame -- if it is false
-                // and people still trail, the interpolation is innocent and the cause is
-                // elsewhere.
-                if (this.diagFrame == 300) {
-                    System.IO.Console.println($"draw: smooth={this.smooth} folkTick={this.folkTick} detail window {this.detX0},{this.detY0} {this.detW}x{this.detH} baking={this.baking}");
-                }
-                if (this.diagFrame == 60 || this.diagFrame == 900) {
-                    mutable int loads = 0;
-                    for (int s in 4..GlWorld3D.SLOTS) {
-                        loads = loads + this.icount[s];
-                    }
-                    System.IO.Console.println($"people@{this.diagFrame}: {this.icount[0] + this.icount[1] + this.icount[2] + this.icount[3]} body instances + {loads} loads, of {this.folk.count()} alive, window {this.detW}x{this.detH}, glError={Wgl.glGetError()}");
-                }
-                if (drewFolk) {
-                    this.gl.bindVertexArray(0);
-                    this.gl.useProgram(this.prog);
-                    this.gl.uniformMatrix4fv(this.uProj, 1, cast<byte>(0), this.projM.ptr());
-                    this.gl.uniformMatrix4fv(this.uView, 1, cast<byte>(0), this.viewM.ptr());
-                    this.gl.uniform1f(this.uTime, this.timeSec);
-                    this.gl.uniform1f(this.uAlpha, 1.0);
-                    this.gl.uniform1f(this.uFlat, 0.0);
-                }
-                // THE BORDERS, OPAQUE AND UNLIT.
-                //
-                // No blending. That is the whole fix for the beige: a wash at fifteen per cent
-                // over dark water comes out the colour of the water, and no better choice of
-                // colour repairs a mechanism. A solid line is the colour it was given, on grass,
-                // on snow, on sea.
-                //
-                // Unlit (`uFlat`) for the same reason at a different angle -- a border is a thing
-                // drawn ON the world, not a surface in it, and it must not pick up a highlight
-                // from the sun and change shade as the camera turns.
-                if (this.onverts > 0) {
-                    this.gl.uniform1f(this.uFlat, 1.0);
-                    this.gl.uniform1f(this.uAlpha, 1.0);
-                    this.gl.bindVertexArray(this.ovao);
-                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.onverts);
-                    this.gl.uniform1f(this.uFlat, 0.0);
                 }
                 this.gl.bindVertexArray(0);
                 this.gauge.lap(cast<int>(Phase.Draw));
@@ -3675,53 +2426,6 @@ public bundle Agents {
 
             private static method postVert() returns String {
                 return "#version 330 core\nlayout(location=0) in vec2 aPos;\nlayout(location=1) in vec2 aUV;\nout vec2 vUV;\nvoid main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
-            }
-
-            // THE AGENT SHADER: the turning the emitters used to do per vertex on the processor,
-            // done here per vertex on the card, from nine numbers the frame sent for this person.
-            //
-            // Locations 0..3 are the body and never change once uploaded. Locations 4..7 advance
-            // once per INSTANCE, not once per vertex -- that divisor is the whole trick.
-            //
-            // Two shapes come out of the same mesh. A body is turned by the heading, lit by its own
-            // normals, and tinted where the model says a triangle takes a tint. A shadow is the
-            // same body sheared by height onto the ground, flat, in the ground's own colour --
-            // which is what makes a shadow on sand and a shadow on snow different colours instead
-            // of a black disc pasted under everybody. `iCol.w` says which of the two this is.
-            private static method agentVertSrc() returns String {
-                return "#version 330 core\n"
-                     + "layout(location=0) in vec3 aPos;\n"
-                     + "layout(location=1) in vec3 aNrm;\n"
-                     + "layout(location=2) in vec3 aCol;\n"
-                     + "layout(location=3) in float aTint;\n"
-                     + "layout(location=4) in vec3 iPos;\n"
-                     + "layout(location=5) in vec2 iRot;\n"
-                     + "layout(location=6) in vec4 iCol;\n"
-                     + "layout(location=7) in float iShade;\n"
-                     + "uniform mat4 uProj;\nuniform mat4 uView;\nuniform float uScale;\n"
-                     + "out vec3 vNrm;\nout vec3 vCol;\n"
-                     + "void main(){\n"
-                     + "  float lx = aPos.x * uScale;\n"
-                     + "  float ly = aPos.y * uScale;\n"
-                     + "  float hz = aPos.z * uScale;\n"
-                     + "  float ca = iRot.x;\n  float sa = iRot.y;\n"
-                     + "  vec3 world;\n  vec3 n;\n  vec3 c;\n"
-                     + "  if (iCol.w >= 0.5) {\n"
-                     + "    world = vec3(lx*ca - ly*sa + iPos.x - hz*0.368,\n"
-                     + "                 lx*sa + ly*ca + iPos.y - hz*0.579,\n"
-                     + "                 iPos.z);\n"
-                     + "    n = vec3(0.0, 0.0, 1.0);\n"
-                     + "    c = iCol.rgb;\n"
-                     + "  } else {\n"
-                     + "    world = vec3(lx*ca - ly*sa + iPos.x, lx*sa + ly*ca + iPos.y, hz + iPos.z);\n"
-                     + "    n = vec3(aNrm.x*ca - aNrm.y*sa, aNrm.x*sa + aNrm.y*ca, aNrm.z);\n"
-                     + "    c = aCol;\n"
-                     + "    if (aTint > 0.5) { c = c * iCol.rgb; }\n"
-                     + "    c = c * iShade;\n"
-                     + "  }\n"
-                     + "  gl_Position = uProj * uView * vec4(world, 1.0);\n"
-                     + "  vNrm = n; vCol = c;\n"
-                     + "}\n";
             }
 
             private static method postFrag() returns String {
