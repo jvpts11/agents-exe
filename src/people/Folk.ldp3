@@ -544,6 +544,25 @@ public bundle Agents {
                     mutable float hix = lox + 1.0;
                     mutable float loy = cast<float>(cy);
                     mutable float hiy = loy + 1.0;
+                    // WHAT HE IS STANDING IN, and how fast it lets him go. Read once per interval
+                    // from the cell he starts in, and again whenever he leaves it -- the same
+                    // saving the walkability test already makes.
+                    int here = g.biomeAt(cx, cy);
+                    mutable float pace = Biomes.pace(here);
+                    one.swimming = Biomes.swims(here);
+                    // HIGH ROCK IS AVOIDED UNLESS THAT IS WHERE HE IS GOING.
+                    //
+                    // It is passable now -- the stone and the ore are up there and until this
+                    // slice nobody in the world could reach a single one of them -- but it is slow,
+                    // and a man crossing a country does not climb a mountain for the pleasure of
+                    // it. So the step onto rock is refused the way a wall is refused, which sends
+                    // the walker round; when the thing he was sent for IS on the rock, it is not.
+                    mutable boolean climbs = true;
+                    if (one.errand != 0) {
+                        climbs = Biomes.rough(g.biomeAt(one.goX, one.goY));
+                    } else {
+                        climbs = Biomes.rough(here);
+                    }
                     // SOMEBODY ON AN ERRAND WALKS AT IT. Everybody else drifts.
                     //
                     // This is the whole difference between a crowd and a workforce, and it is one
@@ -567,31 +586,31 @@ public bundle Agents {
                         } else {
                             float pickA = LandMath.hash01(this.seed ^ 0x51E7, i, tick);
                             float pickB = LandMath.hash01(this.seed ^ 0x93B1, i, tick);
+                            // THE DIRECTION GETS ITS OWN DRAW.
+                            //
+                            // It used to share pickB with the length of the walk, and the two are
+                            // not independent when one number decides both: sin(2*pi*pickB) is
+                            // southward for pickB below a half and northward above it, and the
+                            // hold is 60+220*pickB -- so everybody going north walked about twice
+                            // as long as everybody going south before stopping. Over a few
+                            // thousand bouts that is a tide. Measured on even ground -- 884 tiles
+                            // northwest against 878 southwest -- the idle stood 376 north to 37
+                            // south.
+                            float pickC = LandMath.hash01(this.seed ^ 0x2F5D, i, tick);
                             one.rest = 40 + cast<int>(pickA * 160.0);
                             one.hold = 60 + cast<int>(pickB * 220.0);
-                            float ang = pickB * 6.2831853;
+                            float ang = pickC * 6.2831853;
                             hx = cast<float>(Math.cos(cast<double>(ang)));
                             hy = cast<float>(Math.sin(cast<double>(ang)));
                             turn = 0.0;
                         }
-                        // And never out of his own town. Checked only when he is walking -- a man
-                        // standing still is not getting further from anywhere.
-                        mutable float ohx = 0.0;
-                        mutable float ohy = 0.0;
-                        mutable float out2 = 0.0;
-                        if (!still) {
-                            ohx = cast<float>(one.homeX) + 0.5 - px;
-                            ohy = cast<float>(one.homeY) + 0.5 - py;
-                            out2 = ohx * ohx + ohy * ohy;
-                        }
-                        if (out2 > Folk.LEASH * Folk.LEASH) {
-                            float inv = 1.0 / cast<float>(Math.sqrt(cast<double>(out2)));
-                            hx = ohx * inv;
-                            hy = ohy * inv;
-                            turn = 0.0;
-                            still = false;
-                            one.rest = 0;
-                        }
+                        // WHERE HE MAY NOT GO IS NOT DECIDED HERE.
+                        //
+                        // This was a circle of fourteen tiles round the middle of his town, which
+                        // is not the same shape as his town and does not grow with it: a city of
+                        // six thousand tiles had its people milling about in a disc near the hall.
+                        // The bound is the GROUND THE CITY HOLDS, and only the Realm knows whose
+                        // each tile is -- so the turning-back is done there, by `herd`.
                     }
                     if (still) {
                         one.px = wasX;
@@ -636,8 +655,8 @@ public bundle Agents {
                     // The step itself, once. Between one sub-step and the next the heading only
                     // changes if the agent turned back off a shore, so the multiply belongs where
                     // that happens rather than on every one of the sixteen.
-                    mutable float dx = hx * advance;
-                    mutable float dy = hy * advance;
+                    mutable float dx = hx * advance * pace;
+                    mutable float dy = hy * advance * pace;
                     mutable int k = 0;
                     while (k < steps) {
                         float sx = px + dx;
@@ -676,8 +695,16 @@ public bundle Agents {
                             py = sy;
                         } else {
                             looks = looks + 1;
-                            if (sx >= 0.0 && sy >= 0.0 && sx < w && sy < h
-                                && Biomes.walkable(g.biomeAt(cast<int>(sx), cast<int>(sy)))) {
+                            mutable boolean ok = false;
+                            mutable int next = 0;
+                            if (sx >= 0.0 && sy >= 0.0 && sx < w && sy < h) {
+                                next = g.biomeAt(cast<int>(sx), cast<int>(sy));
+                                ok = Biomes.walkable(next);
+                                if (ok && !climbs && Biomes.rough(next)) {
+                                    ok = false;              // go round the mountain, not over it
+                                }
+                            }
+                            if (ok) {
                                 px = sx;
                                 py = sy;
                                 cx = cast<int>(sx);
@@ -686,6 +713,11 @@ public bundle Agents {
                                 hix = lox + 1.0;
                                 loy = cast<float>(cy);
                                 hiy = loy + 1.0;
+                                // The new ground sets the pace and says whether he is swimming.
+                                pace = Biomes.pace(next);
+                                one.swimming = Biomes.swims(next);
+                                dx = hx * advance * pace;
+                                dy = hy * advance * pace;
                             } else {
                                 dx = 0.0 - dx;
                                 dy = 0.0 - dy;

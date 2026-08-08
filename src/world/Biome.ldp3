@@ -27,21 +27,42 @@ public bundle Agents {
             private static mutable int[] R;
             private static mutable int[] G;
             private static mutable int[] B;
+            // THREE QUESTIONS, NOT ONE.
+            //
+            // `walkable` used to answer all of them at once and got two of them wrong. Whether a
+            // body may BE somewhere, whether a town may BUILD there, and how fast the ground is
+            // crossed are three different facts, and folding them together put stone and ore
+            // behind a wall: they live on mountain rock, mountain rock was "unwalkable", and so
+            // nobody in the world could ever reach a single one of them.
+            //
+            //   PASS  -- a body may be here, on foot or swimming. False only for open sea, which
+            //            needs a ship.
+            //   SWIM  -- being here means swimming: faster, and drawn half under.
+            //   BUILD -- a settlement may be founded and raised here. Never true of water or of
+            //            high rock; being NEXT to either has nothing to do with it.
+            //   PACE  -- how fast it is crossed. High rock is slow, which is what makes a walker
+            //            go round it when the way round is not much longer.
             private static mutable boolean[] WALK;
+            private static mutable boolean[] SWIM;
+            private static mutable boolean[] BUILD;
+            private static mutable float[] PACE;
 
             onClassLoad {
                 Biomes.R = new int[40]();
                 Biomes.G = new int[40]();
                 Biomes.B = new int[40]();
                 Biomes.WALK = new boolean[40]();
-                // ordinal, r, g, b, walkable
-                Biomes.put(0, 12, 20, 60, false);      // MarineTrench
-                Biomes.put(1, 18, 42, 96, false);      // DeepOcean
-                Biomes.put(2, 28, 74, 140, false);     // Ocean
-                Biomes.put(3, 58, 132, 188, false);    // ShallowSea
-                Biomes.put(4, 60, 190, 190, false);    // CoralReef
-                Biomes.put(5, 200, 224, 236, false);   // SeaIce
-                Biomes.put(6, 46, 110, 168, false);    // Lake
+                Biomes.SWIM = new boolean[40]();
+                Biomes.BUILD = new boolean[40]();
+                Biomes.PACE = new float[40]();
+                // ordinal, r, g, b, a body may be here
+                Biomes.put(0, 12, 20, 60, false);      // MarineTrench -- a ship or nothing
+                Biomes.put(1, 18, 42, 96, false);      // DeepOcean    -- a ship or nothing
+                Biomes.put(2, 28, 74, 140, false);     // Ocean        -- a ship or nothing
+                Biomes.put(3, 58, 132, 188, true);     // ShallowSea   -- swum
+                Biomes.put(4, 60, 190, 190, true);     // CoralReef    -- swum
+                Biomes.put(5, 200, 224, 236, true);    // SeaIce       -- walked, and slow
+                Biomes.put(6, 46, 110, 168, true);     // Lake         -- swum
                 Biomes.put(7, 52, 120, 176, false);    // River
                 Biomes.put(8, 226, 214, 160, true);    // Beach
                 Biomes.put(9, 140, 138, 130, true);    // RockyShore
@@ -64,17 +85,45 @@ public bundle Agents {
                 Biomes.put(26, 178, 168, 140, true);   // ColdDesert
                 Biomes.put(27, 56, 100, 82, true);     // Taiga
                 Biomes.put(28, 150, 158, 140, true);   // Tundra
-                Biomes.put(29, 232, 240, 248, false);  // IceCap
-                Biomes.put(30, 206, 224, 240, false);  // Glacier
+                Biomes.put(29, 232, 240, 248, true);   // IceCap
+                Biomes.put(30, 206, 224, 240, true);   // Glacier
                 Biomes.put(31, 224, 232, 240, true);   // Snowfield
                 Biomes.put(32, 120, 148, 96, true);    // Hills
-                Biomes.put(33, 122, 116, 108, false);  // Mountain
+                Biomes.put(33, 122, 116, 108, true);   // Mountain
                 Biomes.put(34, 132, 168, 120, true);   // AlpineMeadow
-                Biomes.put(35, 238, 242, 248, false);  // SnowPeak
-                Biomes.put(36, 70, 48, 46, false);     // Volcanic
+                Biomes.put(35, 238, 242, 248, true);   // SnowPeak
+                Biomes.put(36, 70, 48, 46, true);      // Volcanic
                 Biomes.put(37, 176, 128, 92, true);    // Badlands
                 Biomes.put(38, 226, 226, 220, true);   // SaltFlat
                 Biomes.put(39, 72, 160, 120, true);    // Oasis
+
+                // The default is dry ground a town may stand on, crossed at walking pace. What
+                // follows is only the exceptions, so the special cases are the short list rather
+                // than something to be read off forty lines.
+                mutable int o = 0;
+                while (o < 40) {
+                    Biomes.SWIM[o] = false;
+                    Biomes.BUILD[o] = Biomes.WALK[o];
+                    Biomes.PACE[o] = 1.0;
+                    o = o + 1;
+                }
+                // SWUM: shallow sea, reef, lake, oasis. Faster than walking, and nothing is built
+                // on them. A river is walked -- it is shallow and it is crossed -- but a house
+                // does not stand in one.
+                Biomes.wet(3);
+                Biomes.wet(4);
+                Biomes.wet(6);
+                Biomes.wet(39);
+                Biomes.BUILD[7] = false;               // River: forded, never built in
+                // HIGH ROCK: walked, slowly, and never settled. Territory may cover it and a
+                // gatherer may climb it -- the ore and the stone are up there and this is what
+                // finally lets anybody reach them -- but no town is founded on a mountain.
+                Biomes.high(5);                        // SeaIce
+                Biomes.high(29);                       // IceCap
+                Biomes.high(30);                       // Glacier
+                Biomes.high(33);                       // Mountain
+                Biomes.high(35);                       // SnowPeak
+                Biomes.high(36);                       // Volcanic
             }
 
             private static method put(int o, int r, int g, int b, boolean w) returns void {
@@ -82,6 +131,19 @@ public bundle Agents {
                 Biomes.G[o] = g;
                 Biomes.B[o] = b;
                 Biomes.WALK[o] = w;
+            }
+
+            private static method wet(int o) returns void {
+                Biomes.SWIM[o] = true;
+                Biomes.BUILD[o] = false;
+                Biomes.PACE[o] = 1.35;
+                return;
+            }
+
+            private static method high(int o) returns void {
+                Biomes.BUILD[o] = false;
+                Biomes.PACE[o] = 0.45;
+                return;
             }
 
             public static method name(int ordinal) returns String {
@@ -139,8 +201,31 @@ public bundle Agents {
                 return Biomes.B[ordinal];
             }
 
+            // A body may be here at all -- on foot, or swimming. False only for open sea.
             public static method walkable(int ordinal) returns boolean {
                 return Biomes.WALK[ordinal];
+            }
+
+            // Being here means swimming: drawn half under, and quicker than walking.
+            public static method swims(int ordinal) returns boolean {
+                return Biomes.SWIM[ordinal];
+            }
+
+            // A town may be founded here and a building raised here. What is NEXT to the tile
+            // never enters into it: a house on the shore is a house on the shore.
+            public static method buildable(int ordinal) returns boolean {
+                return Biomes.BUILD[ordinal];
+            }
+
+            // How fast it is crossed, against ordinary ground at one.
+            public static method pace(int ordinal) returns float {
+                return Biomes.PACE[ordinal];
+            }
+
+            // High rock and ice: passable, slow, never settled. The thing a walker goes round
+            // when the target is not itself up there.
+            public static method rough(int ordinal) returns boolean {
+                return Biomes.PACE[ordinal] < 1.0;
             }
         }
     }

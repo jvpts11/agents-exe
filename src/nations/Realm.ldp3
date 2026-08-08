@@ -111,6 +111,11 @@ public bundle Agents {
             public static fixed int PER_BUILDER = 12;
             // People served by one store. A town of hundreds keeps several.
             public static fixed int PER_PIT = 60;
+            // The appetite for a good the town has none of, and the amount in store that halves
+            // it. Only the RATIO between two goods' appetites matters, so FULL_WANT is just
+            // headroom for the integer arithmetic.
+            public static fixed int FULL_WANT = 1000;
+            public static fixed int SOFT = 400;
             public static fixed int ERA1_N = 6;
 
             public constructor Realm(Grid* g, int withSeed) {
@@ -561,6 +566,7 @@ public bundle Agents {
                         mutable Agent* born = folk.at(who);
                         born.homeX = one.cx;
                         born.homeY = one.cy;
+                        born.home = one.id;
                     }
                     // HOUSES ARE NO LONGER CONJURED. A hut used to appear here as an integer the
                     // moment the town was full, which is exactly the thing João objected to: four
@@ -607,7 +613,44 @@ public bundle Agents {
                     this.clock.lap(cast<int>(Phase.Building));
                     this.settle(g, folk, one, tick);
                     this.clock.lap(cast<int>(Phase.Settling));
+                    this.herd(folk, one);
                     c = c + 1;
+                }
+                return;
+            }
+
+            // IDLE DRIFT STAYS ON THE CITY'S OWN GROUND.
+            //
+            // A man with nothing to do walks about his town. Which ground that is, is the ground
+            // the town HOLDS -- so the test is whose tile he is standing on, and the answer lives
+            // here because the Realm is the only thing that knows. It used to be a circle of
+            // fourteen tiles round the hall, drawn inside the walker, and a city that grew to six
+            // thousand tiles still had its people crowded round the middle of it.
+            //
+            // Only the idle. A gatherer walking to a wood is supposed to leave, and does.
+            private method herd(Folk* folk, City* one) returns void {
+                mutable int t = 0;
+                while (t < one.residents.size()) {
+                    mutable Agent* who = folk.at(one.residents.get(t));
+                    t = t + 1;
+                    if (who.errand != 0) {
+                        continue;
+                    }
+                    if (this.ownerOf(cast<int>(who.x), cast<int>(who.y)) == one.id) {
+                        continue;                          // at home, in the wide sense
+                    }
+                    float dx = cast<float>(one.cx) + 0.5 - who.x;
+                    float dy = cast<float>(one.cy) + 0.5 - who.y;
+                    float far2 = dx * dx + dy * dy;
+                    if (far2 <= 0.0001) {
+                        continue;
+                    }
+                    float inv = 1.0 / cast<float>(Math.sqrt(cast<double>(far2)));
+                    who.hx = dx * inv;
+                    who.hy = dy * inv;
+                    who.rest = 0;
+                    who.hold = 24;                         // hold the way home rather than re-pick
+                    this.strayed = this.strayed + 1;
                 }
                 return;
             }
@@ -660,7 +703,15 @@ public bundle Agents {
                         // timber. A mason fetches stone. The rule in section 8 is not a policy the
                         // scheduler applies -- it is that there is no line of code here that could
                         // send him for anything else.
-                        int want = Gathers.takes(who.trade);
+                        // WHICH OF HIS TRADE'S GOODS, drawn against what the town wants. His class
+                        // is fixed -- a wright fetches timber and there is no line here that could
+                        // send him for anything else -- but a class covers several goods and which
+                        // of them he goes for follows the appetite. See `wanted`.
+                        int want = this.wanted(one, Gathers.takes(who.trade), who.id + tick * 7);
+                        if (want == cast<int>(Good.Nothing)) {
+                            t = t + 1;
+                            continue;
+                        }
                         // SEARCHED FROM WHERE HE IS STANDING, not from the town centre.
                         //
                         // Searching from the centre gives every single person the same answer, so
@@ -721,6 +772,7 @@ public bundle Agents {
                         who.goX = found % this.w;
                         who.goY = found / this.w;
                         who.errand = 1;
+                        who.wants = want;
                         who.lastAct = 1;
                         who.lastTick = tick;
                         this.sentOut = this.sentOut + 1;
@@ -1043,7 +1095,7 @@ public bundle Agents {
                 if (what == cast<int>(BuildingKind.NoBuilding)) {
                     return false;
                 }
-                int plot = this.freePlot(one);
+                int plot = this.freePlot(g, one);
                 if (plot < 0) {
                     this.noPlot = this.noPlot + 1;
                     return false;
@@ -1281,6 +1333,69 @@ public bundle Agents {
                 return n;
             }
 
+            // HOW BADLY THE TOWN WANTS ONE MORE OF A GOOD.
+            //
+            // Appetite, not a shortage list. Everything is wanted at the founding, and what the
+            // store already holds is what damps the wanting: at nothing in hand the appetite is
+            // full, at SOFT in hand it is halved, at ten times SOFT it is a tenth. It never falls
+            // to nothing, so no good is ever written off -- a store that empties simply becomes
+            // interesting again on its own.
+            //
+            // The alternative, taking whatever the town is shortest of, was tried and it failed
+            // for a reason worth keeping written down: the scarcest good is an ABSORBING state.
+            // Something the ground will not give stays at nought, so it stays the scarcest, so
+            // every single gatherer of that class is sent after it forever and the four other
+            // goods his trade could have brought home never come. One number for "most wanted"
+            // cannot express a town that wants five things at once, and a town always does.
+            private method appetite(City* one, int good) returns int {
+                int have = one.have(good);
+                mutable int w = Realm.FULL_WANT * Realm.SOFT / (Realm.SOFT + have);
+                if (w < 1) {
+                    w = 1;
+                }
+                return w;
+            }
+
+            // One of his own trade's goods, drawn with a weight equal to the appetite for it.
+            //
+            // Drawn, not chosen: two masons asking in the same tick get different answers, so the
+            // town works stone and clay and sand at once in whatever proportion it is short of
+            // them. That is the whole of the demand system -- there is no list of priorities and
+            // nothing decides who fetches what.
+            private method wanted(City* one, int hclass, int stir) returns int {
+                int many = Nodes.goodsIn(hclass);
+                if (many < 1) {
+                    return cast<int>(Good.Nothing);
+                }
+                mutable int total = 0;
+                mutable int i = 0;
+                while (i < many) {
+                    int gd = Nodes.goodAt(hclass, i);
+                    i = i + 1;
+                    if (gd == cast<int>(Good.Nothing)) {
+                        continue;
+                    }
+                    total = total + this.appetite(one, gd);
+                }
+                if (total < 1) {
+                    return cast<int>(Good.Nothing);
+                }
+                mutable int roll = ((stir * 2654435761) & 0x7FFFFFFF) % total;
+                i = 0;
+                while (i < many) {
+                    int gd = Nodes.goodAt(hclass, i);
+                    i = i + 1;
+                    if (gd == cast<int>(Good.Nothing)) {
+                        continue;
+                    }
+                    roll = roll - this.appetite(one, gd);
+                    if (roll < 0) {
+                        return gd;
+                    }
+                }
+                return cast<int>(Good.Nothing);
+            }
+
             // The nearest node of a given trade, searched outward from the city in rings of cells.
             // Bounded, and the refusal is counted: a city with no forest within reach has to be
             // able to say so rather than quietly gathering nothing.
@@ -1293,7 +1408,7 @@ public bundle Agents {
             //
             // The reach is far past the border on purpose. A settlement is not guaranteed clay or
             // rock inside its own ground, and a gatherer leaving the territory is the normal case.
-            private method nodeNear(Grid* g, int fromX, int fromY, int hclass,
+            private method nodeNear(Grid* g, int fromX, int fromY, int good,
                                     int stir, int reach) returns int {
                 // Everything found in a ring is kept, and one of them is taken. Two people asking
                 // in the same tick get different nodes at the same distance.
@@ -1316,7 +1431,7 @@ public bundle Agents {
                             if (gx < 0 || gy < 0 || gx >= this.w || gy >= this.h) {
                                 continue;
                             }
-                            if (g.surface().nodeAt(gx, gy, hclass) >= 0) {
+                            if (g.surface().goodAt(gx, gy, good) >= 0) {
                                 seen = seen + 1;
                                 if (((stir * 2654435761 + seen * 40503) & 0x7FFFFFFF) % seen == 0) {
                                     best = gy * this.w + gx;
@@ -1338,7 +1453,7 @@ public bundle Agents {
                             if (gx < 0 || gy < 0 || gx >= this.w || gy >= this.h) {
                                 continue;
                             }
-                            if (g.surface().nodeAt(gx, gy, hclass) >= 0) {
+                            if (g.surface().goodAt(gx, gy, good) >= 0) {
                                 seen = seen + 1;
                                 if (((stir * 2654435761 + seen * 40503) & 0x7FFFFFFF) % seen == 0) {
                                     best = gy * this.w + gx;
@@ -1383,9 +1498,8 @@ public bundle Agents {
                         // arrival looked for timber on it, found none, and turned round -- which
                         // the run reported as twenty-three thousand empty nodes against two and a
                         // half thousand loads. The going and the arriving have to agree on what
-                        // he went for.
-                        int use = g.surface().nodeAt(who.goX, who.goY,
-                                                     Gathers.takes(who.trade));
+                        // he went for, and now that is the GOOD and not merely the class.
+                        int use = g.surface().goodAt(who.goX, who.goY, who.wants);
                         if (use < 0) {
                             who.errand = 0;                  // somebody else took it first
                             this.tooLate = this.tooLate + 1;
@@ -1442,6 +1556,20 @@ public bundle Agents {
             // roofs with no ground between them. With it there are lanes, yards and gaps, and a
             // town that owns three hundred tiles has buildings on a third of them -- which is
             // what a settlement looks like, because not all of a city's ground is built on.
+            // WHETHER A BUILDING MAY GO ON THIS TILE OF THE CITY'S GROUND.
+            //
+            // Two separate refusals and they are not the same. The ground itself has to be the
+            // kind a settlement stands on -- not water, not high rock, and territory now covers
+            // both -- and it has to be clear of what is already standing. Being NEXT to a lake or
+            // NEXT to a mountain refuses nothing: the shore is where towns are.
+            private method plotOk(Grid* g, City* one, int at) returns boolean {
+                if (!Biomes.buildable(g.biomeAt(at % this.w, at / this.w))) {
+                    this.refusedWet = this.refusedWet + 1;
+                    return false;
+                }
+                return !this.tooClose(one, at);
+            }
+
             private method tooClose(City* one, int at) returns boolean {
                 int ax = at % this.w;
                 int ay = at / this.w;
@@ -1482,7 +1610,7 @@ public bundle Agents {
             //
             // It follows that a city has far more ground than buildings, which is correct: not
             // all of a settlement's territory is built on.
-            private method freePlot(City* one) returns int {
+            private method freePlot(Grid* g, City* one) returns int {
                 // THE MINIMUM IS A FLOOR, NOT A LATTICE.
                 //
                 // Taking the nearest tile that satisfies the gap is an optimal packing, and an
@@ -1522,7 +1650,7 @@ public bundle Agents {
                     if (d > reach2) {
                         continue;                     // outside the town, inside the country
                     }
-                    if (d < nearest && !this.tooClose(one, at)) {
+                    if (d < nearest && this.plotOk(g, one, at)) {
                         nearest = d;
                     }
                 }
@@ -1546,7 +1674,7 @@ public bundle Agents {
                     if (d > band || d > reach2) {
                         continue;
                     }
-                    if (this.tooClose(one, at)) {
+                    if (!this.plotOk(g, one, at)) {
                         continue;
                     }
                     many = many + 1;
@@ -1571,7 +1699,7 @@ public bundle Agents {
                     if (d > band || d > reach2) {
                         continue;
                     }
-                    if (this.tooClose(one, at)) {
+                    if (!this.plotOk(g, one, at)) {
                         continue;
                     }
                     if (seen == pick) {
@@ -1716,7 +1844,77 @@ public bundle Agents {
                 return was;
             }
 
-            public method growthReport() returns void {
+            public method growthReport(Grid* g, Folk* folk) returns void {
+                // A TARGET NOBODY CAN STAND ON.
+                //
+                // Arriving is `his tile equals the target tile`, and a node standing on water is a
+                // tile no walker may enter: he reaches the shore, the next step is refused, his
+                // heading is reversed, and he shuttles there for the rest of the run. He is not
+                // motionless, so the wedge rule -- which watches for a man who has not moved --
+                // never sees him. This counts how many are walking at ground they cannot reach.
+                mutable int wet = 0;
+                mutable int onErrand = 0;
+                mutable int ci = 0;
+                while (ci < this.cities.size()) {
+                    mutable City* one = this.cities.get(ci);
+                    ci = ci + 1;
+                    mutable int t = 0;
+                    while (t < one.residents.size()) {
+                        mutable Agent* who = folk.at(one.residents.get(t));
+                        t = t + 1;
+                        if (who.errand != 1) {
+                            continue;
+                        }
+                        onErrand = onErrand + 1;
+                        if (!Biomes.walkable(g.biomeAt(who.goX, who.goY))) {
+                            wet = wet + 1;
+                        }
+                    }
+                }
+                System.IO.Console.println($"reach: {wet} of {onErrand} walking to a node standing on ground they cannot enter");
+                // AND WHETHER THOSE NODES SHOULD BE THERE AT ALL.
+                //
+                // Two readings of the same crowd on the shore: the town accepts an unreachable
+                // tile as a destination, or the node is not where it is drawn. They call for
+                // opposite fixes, and this tells them apart -- a fishing spot on water is the
+                // catalogue working, and a stone or a reed bed on water is not.
+                // Water and highland told apart: unwalkable covers both, and they are different
+                // facts. A boulder in a lake is a placement mistake; a boulder on a mountain is
+                // the world being right and the ARRIVAL RULE being wrong, because stone lives on
+                // rock and rock is not ground a man strolls over.
+                mutable int[] inWater = new int[Nodes.count()]();
+                mutable int[] onRock = new int[Nodes.count()]();
+                mutable int anyDrowned = 0;
+                NodeField* nf = g.surface();
+                mutable int ni = 0;
+                while (ni < nf.size()) {
+                    int nk = nf.kindAt(ni);
+                    ni = ni + 1;
+                    if (nk == 0) {
+                        continue;
+                    }
+                    int bi = g.biomeAt(nf.cellXAt(ni - 1), nf.cellYAt(ni - 1));
+                    if (Biomes.walkable(bi)) {
+                        continue;
+                    }
+                    anyDrowned = anyDrowned + 1;
+                    if (bi < 8) {
+                        inWater[nk] = inWater[nk] + 1;
+                    } else {
+                        onRock[nk] = onRock[nk] + 1;
+                    }
+                }
+                System.IO.Console.println($"nodes on unwalkable ground: {anyDrowned} of {nf.size()}");
+                mutable int nkk = 1;
+                while (nkk < Nodes.count()) {
+                    if (inWater[nkk] > 0 || onRock[nkk] > 0) {
+                        System.IO.Console.println($"  {Nodes.name(nkk)}: {inWater[nkk]} in water, {onRock[nkk]} on highland rock");
+                    }
+                    nkk = nkk + 1;
+                }
+                delete inWater;
+                delete onRock;
+
                 System.IO.Console.println($"growth: {this.atCeiling} ticks at the building ceiling, {this.refusedBoxed} boxed in, {this.refusedFar} refused for distance, {this.refusedWet} refused as unwalkable, {this.noPlot} with nowhere to build");
                 System.IO.Console.println($"gather: {this.sentOut} sent out, {this.gathered} taken off the map, {this.delivered} delivered to a store, {this.noNode} found nothing in reach, {this.tooLate} arrived at an empty node, {this.yieldsNothing} at a node that yields nothing");
                 mutable int c = 0;
@@ -1735,6 +1933,54 @@ public bundle Agents {
                         }
                         gd = gd + 1;
                     }
+                    // WHERE THE GROUND IS AND WHERE THE PEOPLE ARE, in the same four quarters.
+                    //
+                    // A crowd gathered on one side of a town has two possible readings -- the
+                    // ground is lopsided that way, or the walk is biased that way -- and one
+                    // number cannot tell them apart. Two can: if the people lean the way the
+                    // tiles lean, they are following the country; if the tiles are even and the
+                    // people are not, the bias is in the walking.
+                    mutable int[] gq = new int[4]();
+                    mutable int qi = 0;
+                    while (qi < one.tiles.size()) {
+                        int cell = one.tiles.get(qi);
+                        qi = qi + 1;
+                        int qx = cell % this.w;
+                        int qy = cell / this.w;
+                        mutable int q = 0;
+                        if (qy < one.cy) {
+                            q = 0;
+                        } else {
+                            q = 2;
+                        }
+                        if (qx >= one.cx) {
+                            q = q + 1;
+                        }
+                        gq[q] = gq[q] + 1;
+                    }
+                    mutable int[] pq = new int[4]();
+                    mutable int pi = 0;
+                    while (pi < one.residents.size()) {
+                        mutable Agent* who = folk.at(one.residents.get(pi));
+                        pi = pi + 1;
+                        if (who.errand != 0) {
+                            continue;
+                        }
+                        mutable int q = 0;
+                        if (cast<int>(who.y) < one.cy) {
+                            q = 0;
+                        } else {
+                            q = 2;
+                        }
+                        if (cast<int>(who.x) >= one.cx) {
+                            q = q + 1;
+                        }
+                        pq[q] = pq[q] + 1;
+                    }
+                    System.IO.Console.println($"  city {one.id} ground NW/NE/SW/SE: {gq[0]}/{gq[1]}/{gq[2]}/{gq[3]}");
+                    System.IO.Console.println($"  city {one.id} idle   NW/NE/SW/SE: {pq[0]}/{pq[1]}/{pq[2]}/{pq[3]}");
+                    delete gq;
+                    delete pq;
                     // WHAT IS ACTUALLY STANDING, by kind. Four hundred integers in a list said
                     // nothing; this says whether the town has a sawmill.
                     mutable int k = 0;
@@ -1748,7 +1994,31 @@ public bundle Agents {
                     mutable int s = 0;
                     while (s < one.sites.size()) {
                         mutable Site* it = one.sites.get(s);
-                        System.IO.Console.println($"  city {one.id} site: {Builds.name(it.kind)} at {it.x},{it.y} -- {it.done}/{it.work} hashes, {it.hands} builders");
+                        System.IO.Console.println($"  city {one.id} site: {Builds.name(it.kind)} at {it.x},{it.y} -- {it.done}/{it.work} hashes, {it.hands} builders, stocked {it.stocked()}");
+                        // WHAT IT IS STILL WAITING FOR, AND WHO IS SUPPOSED TO BE BRINGING IT.
+                        //
+                        // A site that never finishes has a shortfall that nobody is acting on, and
+                        // `coming` is where that hides: a load promised by a builder who was then
+                        // taken off the errand leaves the promise behind, so `short` reads nought,
+                        // nobody fetches, and the frame waits forever with hands on it. Printing
+                        // the three numbers beside the number of men actually carrying for this
+                        // site is what tells a real load from a ghost.
+                        mutable int carrying = 0;
+                        mutable int r = 0;
+                        while (r < one.residents.size()) {
+                            mutable Agent* hand = folk.at(one.residents.get(r));
+                            r = r + 1;
+                            if (hand.site == it.id && (hand.errand == 3 || hand.errand == 4)) {
+                                carrying = carrying + 1;
+                            }
+                        }
+                        mutable int gg = 0;
+                        while (gg < Goods.count()) {
+                            if (it.needs[gg] > 0) {
+                                System.IO.Console.println($"    needs {it.needs[gg]} {Goods.name(gg)}, on site {it.onSite[gg]}, promised {it.coming[gg]}, men carrying for it {carrying}");
+                            }
+                            gg = gg + 1;
+                        }
                         s = s + 1;
                     }
                     c = c + 1;
