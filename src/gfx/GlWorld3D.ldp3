@@ -1657,17 +1657,30 @@ public bundle Agents {
                     }
                     mutable int b = a;
                     while (b < e && nf.cellXAt(b) < ox + this.detW) {
-                        int nk = nf.kindAt(b);
-                        // AN EMPTY NODE IS NOT DRAWN.
+                        // AN EMPTY NODE IS NOT DRAWN -- BUT IT IS STILL LISTED.
                         //
                         // Forage and fishing RENEW, so harvesting them to nothing leaves the kind
                         // in place with a quantity of zero and lets `regrow` fill it again. The
                         // bake read the kind and never the quantity, so a picked reed bed and a
                         // fished-out shoal stood there looking full for the rest of the run. Not
                         // the bake being stale -- the bake being asked the wrong question.
+                        //
+                        // It is listed as NOTHING rather than skipped, and that distinction is the
+                        // whole of this fix. `dNodeK` is read back by POSITION, one entry per node
+                        // the emitting pass walks -- so a node this pass declines to list is a node
+                        // the other pass still walks, and from there every node draws the model of
+                        // one further down the list. The world is born with empty nodes (a buried
+                        // seam carries nothing until it is opened), so this fired on a world nobody
+                        // had touched: measured, 1817 nodes in the window against 1813 listed, and
+                        // the four missing shifted the models of every node after them. Moving the
+                        // camera moved the window, changed which empties fell inside it, and
+                        // reshuffled the whole scene -- which is exactly how it looked.
+                        //
+                        // One entry per node, always. Zero means draw nothing, which the emitting
+                        // pass already knows how to do.
+                        mutable int nk = nf.kindAt(b);
                         if (nf.qtyAt(b) <= 0) {
-                            b = b + 1;
-                            continue;
+                            nk = 0;
                         }
                         // Remembered, not looked up again later. See dNodeK.
                         if (this.dNodeN >= this.dNodeK.length()) {
@@ -1796,11 +1809,16 @@ public bundle Agents {
                         // now: the world has been running the whole time this bake has been going
                         // in, and asking it again is how a tree that grew back in the meantime
                         // wrote triangles nobody had counted. See dNodeK.
+                        // ONE STEP PER NODE, IN OR OUT OF RANGE. The advance used to sit inside
+                        // the bounds test, so a cursor that ran past the end simply stopped
+                        // counting -- and `dNodeCur == dNodeN` then read true however far the two
+                        // passes had drifted apart. A cursor that lies about its own position
+                        // cannot be the thing that checks the alignment.
                         mutable int nk = 0;
                         if (this.dNodeCur < this.dNodeN) {
                             nk = this.dNodeK[this.dNodeCur];
-                            this.dNodeCur = this.dNodeCur + 1;
                         }
+                        this.dNodeCur = this.dNodeCur + 1;
                         if (nk != 0 && this.nModel[nk] >= 0) {
                             int cx2 = nf.cellXAt(ni);
                             int cy2 = nf.cellYAt(ni);
@@ -1920,7 +1938,16 @@ public bundle Agents {
             // The flag is left standing instead. The next frame that asks will start it, and a
             // camera move -- which calls beginBake directly with a new window -- wins the race it
             // ought to win, because moving the window makes the pending refresh irrelevant.
-            private method bakeSettled() returns void {
+            //
+            // AND IT MAY ONLY SETTLE IF THE TWO PASSES WALKED THE SAME NODES. The counting pass
+            // lists a kind per node and the emitting pass reads them back by position; nothing in
+            // either loop makes that correspondence hold, and when it silently stopped holding the
+            // symptom was a scene that reshuffled itself whenever the camera moved. A contract is
+            // the right shape for that: it is not a value being wrong, it is two passes disagreeing,
+            // and the disagreement has no other visible face.
+            private method bakeSettled() returns void
+                requires this.dNodeCur == this.dNodeN
+            {
                 this.baking = false;
                 return;
             }
