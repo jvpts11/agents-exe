@@ -14,6 +14,7 @@ import Agents.Sim.Phase;
 import Agents.World.Species;
 import Agents.World.Beasts;
 import Agents.World.Goods;
+import System.Collections.Iterator;
 import System.Memory;
 
 // True-3D GL renderer for the world, two-level LOD:
@@ -323,6 +324,32 @@ public bundle Agents {
                 delete this.btally;
                 delete this.connOrd;
                 delete this.fallOrd;
+            }
+
+            // A BUFFER IS ONLY UPLOADED IF IT WAS FILLED EXACTLY.
+            //
+            // Every buffer in this file is sized by a counting pass and filled by an emitting pass,
+            // and the file already knew that those two drifting apart is its recurring defect: `wr`
+            // refuses a write past the end, `wrOver` counts the refusals, and a line at the end of
+            // the run reports them. That is a contract written as a comment and enforced by a
+            // number nobody has to read -- it reports the disagreement long after the picture was
+            // drawn wrong, and only in the over-filling direction.
+            //
+            // UNDER-filling is the quieter half and had no guard at all. `bufferData` uploads the
+            // whole COUNTED size, so a pass that writes fewer floats than it counted hands the card
+            // whatever the allocator left in the tail and calls it geometry.
+            //
+            // So the upload is the one operation both halves have to pass through, and it says what
+            // it needs: filled exactly, or do not upload. The three call sites were four identical
+            // lines each.
+            private method upload(int vao, int vbo, address buf, int wrote, int counted) returns void
+                requires wrote == counted
+            {
+                this.gl.bindVertexArray(vao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, vbo);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(counted * 4), cast<long>(buf), GL.STATIC_DRAW);
+                this.gl.bindVertexArray(0);
+                return;
             }
 
             private method setupVao(int vao, int vbo) returns void {
@@ -1172,31 +1199,108 @@ public bundle Agents {
                 return false;
             }
 
-            // dropExtras = coarse LOD: drop water foam AND above-plate decorations (they scale up into
-            // giants); mountain-family tiles keep their peak cones (stretched back up in emitTile).
+            // A RAISED BLOCK CARRIES A SKIRT DOWN TO THE GROUND, and both passes must agree on when.
+            //
+            // They did not. The counting pass asked `lvl > 0` and the emitting pass asks whether the
+            // lift clears half a unit, which are not the same question -- a block lifted by nothing
+            // but the per-biome `zAdj` answers them differently. The detail pass was worse: it added
+            // the eight triangles for EVERY cell and emitted them only for the raised ones.
+            //
+            // One method, asked by both.
+            public static fixed int SKIRT_TRIS = 8;
+
+            private method hasSkirt(float zOff) returns boolean {
+                return zOff > 0.5;               // a real stack step, not the tiny detail lift
+            }
+
+            // WHETHER A TRIANGLE OF THIS TILE IS DRAWN AT ALL.
+            //
+            // dropExtras = coarse LOD: drop water foam AND everything the tile draws above its plate.
             // dropDecor = drop just the 3D decorations, keeping foam (per-cell coral thinning).
-            private method countTile(int ord, boolean dropExtras, boolean dropDecor) returns int {
+            //
+            // This was written twice, once in each pass, and the copies drifted: the counting one
+            // still dropped decorations by asking `isDecor`, while the emitting one had moved to the
+            // GEOMETRIC test below -- anything standing above the plate goes, whatever the catalogue
+            // calls it. Two different questions about the same triangle, and the buffer sized by one
+            // filled by the other.
+            private method keepsTri(int ord, int tri, boolean dropExtras, boolean dropDecor)
+                returns boolean {
+                if (dropExtras && this.isFoam(tri)) {
+                    return false;
+                }
+                if (dropExtras) {
+                    // A coarse block is a PLATE, not one cell's artwork blown up eight times.
+                    // Everything a tile draws ON TOP of its plate -- the surface patches, the lava
+                    // cracks, the boulders -- is authored at cell scale, so emitting the tile at
+                    // block scale turns a one-cell mark into an eight-cell graphic: the giant khaki
+                    // crosses lying on grassland, the huge orange slabs on volcanic rock, and,
+                    // because the block sits at its MINIMUM level, those slabs hang in the air over
+                    // the lower ground at a plateau edge.
+                    //
+                    // Only a TALL feature on a mountain survives, because a cone is what makes a
+                    // range read as a range from across the world.
+                    float top = this.tileTop[ord];
+                    if (this.triTop(tri) > top + 0.0001) {
+                        if (!(this.isMountainOrd(ord) && this.triTop(tri) > top + 0.05)) {
+                            return false;
+                        }
+                    }
+                }
+                if (dropDecor && this.isDecor(ord, tri)) {
+                    return false;
+                }
+                return true;
+            }
+
+            // The highest of a triangle's three vertices, in the tile's own space.
+            private method triTop(int tri) returns float {
+                mutable float hi = this.terr.pz[tri * 3];
+                mutable int v = 1;
+                while (v < 3) {
+                    float pz = this.terr.pz[tri * 3 + v];
+                    if (pz > hi) {
+                        hi = pz;
+                    }
+                    v = v + 1;
+                }
+                return hi;
+            }
+
+            // The triangles of this tile that will be drawn, in order.
+            //
+            // A GENERATOR, so the counting pass and the emitting pass do not merely apply the same
+            // rule -- they walk the same walk. A shared predicate would have fixed today's drift and
+            // left the shape that produced it: two loops, each free to grow a condition the other
+            // never hears about. There is one loop now, and the only thing the two callers do
+            // differently is what they do with a triangle they are handed.
+            private method keptTris(int ord, boolean dropExtras, boolean dropDecor)
+                returns Iterator<int> {
                 int t0 = this.terr.triStart[ord];
                 int tn = this.terr.triCount[ord];
-                boolean keepDecor = this.isMountainOrd(ord);
-                mutable int c = 0;
                 mutable int t = 0;
                 while (t < tn) {
                     int tri = t0 + t;
-                    mutable boolean skip = false;
-                    if (dropExtras && this.isFoam(tri)) {
-                        skip = true;
-                    }
-                    if ((dropExtras && !keepDecor) || dropDecor) {
-                        if (this.isDecor(ord, tri)) {
-                            skip = true;
-                        }
-                    }
-                    if (!skip) {
-                        c = c + 1;
+                    if (this.keepsTri(ord, tri, dropExtras, dropDecor)) {
+                        yield tri;
                     }
                     t = t + 1;
                 }
+            }
+
+            // How many triangles `emitTile` will write for this tile, at this lift. Counted through
+            // the same generator that emits them, so the answer cannot be a different answer.
+            private method countTile(int ord, float zOff, boolean dropExtras, boolean dropDecor)
+                returns int {
+                mutable int c = 0;
+                if (this.hasSkirt(zOff)) {
+                    c = GlWorld3D.SKIRT_TRIS;
+                }
+                mutable Iterator<int>* kept = this.keptTris(ord, dropExtras, dropDecor);
+                while (kept.hasNext()) {
+                    kept.next();
+                    c = c + 1;
+                }
+                delete kept;
                 return c;
             }
 
@@ -1246,11 +1350,9 @@ public bundle Agents {
             private method emitTile(address buf, int w, int ord, float wx, float wy, float zOff,
                                     float scale, boolean dropExtras, boolean dropDecor, float shade) returns int {
                 int t0 = this.terr.triStart[ord];
-                int tn = this.terr.triCount[ord];
-                boolean keepDecor = this.isMountainOrd(ord);
                 float top = this.tileTop[ord];
                 mutable int p = w;
-                if (zOff > 0.5) {                    // a real stack step, not the tiny detail lift
+                if (this.hasSkirt(zOff)) {
                     float sr = cast<float>(this.terr.cr[t0]) / 255.0 * shade;
                     float sg = cast<float>(this.terr.cg[t0]) / 255.0 * shade;
                     float sb = cast<float>(this.terr.cb[t0]) / 255.0 * shade;
@@ -1264,94 +1366,67 @@ public bundle Agents {
                     p = this.emitQuad(buf, p, x0, y1, 0.0, x0, y1, zt, x1, y1, zt, x1, y1, 0.0, 0.0, 1.0, 0.0, sr, sg, sb);
                     p = this.emitQuad(buf, p, x0, y0, 0.0, x1, y0, 0.0, x1, y0, zt, x0, y0, zt, 0.0, 0.0 - 1.0, 0.0, sr, sg, sb);
                 }
-                mutable int t = 0;
-                while (t < tn) {
-                    int tri = t0 + t;
-                    mutable boolean skip = false;
+                // THE SAME WALK THE COUNTING PASS TOOK. Whatever it was told would be drawn is what
+                // arrives here, in the same order -- see `keptTris`.
+                mutable Iterator<int>* kept = this.keptTris(ord, dropExtras, dropDecor);
+                while (kept.hasNext()) {
+                    int tri = kept.next();
                     boolean decor = this.isDecor(ord, tri);
-                    if (dropExtras && this.isFoam(tri)) {
-                        skip = true;
-                    }
                     mutable float triMin = this.terr.pz[tri * 3];
-                    mutable float triMax = this.terr.pz[tri * 3];
                     mutable int vz = 1;
                     while (vz < 3) {
                         float pz = this.terr.pz[tri * 3 + vz];
                         if (pz < triMin) {
                             triMin = pz;
                         }
-                        if (pz > triMax) {
-                            triMax = pz;
-                        }
                         vz = vz + 1;
                     }
-                    if (dropExtras) {
-                        // A coarse block is a PLATE, not one cell's artwork blown up eight times.
-                        // Everything a tile draws ON TOP of its plate -- the surface patches, the
-                        // lava cracks, the boulders -- is authored at cell scale, so emitting the
-                        // tile at block scale turns a one-cell mark into an eight-cell graphic: the
-                        // giant khaki crosses lying on grassland, the huge orange slabs on volcanic
-                        // rock, and, because the block sits at its MINIMUM level, those slabs hang
-                        // in the air over the lower ground at a plateau edge.
-                        //
-                        // Only a TALL feature on a mountain survives, because a cone is what makes
-                        // a range read as a range from across the world.
-                        if (triMax > top + 0.0001) {
-                            if (!(keepDecor && triMax > top + 0.05)) {
-                                skip = true;
-                            }
-                        }
+                    float triMax = this.triTop(tri);
+                    int vb = tri * 3;
+                    mutable float sh = shade;
+                    if (this.isFoam(tri)) {
+                        sh = 1.0;                    // foam keeps its exact colour: the shader keys the
+                    }                                // water animation off it
+                    // A coarse block reads as ONE biome, so its top face is painted the biome's own
+                    // top colour rather than the patch the authored cell happened to carry there.
+                    // Left alone, the light/dark speckle of a single cell is stretched to eight cells
+                    // and becomes a giant khaki cross lying on the grassland, or a white slab on the
+                    // mountains -- shapes with no meaning at that size.
+                    mutable int cix = tri;
+                    if (dropExtras && triMin > top - 0.0001 && triMax < top + 0.0001) {
+                        cix = t0 + 8;
                     }
-                    if (dropDecor && decor) {
-                        skip = true;
-                    }
-                    if (!skip) {
-                        int vb = tri * 3;
-                        mutable float sh = shade;
-                        if (this.isFoam(tri)) {
-                            sh = 1.0;                // foam keeps its exact colour: the shader keys the
-                        }                            // water animation off it
-                        // A coarse block reads as ONE biome, so its top face is painted the biome's
-                        // own top colour rather than the patch the authored cell happened to carry
-                        // there. Left alone, the light/dark speckle of a single cell is stretched to
-                        // eight cells and becomes a giant khaki cross lying on the grassland, or a
-                        // white slab on the mountains -- shapes with no meaning at that size.
-                        mutable int cix = tri;
-                        if (dropExtras && triMin > top - 0.0001 && triMax < top + 0.0001) {
-                            cix = t0 + 8;
-                        }
-                        float r = cast<float>(this.terr.cr[cix]) / 255.0 * sh;
-                        float g = cast<float>(this.terr.cg[cix]) / 255.0 * sh;
-                        float b = cast<float>(this.terr.cb[cix]) / 255.0 * sh;
-                        mutable int k = 0;
-                        while (k < 3) {
-                            int vi = vb + k;
-                            mutable float lz = this.terr.pz[vi];
-                            if (lz > top && lz < top + 0.05) {
-                                // flat surface decal: a guaranteed 0.03 clearance off the plate (art
-                                // authored 0.001 above it moired against it) plus a PROPORTIONAL
-                                // rise that keeps decal layers apart (a hard cap collapsed them onto
-                                // one shimmering plane). Max 0.13, well under the detail layer's 0.8.
-                                lz = top + 0.03 + (lz - top) * 2.0;
-                            } else {
-                                if (decor && dropExtras) {
-                                    // coarse mountain peak: stretch the cone a LITTLE so it reads far
-                                    // away, but capped -- full x8 made giant spikes
-                                    mutable float ds = scale;
-                                    if (ds > 2.5) {
-                                        ds = 2.5;
-                                    }
-                                    lz = top + (lz - top) * ds;
+                    float r = cast<float>(this.terr.cr[cix]) / 255.0 * sh;
+                    float g = cast<float>(this.terr.cg[cix]) / 255.0 * sh;
+                    float b = cast<float>(this.terr.cb[cix]) / 255.0 * sh;
+                    mutable int k = 0;
+                    while (k < 3) {
+                        int vi = vb + k;
+                        mutable float lz = this.terr.pz[vi];
+                        if (lz > top && lz < top + 0.05) {
+                            // flat surface decal: a guaranteed 0.03 clearance off the plate (art
+                            // authored 0.001 above it moired against it) plus a PROPORTIONAL rise
+                            // that keeps decal layers apart (a hard cap collapsed them onto one
+                            // shimmering plane). Max 0.13, well under the detail layer's 0.8.
+                            lz = top + 0.03 + (lz - top) * 2.0;
+                        } else {
+                            if (decor && dropExtras) {
+                                // coarse mountain peak: stretch the cone a LITTLE so it reads far
+                                // away, but capped -- full x8 made giant spikes
+                                mutable float ds = scale;
+                                if (ds > 2.5) {
+                                    ds = 2.5;
                                 }
+                                lz = top + (lz - top) * ds;
                             }
-                            p = this.wr(buf, p, this.terr.px[vi] * scale + wx, this.terr.py[vi] * scale + wy,
-                                        lz + zOff,
-                                        this.terr.nx[vi], this.terr.ny[vi], this.terr.nz[vi], r, g, b);
-                            k = k + 1;
                         }
+                        p = this.wr(buf, p, this.terr.px[vi] * scale + wx, this.terr.py[vi] * scale + wy,
+                                    lz + zOff,
+                                    this.terr.nx[vi], this.terr.ny[vi], this.terr.nz[vi], r, g, b);
+                        k = k + 1;
                     }
-                    t = t + 1;
                 }
+                delete kept;
                 return p;
             }
 
@@ -1446,10 +1521,12 @@ public bundle Agents {
                         int lvl = this.blockMinLvl(bx, by);
                         bOrd[by * bw + bx] = ord;
                         bLvl[by * bw + bx] = lvl;
-                        tris = tris + this.countTile(ord, true, false);
-                        if (lvl > 0) {
-                            tris = tris + 8;
-                        }
+                        // The SAME lift the emitting pass will use, so the skirt is counted exactly
+                        // when it is written. This asked `lvl > 0` and the emitting pass asks whether
+                        // the lift clears half a unit -- and `zAdj` is part of the lift, so the two
+                        // disagreed on every block whose biome sits proud of the ground plane.
+                        tris = tris + this.countTile(ord, cast<float>(lvl) * this.stepH + this.zAdj[ord],
+                                                     true, false);
                         if (this.coarseHint(bx, by, ord)) {
                             htris = htris + this.props.triCount[this.hintProp] * 2;
                         }
@@ -1542,13 +1619,8 @@ public bundle Agents {
                 }
                 delete bOrd;
                 delete bLvl;
-                this.gl.bindVertexArray(this.vao);
-                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
-                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(tris * 27 * 4), cast<long>(buf), GL.STATIC_DRAW);
-                this.gl.bindVertexArray(this.hvao);
-                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.hvbo);
-                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(htris * 27 * 4), cast<long>(hbuf), GL.STATIC_DRAW);
-                this.gl.bindVertexArray(0);
+                this.upload(this.vao, this.vbo, buf, w, tris * 27);
+                this.upload(this.hvao, this.hvbo, hbuf, hw, htris * 27);
                 this.nverts = tris * 3;
                 this.hnverts = htris * 3;
                 Memory.free(buf);
@@ -1636,7 +1708,15 @@ public bundle Agents {
                             tris = tris + this.countRTile(pk / 4, lvl);
                         } else {
                             this.dRiverC[slot] = 0 - 1;
-                            tris = tris + this.countTile(ord, false, this.thinDecor(ord, gx, gy)) + 8;
+                            // The `+ 8` that stood here was the skirt, added unconditionally. It was
+                            // RIGHT, and right by coincidence: the detail lift carries a fixed 0.8
+                            // that clears the skirt threshold whatever the cell's level, so the two
+                            // expressions happened to agree. Two expressions that agree by accident
+                            // are the shape this whole defect came in, so it is derived now -- from
+                            // the same lift the emitting pass uses, through the same question.
+                            tris = tris + this.countTile(ord,
+                                                         cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8,
+                                                         false, this.thinDecor(ord, gx, gy));
                         }
                         // Decorative clutter only: the resource nodes are instances with their own
                         // positions and are counted per ROW, below.
@@ -1851,10 +1931,7 @@ public bundle Agents {
                 if (y < this.detH) {
                     return;
                 }
-                this.gl.bindVertexArray(this.dvao);
-                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.dvbo);
-                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(this.bkTris * 27 * 4), cast<long>(buf), GL.STATIC_DRAW);
-                this.gl.bindVertexArray(0);
+                this.upload(this.dvao, this.dvbo, buf, w, this.bkTris * 27);
                 this.dnverts = this.bkTris * 3;
                 Memory.free(buf);
                 this.detX0 = ox;
