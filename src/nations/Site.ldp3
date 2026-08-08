@@ -45,6 +45,12 @@ public bundle Agents {
             public mutable int[] needs;
             public mutable int[] onSite;
             public mutable int[] coming;
+            // AND HOW MUCH OF IT HAS ALREADY LEFT THE STORE. A load in a carrier's hands is spent
+            // as far as the store is concerned but has not arrived as far as the frame is
+            // concerned, and it must be counted in exactly one of those places or the town will
+            // either order what it cannot pay for or refuse what it can. Rebuilt from the carriers
+            // each pass, like `coming`.
+            public mutable int[] drawnFor;
 
             // Hashes made, of hashes wanted. Both from the kind's complexity, so they cannot drift.
             public mutable int work;
@@ -64,6 +70,7 @@ public bundle Agents {
                 this.needs = new int[Goods.count()]();
                 this.onSite = new int[Goods.count()]();
                 this.coming = new int[Goods.count()]();
+                this.drawnFor = new int[Goods.count()]();
                 this.work = Builds.totalWork(what);
                 this.done = 0;
                 this.ceiling = Builds.builderCeiling(what);
@@ -80,6 +87,7 @@ public bundle Agents {
                 delete this.needs;
                 delete this.onSite;
                 delete this.coming;
+                delete this.drawnFor;
                 return;
             }
 
@@ -137,6 +145,42 @@ public bundle Agents {
             public method promise(int good, int many) returns void {
                 this.coming[good] = this.coming[good] + many;
                 return;
+            }
+
+            // WHAT IS WALKING TOWARDS THIS SITE IS RECOUNTED, not accumulated.
+            //
+            // `coming` is a promise made when a builder is sent, and it was only ever taken back by
+            // the two paths that end an errand tidily. Every other way a carrier can stop being one
+            // -- unwedged after failing to reach the store, his city taken, his site closed under
+            // him -- left the promise behind with nobody carrying it. `short` then reads nought, so
+            // `wants` says the site needs nothing, so no builder is ever sent, so `stocked` stays
+            // false forever: three men standing on a frame at 0/80 hashes with six clay promised by
+            // nobody. Measured in the run before this: `promised 6, men carrying for it 0`.
+            //
+            // Cleared and rebuilt from the carriers each pass, so a ghost cannot exist rather than
+            // being chased out of the several places it can appear.
+            public method forgetAllComing() returns void {
+                mutable int g = 0;
+                while (g < Goods.count()) {
+                    this.coming[g] = 0;
+                    this.drawnFor[g] = 0;
+                    g = g + 1;
+                }
+                return;
+            }
+
+            // WHAT THIS FRAME STILL HAS TO TAKE OUT OF THE STORE.
+            //
+            // Not its bill: the part of the bill that is neither already lying on the ground here
+            // nor already in somebody's arms on the way. This is the claim a town has to honour
+            // before it can afford to open another frame -- ordering against the raw stock is how
+            // three frames were paid for with one frame's worth of wood.
+            public method owedFromStore(int good) returns int {
+                int gap = this.needs[good] - this.onSite[good] - this.drawnFor[good];
+                if (gap < 0) {
+                    return 0;
+                }
+                return gap;
             }
 
             // A load that never arrived -- its carrier died, or the city was taken. The promise is

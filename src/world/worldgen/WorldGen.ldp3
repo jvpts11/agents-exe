@@ -167,6 +167,45 @@ public bundle Agents {
                 this.worldType = 0;
                 this.landRatio = 0.0 - 1.0;
                 this.nContinents = 0;
+                // THE SCRATCH IS OWNED FROM THE FIRST MOMENT, EMPTY.
+                //
+                // These were left unassigned until `generate` ran, on the grounds that nothing reads
+                // them before then. A new object's storage is whatever was last there, so they did
+                // not start empty -- they started WRONG, and `generate` ends by deleting them, so a
+                // WorldGen that never generated held seven pointers into somebody else's memory. The
+                // compiler names this now; it is right to.
+                this.w = 0;
+                this.h = 0;
+                this.emptyScratch();
+            }
+
+            // Seven zero-length arrays: the object always owns something valid, so there is no state
+            // in which a delete is a guess.
+            private method emptyScratch() returns void {
+                this.eb = new float[0]();
+                this.wtr = new int[0]();
+                this.dn = new int[0]();
+                this.fl = new float[0]();
+                this.fld = new float[0]();
+                this.hkey = new float[0]();
+                this.hval = new int[0]();
+                return;
+            }
+
+            private method freeScratch() returns void {
+                delete this.eb;
+                delete this.wtr;
+                delete this.dn;
+                delete this.fl;
+                delete this.fld;
+                delete this.hkey;
+                delete this.hval;
+                return;
+            }
+
+            public destructor ~WorldGen() returns void {
+                this.freeScratch();
+                return;
             }
 
             // Continental mode only: how many distinct continents to grow (<= 0 keeps the aspect-based
@@ -928,6 +967,7 @@ public bundle Agents {
                 }
                 int n = w * h;
                 Grid* g = new Grid(w, h) on heap;
+                this.freeScratch();          // the empty ones, or a previous generate's
                 this.eb = new float[n]();
                 this.wtr = new int[n]();
                 this.dn = new int[n]();
@@ -997,13 +1037,10 @@ public bundle Agents {
                 delete landPass;
                 delete tecPass;
                 delete wf;
-                delete this.eb;
-                delete this.wtr;
-                delete this.dn;
-                delete this.fl;
-                delete this.fld;
-                delete this.hkey;
-                delete this.hval;
+                // Back to owning seven empty arrays rather than seven freed ones: the state after
+                // generating is the state before it, which is what makes the destructor safe.
+                this.freeScratch();
+                this.emptyScratch();
                 return g;
             }
 

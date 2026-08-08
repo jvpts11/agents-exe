@@ -76,6 +76,23 @@ public bundle Agents {
             private mutable long tooLate;
             private mutable long yieldsNothing;
             private mutable long strayed;        // sent home for having wandered out of reach
+            // THE LEDGER. Every place a unit of a good can be, and every move between two of them,
+            // counted per good on every tick with nothing sampled.
+            //
+            // A stock is a snapshot and a snapshot cannot be audited: clay stood at one while five
+            // thousand seven hundred had come in, and the difference could have been eaten by
+            // buildings, or dropped by a carrier, or left on a frame -- three different faults with
+            // three different fixes. These columns tell them apart, and they must add up: what came
+            // off the map is in a store, in a hand, on a frame, in a building, or was lost, and
+            // there is nowhere else for it to be.
+            private mutable long[] ledTook;      // off the map, into a gatherer's hands
+            private mutable long[] ledToStore;   // hands -> store
+            private mutable long[] ledFromStore; // store -> a builder's hands
+            private mutable long[] ledToSite;    // hands -> the frame
+            private mutable long[] ledBuilt;     // the frame -> a building that now stands
+            private mutable long[] ledLostHand;  // dropped: his frame finished without him
+            private mutable long returned;       // put back by a carrier who was stood down
+            private mutable long[] ledLostSite;  // a frame closed with material still on it
             // WHAT THE TRADES AND THE SITES DID. Same discipline: a city that raises nothing has
             // to name which gate stopped it -- no plot, no material, no builder, or a site that
             // was already at its ceiling of hands.
@@ -111,6 +128,10 @@ public bundle Agents {
             public static fixed int PER_BUILDER = 12;
             // People served by one store. A town of hundreds keeps several.
             public static fixed int PER_PIT = 60;
+            // People served by one workshop of a given kind. The same shape as the store's rule and
+            // for the same reason: a building is a place people work at, and it has room for some
+            // and not for everybody.
+            public static fixed int PER_WORKSHOP = 150;
             // The appetite for a good the town has none of, and the amount in store that halves
             // it. Only the RATIO between two goods' appetites matters, so FULL_WANT is just
             // headroom for the integer arithmetic.
@@ -140,6 +161,14 @@ public bundle Agents {
                 this.tooLate = 0;
                 this.yieldsNothing = 0;
                 this.strayed = 0;
+                this.ledTook = new long[Goods.count()]();
+                this.ledToStore = new long[Goods.count()]();
+                this.ledFromStore = new long[Goods.count()]();
+                this.ledToSite = new long[Goods.count()]();
+                this.ledBuilt = new long[Goods.count()]();
+                this.ledLostHand = new long[Goods.count()]();
+                this.returned = 0;
+                this.ledLostSite = new long[Goods.count()]();
                 this.learned = 0;
                 this.selfTaught = 0;
                 this.ordered = 0;
@@ -196,6 +225,13 @@ public bundle Agents {
                 delete this.subs;
                 delete this.cities;
                 delete this.cityOf;
+                delete this.ledTook;
+                delete this.ledToStore;
+                delete this.ledFromStore;
+                delete this.ledToSite;
+                delete this.ledBuilt;
+                delete this.ledLostHand;
+                delete this.ledLostSite;
                 return;
             }
 
@@ -808,7 +844,14 @@ public bundle Agents {
                 if (mine == null) {
                     who.errand = 0;                          // his site finished without him
                     who.site = 0 - 1;
+                    // ...and whatever he had drawn goes with him. Counted, because it left the
+                    // store and never reached a frame.
+                    if (who.held > 0 && who.holds > 0) {
+                        this.ledLostHand[who.holds] =
+                            this.ledLostHand[who.holds] + cast<long>(who.held);
+                    }
                     who.held = 0;
+                    who.holds = cast<int>(Good.Nothing);
                     return;
                 }
                 if (atX != who.goX || atY != who.goY) {
@@ -826,6 +869,8 @@ public bundle Agents {
                         return;
                     }
                     who.held = many;                         // now actually in hand
+                    this.ledFromStore[who.holds] =
+                        this.ledFromStore[who.holds] + cast<long>(many);
                     who.goX = mine.x;
                     who.goY = mine.y;
                     who.errand = 4;
@@ -834,6 +879,7 @@ public bundle Agents {
                 if (who.errand == 4) {
                     mine.deliver(who.holds, who.held);
                     this.hauled = this.hauled + cast<long>(who.held);
+                    this.ledToSite[who.holds] = this.ledToSite[who.holds] + cast<long>(who.held);
                     who.held = 0;
                     who.holds = cast<int>(Good.Nothing);
                     who.errand = 5;
@@ -860,6 +906,16 @@ public bundle Agents {
                 one.buildings.add(mine.y * this.w + mine.x);
                 one.kinds.add(mine.kind);
                 one.facing.add(mine.facing);       // the way the frame stood is the way it stands
+                // Everything that was on the frame is now IN the building. Anything above what it
+                // needed was over-delivered and is written off with it, which is the last place a
+                // unit can go and the reason the columns can be made to add up.
+                mutable int lg = 0;
+                while (lg < Goods.count()) {
+                    if (mine.onSite[lg] > 0) {
+                        this.ledBuilt[lg] = this.ledBuilt[lg] + cast<long>(mine.onSite[lg]);
+                    }
+                    lg = lg + 1;
+                }
                 this.raised = this.raised + 1;
                 this.townsCut = true;
                 this.closeSite(folk, one, mine);
@@ -881,6 +937,17 @@ public bundle Agents {
                     }
                     hand.site = 0 - 1;
                     hand.errand = 0;
+                    // A BUILDER LET GO WHILE CARRYING PUTS IT BACK, he does not drop it.
+                    //
+                    // This was the only one of the three ways a load can be abandoned that ever
+                    // fired -- 392 clay, 477 wood and 196 stone in one run -- and it is the most
+                    // ordinary moment there is: the frame is finished by the men already on it
+                    // while he is still walking to it with the last of the material. Throwing his
+                    // load away for that is the town losing goods for succeeding.
+                    if (hand.held > 0 && hand.holds > 0) {
+                        one.giveBack(hand.holds, hand.held);
+                        this.returned = this.returned + cast<long>(hand.held);
+                    }
                     hand.held = 0;
                     hand.holds = cast<int>(Good.Nothing);
                     if (hand.wasCraft != cast<int>(Craft.NoCraft)) {
@@ -965,19 +1032,35 @@ public bundle Agents {
                 while (c < Gathers.crafts()) {
                     if (this.needed(one, c)) {
                         int have = tally[c];
-                        // ENOUGH BUILDERS IS ENOUGH. A hut takes three hands; a town that taught
-                        // the trade to a hundred and seventy-six people turned nine hundred
-                        // thousand of them away at the site in one arc, and every one of those
-                        // was somebody not gathering. A trade nobody can practise is the lower
-                        // engine of section 4 pointed at the town's own feet.
-                        // BUILDERS FOLLOW PLACES, NOT POPULATION. A town of sixteen hundred was
-                        // making a hundred and thirty of them for twelve places at the sites,
-                        // and the surplus stood still for the whole run -- a trade nobody can
-                        // practise, which is worse than no trade at all.
-                        if (c == cast<int>(Craft.Builder)
-                            && have >= 2 + (2 + one.residents.size() / 40) * 3) {
-                            c = c + 1;
-                            continue;
+                        // BUILDERS FOLLOW PLACES, AND THE PLACES ARE COUNTED, not guessed at.
+                        //
+                        // A hut has room for three pairs of hands and nothing has room for more
+                        // than sixteen; the town's capacity is the sum over the frames actually
+                        // standing open. This was a formula in the population instead -- about
+                        // three times the real number -- and the surplus was turned away at the
+                        // sites 16,650,217 times in one run. Every one of those is somebody who
+                        // could have been gathering, holding a trade he cannot practise, which is
+                        // worse than having no trade at all.
+                        //
+                        // A few spare, because a site finishing must not leave the next one with
+                        // nobody, and at least a handful before anything is standing at all.
+                        if (c == cast<int>(Craft.Builder)) {
+                            mutable int places = 0;
+                            mutable int si = 0;
+                            while (si < one.sites.size()) {
+                                mutable Site* it = one.sites.get(si);
+                                si = si + 1;
+                                if (!it.finished()) {
+                                    places = places + it.ceiling;
+                                }
+                            }
+                            if (places < 6) {
+                                places = 6;
+                            }
+                            if (have >= places + 4) {
+                                c = c + 1;
+                                continue;
+                            }
                         }
                         if (have < fewest) {
                             fewest = have;
@@ -1074,16 +1157,33 @@ public bundle Agents {
 
             // WHETHER THE STORE HOLDS THE WHOLE BILL. Asked before a kind is chosen, so an
             // unaffordable one is skipped rather than blocking every kind behind it.
+            // WHAT THE STORE HAS THAT IS NOT ALREADY SPOKEN FOR.
+            //
+            // The frames standing open have a claim on the store: everything their bills still
+            // need, less what is already on their ground or in a carrier's arms. Measuring against
+            // the raw stock let a town open a frame with wood that three other frames were already
+            // waiting for -- which is not a shortage of wood, it is the same wood promised four
+            // times, and the frames that lose the race stand unfinished forever.
+            private method free(City* one, int good) returns int {
+                mutable int spare = one.have(good);
+                mutable int s = 0;
+                while (s < one.sites.size()) {
+                    spare = spare - one.sites.get(s).owedFromStore(good);
+                    s = s + 1;
+                }
+                return spare;
+            }
+
             private method canAfford(City* one, int what) returns boolean {
-                if (one.have(cast<int>(Good.Wood)) < Builds.woodCost(what)) {
+                if (this.free(one, cast<int>(Good.Wood)) < Builds.woodCost(what)) {
                     return false;
                 }
-                if (one.have(cast<int>(Good.Stone)) < Builds.stoneCost(what)) {
+                if (this.free(one, cast<int>(Good.Stone)) < Builds.stoneCost(what)) {
                     return false;
                 }
                 int third = Builds.matCost(what);
                 if (third != cast<int>(Good.Nothing)
-                    && one.have(third) < Builds.matCostN(what)) {
+                    && this.free(one, third) < Builds.matCostN(what)) {
                     return false;
                 }
                 return true;
@@ -1110,16 +1210,23 @@ public bundle Agents {
                 if (third != cast<int>(Good.Nothing)) {
                     thirdN = Builds.matCostN(what);
                 }
-                if (one.have(cast<int>(Good.Wood)) < wood
-                    || one.have(cast<int>(Good.Stone)) < stone
-                    || (thirdN > 0 && one.have(third) < thirdN)) {
+                // THE ORDER DOES NOT TAKE THE MATERIAL, IT ONLY CLAIMS IT.
+                //
+                // It used to draw the whole bill out of the store here -- and that material went
+                // nowhere: it was not put on the frame, and the frame's `needs` still held the same
+                // bill, which the builders then drew from the store AGAIN and carried by hand. Every
+                // building cost the town twice what the catalogue says, and the ledger caught it as
+                // 1,920 clay debited at the order against 1,928 the buildings actually needed.
+                //
+                // The material now stays in the store until somebody walks in and picks it up,
+                // which is the model: a thing is carried from where it was to where it is needed.
+                // The reservation is `free` above -- the store still holds it, and no other frame
+                // may be opened against it.
+                if (this.free(one, cast<int>(Good.Wood)) < wood
+                    || this.free(one, cast<int>(Good.Stone)) < stone
+                    || (thirdN > 0 && this.free(one, third) < thirdN)) {
                     this.cannotAfford = this.cannotAfford + 1;
                     return false;
-                }
-                one.draw(cast<int>(Good.Wood), wood);
-                one.draw(cast<int>(Good.Stone), stone);
-                if (thirdN > 0) {
-                    one.draw(third, thirdN);
                 }
                 mutable Site* frame = new Site(this.nextSite, what, one.id,
                                                plot % this.w, plot / this.w) on heap;
@@ -1175,10 +1282,18 @@ public bundle Agents {
                     could[many] = cast<int>(BuildingKind.StoragePit);
                     many = many + 1;
                 }
+                // A WORKSHOP IS WANTED BY HOW MANY PEOPLE IT SERVES, not by whether one exists.
+                //
+                // This asked `!one.has(want)`, so a town built exactly ONE sawmill and one kiln and
+                // one pottery and then never wanted another however large it grew -- a settlement of
+                // two and a half thousand with a single sawmill, which is the same mistake the store
+                // had before it was given a count. A building is a place people work, and a place
+                // has room for a certain number of them.
                 mutable int k = 0;
                 while (k < Realm.ERA1_N) {
                     int want = this.era1[k];
-                    if (!one.has(want) && one.building(want) == 0) {
+                    int standing = one.howMany(want) + one.building(want);
+                    if (standing < 1 + one.residents.size() / Realm.PER_WORKSHOP) {
                         could[many] = want;
                         many = many + 1;
                     }
@@ -1218,6 +1333,7 @@ public bundle Agents {
                 mutable int s = 0;
                 while (s < one.sites.size()) {
                     one.sites.get(s).hands = 0;
+                    one.sites.get(s).forgetAllComing();
                     s = s + 1;
                 }
                 mutable int t = 0;
@@ -1231,6 +1347,23 @@ public bundle Agents {
                         mutable nullable Site* mine = this.siteById(one, who.site);
                         if (mine != null) {
                             mine.hands = mine.hands + 1;
+                            // ...and he is the promise. `held` is negative while the load is owed
+                            // and positive once it is on his shoulder; either way it is one load
+                            // walking towards this site, and counting it here is what makes
+                            // `coming` true rather than remembered.
+                            mutable int owed = who.held;
+                            if (owed < 0) {
+                                owed = 0 - owed;
+                            }
+                            if (owed > 0 && who.holds != cast<int>(Good.Nothing)) {
+                                mine.promise(who.holds, owed);
+                                // A POSITIVE `held` MEANS IT IS ALREADY OUT OF THE STORE. Negative
+                                // is still owed; the store still has it and still has to keep it.
+                                if (who.held > 0) {
+                                    mine.drawnFor[who.holds] =
+                                        mine.drawnFor[who.holds] + who.held;
+                                }
+                            }
                         }
                         continue;                            // already on it
                     }
@@ -1522,6 +1655,7 @@ public bundle Agents {
                         }
                         who.holds = gives;
                         who.held = got;
+                        this.ledTook[gives] = this.ledTook[gives] + cast<long>(got);
                         // The node has less in it than it did, and may now be gone. The picture is
                         // told so it can stop drawing a tree that has been felled.
                         this.mapCut = true;
@@ -1537,6 +1671,8 @@ public bundle Agents {
                         }
                         one.take(who.holds, who.held);
                         this.delivered = this.delivered + cast<long>(who.held);
+                        this.ledToStore[who.holds] =
+                            this.ledToStore[who.holds] + cast<long>(who.held);
                         who.held = 0;
                         who.errand = 0;
                         who.lastAct = 3;
@@ -1926,10 +2062,50 @@ public bundle Agents {
                     // readily as stone -- the goods were in the store and the readout was looking
                     // past them. A report that only prints what it went looking for will always
                     // agree with whoever wrote it.
+                    // THE LEDGER, AND WHETHER IT ADDS UP.
+                    //
+                    // Off the map into a hand, into a store, out of it again, onto a frame, into a
+                    // building -- and the three ways out of that chain. Whatever is left over is
+                    // sitting in a hand or on an unfinished frame right now; anything the columns
+                    // cannot account for is a leak nobody has named yet, and `unaccounted` is the
+                    // number that says so instead of the stock quietly reading low.
+                    mutable int inHand = 0;
+                    mutable int onFrames = 0;
+                    mutable int lg = 0;
+                    while (lg < Goods.count()) {
+                        if (this.ledTook[lg] == 0 && this.ledToStore[lg] == 0) {
+                            lg = lg + 1;
+                            continue;
+                        }
+                        inHand = 0;
+                        mutable int rr = 0;
+                        while (rr < one.residents.size()) {
+                            mutable Agent* h = folk.at(one.residents.get(rr));
+                            rr = rr + 1;
+                            if (h.holds == lg && h.held > 0) {
+                                inHand = inHand + h.held;
+                            }
+                        }
+                        onFrames = 0;
+                        mutable int ss = 0;
+                        while (ss < one.sites.size()) {
+                            onFrames = onFrames + one.sites.get(ss).onSite[lg];
+                            ss = ss + 1;
+                        }
+                        long lost = this.ledLostHand[lg] + this.ledLostSite[lg]
+                                  + folk.lostLoad[lg];
+                        long accounted = cast<long>(one.have(lg)) + this.ledBuilt[lg]
+                                       + cast<long>(inHand) + cast<long>(onFrames) + lost;
+                        System.IO.Console.println($"  ledger {Goods.name(lg)}: took {this.ledTook[lg]}, to store {this.ledToStore[lg]}, out of store {this.ledFromStore[lg]}, onto frames {this.ledToSite[lg]}, into buildings {this.ledBuilt[lg]}");
+                        System.IO.Console.println($"    now: {one.have(lg)} in store, {inHand} in hands, {onFrames} on frames | lost {lost} (wedged {folk.lostLoad[lg]}, frame gone {this.ledLostHand[lg]}, frame closed {this.ledLostSite[lg]}) | took {this.ledTook[lg]} vs accounted {accounted}");
+                        lg = lg + 1;
+                    }
                     mutable int gd = 0;
                     while (gd < Goods.count()) {
-                        if (one.have(gd) > 0) {
-                            System.IO.Console.println($"  city {one.id} store: {one.have(gd)} {Goods.name(gd)}");
+                        // IN STOCK, AND EVER BROUGHT IN. A good sitting at one is either unobtained
+                        // or spent as fast as it lands, and the stock alone cannot say which.
+                        if (one.have(gd) > 0 || one.brought[gd] > 0) {
+                            System.IO.Console.println($"  city {one.id} store: {one.have(gd)} {Goods.name(gd)} (brought {one.brought[gd]})");
                         }
                         gd = gd + 1;
                     }
@@ -2201,7 +2377,7 @@ public bundle Agents {
             // WHO DOES WHAT, over the whole realm. The census that says whether the trades took.
             public method trades(Folk* folk) returns void {
                 System.IO.Console.println($"trades: {this.learned} learned from a neighbour, {this.selfTaught} with nobody to learn from, {this.gaveBack} temporary builders released");
-                System.IO.Console.println($"sites: {this.ordered} ordered, {this.raised} raised, {this.hashes} hashes, {this.hauled} carried store to site; refused {this.cannotAfford} could not pay, {this.sitesFull} too many open, {this.siteFull} site at its ceiling");
+                System.IO.Console.println($"sites: {this.ordered} ordered, {this.raised} raised, {this.hashes} hashes, {this.hauled} carried store to site, {this.returned} put back by a carrier stood down; refused {this.cannotAfford} could not pay, {this.sitesFull} too many open, {this.siteFull} site at its ceiling");
                 mutable int[] tally = new int[Gathers.crafts()]();
                 mutable int c = 0;
                 while (c < this.cities.size()) {

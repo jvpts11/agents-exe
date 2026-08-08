@@ -5,6 +5,8 @@ import Agents.World.Grid;
 import Agents.World.Biomes;
 import Agents.World.LandMath;
 import Agents.World.Gathers;
+import Agents.World.Good;
+import Agents.World.Goods;
 import Agents.People.Agent;
 import Agents.People.Recall;
 import Agents.People.AgentClass;
@@ -97,6 +99,13 @@ public bundle Agents {
             public static fixed float LEASH = 14.0;
             // Ticks pinned in one spot on an errand before it is given up as unreachable.
             public static fixed int WEDGE_LIMIT = 240;
+            // WHAT WAS IN THEIR HANDS WHEN THEY GAVE UP, per good.
+            //
+            // Giving an errand up zeroes `held`, and for a builder that load had already been drawn
+            // OUT of the store -- so it leaves the books entirely. The ledger has to see it here
+            // because this is where it happens; the Realm cannot know about a walker it did not
+            // send anywhere.
+            public mutable long[] lostLoad;
 
             public constructor Folk(int howMany, int withSeed) {
                 mutable int room = howMany;
@@ -117,6 +126,7 @@ public bundle Agents {
                 this.groundLooks = 0;
                 this.movedEver = 0;
                 this.unwedged = 0;
+                this.lostLoad = new long[Goods.count()]();
             }
 
             // ROOM FOR MORE PEOPLE, because a population that a game is running is not a number
@@ -241,6 +251,7 @@ public bundle Agents {
                 delete this.prevIn;
                 delete this.blockOf;
                 delete this.head;
+                delete this.lostLoad;
                 return;
             }
 
@@ -751,7 +762,12 @@ public bundle Agents {
                         if (one.wedged > Folk.WEDGE_LIMIT) {
                             one.wedged = 0;
                             one.errand = 0;
+                            if (one.held > 0 && one.holds > 0) {
+                                this.lostLoad[one.holds] =
+                                    this.lostLoad[one.holds] + cast<long>(one.held);
+                            }
                             one.held = 0;
+                            one.holds = cast<int>(Good.Nothing);
                             one.site = 0 - 1;
                             this.unwedged = this.unwedged + 1;
                         }
