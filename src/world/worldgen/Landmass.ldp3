@@ -139,40 +139,6 @@ public bundle Agents {
             }
         }
 
-        // The land mask has exactly one owner at a time: Landmass builds it, Tectonics consumes it.
-        // `movable` makes the compiler enforce that -- a second reader is a compile error.
-        public movable class LandMask {
-            private mutable byte[] cells;
-            private mutable int n;
-            private mutable int live;
-
-            public constructor LandMask(int n) {
-                this.n = n;
-                this.live = 0;
-                this.cells = new byte[n]();
-            }
-
-            public destructor ~LandMask() returns void {
-                delete this.cells;
-            }
-
-            public method at(int i) returns boolean {
-                return cast<int>(this.cells[i]) != 0;
-            }
-
-            public method set(int i) returns void {
-                if (cast<int>(this.cells[i]) == 0) {
-                    this.cells[i] = cast<byte>(1);
-                    this.live = this.live + 1;
-                }
-                return;
-            }
-
-            public method count() returns int {
-                return this.live;
-            }
-        }
-
         public class Landmass implements ElevationPass {
             // Plate kinds. Ocean floor, thick continental crust, and a thin craton that only just
             // clears the water -- the third is how islands exist without being a separate mechanism.
@@ -216,7 +182,6 @@ public bundle Agents {
 
             private mutable int[] offX;         // 8-neighbourhood
             private mutable int[] offY;
-            private mutable LandMask mask;
 
             public constructor Landmass(int seed) {
                 this.seed = seed;
@@ -248,7 +213,6 @@ public bundle Agents {
                 this.adj = new byte[1]();
                 this.offX = new int[8]();
                 this.offY = new int[8]();
-                this.mask = new LandMask(1) on heap;
                 this.offX[0] = 0 - 1;   this.offY[0] = 0;
                 this.offX[1] = 1;       this.offY[1] = 0;
                 this.offX[2] = 0;       this.offY[2] = 0 - 1;
@@ -282,7 +246,6 @@ public bundle Agents {
                 delete this.adj;
                 delete this.offX;
                 delete this.offY;
-                delete this.mask;
             }
 
             public override method name() returns String {
@@ -1349,8 +1312,6 @@ public bundle Agents {
                     down = 0.000001;
                 }
 
-                delete this.mask;
-                this.mask = new LandMask(n) on heap;
                 i = 0;
                 while (i < n) {
                     float v = f.eb[i];
@@ -1362,7 +1323,6 @@ public bundle Agents {
                         // slightly concave: broad lowlands, a minority of high interior
                         float t2 = t * (0.35 + 0.65 * t);
                         f.eb[i] = 0.44 + 0.18 * t2;
-                        this.mask.set(i);
                     } else {
                         mutable float t = (sea - v) / down;
                         if (t > 1.0) {
@@ -1497,13 +1457,17 @@ public bundle Agents {
                 }
                 int crustShare = this.cratonArea() * 100 / (this.pw * this.ph);
 
-                // where the land actually landed
+                // where the land actually landed. Land is read straight off the elevation: only
+                // this pass has run here (no Tectonics), and raiseAndFlood's remap puts every
+                // land cell at 0.44 + 0.18*t2 (>= 0.44) and every water cell at 0.429 - 0.169*t2
+                // (<= 0.429) -- so `eb >= 0.44` IS the land mask, exactly. The LandMask class this
+                // replaced claimed Tectonics consumed it; nothing did, and it died in the relayout.
                 mutable int land = 0;
                 mutable int onCraton = 0;
                 mutable int cell = 0;
                 int n = w * h;
                 while (cell < n) {
-                    if (this.mask.at(cell)) {
+                    if (f.eb[cell] >= 0.44) {
                         land = land + 1;
                         int gx = (cell % w) * this.pw / w;
                         int gy = (cell / w) * this.ph / h;
