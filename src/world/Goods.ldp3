@@ -1,339 +1,58 @@
 import System.IO.Console;
-
-// Everything a community can hold. The set is not a free list: docs/ECONOMY.md is a contract that
-// names every raw resource, every refined material and every prepared food, and each one already has
-// a producer and an era assigned to it. So it is written the same way the resource nodes were --
-// as a `catalog`, which makes dropping one a COMPILE error instead of a production chain that
-// silently starves at runtime.
-//
-// The names are the document's, in the document's order: section 1's raw resources, then section 2's
-// refined materials, then the prepared half of section 3 (the raw foods -- berries, fish, milk and
-// the rest -- are already in section 1 and are not repeated here). Section 4's advanced goods arrive
-// with the eras that make them.
+import Agents.World.EconomyGoods;
+import Agents.World.GoodKind;
+import Agents.World.GoodTier;
+import Agents.World.ExtractedGood;
+import Agents.World.ProcessedGood;
+import Agents.World.ManufacturedGood;
+import Agents.World.IndustrialGood;
 program AgentsExe;
 
+// The dense engine the tick reads, DERIVED at class load from the four family enums -- declared
+// once on the families, compiled here into the same columns (same values, same layout) the old
+// hand-written rows produced, which the captured-table test proves byte for byte. Global index 0
+// is Nothing -- outside every family, so a zeroed array is an empty warehouse -- and each family
+// occupies its contiguous range: Extracted 1-33, Processed 34-57, Manufactured 58-64,
+// Industrial 65-74 (the relayout design's locked map).
 public bundle Agents {
     public namespace World {
 
-        public catalog EconomyGoods {
-            // section 1 -- raw resources, straight off a node or an animal
-            Wood,
-            Stone,
-            Marble,
-            Clay,
-            Sand,
-            Coal,
-            Salt,
-            Sulfur,
-            Gems,
-            Oil,
-            RareEarth,
-            IronOre,
-            CopperOre,
-            TinOre,
-            GoldOre,
-            SilverOre,
-            Grain,
-            Berries,
-            Fruit,
-            Grapes,
-            Vegetables,
-            Mushrooms,
-            Herbs,
-            Fish,
-            RawMeat,
-            Milk,
-            Honey,
-            Egg,
-            Cotton,
-            Flax,
-            Wool,
-            Hide,
-            Reeds,
-            // section 2 -- refined materials, out of a building
-            Plank,
-            Charcoal,
-            Brick,
-            Pottery,
-            Glass,
-            Paper,
-            Leather,
-            Cloth,
-            Rope,
-            Cement,
-            IronIngot,
-            CopperIngot,
-            BronzeIngot,
-            Steel,
-            GoldBar,
-            SilverBar,
-            // section 3 -- what a kitchen or a mill makes of the food above
-            Flour,
-            Bread,
-            Beer,
-            Wine,
-            Cheese,
-            DriedMeat,
-            CannedFood,
-            Preserves,
-            // section 6 -- what a person carries rather than what a place stores.
-            //
-            // Fungible on purpose, and it is worth saying why: the art has fourteen distinct tools
-            // and the engine draws the right one for the trade, but the ECONOMY has no use for
-            // fourteen separate stockpiles. A village that has made tools has tools; which of them
-            // the woodcutter picked up is a fact about the woodcutter, not about the granary. The
-            // same argument the harvest classes won -- index the world along the axis the questions
-            // are actually asked on.
-            Tools,
-            Weapon,
-            Armour,
-            // section 7 -- what a PLACE keeps rather than what a person carries.
-            //
-            // A boat is the first thing in this catalogue that is neither eaten, worn out nor built
-            // into a wall: it sits at a quay, and a harbour is only a harbour while one is tied up
-            // there. It is also the reason rope exists at all. Reeds are cut in a hundred and
-            // twenty-one towns and the ropewalk has had a recipe and an era all along, and in twenty
-            // generations not one length was ever made -- because a jetty's dozen was the most
-            // anything ever asked for, and a dozen is under the bar a village gets out of bed for.
-            // A hull and its rigging is not a dozen.
-            Boat,
-            // ---- what a second age makes once it has more than food and walls ----
-            //
-            // A hundred and twenty-five item meshes were cut for this game against sixty-two goods,
-            // so most of what was drawn has never been a thing anybody could hold. These three are
-            // what the second age needs: they give the carpenter, the jeweller and the printing
-            // press something to be for, and between them they take the last two goods that come
-            // out of the ground and go nowhere -- gems, and the gold and silver beside them.
-            Furniture,       // plank into something to sit on
-            Jewelry,         // gold, silver and gems into something worth guarding
-            Book,            // paper into knowledge that outlives the person who had it
-            // ---- what the third and fourth ages run on ----
-            //
-            // These are what the industrial half of the building catalogue eats and makes. They
-            // also close the last four goods that come out of this world's ground and go nowhere:
-            // sulfur into ammunition and chemicals, oil into fuel, rare earth into chips, and gems
-            // into jewelry above.
-            Fuel,            // oil, refined
-            Electricity,     // coal, sun or atom, burnt into work
-            Chemicals,       // sulfur and coal, cooked
-            Plastic,         // fuel and chemicals, into everything
-            MachineParts,    // steel worked to a tolerance a hand cannot hold
-            Chip,            // rare earth and a great deal of power
-            Computer,        // a chip in a plastic box
-            Medicine,        // chemicals and herbs, against the thing that kills the careful
-            Ammo,            // sulfur and iron, and the end of the age of walls
-            Vehicle          // steel and parts, and the end of the age of walking
-        }
-
-        // What a store holds. Ordinal 0 is Nothing, so an empty slot and "no good" are the same
-        // value and a zeroed array is an empty warehouse.
-        public enum Good extends EconomyGoods {
-            Nothing
-
-            byCatalog {
-                Wood,
-                Stone,
-                Marble,
-                Clay,
-                Sand,
-                Coal,
-                Salt,
-                Sulfur,
-                Gems,
-                Oil,
-                RareEarth,
-                IronOre,
-                CopperOre,
-                TinOre,
-                GoldOre,
-                SilverOre,
-                Grain,
-                Berries,
-                Fruit,
-                Grapes,
-                Vegetables,
-                Mushrooms,
-                Herbs,
-                Fish,
-                RawMeat,
-                Milk,
-                Honey,
-                Egg,
-                Cotton,
-                Flax,
-                Wool,
-                Hide,
-                Reeds,
-                Plank,
-                Charcoal,
-                Brick,
-                Pottery,
-                Glass,
-                Paper,
-                Leather,
-                Cloth,
-                Rope,
-                Cement,
-                IronIngot,
-                CopperIngot,
-                BronzeIngot,
-                Steel,
-                GoldBar,
-                SilverBar,
-                Flour,
-                Bread,
-                Beer,
-                Wine,
-                Cheese,
-                DriedMeat,
-                CannedFood,
-                Preserves,
-                Tools,
-                Weapon,
-                Armour,
-                Boat,
-                Furniture,
-                Jewelry,
-                Book,
-                Fuel,
-                Electricity,
-                Chemicals,
-                Plastic,
-                MachineParts,
-                Chip,
-                Computer,
-                Medicine,
-                Ammo,
-                Vehicle
-            }
-        }
-
-        // The document's storage/UI grouping, and the only thing the sim needs to ask about a good
-        // it does not otherwise know: whether somebody can eat it.
-        public enum GoodTier {
-            None,
-            Raw,
-            Material,
-            Food
-        }
-
-        // The per-good table, in the same parallel-array style as Biomes and Nodes: filled once at
-        // class load, read by ordinal, sized from the enum so it cannot drift from it.
         public class Goods {
+            // The "no good" global index. Index 0 belongs to no family on purpose.
+            public static fixed int NOTHING = 0;
+
             private static mutable String[] NAME;
             private static mutable int[] TIER;
 
             onClassLoad {
-                int n = Good.count();
+                int n = Goods.count();
                 Goods.NAME = new String[n]();
                 Goods.TIER = new int[n]();
-                mutable int i = 0;
-                while (i < n) {
-                    Goods.NAME[i] = "Nothing";
-                    Goods.TIER[i] = cast<int>(GoodTier.None);
-                    i = i + 1;
+                Goods.NAME[0] = "Nothing";
+                Goods.TIER[0] = cast<int>(GoodTier.None);
+                for (ExtractedGood g in ExtractedGood.values()) {
+                    Goods.NAME[g.index()] = g.name();
+                    Goods.TIER[g.index()] = cast<int>(g.tier());
                 }
-                int raw = cast<int>(GoodTier.Raw);
-                int mat = cast<int>(GoodTier.Material);
-                int food = cast<int>(GoodTier.Food);
-
-                Goods.put(cast<int>(Good.Wood), "Wood", raw);
-                Goods.put(cast<int>(Good.Stone), "Stone", raw);
-                Goods.put(cast<int>(Good.Marble), "Marble", raw);
-                Goods.put(cast<int>(Good.Clay), "Clay", raw);
-                Goods.put(cast<int>(Good.Sand), "Sand", raw);
-                Goods.put(cast<int>(Good.Coal), "Coal", raw);
-                Goods.put(cast<int>(Good.Salt), "Salt", raw);
-                Goods.put(cast<int>(Good.Sulfur), "Sulfur", raw);
-                Goods.put(cast<int>(Good.Gems), "Gems", raw);
-                Goods.put(cast<int>(Good.Oil), "Oil", raw);
-                Goods.put(cast<int>(Good.RareEarth), "RareEarth", raw);
-                Goods.put(cast<int>(Good.IronOre), "IronOre", raw);
-                Goods.put(cast<int>(Good.CopperOre), "CopperOre", raw);
-                Goods.put(cast<int>(Good.TinOre), "TinOre", raw);
-                Goods.put(cast<int>(Good.GoldOre), "GoldOre", raw);
-                Goods.put(cast<int>(Good.SilverOre), "SilverOre", raw);
-
-                // Raw AND edible: these come off a node or an animal and go straight into a mouth.
-                Goods.put(cast<int>(Good.Grain), "Grain", food);
-                Goods.put(cast<int>(Good.Berries), "Berries", food);
-                Goods.put(cast<int>(Good.Fruit), "Fruit", food);
-                Goods.put(cast<int>(Good.Grapes), "Grapes", food);
-                Goods.put(cast<int>(Good.Vegetables), "Vegetables", food);
-                Goods.put(cast<int>(Good.Mushrooms), "Mushrooms", food);
-                Goods.put(cast<int>(Good.Herbs), "Herbs", raw);
-                Goods.put(cast<int>(Good.Fish), "Fish", food);
-                Goods.put(cast<int>(Good.RawMeat), "RawMeat", food);
-                Goods.put(cast<int>(Good.Milk), "Milk", food);
-                Goods.put(cast<int>(Good.Honey), "Honey", food);
-                Goods.put(cast<int>(Good.Egg), "Egg", food);
-                Goods.put(cast<int>(Good.Cotton), "Cotton", raw);
-                Goods.put(cast<int>(Good.Flax), "Flax", raw);
-                Goods.put(cast<int>(Good.Wool), "Wool", raw);
-                Goods.put(cast<int>(Good.Hide), "Hide", raw);
-                Goods.put(cast<int>(Good.Reeds), "Reeds", raw);
-
-                Goods.put(cast<int>(Good.Plank), "Plank", mat);
-                Goods.put(cast<int>(Good.Charcoal), "Charcoal", mat);
-                Goods.put(cast<int>(Good.Brick), "Brick", mat);
-                Goods.put(cast<int>(Good.Pottery), "Pottery", mat);
-                Goods.put(cast<int>(Good.Glass), "Glass", mat);
-                Goods.put(cast<int>(Good.Paper), "Paper", mat);
-                Goods.put(cast<int>(Good.Leather), "Leather", mat);
-                Goods.put(cast<int>(Good.Cloth), "Cloth", mat);
-                Goods.put(cast<int>(Good.Rope), "Rope", mat);
-                Goods.put(cast<int>(Good.Cement), "Cement", mat);
-                Goods.put(cast<int>(Good.IronIngot), "IronIngot", mat);
-                Goods.put(cast<int>(Good.CopperIngot), "CopperIngot", mat);
-                Goods.put(cast<int>(Good.BronzeIngot), "BronzeIngot", mat);
-                Goods.put(cast<int>(Good.Steel), "Steel", mat);
-                Goods.put(cast<int>(Good.GoldBar), "GoldBar", mat);
-                Goods.put(cast<int>(Good.SilverBar), "SilverBar", mat);
-
-                Goods.put(cast<int>(Good.Flour), "Flour", mat);
-                Goods.put(cast<int>(Good.Bread), "Bread", food);
-                Goods.put(cast<int>(Good.Beer), "Beer", food);
-                Goods.put(cast<int>(Good.Wine), "Wine", food);
-                Goods.put(cast<int>(Good.Cheese), "Cheese", food);
-                Goods.put(cast<int>(Good.DriedMeat), "DriedMeat", food);
-                Goods.put(cast<int>(Good.CannedFood), "CannedFood", food);
-                Goods.put(cast<int>(Good.Preserves), "Preserves", food);
-                // THESE FOUR HAD NO NAME AND NOBODY NOTICED.
-                //
-                // The table is sized from the enum so it cannot lose a row, but nothing checked that
-                // every row was FILLED -- so Tools, Weapon and Armour carried the empty string, and
-                // every report that printed a good by name printed them as "Nothing". A census read
-                // "Nothing: 745348 / 60" and the world was taken to have three dead goods when what
-                // it actually had was three quarters of a million tools in sixty towns, three
-                // hundred and ninety-two weapons and three hundred and eighteen suits of mail. A
-                // gap in a catalogue reads as a gap in the WORLD, and the two were confused for a
-                // whole wave of work.
-                Goods.put(cast<int>(Good.Tools), "Tools", mat);
-                Goods.put(cast<int>(Good.Weapon), "Weapon", mat);
-                Goods.put(cast<int>(Good.Armour), "Armour", mat);
-                Goods.put(cast<int>(Good.Boat), "Boat", mat);
-                Goods.put(cast<int>(Good.Furniture), "Furniture", mat);
-                Goods.put(cast<int>(Good.Jewelry), "Jewelry", mat);
-                Goods.put(cast<int>(Good.Book), "Book", mat);
-                Goods.put(cast<int>(Good.Fuel), "Fuel", mat);
-                Goods.put(cast<int>(Good.Electricity), "Electricity", mat);
-                Goods.put(cast<int>(Good.Chemicals), "Chemicals", mat);
-                Goods.put(cast<int>(Good.Plastic), "Plastic", mat);
-                Goods.put(cast<int>(Good.MachineParts), "MachineParts", mat);
-                Goods.put(cast<int>(Good.Chip), "Chip", mat);
-                Goods.put(cast<int>(Good.Computer), "Computer", mat);
-                Goods.put(cast<int>(Good.Medicine), "Medicine", mat);
-                Goods.put(cast<int>(Good.Ammo), "Ammo", mat);
-                Goods.put(cast<int>(Good.Vehicle), "Vehicle", mat);
+                for (ProcessedGood g in ProcessedGood.values()) {
+                    Goods.NAME[g.index()] = g.name();
+                    Goods.TIER[g.index()] = cast<int>(g.tier());
+                }
+                for (ManufacturedGood g in ManufacturedGood.values()) {
+                    Goods.NAME[g.index()] = g.name();
+                    Goods.TIER[g.index()] = cast<int>(g.tier());
+                }
+                for (IndustrialGood g in IndustrialGood.values()) {
+                    Goods.NAME[g.index()] = g.name();
+                    Goods.TIER[g.index()] = cast<int>(g.tier());
+                }
             }
 
-            private static method put(int ord, String name, int tier) returns void {
-                Goods.NAME[ord] = name;
-                Goods.TIER[ord] = tier;
-            }
-
+            // Nothing plus the four families. Derived, so a good added to a family widens every
+            // plane and table sized from this the moment it exists.
             public static method count() returns int {
-                return Good.count();
+                return 1 + ExtractedGood.count() + ProcessedGood.count() +
+                       ManufacturedGood.count() + IndustrialGood.count();
             }
 
             public static method name(int ord) returns String {
@@ -344,8 +63,6 @@ public bundle Agents {
                 return Goods.TIER[ord];
             }
 
-            // Whether a hungry person can live on it. Flour is a material and bread is a meal, which
-            // is the whole point of the mill and the bakery existing.
             public static method edible(int ord) returns boolean {
                 return Goods.TIER[ord] == cast<int>(GoodTier.Food);
             }
