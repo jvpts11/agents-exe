@@ -182,25 +182,57 @@ public bundle Agents {
             // Sort into cell order (row-major, then x within the row) with a counting sort, and
             // build the per-row index. Passes append in whatever order suits them; this is called
             // once when they are all done.
+            //
+            // SIX PASSES, IN THIS ORDER, AND THE ORDER IS THE ALGORITHM. `start` is one array
+            // wearing three hats in turn -- bucket sizes, then bucket beginnings, then a moving
+            // cursor the permute walks to the bucket ENDS -- and each pass below is named for the
+            // hat it is wearing. The row index has to be read while the second hat is on, and the
+            // cell index while the third is, which is why they are not adjacent. Reordering these
+            // does not produce a slower world; it produces a different one.
             public method finish() returns void {
                 int nc = this.w * this.h;
                 int[] start = new int[nc + 1]();
+                this.countPerCell(start);
+                this.runningTotals(start, nc);
+                this.readRowIndex(start, nc);
+                this.permuteIntoCellOrder(start);
+                this.seedRegrowthMemory();
+                this.readCellIndex(start, nc);
+                delete start;
+                this.recountBlocks();
+                this.sealBlindSeams();
+                this.ordered = true;
+                return;
+            }
+
+            // Pass one: how many instances stand on each cell, written one slot to the right so
+            // the running totals below turn counts into beginnings without a second array.
+            private method countPerCell(int[] start) returns void {
                 mutable int i = 0;
                 while (i < this.n) {
                     int c = this.cellOf(i);
                     start[c + 1] = start[c + 1] + 1;
                     i = i + 1;
                 }
+                return;
+            }
+
+            // Pass two: counts become where each bucket BEGINS.
+            private method runningTotals(int[] start, int nc) returns void {
                 mutable int run = 0;
-                mutable int c2 = 0;
-                while (c2 <= nc) {
-                    run = run + start[c2];
-                    start[c2] = run;
-                    c2 = c2 + 1;
+                mutable int c = 0;
+                while (c <= nc) {
+                    run = run + start[c];
+                    start[c] = run;
+                    c = c + 1;
                 }
-                // start[c] is now where bucket c BEGINS. Read the row index off it before the fill
-                // below turns it into a moving cursor -- start[y*w] is the first instance of row y,
-                // and start[nc] is the total, which is exactly the end of the last row.
+                return;
+            }
+
+            // Pass three: the per-row index, read off the beginnings BEFORE the permute turns them
+            // into a moving cursor -- start[y*w] is the first instance of row y, and start[nc] is
+            // the total, which is exactly the end of the last row.
+            private method readRowIndex(int[] start, int nc) returns void {
                 mutable int y = 0;
                 while (y <= this.h) {
                     mutable int cell = y * this.w;
@@ -210,11 +242,17 @@ public bundle Agents {
                     this.rowStart[y] = start[cell];
                     y = y + 1;
                 }
+                return;
+            }
+
+            // Pass four: everything moves into cell order, and `start` is left holding the END of
+            // each bucket.
+            private method permuteIntoCellOrder(int[] start) returns void {
                 float[] ox = new float[this.cap]();
                 float[] oy = new float[this.cap]();
                 byte[] ok = new byte[this.cap]();
                 short[] oq = new short[this.cap]();
-                i = 0;
+                mutable int i = 0;
                 while (i < this.n) {
                     int c = this.cellOf(i);
                     int dst = start[c];
@@ -233,34 +271,46 @@ public bundle Agents {
                 this.py = oy;
                 this.kind = ok;
                 this.qty = oq;
-                // What the world was born with, taken here because nothing has been harvested yet.
-                // A felled tree clears `kind`; this remembers the species so the wood that grows
-                // back is the wood that was there.
+                return;
+            }
+
+            // Pass five: what the world was born with, taken here because nothing has been
+            // harvested yet. A felled tree clears `kind`; this remembers the species so the wood
+            // that grows back is the wood that was there.
+            private method seedRegrowthMemory() returns void {
                 delete this.born;
                 this.born = new byte[this.cap]();
-                mutable int seedIdx = 0;
-                while (seedIdx < this.n) {
-                    this.born[seedIdx] = this.kind[seedIdx];
-                    seedIdx = seedIdx + 1;
+                mutable int i = 0;
+                while (i < this.n) {
+                    this.born[i] = this.kind[i];
+                    i = i + 1;
                 }
-                // start[c] has been walked forward to the END of bucket c by the fill, so the
-                // beginning of c is where c-1 ended -- and a cell nobody stands on gets -1 rather
-                // than an empty range, so a caller tests one integer instead of comparing two.
+                return;
+            }
+
+            // Pass six: the first instance standing on each cell. `start[c]` has been walked
+            // forward to the END of bucket c by the permute, so the beginning of c is where c-1
+            // ended -- and a cell nobody stands on gets -1 rather than an empty range, so a caller
+            // tests one integer instead of comparing two.
+            private method readCellIndex(int[] start, int nc) returns void {
                 delete this.cellFirst;
                 this.cellFirst = new int[nc]();
                 mutable int prev = 0;
-                mutable int c3 = 0;
-                while (c3 < nc) {
-                    if (start[c3] > prev) {
-                        this.cellFirst[c3] = prev;
-                        prev = start[c3];
+                mutable int c = 0;
+                while (c < nc) {
+                    if (start[c] > prev) {
+                        this.cellFirst[c] = prev;
+                        prev = start[c];
                     } else {
-                        this.cellFirst[c3] = 0 - 1;
+                        this.cellFirst[c] = 0 - 1;
                     }
-                    c3 = c3 + 1;
+                    c = c + 1;
                 }
-                delete start;
-                // The coarse work map, counted once here and maintained by `harvest` from now on.
+                return;
+            }
+
+            // The coarse work map, counted once here and maintained by `harvest` from now on.
+            private method recountBlocks() returns void {
                 for (int b in 0..this.bplane * Harvest.count()) {
                     this.blockHave[b] = 0;
                 }
@@ -273,31 +323,34 @@ public bundle Agents {
                         this.creditBlock(j, k);
                     }
                 }
-                // Seal the blind seams.
-                //
-                // A working face the world was born with carries nothing, and until it is opened it
-                // has to be INDISTINGUISHABLE FROM BARE GROUND -- not merely empty. Leaving the kind
-                // set with a quantity of zero looked equivalent and was not: every scan in the
-                // codebase asks "is there ore here" by reading the kind, so a hundred and fourteen
-                // seams read as ore that could not be worked, the resource audit reported 193 of 198
-                // bodies reachable where 146 were, and the test that says a worked-out seam stays
-                // worked out went red. The file already has a convention for this and it is the
-                // right one: a spent seam clears its kind and `born` remembers what it was.
+                return;
+            }
+
+            // Seal the blind seams.
+            //
+            // A working face the world was born with carries nothing, and until it is opened it
+            // has to be INDISTINGUISHABLE FROM BARE GROUND -- not merely empty. Leaving the kind
+            // set with a quantity of zero looked equivalent and was not: every scan in the
+            // codebase asks "is there ore here" by reading the kind, so a hundred and fourteen
+            // seams read as ore that could not be worked, the resource audit reported 193 of 198
+            // bodies reachable where 146 were, and the test that says a worked-out seam stays
+            // worked out went red. The file already has a convention for this and it is the
+            // right one: a spent seam clears its kind and `born` remembers what it was.
+            private method sealBlindSeams() returns void {
                 delete this.blind;
                 this.blind = new byte[this.cap]();
-                mutable int sIdx = 0;
-                while (sIdx < this.n) {
-                    int sk = cast<int>(this.kind[sIdx]) & 255;
-                    if (sk != 0 && cast<int>(this.qty[sIdx]) == 0) {
-                        int shc = Nodes.work(sk);
-                        if (shc == cast<int>(Harvest.Mine) || shc == cast<int>(Harvest.Quarry)) {
-                            this.blind[sIdx] = cast<byte>(1);
-                            this.kind[sIdx] = cast<byte>(0);
+                mutable int i = 0;
+                while (i < this.n) {
+                    int k = cast<int>(this.kind[i]) & 255;
+                    if (k != 0 && cast<int>(this.qty[i]) == 0) {
+                        int hc = Nodes.work(k);
+                        if (hc == cast<int>(Harvest.Mine) || hc == cast<int>(Harvest.Quarry)) {
+                            this.blind[i] = cast<byte>(1);
+                            this.kind[i] = cast<byte>(0);
                         }
                     }
-                    sIdx = sIdx + 1;
+                    i = i + 1;
                 }
-                this.ordered = true;
                 return;
             }
 
