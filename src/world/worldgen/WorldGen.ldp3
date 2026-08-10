@@ -217,6 +217,23 @@ public bundle Agents {
             // gives the same world: a search, not a lottery. `tries` bounds it; if nothing passes,
             // the last roll is returned rather than nothing, because a flawed world beats no world
             // and the caller has been told which criterion it failed.
+            //
+            // ---- THE ATTEMPT COUNTER MUST NOT BE `persistent`, AND HERE IS WHY ----
+            //
+            // It looks like the feature's ideal small customer: a roll object is built and thrown
+            // away per attempt, and the count has to outlive each one. It does outlive them -- as
+            // a local in this method's frame, which is the right lifetime and not an accident.
+            //
+            // A persistent field would give it the wrong one. Persistent state reattaches across
+            // constructions for the whole run, so the count would carry from one search into the
+            // NEXT, and the retry seed is derived from it: `seed + attempt * 7717`. The fifth
+            // world generated in a process would roll different seeds depending on how many
+            // retries the first four happened to need. Twelve worlds are hashed in one run and a
+            // test asks this method for the same seed twice and requires the same world back --
+            // it would be measuring process history rather than the seed.
+            //
+            // "A search, not a lottery" is the whole contract of this method, and a counter that
+            // remembers other searches breaks it. The feature is right; this is not its customer.
             private static method rollOnce(int seed, int worldType, float land, int continents,
                                            int w, int h) returns Grid* {
                 WorldGen gen = new WorldGen(seed) on stack;
