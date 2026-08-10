@@ -84,94 +84,6 @@ public bundle Agents {
                 return 0.38;
             }
 
-            // The climate field's noise, in cell coordinates rather than the normalized ones the
-            // shared kernel takes.
-            //
-            // THIS CLASS HELD ITS OWN COPY of hash01, smooth, vnoise and the octave loop -- the
-            // same arithmetic as LandMath's, written out a second time, which is the exact shape
-            // that silently desynchronises a climate from the coastline it is sampled over the day
-            // somebody improves one of them.
-            //
-            // The two were not quite identical, and that is why deleting the copy needed a proof
-            // rather than a glance: LandMath's `vnoise` clamps a period below 1 up to 1 and this
-            // one did not, so on such a period they would disagree -- and with a period of zero the
-            // copy divides by it. That input is unreachable here, and the whole reachable set is
-            // four numbers: `baseCells` is assigned 3 in the constructor and nowhere else, the two
-            // callers of this method pass 17 and 37 -- so the period starts at 20 or 40 and doubles
-            // every octave -- and the one direct `vnoise` call in the classifier passes 23. The
-            // guard cannot fire, the kernels agree on every input this program can produce, and the
-            // twelve worlds say so to the bit.
-            private method fbm(int x, int y, int salt) returns float {
-                float nx = cast<float>(x) / cast<float>(this.w);
-                float ny = cast<float>(y) / cast<float>(this.h);
-                return LandMath.fbm(this.seed, nx, ny, this.baseCells + salt, this.octaves);
-            }
-
-            // ---- pass 4: climate (temperature, moisture with belts + coastal bonus) ----
-            private method belt(float alat) returns float {
-                if (alat < 0.12) {
-                    return 0.90;
-                }
-                if (alat < 0.36) {
-                    float t = (alat - 0.12) / 0.24;
-                    return 0.90 - 0.70 * t;
-                }
-                if (alat < 0.66) {
-                    float t = (alat - 0.36) / 0.30;
-                    return 0.20 + 0.50 * t;
-                }
-                float t = (alat - 0.66) / 0.34;
-                return 0.70 - 0.50 * t;
-            }
-
-            private method climate(Grid* g) returns void {
-                // 32 rings: how far ocean moisture reaches inland. 8 cells on a 2560-wide map died
-                // inside the beach band, so no m>=0.8 biome (rainforest/wetland/ice cap) ever formed;
-                // 32 gives real coastal climate bands with a continental dry interior.
-                int rings = 32;
-                this.scratch.distanceToWater(rings);
-                mutable int y = 0;
-                while (y < this.h) {
-                    float alat = this.scratch.absLat(y);
-                    float latBand = 1.0 - alat;
-                    float beltM = this.belt(alat);
-                    mutable int x = 0;
-                    while (x < this.w) {
-                        int i = y * this.w + x;
-                        float e = this.scratch.elevation[i];
-                        mutable float lapse = 0.0;
-                        if (e > this.scratch.sea) {
-                            // 0.75: high ground cools into rock/glacier/meadow bands without
-                            // freezing whole continents (0.9 froze everything above e~0.70)
-                            lapse = 0.75 * (e - this.scratch.sea);
-                        }
-                        float tnoise = (this.fbm(x, y, 17) - 0.5) * 0.14;   // wavy climate bands, not straight lines
-                        mutable float t = latBand - lapse + tnoise;
-                        if (t < 0.0) { t = 0.0; }
-                        if (t > 1.0) { t = 1.0; }
-                        float mn = this.fbm(x, y, 37);
-                        mutable float coast = 0.0;
-                        if (this.scratch.water[i] < rings) {
-                            coast = 1.0 - cast<float>(this.scratch.water[i]) / cast<float>(rings);
-                        }
-                        // coast-heavy blend: oceans are where moisture comes from -- the top decile
-                        // (rainforests, wetlands, ice caps) forms along wet coasts and fades inland
-                        mutable float m = 0.46 * mn + 0.26 * beltM + 0.28 * coast;
-                        // Stretch the contrast around the mean: the raw blend almost never leaves
-                        // [0.2, 0.8], so every m>=0.80 biome (wetlands, rainforests, IceCap) and most
-                        // m<0.20 deserts NEVER generated. Widening both tails puts the whole Whittaker
-                        // table in play.
-                        m = 0.5 + (m - 0.5) * 1.6;
-                        if (m > 1.0) { m = 1.0; }
-                        if (m < 0.0) { m = 0.0; }
-                        g.setTemp(x, y, cast<int>(t * 100.0));
-                        g.setMoist(x, y, cast<int>(m * 100.0));
-                        x = x + 1;
-                    }
-                    y = y + 1;
-                }
-            }
-
             // ---- pass 5: hydrology (steepest descent -> rivers; pits -> lakes) ----
             // Priority-Flood + epsilon (Barnes et al.): flood inward from the sea through a min-heap, so
             // every land cell gets a monotonic downhill path to the ocean. This fills pits AND resolves
@@ -669,7 +581,9 @@ public bundle Agents {
                 // The flood already placed the coastline at the requested land ratio, so the sea
                 // level is whatever contour it chose -- not a number tuned here.
                 this.scratch.sea = wf.sea;
-                this.climate(g);
+                Climate* climate = new Climate(this.seed, this.octaves, this.baseCells) on heap;
+                climate.apply(g, this.scratch);
+                delete climate;
                 this.hydrology(g);
                 // The hydrology overwrote the water plane as its visited flag -- see Scratch's
                 // header, where that reuse is written down -- so rebuild the distance the

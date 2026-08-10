@@ -1,0 +1,128 @@
+import System.IO.Console;
+import Agents.World.Grid;
+program AgentsExe;
+
+// Temperature and moisture over the whole map: latitude and lapse for the first, a blend of noise,
+// wind belt and distance-to-ocean for the second.
+//
+// Both are written into the Grid as hundredths, which is where every later stage reads them from --
+// the classifier, the flora, the audit. What this pass decides, the world lives with.
+public bundle Agents {
+    public namespace World {
+
+        public class Climate {
+            // How far ocean moisture reaches inland, in rings. Eight cells on a 2560-wide map died
+            // inside the beach band, so no wet biome -- rainforest, wetland, ice cap -- ever formed
+            // anywhere; thirty-two gives real coastal bands with a continental dry interior.
+            public static fixed int REACH = 32;
+
+            // High ground cools, but not into a frozen continent: 0.9 froze everything above 0.70
+            // elevation. This carries the rock, glacier and meadow bands without doing that.
+            public static fixed double LAPSE = 0.75;
+
+            // Wavy climate bands rather than straight lines, and the two salts that draw them.
+            public static fixed double BAND_WAVER = 0.14;
+
+            // What moisture is made of: mostly the noise field, then the wind belt, then the coast.
+            // COAST-HEAVY ON PURPOSE -- oceans are where moisture comes from, so the top decile
+            // forms along wet coasts and fades inland.
+            public static fixed double FROM_NOISE = 0.46;
+            public static fixed double FROM_BELT = 0.26;
+            public static fixed double FROM_COAST = 0.28;
+
+            // Stretch the contrast around the mean. The raw blend almost never leaves [0.2, 0.8],
+            // so every wet biome and most deserts NEVER generated; widening both tails puts the
+            // whole Whittaker table in play.
+            public static fixed double CONTRAST = 1.6;
+
+            private mutable int seed;
+            private mutable int octaves;
+            private mutable int baseCells;
+
+            public constructor Climate(int seed, int octaves, int baseCells) {
+                this.seed = seed;
+                this.octaves = octaves;
+                this.baseCells = baseCells;
+            }
+
+            // The wind belts, as a moisture multiplier by distance from the equator: wet at the
+            // equator, dry through the horse latitudes, wet again at the temperate front, drying
+            // toward the pole.
+            private method belt(float alat) returns float {
+                if (alat < 0.12) {
+                    return 0.90;
+                }
+                if (alat < 0.36) {
+                    float t = (alat - 0.12) / 0.24;
+                    return 0.90 - 0.70 * t;
+                }
+                if (alat < 0.66) {
+                    float t = (alat - 0.36) / 0.30;
+                    return 0.20 + 0.50 * t;
+                }
+                float t = (alat - 0.66) / 0.34;
+                return 0.70 - 0.50 * t;
+            }
+
+            // The climate field's noise, in cell coordinates rather than the normalized ones the
+            // shared kernel takes.
+            //
+            // THE SEQUENCER HELD ITS OWN COPY of hash01, smooth, vnoise and the octave loop -- the
+            // same arithmetic as LandMath's, written out a second time, which is the exact shape
+            // that silently desynchronises a climate from the coastline it is sampled over the day
+            // somebody improves one of them.
+            //
+            // The two were not quite identical, and that is why deleting the copy needed a proof
+            // rather than a glance: LandMath's `vnoise` clamps a period below 1 up to 1 and the
+            // copy did not, so on such a period they would disagree -- and with a period of zero
+            // the copy divides by it. That input is unreachable, and the whole reachable set is
+            // four numbers: `baseCells` is 3, the two callers of this method pass 17 and 37 -- so
+            // the period starts at 20 or 40 and doubles every octave -- and the one direct
+            // `vnoise` call in the classifier passes 23. The guard cannot fire, the kernels agree
+            // on every input this program can produce, and the twelve worlds say so to the bit.
+            private method fbm(Scratch* s, int x, int y, int salt) returns float {
+                float nx = cast<float>(x) / cast<float>(s.w);
+                float ny = cast<float>(y) / cast<float>(s.h);
+                return LandMath.fbm(this.seed, nx, ny, this.baseCells + salt, this.octaves);
+            }
+
+            public method apply(Grid* g, Scratch* s) returns void {
+                s.distanceToWater(Climate.REACH);
+                mutable int y = 0;
+                while (y < s.h) {
+                    float alat = s.absLat(y);
+                    float latBand = 1.0 - alat;
+                    float beltM = this.belt(alat);
+                    mutable int x = 0;
+                    while (x < s.w) {
+                        int i = y * s.w + x;
+                        float e = s.elevation[i];
+                        mutable float lapse = 0.0;
+                        if (e > s.sea) {
+                            lapse = Climate.LAPSE * (e - s.sea);
+                        }
+                        float tnoise = (this.fbm(s, x, y, 17) - 0.5) * Climate.BAND_WAVER;
+                        mutable float t = latBand - lapse + tnoise;
+                        if (t < 0.0) { t = 0.0; }
+                        if (t > 1.0) { t = 1.0; }
+                        float mn = this.fbm(s, x, y, 37);
+                        mutable float coast = 0.0;
+                        if (s.water[i] < Climate.REACH) {
+                            coast = 1.0 - cast<float>(s.water[i]) / cast<float>(Climate.REACH);
+                        }
+                        mutable float m = Climate.FROM_NOISE * mn + Climate.FROM_BELT * beltM
+                                        + Climate.FROM_COAST * coast;
+                        m = 0.5 + (m - 0.5) * Climate.CONTRAST;
+                        if (m > 1.0) { m = 1.0; }
+                        if (m < 0.0) { m = 0.0; }
+                        g.setTemp(x, y, cast<int>(t * 100.0));
+                        g.setMoist(x, y, cast<int>(m * 100.0));
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                return;
+            }
+        }
+    }
+}
