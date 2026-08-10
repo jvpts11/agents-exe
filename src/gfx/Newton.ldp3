@@ -1,0 +1,61 @@
+import System.IO.Console;
+program AgentsExe;
+
+// The renderer's own arithmetic: square root by Newton's method, sine and cosine by Taylor series.
+//
+// Three copies of each of these lived in the two 3D paths -- byte for byte the same series, written
+// out twice, which is the shape that silently desynchronises two renderers of the same world the
+// day somebody improves one of them. They are one implementation now.
+//
+// THE ITERATION COUNT IS A PARAMETER, AND THAT IS THE WHOLE POINT. The GL path ran twenty
+// iterations and the software path fourteen. That is not an oversight to be tidied into one
+// number: the two paths are two deliberate implementations, their outputs are compared as pixels,
+// and a root converged to a different depth is a different pixel. Each call site names the count it
+// has always used, so the divergence survives the deduplication instead of being averaged away by
+// it.
+//
+// This is NOT the worldgen's LandMath. That one is frozen against the world hash; this one is
+// frozen against the pixel goldens. They happen to agree on the sine series today and they are
+// still two contracts, held by two different proofs.
+public bundle Agents {
+    public namespace World {
+
+        public class Newton {
+            // One spelling of pi, at the precision every one of these copies already used.
+            public static fixed double PI = 3.14159265;
+
+            public static method sqrt(float v, int iterations) returns float {
+                if (v <= 0.0) {
+                    return 0.0;
+                }
+                mutable float g = v;
+                mutable int i = 0;
+                while (i < iterations) {
+                    g = 0.5 * (g + v / g);
+                    i = i + 1;
+                }
+                return g;
+            }
+
+            // Range-reduced to [-pi, pi], then a four-term series. Both 3D paths used exactly this,
+            // so unlike the root it takes no count.
+            public static method sin(float x) returns float {
+                mutable float t = x;
+                float pi = Newton.PI;
+                float two = 2.0 * pi;
+                while (t > pi) {
+                    t = t - two;
+                }
+                while (t < 0.0 - pi) {
+                    t = t + two;
+                }
+                float t2 = t * t;
+                return t - t * t2 / 6.0 + t * t2 * t2 / 120.0 - t * t2 * t2 * t2 / 5040.0;
+            }
+
+            public static method cos(float x) returns float {
+                return Newton.sin(x + 1.5707963);
+            }
+        }
+    }
+}
