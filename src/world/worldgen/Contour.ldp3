@@ -1,0 +1,58 @@
+import System.IO.Console;
+program AgentsExe;
+
+// THE TWO LINES THIS WORLD IS BUILT AROUND, in every spelling they are written in.
+//
+// A world has two heights that mean something everywhere: where the water stops, and where the
+// mountains start. Nine places test one of them and they do not all hold the number in the same
+// units -- the generation field runs 0..1 while the Grid stores elevation as a short scaled by ten
+// thousand -- so the same line is written as `0.63` in one file, `6300` in another, and the flood
+// writes its side of the waterline as `0.44 + 0.18 * t2`.
+//
+// THEY ARE NOT DERIVED FROM EACH OTHER, and that is deliberate rather than lazy. `0.63f * 10000.0`
+// folds to 6299, not 6300: computing one encoding from the other would move the line by a
+// ten-thousandth and there is no seed for which that is guaranteed harmless. So each keeps its own
+// exact spelling, they sit side by side where a reader can see they are the same decision, and the
+// demand below records the relation the two are MEANT to have -- accurate to the rounding the
+// encodings actually differ by. If that demand ever fails, that is a finding to bring to somebody,
+// not a licence to change a number.
+public bundle Agents {
+    public namespace World {
+
+        public class Contour {
+            // Where the mountain family begins, on the generation field's 0..1 scale. Ordinary land
+            // ends just below it: Landmass caps its relief under this line, Tectonics solves for
+            // exactly the amplitude that carries a cell across it, the renderer starts stacking
+            // terrain at it, and the highland biomes start here. When this said 0.58 the flat
+            // plateau interiors landed in the mountain band and half the world came out as hills
+            // and badlands.
+            // DOUBLE, and that is not a detail. An undecorated decimal literal is a double in this
+            // language, so `e >= 0.63` compared in double precision at every one of these sites.
+            // Declaring the constant `float` rounds 0.63 to 0.62999999523 and compares in single
+            // precision instead -- a different question, which the twelve worlds answered
+            // differently the first time this was written that way. Naming a number must not
+            // change its type.
+            public static fixed double HIGHLAND = 0.63;
+
+            // The same line, in the units the Grid stores: elevation as a short, the 0..1 field
+            // multiplied by ten thousand. Written out rather than computed -- see the header.
+            public static fixed int HIGHLAND_STORED = 6300;
+
+            // The waterline, on the same 0..1 scale. The flood writes every land cell at
+            // `WATERLINE + LAND_BAND * t2` and every water cell below it, so `eb >= WATERLINE` IS
+            // the land mask, exactly -- which is why a separate land mask was deleted rather than
+            // maintained.
+            public static fixed double WATERLINE = 0.44;
+
+            // How much height the land band above the waterline is allowed to use.
+            public static fixed double LAND_BAND = 0.18;
+
+            // How far the two spellings of the highland line are allowed to be apart, in stored
+            // units. One: the product `HIGHLAND * 10000` lands on 6299 in float where the stored
+            // constant says 6300, and that single unit IS the reason the two are written out
+            // separately instead of one being computed from the other. Anything wider than this
+            // is drift.
+            public static fixed int ENCODING_SLACK = 1;
+        }
+    }
+}
