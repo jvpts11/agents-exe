@@ -3,6 +3,18 @@ program AgentsExe;
 
 // The scratch shared by the generation passes: dimensions, parameters and the elevation field.
 // Owned by WorldGen for the duration of generate().
+//
+// WHY THE TWO FULL-RESOLUTION BUFFERS ARE STILL BARE ARRAYS, and it is a measurement rather than
+// an oversight. Everything here that could be grouped has been: the plates arrive as rows and the
+// boundary as margins, and both are COARSE -- a few hundred entries on the plate grid, read once
+// per plate or once per coarse cell. `eb` and `vent` are not. They are indexed inside the per-cell
+// loops of five passes, `f.eb[i]` written straight into the arithmetic rather than bound to a
+// local first, over two and a half million cells a pass. Putting an accessor in front of that buys
+// tidiness and pays for it in the one place this project has never been willing to pay.
+//
+// So they stay reachable, and the reason is written here instead of being folklore. If that ever
+// changes it changes with a number beside it -- measured improvements are their own step of the
+// relayout, after the form is right, never smuggled in beside a rename.
 public bundle Agents {
     public namespace World {
 
@@ -31,8 +43,7 @@ public bundle Agents {
             // metals by biome would be arbitrary; placing them by the boundary that made the rock is
             // what the real world does, and the classification already exists -- it was simply
             // thrown away once the relief had been applied.
-            public mutable byte[] borigin;   // coarse: kind of the nearest boundary (Tectonics.B_*)
-            public mutable float[] bnear;    // coarse: 0 far from it, 1 on it
+            public mutable Margin[] margins; // coarse: the nearest boundary's kind, and how near
 
             public constructor WorldField(int w, int h, int seed) {
                 this.w = w;
@@ -48,8 +59,7 @@ public bundle Agents {
                 this.plate = new int[1]();
                 this.plates = new Plate[1]();
                 this.vent = new byte[w * h]();
-                this.borigin = new byte[1]();
-                this.bnear = new float[1]();
+                this.margins = new Margin[1]();
             }
 
             public destructor ~WorldField() returns void {
@@ -57,8 +67,7 @@ public bundle Agents {
                 delete this.plate;
                 delete this.plates;
                 delete this.vent;
-                delete this.borigin;
-                delete this.bnear;
+                delete this.margins;
             }
 
             // Plate id at a FULL-resolution cell.
