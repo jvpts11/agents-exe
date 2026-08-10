@@ -1,0 +1,188 @@
+import System.IO.Console;
+import Agents.World.EconomyNodes;
+import Agents.World.NodeClass;
+import Agents.World.NodeAtlas;
+import Agents.World.Harvest;
+import Agents.World.PropNode;
+import Agents.World.FloraNode;
+import Agents.World.EarthNode;
+import Agents.World.OreNode;
+import Agents.World.Goods;
+program AgentsExe;
+
+// The dense per-kind engine the tick reads, DERIVED at class load from the four node families --
+// declared once on the constants, compiled here into the same columns the old hand-written rows
+// produced, which the captured-table test proves fact for fact. Global index 0 is None -- outside
+// every family, so a zeroed grid is an empty one and the whole set still fits the byte the Grid
+// stores per cell. Families own their contiguous ranges: Prop 1-8, Flora 9-21, Earth 22-26,
+// Ore 27-36 (the relayout design's map, corrected at C2.1 where the standing table put GemRock
+// among the metals).
+public bundle Agents {
+    public namespace World {
+
+        public class Nodes {
+            // The "no node" global index. Index 0 belongs to no family on purpose.
+            public static fixed int NONE = 0;
+
+            private static mutable String[] NAME;
+            private static mutable int[] ATLAS;
+            private static mutable int[] KLASS;
+            private static mutable boolean[] BURY;
+            private static mutable int[] QTY;
+            // What comes off it, and who goes and gets it -- the two facts that turn a thing standing
+            // on the ground into a link in docs/ECONOMY.md's first chain.
+            private static mutable int[] YIELD;
+            private static mutable int[] WORK;
+            // The distinct goods each Harvest class can yield, derived from the two tables above.
+            // Flat, hclass * Goods.count() + i, with the live length beside it.
+            private static mutable int[] CLASS_GOODS;
+            private static mutable int[] CLASS_N;
+
+            onClassLoad {
+                int n = Nodes.count();
+                Nodes.NAME = new String[n]();
+                Nodes.ATLAS = new int[n]();
+                Nodes.KLASS = new int[n]();
+                Nodes.BURY = new boolean[n]();
+                Nodes.QTY = new int[n]();
+                Nodes.YIELD = new int[n]();
+                Nodes.WORK = new int[n]();
+                Nodes.NAME[0] = "None";
+                Nodes.YIELD[0] = Goods.NOTHING;
+                Nodes.WORK[0] = cast<int>(Harvest.Nothing);
+                for (PropNode k in PropNode.values()) {
+                    Nodes.absorb(k.index(), k.name(), cast<int>(k.atlas()), cast<int>(k.kind()),
+                                 k.buryable(), k.baseQty(), k.gives(), cast<int>(k.work()));
+                }
+                for (FloraNode k in FloraNode.values()) {
+                    Nodes.absorb(k.index(), k.name(), cast<int>(k.atlas()), cast<int>(k.kind()),
+                                 k.buryable(), k.baseQty(), k.gives(), cast<int>(k.work()));
+                }
+                for (EarthNode k in EarthNode.values()) {
+                    Nodes.absorb(k.index(), k.name(), cast<int>(k.atlas()), cast<int>(k.kind()),
+                                 k.buryable(), k.baseQty(), k.gives(), cast<int>(k.work()));
+                }
+                for (OreNode k in OreNode.values()) {
+                    Nodes.absorb(k.index(), k.name(), cast<int>(k.atlas()), cast<int>(k.kind()),
+                                 k.buryable(), k.baseQty(), k.gives(), cast<int>(k.work()));
+                }
+
+                // The class->goods index, derived rather than written down, so a new vein added to
+                // a family is reachable the moment it exists.
+                int nh = Harvest.count();
+                int ngd = Goods.count();
+                Nodes.CLASS_N = new int[nh]();
+                Nodes.CLASS_GOODS = new int[nh * ngd]();
+                mutable int kd = 1;
+                while (kd < n) {
+                    int hcv = Nodes.WORK[kd];
+                    int gv = Nodes.YIELD[kd];
+                    if (hcv != cast<int>(Harvest.Nothing) && gv != Goods.NOTHING) {
+                        mutable boolean seen = false;
+                        mutable int s = 0;
+                        while (s < Nodes.CLASS_N[hcv]) {
+                            if (Nodes.CLASS_GOODS[hcv * ngd + s] == gv) {
+                                seen = true;
+                            }
+                            s = s + 1;
+                        }
+                        if (!seen) {
+                            Nodes.CLASS_GOODS[hcv * ngd + Nodes.CLASS_N[hcv]] = gv;
+                            Nodes.CLASS_N[hcv] = Nodes.CLASS_N[hcv] + 1;
+                        }
+                    }
+                    kd = kd + 1;
+                }
+            }
+
+            private static method absorb(int ord, String name, int atlas, int klass, boolean bury,
+                                         int qty, int gives, int work) returns void {
+                Nodes.NAME[ord] = name;
+                Nodes.ATLAS[ord] = atlas;
+                Nodes.KLASS[ord] = klass;
+                Nodes.BURY[ord] = bury;
+                Nodes.QTY[ord] = qty;
+                Nodes.YIELD[ord] = gives;
+                Nodes.WORK[ord] = work;
+            }
+
+            // None plus the four families. Derived, so a kind added to a family widens every
+            // table sized from this the moment it exists.
+            public static method count() returns int {
+                return 1 + PropNode.count() + FloraNode.count() + EarthNode.count() +
+                       OreNode.count();
+            }
+
+            // The kind's identifier, which is also the name of its .mesh file.
+            public static method name(int ord) returns String {
+                return Nodes.NAME[ord];
+            }
+
+            public static method atlas(int ord) returns int {
+                return Nodes.ATLAS[ord];
+            }
+
+            public static method klass(int ord) returns int {
+                return Nodes.KLASS[ord];
+            }
+
+            // True where a deposit of this kind can exist underground. It is a per-kind fact and not
+            // a rule derived from the class: a boulder is loose stone lying on the ground, and there
+            // is nothing under it to prospect for.
+            public static method buryable(int ord) returns boolean {
+                return Nodes.BURY[ord];
+            }
+
+            // Units an average node of this kind holds. Placement scales this by local richness --
+            // the number that makes exhaustion possible at all.
+            public static method baseQty(int ord) returns int {
+                return Nodes.QTY[ord];
+            }
+
+            // Whether this kind is worth a projected shadow. The ground plants are not: a mushroom
+            // patch casts nothing anybody can read at this scale, and its mesh is 273 triangles --
+            // doubling that for a shadow spends a large part of the detail window's whole budget on
+            // something invisible. Trees, boulders and outcrops stand up off the ground and keep it.
+            public static method castsShadow(int ord) returns boolean {
+                if (Nodes.isTree(ord)) {
+                    return true;
+                }
+                if (ord == PropNode.Boulder.index()) {
+                    return true;
+                }
+                if (ord == FloraNode.Cactus.index()) {
+                    return true;
+                }
+                if (ord == FloraNode.FishingSpot.index()) {
+                    return false;               // it floats on the water
+                }
+                return Nodes.klass(ord) != cast<int>(NodeClass.Biological);
+            }
+
+            // What comes off a unit of it, as a goods global index.
+            public static method gives(int ord) returns int {
+                return Nodes.YIELD[ord];
+            }
+
+            // Which trade goes and gets it, as a Harvest ordinal.
+            public static method work(int ord) returns int {
+                return Nodes.WORK[ord];
+            }
+
+            public static method isTree(int ord) returns boolean {
+                return Nodes.WORK[ord] == cast<int>(Harvest.Timber);
+            }
+
+            // How many different goods this trade can bring home, and which they are. This is the
+            // fact a village needs to decide whether it wants a quarrier at all, and which face he
+            // walks to when it does.
+            public static method goodsIn(int hclass) returns int {
+                return Nodes.CLASS_N[hclass];
+            }
+
+            public static method goodAt(int hclass, int i) returns int {
+                return Nodes.CLASS_GOODS[hclass * Goods.count() + i];
+            }
+        }
+    }
+}
