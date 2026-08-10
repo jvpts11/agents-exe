@@ -4,15 +4,20 @@ import Agents.World.Grid;
 import Agents.World.Biome;
 import Agents.World.WorldAudit;
 
-// World generation: deterministic, size-agnostic.
-// Pipeline: relief + flood -> tectonic deformation -> thermal erosion -> climate (latitude/lapse
-// temp, moisture with belts + coastal bonus) -> hydrology (steepest-descent rivers + lake pits) ->
-// BIOME_CATALOG classification (with river/lake/vent/endorheic overrides). Scratch buffers live in
-// fields (freed at the end) so passes share them without array-copy semantics.
+// THE SEQUENCER. What runs, in what order, and what each stage is handed.
 //
-// The elevation stages are ElevationPass implementations. Landmass builds a height field for the
-// whole map and floods it -- continents are whatever stays above water, never a placement decision
-// -- and hands its plate partition on through WorldField; Tectonics then deforms the boundaries.
+// It used to be the whole of world generation -- a thousand lines holding the climate, the
+// hydrology, the classification, the Whittaker diagram and the working buffers all at once. Each of
+// those is a stage with its own file now, and what is left here is the one thing that cannot be
+// delegated: the ORDER, which is a chain of real dependencies and not a preference.
+//
+//   relief + flood -> tectonic deformation -> climate -> hydrology -> classification -> content
+//
+// Landmass builds a height field for the whole map and floods it -- continents are whatever stays
+// above water, never a placement decision -- and hands its plate partition on through WorldField;
+// Tectonics deforms the boundaries it left behind. The climate needs the finished elevation, the
+// hydrology needs the climate (ice is not a channel), the classification needs both, and the
+// content passes need the terrain settled under them.
 program AgentsExe;
 
 public bundle Agents {
@@ -84,313 +89,6 @@ public bundle Agents {
                 return 0.38;
             }
 
-            // ---- pass 5: hydrology (steepest descent -> rivers; pits -> lakes) ----
-            // Priority-Flood + epsilon (Barnes et al.): flood inward from the sea through a min-heap, so
-            // every land cell gets a monotonic downhill path to the ocean. This fills pits AND resolves
-            // flats (a tiny epsilon gradient), and the order in which cells are discovered IS the drainage
-            // tree -- each cell drains to the neighbour that reached it -- giving convergent, dendritic
-            // rivers with no straight parallel-diagonal artifacts. Filled depressions become lakes.
-            // Permanent ice -- an icecap or a glacier. Not a channel: it is the thing a river starts
-            // BELOW. Snowfield is deliberately excluded, because snowfield melts and a river may
-            // both rise on it and cross it. The tests mirror classify's own so the two agree.
-            private method glaciated(Grid* g, int x, int y, float e) returns boolean {
-                float t = cast<float>(g.tempAt(x, y)) / 100.0;
-                float m = cast<float>(g.moistAt(x, y)) / 100.0;
-                if (t < 0.05) {
-                    return true;                                  // IceCap: nothing melts
-                }
-                if (t < 0.15 && m >= 0.80) {
-                    return true;                                  // IceCap: wet polar
-                }
-                if (e >= Contour.HIGHLAND) {
-                    if (t < 0.10) {
-                        return true;                              // Glacier
-                    }
-                    if (e >= 0.70 && t < 0.22) {
-                        return true;                              // Glacier
-                    }
-                    if (e >= 0.74 && this.scratch.absLat(y) >= 0.52) {
-                        return true;                              // Glacier
-                    }
-                }
-                return false;
-            }
-
-            private method hydrology(Grid* g) returns void {
-                int n = this.w * this.h;
-                float eps = 0.00001;
-                // wtr is free after climate(): reuse it as the visited flag.
-                mutable int i = 0;
-                while (i < n) {
-                    this.scratch.water[i] = 0;
-                    this.scratch.flooded[i] = this.scratch.elevation[i];
-                    this.scratch.downstream[i] = 0 - 1;
-                    this.scratch.flow[i] = 1.0;
-                    i = i + 1;
-                }
-                // Seed the heap with every sea cell (the outlets, at their true elevation).
-                mutable int s = 0;
-                while (s < n) {
-                    if (this.scratch.elevation[s] < this.scratch.sea) {
-                        this.scratch.water[s] = 1;
-                        this.scratch.drain.push(this.scratch.elevation[s], s);
-                    }
-                    s = s + 1;
-                }
-                // A fully-land world (no sea) still needs an outlet: seed the single lowest cell.
-                if (this.scratch.drain.size() == 0) {
-                    mutable int lo = 0;
-                    mutable int k = 1;
-                    while (k < n) {
-                        if (this.scratch.elevation[k] < this.scratch.elevation[lo]) {
-                            lo = k;
-                        }
-                        k = k + 1;
-                    }
-                    this.scratch.water[lo] = 1;
-                    this.scratch.drain.push(this.scratch.elevation[lo], lo);
-                }
-                int[] order = new int[n]();   // pop order, for downstream flow accumulation in reverse
-                mutable int oc = 0;
-                while (this.scratch.drain.size() > 0) {
-                    int cell = this.scratch.drain.topVal();
-                    float cfld = this.scratch.drain.topKey();
-                    this.scratch.drain.pop();
-                    order[oc] = cell;
-                    oc = oc + 1;
-                    int cx = cell % this.w;
-                    int cy = cell / this.w;
-                    mutable int oy = 0 - 1;
-                    while (oy <= 1) {
-                        mutable int ox = 0 - 1;
-                        while (ox <= 1) {
-                            if (!(ox == 0 && oy == 0)) {
-                                int nyy = cy + oy;
-                                if (nyy >= 0 && nyy < this.h) {
-                                    int j = this.scratch.idx(cx + ox, nyy);
-                                    if (this.scratch.water[j] == 0) {
-                                        this.scratch.water[j] = 1;
-                                        mutable float nf = this.scratch.elevation[j];
-                                        if (nf < cfld + eps) {
-                                            nf = cfld + eps;
-                                        }
-                                        this.scratch.flooded[j] = nf;
-                                        this.scratch.downstream[j] = cell;
-                                        this.scratch.drain.push(nf, j);
-                                    }
-                                }
-                            }
-                            ox = ox + 1;
-                        }
-                        oy = oy + 1;
-                    }
-                }
-                // Re-route each land cell to its STEEPEST fld neighbour instead of the discovery
-                // parent: on smooth slopes the flood wavefront sweeps uniformly, so parent links run
-                // in straight parallel diagonals (the "rivers that never connect"). Steepest descent
-                // on the filled surface follows the actual valleys, so tributaries CONVERGE into a
-                // dendritic network -- and fld is pit-free (epsilon), so descent always reaches the
-                // sea. The reverse-fld accumulation order below stays valid for any descending link.
-                mutable int rc = 0;
-                while (rc < n) {
-                    if (this.scratch.downstream[rc] != 0 - 1) {
-                        int rcx = rc % this.w;
-                        int rcy = rc / this.w;
-                        mutable float bestF = this.scratch.flooded[rc];
-                        mutable int bestJ = 0 - 1;
-                        mutable int ry = 0 - 1;
-                        while (ry <= 1) {
-                            mutable int rx = 0 - 1;
-                            while (rx <= 1) {
-                                if (!(rx == 0 && ry == 0)) {
-                                    int nxx = rcx + rx;
-                                    int nyy = rcy + ry;
-                                    if (nxx >= 0 && nxx < this.w && nyy >= 0 && nyy < this.h) {
-                                        int j = nyy * this.w + nxx;
-                                        if (this.scratch.flooded[j] < bestF) {
-                                            bestF = this.scratch.flooded[j];
-                                            bestJ = j;
-                                        }
-                                    }
-                                }
-                                rx = rx + 1;
-                            }
-                            ry = ry + 1;
-                        }
-                        if (bestJ != 0 - 1) {
-                            this.scratch.downstream[rc] = bestJ;
-                        }
-                    }
-                    rc = rc + 1;
-                }
-                // Flow accumulation: leaves first (reverse discovery order), pushing flow downstream.
-                mutable int r = oc - 1;
-                while (r >= 0) {
-                    int cell = order[r];
-                    int d = this.scratch.downstream[cell];
-                    if (d != 0 - 1) {
-                        this.scratch.flow[d] = this.scratch.flow[d] + this.scratch.flow[cell];
-                    }
-                    r = r - 1;
-                }
-                // CHANNEL CAPTURE: a channel running right beside a bigger one gets absorbed by it.
-                // Steepest descent alone can keep two parallel channels one cell apart for long
-                // stretches (and braid ugly knots at junctions); re-aiming every cell at its
-                // largest-flow downhill neighbour merges the minor channel into the major, then the
-                // accumulation is recomputed over the same (still strictly descending) order.
-                mutable int cc = 0;
-                while (cc < n) {
-                    if (this.scratch.downstream[cc] != 0 - 1) {
-                        int ccx = cc % this.w;
-                        int ccy = cc / this.w;
-                        mutable float bestFl = 0.0 - 1.0;
-                        mutable int bestJ = 0 - 1;
-                        mutable int cy2 = 0 - 1;
-                        while (cy2 <= 1) {
-                            mutable int cx2 = 0 - 1;
-                            while (cx2 <= 1) {
-                                if (!(cx2 == 0 && cy2 == 0)) {
-                                    int nxx = ccx + cx2;
-                                    int nyy = ccy + cy2;
-                                    if (nxx >= 0 && nxx < this.w && nyy >= 0 && nyy < this.h) {
-                                        int j = nyy * this.w + nxx;
-                                        if (this.scratch.flooded[j] < this.scratch.flooded[cc] && this.scratch.flow[j] > bestFl) {
-                                            bestFl = this.scratch.flow[j];
-                                            bestJ = j;
-                                        }
-                                    }
-                                }
-                                cx2 = cx2 + 1;
-                            }
-                            cy2 = cy2 + 1;
-                        }
-                        if (bestJ != 0 - 1) {
-                            this.scratch.downstream[cc] = bestJ;
-                        }
-                    }
-                    cc = cc + 1;
-                }
-                // Rivers never climb, and never touch permanent ice. Both were visible in one shot:
-                // a channel rising on an icecap, running clean across it, then going UP a mountain
-                // and back down the far side.
-                //
-                // The pit-filled surface is monotonic by construction, but it is not the real one --
-                // a spill path out of a filled basin crosses the rim, and the rim can be genuinely
-                // higher than the ground the water came from. So the link is re-tested against the
-                // REAL elevation, and a link that would climb is replaced by one that does not, or
-                // cut. Cutting is the right answer, not a failure: the water pools where it stops,
-                // which is what it does in reality, and the cell is already a lake by the fld test.
-                // A link into ice is treated the same way, so the channel routes AROUND a glacier
-                // instead of through it -- and the mountain itself is never touched.
-                mutable int vv = 0;
-                while (vv < n) {
-                    int d0 = this.scratch.downstream[vv];
-                    if (d0 != 0 - 1) {
-                        int vx = vv % this.w;
-                        int vy = vv / this.w;
-                        boolean iceHere = this.glaciated(g, vx, vy, this.scratch.elevation[vv]);
-                        boolean climbs = this.scratch.elevation[d0] > this.scratch.elevation[vv] + 0.0005;
-                        boolean intoIce = this.glaciated(g, d0 % this.w, d0 / this.w, this.scratch.elevation[d0]);
-                        if (iceHere) {
-                            this.scratch.downstream[vv] = 0 - 1;
-                        } else if (climbs || intoIce) {
-                            mutable float bestE = this.scratch.elevation[vv];
-                            mutable int bj = 0 - 1;
-                            mutable int vy2 = 0 - 1;
-                            while (vy2 <= 1) {
-                                mutable int vx2 = 0 - 1;
-                                while (vx2 <= 1) {
-                                    if (!(vx2 == 0 && vy2 == 0)) {
-                                        int nxx = vx + vx2;
-                                        int nyy = vy + vy2;
-                                        if (nxx >= 0 && nxx < this.w && nyy >= 0 && nyy < this.h) {
-                                            int j = nyy * this.w + nxx;
-                                            // still strictly descending on fld, so the accumulation
-                                            // order below stays valid
-                                            if (this.scratch.flooded[j] < this.scratch.flooded[vv] && this.scratch.elevation[j] <= bestE
-                                                && !this.glaciated(g, nxx, nyy, this.scratch.elevation[j])) {
-                                                bestE = this.scratch.elevation[j];
-                                                bj = j;
-                                            }
-                                        }
-                                    }
-                                    vx2 = vx2 + 1;
-                                }
-                                vy2 = vy2 + 1;
-                            }
-                            this.scratch.downstream[vv] = bj;
-                        }
-                    }
-                    vv = vv + 1;
-                }
-                mutable int z = 0;
-                while (z < n) {
-                    this.scratch.flow[z] = 1.0;
-                    z = z + 1;
-                }
-                r = oc - 1;
-                while (r >= 0) {
-                    int cell = order[r];
-                    int d = this.scratch.downstream[cell];
-                    if (d != 0 - 1) {
-                        this.scratch.flow[d] = this.scratch.flow[d] + this.scratch.flow[cell];
-                    }
-                    r = r - 1;
-                }
-                // Classify hydrographic features: a cell filled well above its real height is a lake;
-                // otherwise a land cell carrying enough flow is a river, drawn toward its downstream cell.
-                float riverThr = cast<float>(this.w) * 0.14;
-                mutable int q = 0;
-                while (q < n) {
-                    int x = q % this.w;
-                    int y = q / this.w;
-                    if (this.scratch.elevation[q] >= this.scratch.sea) {
-                        // THE COAST, which nothing has ever marked.
-                        //
-                        // FLAG_COAST has been declared since the grid was written and set exactly
-                        // nowhere -- four places read it and not one wrote it, so every cell in
-                        // every world answered "no" and the whole coastal half of Ground.Waterside
-                        // was dead alongside it. A harbour could never be sited however badly a town
-                        // wanted one, and no amount of fixing what a port is WORTH was ever going to
-                        // show up, which is two measured arcs spent on the wrong half of the
-                        // question.
-                        //
-                        // It belongs on the LAND side: a quay is built on the shore, and a person
-                        // has to stand where they build. Land whose neighbour is below sea level.
-                        if ((x > 0 && this.scratch.elevation[q - 1] < this.scratch.sea)
-                            || (x + 1 < this.w && this.scratch.elevation[q + 1] < this.scratch.sea)
-                            || (y > 0 && this.scratch.elevation[q - this.w] < this.scratch.sea)
-                            || (y + 1 < this.h && this.scratch.elevation[q + this.w] < this.scratch.sea)) {
-                            g.setCoast(x, y);
-                        }
-                        if (this.scratch.flooded[q] > this.scratch.elevation[q] + 0.005) {
-                            g.setLake(x, y);
-                        } else if (this.scratch.downstream[q] == 0 - 1 && this.scratch.flow[q] > riverThr) {
-                            // A channel whose link was cut for climbing or for running into ice has
-                            // to END somewhere. It ends in a pool -- a proglacial lake at the ice
-                            // margin, or a terminal lake against the ridge it may not climb. Without
-                            // this the river simply stopped in open grass, which reads as broken.
-                            g.setLake(x, y);
-                        } else {
-                            if (this.scratch.downstream[q] != 0 - 1 && this.scratch.flow[q] > riverThr) {
-                                g.setRiver(x, y);
-                                int d = this.scratch.downstream[q];
-                                mutable int gdx = d % this.w - x;
-                                if (gdx > 1) {
-                                    gdx = gdx - this.w;
-                                }
-                                if (gdx < 0 - 1) {
-                                    gdx = gdx + this.w;
-                                }
-                                g.setFlowDir(x, y, gdx, d / this.w - y);
-                            }
-                        }
-                    }
-                    q = q + 1;
-                }
-                delete order;
-            }
-
             public method generate(int w, int h) returns Grid* {
                 // The highland line is written in two units -- 0..1 here, and scaled by ten
                 // thousand where the Grid stores it -- and nine places test one or the other. They
@@ -415,9 +113,6 @@ public bundle Agents {
                 Grid* g = new Grid(w, h) on heap;
                 this.scratch.sizeFor(w, h);  // frees the empty ones, or a previous generate's
 
-                // Elevation is built by the passes, through the interface: Landmass builds the
-                // relief and floods it, then (from the next slice) Tectonics deforms the plate
-                // boundaries it left behind.
                 WorldField* wf = new WorldField(w, h, this.seed) on heap;
                 wf.nContinents = this.nContinents;
                 mutable float land = this.landRatio;
@@ -431,8 +126,8 @@ public bundle Agents {
                 // hardcoded call chain only implied it.
                 //
                 // `name()` on the pass interface still has no caller. It is left alone rather than
-                // deleted because the sequencer this method is going to become is its customer, and
-                // it is named here so the next person knows it is waiting rather than unused.
+                // deleted because a sequencing diagnostic is its customer, and it is named here so
+                // the next person knows it is waiting rather than unused.
                 ElevationPass*[] relief = new ElevationPass*[2]();
                 relief[0] = new Landmass(this.seed) on heap;
                 relief[1] = new Tectonics(this.seed) on heap;
@@ -454,10 +149,17 @@ public bundle Agents {
                 // The flood already placed the coastline at the requested land ratio, so the sea
                 // level is whatever contour it chose -- not a number tuned here.
                 this.scratch.sea = wf.sea;
+
+                // The three stages that turn a height field into a world. Each is handed the same
+                // scratch, and each depends on what the one before it wrote: the hydrology needs
+                // the climate because permanent ice is not a channel, and the classification needs
+                // both because what a cell IS depends on how high, how warm and how wet it is.
                 Climate* climate = new Climate(this.seed, this.octaves, this.baseCells) on heap;
                 climate.apply(g, this.scratch);
                 delete climate;
-                this.hydrology(g);
+                Hydrology* hydrology = new Hydrology() on heap;
+                hydrology.apply(g, this.scratch);
+                delete hydrology;
                 // The hydrology overwrote the water plane as its visited flag -- see Scratch's
                 // header, where that reuse is written down -- so rebuild the distance the
                 // classifier needs. Twenty-four rings rather than the climate's thirty-two,
@@ -467,6 +169,7 @@ public bundle Agents {
                 Classifier* classifier = new Classifier(this.seed) on heap;
                 classifier.apply(g, this.scratch);
                 delete classifier;
+
                 // Content passes: the terrain is settled, and what LIVES on it goes in now.
                 //
                 // Groundcover reads what Flora wrote -- undergrowth is defined by where the trees

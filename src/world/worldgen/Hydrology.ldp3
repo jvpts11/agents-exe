@@ -1,0 +1,341 @@
+import System.IO.Console;
+import Agents.World.Grid;
+program AgentsExe;
+
+// Where the water goes: rivers by steepest descent, lakes where it cannot leave, and the coast.
+//
+// Priority-Flood + epsilon (Barnes et al.): flood inward from the sea through a min-heap, so every
+// land cell gets a monotonic downhill path to the ocean. This fills pits AND resolves flats (a tiny
+// epsilon gradient), and the order in which cells are discovered IS the drainage tree -- each cell
+// drains to the neighbour that reached it -- giving convergent, dendritic rivers with no straight
+// parallel-diagonal artifacts. Filled depressions become lakes.
+//
+// SIX PASSES OVER THE SAME PLANES, and each one exists because the one before it was not enough:
+// the flood discovers, steepest descent fixes the straight diagonals discovery leaves, accumulation
+// measures, capture merges channels running side by side, the ice-and-climb rule cuts links water
+// would not really take, and then accumulation runs AGAIN because cutting a link changes every
+// total downstream of it. Reordering them is not a tidy-up; each one's input is the one before.
+public bundle Agents {
+    public namespace World {
+
+        public class Hydrology {
+            // The epsilon gradient that resolves flats. Small enough not to be terrain, large
+            // enough that descent always has somewhere to go.
+            public static fixed double EPSILON = 0.00001;
+            // A cell filled this far above its real height is holding water: a lake.
+            public static fixed double LAKE_DEPTH = 0.005;
+            // A link that would rise by more than this is climbing, and water does not climb.
+            public static fixed double CLIMB = 0.0005;
+            // How much flow makes a channel a river, as a fraction of the map's width -- so the
+            // threshold scales with the map rather than with a number tuned at one size.
+            public static fixed double RIVER_SHARE = 0.14;
+
+            public constructor Hydrology() {
+            }
+
+            // Permanent ice -- an icecap or a glacier. Not a channel: it is the thing a river
+            // starts BELOW. Snowfield is deliberately excluded, because snowfield melts and a river
+            // may both rise on it and cross it. The tests mirror the classifier's own so the two
+            // agree.
+            private method glaciated(Grid* g, Scratch* s, int x, int y, float e) returns boolean {
+                float t = cast<float>(g.tempAt(x, y)) / 100.0;
+                float m = cast<float>(g.moistAt(x, y)) / 100.0;
+                if (t < 0.05) {
+                    return true;                                  // IceCap: nothing melts
+                }
+                if (t < 0.15 && m >= 0.80) {
+                    return true;                                  // IceCap: wet polar
+                }
+                if (e >= Contour.HIGHLAND) {
+                    if (t < 0.10) {
+                        return true;                              // Glacier
+                    }
+                    if (e >= 0.70 && t < 0.22) {
+                        return true;                              // Glacier
+                    }
+                    if (e >= 0.74 && s.absLat(y) >= 0.52) {
+                        return true;                              // Glacier
+                    }
+                }
+                return false;
+            }
+
+            public method apply(Grid* g, Scratch* s) returns void {
+                int n = s.w * s.h;
+                float eps = Hydrology.EPSILON;
+                // The water plane is free after the climate: reuse it as the visited flag. See
+                // Scratch's header, where that reuse is written down.
+                mutable int i = 0;
+                while (i < n) {
+                    s.water[i] = 0;
+                    s.flooded[i] = s.elevation[i];
+                    s.downstream[i] = 0 - 1;
+                    s.flow[i] = 1.0;
+                    i = i + 1;
+                }
+                // Seed the heap with every sea cell (the outlets, at their true elevation).
+                mutable int c0 = 0;
+                while (c0 < n) {
+                    if (s.elevation[c0] < s.sea) {
+                        s.water[c0] = 1;
+                        s.drain.push(s.elevation[c0], c0);
+                    }
+                    c0 = c0 + 1;
+                }
+                // A fully-land world (no sea) still needs an outlet: seed the single lowest cell.
+                if (s.drain.size() == 0) {
+                    mutable int lo = 0;
+                    mutable int k = 1;
+                    while (k < n) {
+                        if (s.elevation[k] < s.elevation[lo]) {
+                            lo = k;
+                        }
+                        k = k + 1;
+                    }
+                    s.water[lo] = 1;
+                    s.drain.push(s.elevation[lo], lo);
+                }
+                int[] order = new int[n]();   // pop order, for downstream flow accumulation in reverse
+                mutable int oc = 0;
+                while (s.drain.size() > 0) {
+                    int cell = s.drain.topVal();
+                    float cfld = s.drain.topKey();
+                    s.drain.pop();
+                    order[oc] = cell;
+                    oc = oc + 1;
+                    int cx = cell % s.w;
+                    int cy = cell / s.w;
+                    mutable int oy = 0 - 1;
+                    while (oy <= 1) {
+                        mutable int ox = 0 - 1;
+                        while (ox <= 1) {
+                            if (!(ox == 0 && oy == 0)) {
+                                int nyy = cy + oy;
+                                if (nyy >= 0 && nyy < s.h) {
+                                    int j = s.idx(cx + ox, nyy);
+                                    if (s.water[j] == 0) {
+                                        s.water[j] = 1;
+                                        mutable float nf = s.elevation[j];
+                                        if (nf < cfld + eps) {
+                                            nf = cfld + eps;
+                                        }
+                                        s.flooded[j] = nf;
+                                        s.downstream[j] = cell;
+                                        s.drain.push(nf, j);
+                                    }
+                                }
+                            }
+                            ox = ox + 1;
+                        }
+                        oy = oy + 1;
+                    }
+                }
+                // Re-route each land cell to its STEEPEST fld neighbour instead of the discovery
+                // parent: on smooth slopes the flood wavefront sweeps uniformly, so parent links run
+                // in straight parallel diagonals (the "rivers that never connect"). Steepest descent
+                // on the filled surface follows the actual valleys, so tributaries CONVERGE into a
+                // dendritic network -- and fld is pit-free (epsilon), so descent always reaches the
+                // sea. The reverse-fld accumulation order below stays valid for any descending link.
+                mutable int rc = 0;
+                while (rc < n) {
+                    if (s.downstream[rc] != 0 - 1) {
+                        int rcx = rc % s.w;
+                        int rcy = rc / s.w;
+                        mutable float bestF = s.flooded[rc];
+                        mutable int bestJ = 0 - 1;
+                        mutable int ry = 0 - 1;
+                        while (ry <= 1) {
+                            mutable int rx = 0 - 1;
+                            while (rx <= 1) {
+                                if (!(rx == 0 && ry == 0)) {
+                                    int nxx = rcx + rx;
+                                    int nyy = rcy + ry;
+                                    if (nxx >= 0 && nxx < s.w && nyy >= 0 && nyy < s.h) {
+                                        int j = nyy * s.w + nxx;
+                                        if (s.flooded[j] < bestF) {
+                                            bestF = s.flooded[j];
+                                            bestJ = j;
+                                        }
+                                    }
+                                }
+                                rx = rx + 1;
+                            }
+                            ry = ry + 1;
+                        }
+                        if (bestJ != 0 - 1) {
+                            s.downstream[rc] = bestJ;
+                        }
+                    }
+                    rc = rc + 1;
+                }
+                // Flow accumulation: leaves first (reverse discovery order), pushing flow downstream.
+                mutable int r = oc - 1;
+                while (r >= 0) {
+                    int cell = order[r];
+                    int d = s.downstream[cell];
+                    if (d != 0 - 1) {
+                        s.flow[d] = s.flow[d] + s.flow[cell];
+                    }
+                    r = r - 1;
+                }
+                // CHANNEL CAPTURE: a channel running right beside a bigger one gets absorbed by it.
+                // Steepest descent alone can keep two parallel channels one cell apart for long
+                // stretches (and braid ugly knots at junctions); re-aiming every cell at its
+                // largest-flow downhill neighbour merges the minor channel into the major, then the
+                // accumulation is recomputed over the same (still strictly descending) order.
+                mutable int cc = 0;
+                while (cc < n) {
+                    if (s.downstream[cc] != 0 - 1) {
+                        int ccx = cc % s.w;
+                        int ccy = cc / s.w;
+                        mutable float bestFl = 0.0 - 1.0;
+                        mutable int bestJ = 0 - 1;
+                        mutable int cy2 = 0 - 1;
+                        while (cy2 <= 1) {
+                            mutable int cx2 = 0 - 1;
+                            while (cx2 <= 1) {
+                                if (!(cx2 == 0 && cy2 == 0)) {
+                                    int nxx = ccx + cx2;
+                                    int nyy = ccy + cy2;
+                                    if (nxx >= 0 && nxx < s.w && nyy >= 0 && nyy < s.h) {
+                                        int j = nyy * s.w + nxx;
+                                        if (s.flooded[j] < s.flooded[cc] && s.flow[j] > bestFl) {
+                                            bestFl = s.flow[j];
+                                            bestJ = j;
+                                        }
+                                    }
+                                }
+                                cx2 = cx2 + 1;
+                            }
+                            cy2 = cy2 + 1;
+                        }
+                        if (bestJ != 0 - 1) {
+                            s.downstream[cc] = bestJ;
+                        }
+                    }
+                    cc = cc + 1;
+                }
+                // Rivers never climb, and never touch permanent ice. Both were visible in one shot:
+                // a channel rising on an icecap, running clean across it, then going UP a mountain
+                // and back down the far side.
+                //
+                // The pit-filled surface is monotonic by construction, but it is not the real one --
+                // a spill path out of a filled basin crosses the rim, and the rim can be genuinely
+                // higher than the ground the water came from. So the link is re-tested against the
+                // REAL elevation, and a link that would climb is replaced by one that does not, or
+                // cut. Cutting is the right answer, not a failure: the water pools where it stops,
+                // which is what it does in reality, and the cell is already a lake by the fld test.
+                // A link into ice is treated the same way, so the channel routes AROUND a glacier
+                // instead of through it -- and the mountain itself is never touched.
+                mutable int vv = 0;
+                while (vv < n) {
+                    int d0 = s.downstream[vv];
+                    if (d0 != 0 - 1) {
+                        int vx = vv % s.w;
+                        int vy = vv / s.w;
+                        boolean iceHere = this.glaciated(g, s, vx, vy, s.elevation[vv]);
+                        boolean climbs = s.elevation[d0] > s.elevation[vv] + Hydrology.CLIMB;
+                        boolean intoIce = this.glaciated(g, s, d0 % s.w, d0 / s.w, s.elevation[d0]);
+                        if (iceHere) {
+                            s.downstream[vv] = 0 - 1;
+                        } else if (climbs || intoIce) {
+                            mutable float bestE = s.elevation[vv];
+                            mutable int bj = 0 - 1;
+                            mutable int vy2 = 0 - 1;
+                            while (vy2 <= 1) {
+                                mutable int vx2 = 0 - 1;
+                                while (vx2 <= 1) {
+                                    if (!(vx2 == 0 && vy2 == 0)) {
+                                        int nxx = vx + vx2;
+                                        int nyy = vy + vy2;
+                                        if (nxx >= 0 && nxx < s.w && nyy >= 0 && nyy < s.h) {
+                                            int j = nyy * s.w + nxx;
+                                            // still strictly descending on fld, so the accumulation
+                                            // order below stays valid
+                                            if (s.flooded[j] < s.flooded[vv] && s.elevation[j] <= bestE
+                                                && !this.glaciated(g, s, nxx, nyy, s.elevation[j])) {
+                                                bestE = s.elevation[j];
+                                                bj = j;
+                                            }
+                                        }
+                                    }
+                                    vx2 = vx2 + 1;
+                                }
+                                vy2 = vy2 + 1;
+                            }
+                            s.downstream[vv] = bj;
+                        }
+                    }
+                    vv = vv + 1;
+                }
+                mutable int z = 0;
+                while (z < n) {
+                    s.flow[z] = 1.0;
+                    z = z + 1;
+                }
+                r = oc - 1;
+                while (r >= 0) {
+                    int cell = order[r];
+                    int d = s.downstream[cell];
+                    if (d != 0 - 1) {
+                        s.flow[d] = s.flow[d] + s.flow[cell];
+                    }
+                    r = r - 1;
+                }
+                // Classify hydrographic features: a cell filled well above its real height is a lake;
+                // otherwise a land cell carrying enough flow is a river, drawn toward its downstream cell.
+                float riverThr = cast<float>(s.w) * Hydrology.RIVER_SHARE;
+                mutable int q = 0;
+                while (q < n) {
+                    int x = q % s.w;
+                    int y = q / s.w;
+                    if (s.elevation[q] >= s.sea) {
+                        // THE COAST, which nothing had ever marked.
+                        //
+                        // The coast flag was declared when the grid was written and set exactly
+                        // nowhere -- four places read it and not one wrote it, so every cell in
+                        // every world answered "no" and the whole coastal half of Ground.Waterside
+                        // was dead alongside it. A harbour could never be sited however badly a town
+                        // wanted one, and no amount of fixing what a port is WORTH was ever going to
+                        // show up, which is two measured arcs spent on the wrong half of the
+                        // question.
+                        //
+                        // It belongs on the LAND side: a quay is built on the shore, and a person
+                        // has to stand where they build. Land whose neighbour is below sea level.
+                        if ((x > 0 && s.elevation[q - 1] < s.sea)
+                            || (x + 1 < s.w && s.elevation[q + 1] < s.sea)
+                            || (y > 0 && s.elevation[q - s.w] < s.sea)
+                            || (y + 1 < s.h && s.elevation[q + s.w] < s.sea)) {
+                            g.setCoast(x, y);
+                        }
+                        if (s.flooded[q] > s.elevation[q] + Hydrology.LAKE_DEPTH) {
+                            g.setLake(x, y);
+                        } else if (s.downstream[q] == 0 - 1 && s.flow[q] > riverThr) {
+                            // A channel whose link was cut for climbing or for running into ice has
+                            // to END somewhere. It ends in a pool -- a proglacial lake at the ice
+                            // margin, or a terminal lake against the ridge it may not climb. Without
+                            // this the river simply stopped in open grass, which reads as broken.
+                            g.setLake(x, y);
+                        } else {
+                            if (s.downstream[q] != 0 - 1 && s.flow[q] > riverThr) {
+                                g.setRiver(x, y);
+                                int d = s.downstream[q];
+                                mutable int gdx = d % s.w - x;
+                                if (gdx > 1) {
+                                    gdx = gdx - s.w;
+                                }
+                                if (gdx < 0 - 1) {
+                                    gdx = gdx + s.w;
+                                }
+                                g.setFlowDir(x, y, gdx, d / s.w - y);
+                            }
+                        }
+                    }
+                    q = q + 1;
+                }
+                delete order;
+                return;
+            }
+        }
+    }
+}
