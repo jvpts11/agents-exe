@@ -1,0 +1,108 @@
+import System.IO.Console;
+program AgentsExe;
+
+// The scratch shared by the generation passes: dimensions, parameters and the elevation field.
+// Owned by WorldGen for the duration of generate().
+public bundle Agents {
+    public namespace World {
+
+        public class WorldField {
+            public mutable int w;
+            public mutable int h;
+            public mutable int seed;
+            public mutable int nContinents;
+            public mutable float landRatio;
+            public mutable float sea;
+            public mutable float[] eb;
+
+            // The plate partition, filled in by Landmass and read by Tectonics. It lives on the
+            // COARSE grid (pw x ph): boundary physics works at the scale of a plate margin, and a
+            // full-resolution copy would cost 15 MB to say the same thing.
+            public mutable int pw;
+            public mutable int ph;
+            public mutable int nPlates;
+            public mutable int[] plate;      // pw*ph -> plate id
+            public mutable int[] pkind;      // 0 oceanic, 1 craton, 2 island craton
+            public mutable int[] pcont;      // continent id, or -1
+            public mutable float[] pmx;      // plate drift, unit vector
+            public mutable float[] pmy;
+            public mutable byte[] vent;      // full res: 1 where Tectonics put a volcano
+            // Where the crust came from, published by Tectonics and read by the ore pass. Placing
+            // metals by biome would be arbitrary; placing them by the boundary that made the rock is
+            // what the real world does, and the classification already exists -- it was simply
+            // thrown away once the relief had been applied.
+            public mutable byte[] borigin;   // coarse: kind of the nearest boundary (Tectonics.B_*)
+            public mutable float[] bnear;    // coarse: 0 far from it, 1 on it
+
+            public constructor WorldField(int w, int h, int seed) {
+                this.w = w;
+                this.h = h;
+                this.seed = seed;
+                this.nContinents = 6;
+                this.landRatio = 0.0 - 1.0;
+                this.sea = 0.42;
+                this.eb = new float[w * h]();
+                this.pw = 1;
+                this.ph = 1;
+                this.nPlates = 0;
+                this.plate = new int[1]();
+                this.pkind = new int[1]();
+                this.pcont = new int[1]();
+                this.pmx = new float[1]();
+                this.pmy = new float[1]();
+                this.vent = new byte[w * h]();
+                this.borigin = new byte[1]();
+                this.bnear = new float[1]();
+            }
+
+            public destructor ~WorldField() returns void {
+                delete this.eb;
+                delete this.plate;
+                delete this.pkind;
+                delete this.pcont;
+                delete this.pmx;
+                delete this.pmy;
+                delete this.vent;
+                delete this.borigin;
+                delete this.bnear;
+            }
+
+            // Plate id at a FULL-resolution cell.
+            public method plateAt(int x, int y) returns int {
+                mutable int gx = x * this.pw / this.w;
+                mutable int gy = y * this.ph / this.h;
+                if (gx >= this.pw) {
+                    gx = this.pw - 1;
+                }
+                if (gy >= this.ph) {
+                    gy = this.ph - 1;
+                }
+                if (gx < 0) {
+                    gx = 0;
+                }
+                if (gy < 0) {
+                    gy = 0;
+                }
+                return this.plate[gy * this.pw + gx];
+            }
+
+            public method idx(int x, int y) returns int {
+                mutable int xx = x;
+                if (xx < 0) {
+                    xx = 0;
+                }
+                if (xx >= this.w) {
+                    xx = this.w - 1;
+                }
+                mutable int yy = y;
+                if (yy < 0) {
+                    yy = 0;
+                }
+                if (yy >= this.h) {
+                    yy = this.h - 1;
+                }
+                return yy * this.w + xx;
+            }
+        }
+    }
+}

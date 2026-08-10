@@ -1,0 +1,130 @@
+import System.IO.Console;
+program AgentsExe;
+
+// Scalar maths the worldgen stages share. Kept as statics so Landmass and Tectonics use ONE
+// implementation: two divergent noise functions would silently desynchronise the coastline from
+// the climate that is sampled over it.
+//
+// EVERY ARITHMETIC SEQUENCE IN THIS FILE IS FROZEN. These are not "slow versions of Math.*" waiting
+// to be replaced -- the intrinsics return double, and every downstream float in the world would
+// move if they were used. Sixteen Newton iterations, a seven-term sine, exp by range reduction over
+// sixty-four: the world that exists is the world these produce, digit for digit. Changing an
+// iteration count or reassociating a term here does not make a faster world, it makes a different
+// one.
+public bundle Agents {
+    public namespace World {
+
+        public class LandMath {
+            public static method sqrt(float v) returns float {
+                if (v <= 0.0) {
+                    return 0.0;
+                }
+                mutable float g = v;
+                mutable int i = 0;
+                while (i < 16) {
+                    g = 0.5 * (g + v / g);
+                    i = i + 1;
+                }
+                return g;
+            }
+
+            public static method sin(float x) returns float {
+                mutable float t = x;
+                float pi = 3.14159265;
+                float two = 2.0 * pi;
+                while (t > pi) {
+                    t = t - two;
+                }
+                while (t < 0.0 - pi) {
+                    t = t + two;
+                }
+                float t2 = t * t;
+                return t - t * t2 / 6.0 + t * t2 * t2 / 120.0 - t * t2 * t2 * t2 / 5040.0;
+            }
+
+            public static method cos(float x) returns float {
+                return LandMath.sin(x + 1.5707963);
+            }
+
+            // exp by range reduction: exp(x) = exp(x/64)^64, with a 4-term Taylor on the small
+            // argument. Accurate enough for the crest profile and cheap.
+            public static method exp(float x) returns float {
+                mutable boolean negative = false;
+                mutable float v = x;
+                if (v < 0.0) {
+                    v = 0.0 - v;
+                    negative = true;
+                }
+                if (v > 40.0) {
+                    v = 40.0;
+                }
+                float t = v / 64.0;
+                mutable float e = 1.0 + t + t * t * 0.5 + t * t * t / 6.0 + t * t * t * t / 24.0;
+                mutable int i = 0;
+                while (i < 6) {
+                    e = e * e;
+                    i = i + 1;
+                }
+                if (negative) {
+                    return 1.0 / e;
+                }
+                return e;
+            }
+
+            public static method hash01(int seed, int xi, int yi) returns float {
+                mutable int n = xi * 374761393;
+                n = n + yi * 668265263;
+                n = n + seed * 1442695041;
+                n = n ^ (n >> 13);
+                n = n * 1274126177;
+                n = n ^ (n >> 16);
+                int m = n & 2147483647;
+                return cast<float>(m) / 2147483647.0;
+            }
+
+            private static method smooth(float t) returns float {
+                return t * t * (3.0 - 2.0 * t);
+            }
+
+            public static method vnoise(int seed, float fx, float fy, int period) returns float {
+                mutable int p = period;
+                if (p < 1) {
+                    p = 1;
+                }
+                int x0 = cast<int>(fx);
+                int y0 = cast<int>(fy);
+                float tx = fx - cast<float>(x0);
+                float ty = fy - cast<float>(y0);
+                int x0w = x0 % p;
+                int x1w = (x0 + 1) % p;
+                float sx = LandMath.smooth(tx);
+                float sy = LandMath.smooth(ty);
+                float a = LandMath.hash01(seed, x0w, y0);
+                float b = LandMath.hash01(seed, x1w, y0);
+                float c = LandMath.hash01(seed, x0w, y0 + 1);
+                float d = LandMath.hash01(seed, x1w, y0 + 1);
+                float ab = a + (b - a) * sx;
+                float cd = c + (d - c) * sx;
+                return ab + (cd - ab) * sy;
+            }
+
+            // multi-octave value noise over normalized coordinates
+            public static method fbm(int seed, float nx, float ny, int cells, int octaves) returns float {
+                mutable float sum = 0.0;
+                mutable float amp = 1.0;
+                mutable float tot = 0.0;
+                mutable int c = cells;
+                mutable int o = 0;
+                while (o < octaves) {
+                    float v = LandMath.vnoise(seed, nx * cast<float>(c), ny * cast<float>(c), c);
+                    sum = sum + v * amp;
+                    tot = tot + amp;
+                    amp = amp * 0.5;
+                    c = c * 2;
+                    o = o + 1;
+                }
+                return sum / tot;
+            }
+        }
+    }
+}
