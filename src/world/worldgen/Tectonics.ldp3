@@ -31,9 +31,8 @@ public bundle Agents {
             private mutable int[] bpair;        // coarse: which boundary that is, or -1
             private mutable float[] pcx;        // plate centroids, coarse coords
             private mutable float[] pcy;
-            private mutable int[] bkind;        // per pair
-            private mutable float[] bstr;       // per pair: |convergence|, 0..1
-            private mutable int[] bover;        // per pair: the plate that rides OVER the other
+            // The dense pair matrix: kind, strength and which plate rides over, per pair.
+            private mutable PlatePair[] pairs;
             private mutable float[] def;        // full res: + uplift, - depression, before scaling
             private mutable byte[] arcMask;     // full res: 1 on an island arc, which MAY breach
             private mutable float mountainShare;
@@ -58,9 +57,7 @@ public bundle Agents {
                 this.bpair = new int[1]();
                 this.pcx = new float[1]();
                 this.pcy = new float[1]();
-                this.bkind = new int[1]();
-                this.bstr = new float[1]();
-                this.bover = new int[1]();
+                this.pairs = new PlatePair[1]();
                 this.def = new float[1]();
                 this.arcMask = new byte[1]();
                 this.cdef = new float[1]();
@@ -76,9 +73,7 @@ public bundle Agents {
                 delete this.bpair;
                 delete this.pcx;
                 delete this.pcy;
-                delete this.bkind;
-                delete this.bstr;
-                delete this.bover;
+                delete this.pairs;
                 delete this.def;
                 delete this.arcMask;
                 delete this.cdef;
@@ -102,9 +97,7 @@ public bundle Agents {
                 delete this.bpair;
                 delete this.pcx;
                 delete this.pcy;
-                delete this.bkind;
-                delete this.bstr;
-                delete this.bover;
+                delete this.pairs;
                 delete this.def;
                 delete this.arcMask;
                 delete this.cdef;
@@ -115,9 +108,7 @@ public bundle Agents {
                 this.pcx = new float[this.nPlates]();
                 this.pcy = new float[this.nPlates]();
                 int np2 = this.nPlates * this.nPlates;
-                this.bkind = new int[np2]();
-                this.bstr = new float[np2]();
-                this.bover = new int[np2]();
+                this.pairs = new PlatePair[np2]();
                 this.def = new float[f.w * f.h]();
                 this.arcMask = new byte[f.w * f.h]();
                 this.cdef = new float[pn]();
@@ -286,28 +277,28 @@ public bundle Agents {
                             if (s > 1.0) {
                                 s = 1.0;
                             }
-                            this.bstr[p] = s;
-                            this.bover[p] = a;
+                            this.pairs[p].strength = s;
+                            this.pairs[p].over = a;
                             if (conv > 0.15) {
                                 if (contA && contB) {
-                                    this.bkind[p] = cast<int>(BoundaryKind.Collision);
+                                    this.pairs[p].kind = cast<int>(BoundaryKind.Collision);
                                 } else if (contA || contB) {
-                                    this.bkind[p] = cast<int>(BoundaryKind.Subduction);
+                                    this.pairs[p].kind = cast<int>(BoundaryKind.Subduction);
                                     // the continental plate always rides over the oceanic one
                                     if (contB) {
-                                        this.bover[p] = b;
+                                        this.pairs[p].over = b;
                                     }
                                 } else {
-                                    this.bkind[p] = cast<int>(BoundaryKind.IslandArc);
+                                    this.pairs[p].kind = cast<int>(BoundaryKind.IslandArc);
                                 }
                             } else if (conv < 0.0 - 0.15) {
                                 if (contA || contB) {
-                                    this.bkind[p] = cast<int>(BoundaryKind.Rift);
+                                    this.pairs[p].kind = cast<int>(BoundaryKind.Rift);
                                 } else {
-                                    this.bkind[p] = cast<int>(BoundaryKind.Ridge);
+                                    this.pairs[p].kind = cast<int>(BoundaryKind.Ridge);
                                 }
                             } else {
-                                this.bkind[p] = cast<int>(BoundaryKind.None);
+                                this.pairs[p].kind = cast<int>(BoundaryKind.None);
                             }
                         }
                         b = b + 1;
@@ -375,7 +366,7 @@ public bundle Agents {
                     this.cisl[i] = 0.0;
                     int pair = this.bpair[i];
                     if (pair >= 0) {
-                        int kind = this.bkind[pair];
+                        int kind = this.pairs[pair].kind;
                         if (kind != cast<int>(BoundaryKind.None)) {
                             float nx = cast<float>(i % this.pw) / cast<float>(this.pw);
                             float ny = cast<float>(i / this.pw) / cast<float>(this.ph);
@@ -386,7 +377,7 @@ public bundle Agents {
                             float wob = LandMath.fbm(this.seed ^ 0x39A1, nx, ny, 17, 4) - 0.5;
                             float d = this.bdist[i] + wob * 3.4;
                             int self = f.plate[i];
-                            float str = this.bstr[pair];
+                            float str = this.pairs[pair].strength;
                             mutable float v = 0.0;
                             mutable float arc = 0.0;
                             if (kind == cast<int>(BoundaryKind.Collision)) {
@@ -394,7 +385,7 @@ public bundle Agents {
                                 // straddling the suture, no trench and no volcanoes
                                 v = str * this.crest(d, 0.0, 6.5);
                             } else if (kind == cast<int>(BoundaryKind.Subduction)) {
-                                if (self == this.bover[pair]) {
+                                if (self == this.pairs[pair].over) {
                                     // overriding continent: coastal range, then the volcanic arc
                                     // further inland -- the Andes and their volcanoes
                                     v = str * (this.crest(d, 2.0, 3.2) * 0.95);
@@ -405,7 +396,7 @@ public bundle Agents {
                                     v = 0.0 - str * this.crest(d, 3.0, 2.2);
                                 }
                             } else if (kind == cast<int>(BoundaryKind.IslandArc)) {
-                                if (self == this.bover[pair]) {
+                                if (self == this.pairs[pair].over) {
                                     // BEADS, not a crest. An arc that breaches along its whole
                                     // length is a causeway: it reaches a continent at each end and
                                     // welds them, and the biggest landmass went from 24% to 38% of
@@ -449,7 +440,7 @@ public bundle Agents {
                     if (pair < 0) {
                         continue;
                     }
-                    f.borigin[i] = cast<byte>(this.bkind[pair]);
+                    f.borigin[i] = cast<byte>(this.pairs[pair].kind);
                     // bdist is in coarse cells along the cost graph; a boundary's influence on the
                     // rock reaches about as far as its relief does.
                     mutable float near = 1.0 - this.bdist[i] / 12.0;
