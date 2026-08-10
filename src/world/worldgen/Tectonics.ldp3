@@ -18,13 +18,6 @@ public bundle Agents {
     public namespace World {
 
         public class Tectonics implements ElevationPass {
-            public static int B_NONE = 0;
-            public static int B_COLLISION = 1;      // continent meets continent: Himalaya
-            public static int B_SUBDUCTION = 2;     // ocean dives under continent: Andes + trench
-            public static int B_ISLANDARC = 3;      // ocean meets ocean: arc + trench
-            public static int B_RIFT = 4;           // continent pulls apart: valley with shoulders
-            public static int B_RIDGE = 5;          // sea floor spreads: mid-ocean ridge
-
             // Ordinary land ends at 0.62 and the mountain family owns 0.63..1.0, so this is the
             // whole headroom an uplift of 1.0 is allowed to use.
             public static float BAND = 0.42;
@@ -282,9 +275,10 @@ public bundle Agents {
                             float ux = lx / len;
                             float uy = ly / len;
                             float conv = (f.pmx[a] - f.pmx[b]) * ux + (f.pmy[a] - f.pmy[b]) * uy;
-                            // island crust is thin: for boundary physics it behaves like ocean floor
-                            boolean contA = f.pkind[a] == 1;
-                            boolean contB = f.pkind[b] == 1;
+                            // island crust is thin: for boundary physics it behaves like ocean floor,
+                            // which is why this asks for Craton and not "not Oceanic"
+                            boolean contA = f.pkind[a] == cast<int>(PlateKind.Craton);
+                            boolean contB = f.pkind[b] == cast<int>(PlateKind.Craton);
                             mutable float s = conv;
                             if (s < 0.0) {
                                 s = 0.0 - s;
@@ -296,24 +290,24 @@ public bundle Agents {
                             this.bover[p] = a;
                             if (conv > 0.15) {
                                 if (contA && contB) {
-                                    this.bkind[p] = Tectonics.B_COLLISION;
+                                    this.bkind[p] = cast<int>(BoundaryKind.Collision);
                                 } else if (contA || contB) {
-                                    this.bkind[p] = Tectonics.B_SUBDUCTION;
+                                    this.bkind[p] = cast<int>(BoundaryKind.Subduction);
                                     // the continental plate always rides over the oceanic one
                                     if (contB) {
                                         this.bover[p] = b;
                                     }
                                 } else {
-                                    this.bkind[p] = Tectonics.B_ISLANDARC;
+                                    this.bkind[p] = cast<int>(BoundaryKind.IslandArc);
                                 }
                             } else if (conv < 0.0 - 0.15) {
                                 if (contA || contB) {
-                                    this.bkind[p] = Tectonics.B_RIFT;
+                                    this.bkind[p] = cast<int>(BoundaryKind.Rift);
                                 } else {
-                                    this.bkind[p] = Tectonics.B_RIDGE;
+                                    this.bkind[p] = cast<int>(BoundaryKind.Ridge);
                                 }
                             } else {
-                                this.bkind[p] = Tectonics.B_NONE;
+                                this.bkind[p] = cast<int>(BoundaryKind.None);
                             }
                         }
                         b = b + 1;
@@ -382,7 +376,7 @@ public bundle Agents {
                     int pair = this.bpair[i];
                     if (pair >= 0) {
                         int kind = this.bkind[pair];
-                        if (kind != Tectonics.B_NONE) {
+                        if (kind != cast<int>(BoundaryKind.None)) {
                             float nx = cast<float>(i % this.pw) / cast<float>(this.pw);
                             float ny = cast<float>(i / this.pw) / cast<float>(this.ph);
                             // Noise on the DISTANCE: it makes a range wander, fork and vary in
@@ -395,11 +389,11 @@ public bundle Agents {
                             float str = this.bstr[pair];
                             mutable float v = 0.0;
                             mutable float arc = 0.0;
-                            if (kind == Tectonics.B_COLLISION) {
+                            if (kind == cast<int>(BoundaryKind.Collision)) {
                                 // two continents pile into each other: one broad high belt
                                 // straddling the suture, no trench and no volcanoes
                                 v = str * this.crest(d, 0.0, 6.5);
-                            } else if (kind == Tectonics.B_SUBDUCTION) {
+                            } else if (kind == cast<int>(BoundaryKind.Subduction)) {
                                 if (self == this.bover[pair]) {
                                     // overriding continent: coastal range, then the volcanic arc
                                     // further inland -- the Andes and their volcanoes
@@ -410,7 +404,7 @@ public bundle Agents {
                                     // the descending slab drags the sea floor down
                                     v = 0.0 - str * this.crest(d, 3.0, 2.2);
                                 }
-                            } else if (kind == Tectonics.B_ISLANDARC) {
+                            } else if (kind == cast<int>(BoundaryKind.IslandArc)) {
                                 if (self == this.bover[pair]) {
                                     // BEADS, not a crest. An arc that breaches along its whole
                                     // length is a causeway: it reaches a continent at each end and
@@ -423,7 +417,7 @@ public bundle Agents {
                                 } else {
                                     v = 0.0 - str * this.crest(d, 3.0, 2.0);
                                 }
-                            } else if (kind == Tectonics.B_RIFT) {
+                            } else if (kind == cast<int>(BoundaryKind.Rift)) {
                                 // the floor drops between two raised shoulders
                                 v = str * this.crest(d, 5.0, 2.2) * 0.55
                                     - str * this.crest(d, 0.0, 2.0) * 0.70;
