@@ -767,12 +767,20 @@ public bundle Agents {
                     land = this.defaultLand(this.worldType);
                 }
                 wf.landRatio = land;
-                Landmass* landPass = new Landmass(this.seed) on heap;
-                mutable ElevationPass* pass = landPass;
-                pass.apply(wf);
-                Tectonics* tecPass = new Tectonics(this.seed) on heap;
-                pass = tecPass;
-                pass.apply(wf);
+                // THE PIPELINE IS A LIST, and being a list is the point: the order of these two is
+                // a real dependency -- Landmass builds the relief, floods it, and leaves behind the
+                // plate partition that Tectonics then deforms -- and a list says so where a
+                // hardcoded call chain only implied it.
+                //
+                // `name()` on the pass interface still has no caller. It is left alone rather than
+                // deleted because the sequencer this method is going to become is its customer, and
+                // it is named here so the next person knows it is waiting rather than unused.
+                ElevationPass*[] relief = new ElevationPass*[2]();
+                relief[0] = new Landmass(this.seed) on heap;
+                relief[1] = new Tectonics(this.seed) on heap;
+                for (int r in 0..relief.length()) {
+                    relief[r].apply(wf);
+                }
                 mutable int ci = 0;
                 while (ci < n) {
                     this.eb[ci] = wf.eb[ci];
@@ -795,27 +803,31 @@ public bundle Agents {
                 this.distToWater(24);
                 this.classifyAll(g);
                 // Content passes: the terrain is settled, and what LIVES on it goes in now.
-                Flora* floraPass = new Flora(this.seed) on heap;
-                mutable WorldPass* content = floraPass;
-                content.apply(g, wf);
+                //
                 // Groundcover reads what Flora wrote -- undergrowth is defined by where the trees
-                // are -- so the order here is a real dependency, not a preference.
-                Groundcover* coverPass = new Groundcover(this.seed) on heap;
-                content = coverPass;
-                content.apply(g, wf);
-                Deposits* orePass = new Deposits(this.seed) on heap;
-                content = orePass;
-                content.apply(g, wf);
+                // are -- so this order is a real dependency and not a preference either. Deposits
+                // goes last because it is the only one that writes UNDER the ground and wants the
+                // surface settled first.
+                WorldPass*[] content = new WorldPass*[3]();
+                content[0] = new Flora(this.seed) on heap;
+                content[1] = new Groundcover(this.seed) on heap;
+                content[2] = new Deposits(this.seed) on heap;
+                for (int c in 0..content.length()) {
+                    content[c].apply(g, wf);
+                }
                 // Every pass appended in whatever order suited it; sort the surface nodes into cell
                 // order once, now that they are all in, so the renderer can walk a row of them in
                 // step with its own loop.
                 g.surface().finish();
 
-                delete orePass;
-                delete coverPass;
-                delete floraPass;
-                delete landPass;
-                delete tecPass;
+                for (int c in 0..content.length()) {
+                    delete content[c];
+                }
+                delete content;
+                for (int r in 0..relief.length()) {
+                    delete relief[r];
+                }
+                delete relief;
                 delete wf;
                 // Back to owning seven empty arrays rather than seven freed ones: the state after
                 // generating is the state before it, which is what makes the destructor safe.
