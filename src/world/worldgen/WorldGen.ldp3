@@ -22,7 +22,6 @@ public bundle Agents {
             private mutable int seed;
             private mutable int octaves;
             private mutable int baseCells;
-            private mutable float sea;          // sea level in [0,1] -- the flood contour Landmass reports
             private mutable int worldType;      // 0 Continents, 1 Pangaea, 2 Archipelago, 3 InlandSeas
             private mutable float landRatio;    // fraction of the map that is land; < 0 = use world default
             private mutable int nContinents;    // Continental mode: number of continents; <= 0 = auto by aspect
@@ -30,62 +29,32 @@ public bundle Agents {
             private mutable int w;
             private mutable int h;
 
-            // scratch (allocated in generate, freed at the end)
-            private mutable float[] eb;         // elevation 0..1
-            private mutable int[] wtr;          // ring distance to water
-            private mutable int[] dn;           // downstream cell index, or -1
-            private mutable float[] fl;         // flow accumulation
-            private mutable float[] fld;        // pit/flat-filled elevation (priority-flood)
-            // The Priority-Flood's frontier. Its tie order IS the river network, which is why it
-            // is a named type and not the same min-heap the plate growth uses.
-            private mutable DrainHeap* drain;
+            // The working state of one generation: the planes the stages hand between them, the
+            // flood's frontier, and the coordinate questions all of them ask. Sized in `generate`
+            // and emptied again at the end.
+            private mutable Scratch* scratch;
 
             public constructor WorldGen(int seed) {
                 this.seed = seed;
                 this.octaves = 6;
                 this.baseCells = 3;
-                this.sea = 0.42;
                 this.worldType = 0;
                 this.landRatio = 0.0 - 1.0;
                 this.nContinents = 0;
                 // THE SCRATCH IS OWNED FROM THE FIRST MOMENT, EMPTY.
                 //
-                // These were left unassigned until `generate` ran, on the grounds that nothing reads
-                // them before then. A new object's storage is whatever was last there, so they did
-                // not start empty -- they started WRONG, and `generate` ends by deleting them, so a
-                // WorldGen that never generated held seven pointers into somebody else's memory. The
-                // compiler names this now; it is right to.
+                // Its planes were left unassigned until `generate` ran, on the grounds that nothing
+                // reads them before then. A new object's storage is whatever was last there, so
+                // they did not start empty -- they started WRONG, and `generate` ends by deleting
+                // them, so a WorldGen that never generated held pointers into somebody else's
+                // memory. It owns a valid empty Scratch from the first moment instead.
                 this.w = 0;
                 this.h = 0;
-                this.emptyScratch();
-            }
-
-            // Five zero-length arrays and an empty heap: the object always owns something valid, so
-            // there is no state in which a delete is a guess. The heap gets capacity one rather
-            // than zero because a heap that cannot hold anything is not a valid empty heap -- it is
-            // one whose first push writes past the end.
-            private method emptyScratch() returns void {
-                this.eb = new float[0]();
-                this.wtr = new int[0]();
-                this.dn = new int[0]();
-                this.fl = new float[0]();
-                this.fld = new float[0]();
-                this.drain = new DrainHeap(1) on heap;
-                return;
-            }
-
-            private method freeScratch() returns void {
-                delete this.eb;
-                delete this.wtr;
-                delete this.dn;
-                delete this.fl;
-                delete this.fld;
-                delete this.drain;
-                return;
+                this.scratch = new Scratch() on heap;
             }
 
             public destructor ~WorldGen() returns void {
-                this.freeScratch();
+                delete this.scratch;
                 return;
             }
 
@@ -138,25 +107,6 @@ public bundle Agents {
                 return LandMath.fbm(this.seed, nx, ny, this.baseCells + salt, this.octaves);
             }
 
-            // scratch index with X wrap, Y clamp (parallel to Grid layout)
-            private method sidx(int x, int y) returns int {
-                mutable int xx = x;
-                if (xx < 0) {
-                    xx = 0;
-                }
-                if (xx >= this.w) {
-                    xx = this.w - 1;
-                }
-                mutable int yy = y;
-                if (yy < 0) {
-                    yy = 0;
-                }
-                if (yy >= this.h) {
-                    yy = this.h - 1;
-                }
-                return yy * this.w + xx;
-            }
-
             // ---- pass 4: climate (temperature, moisture with belts + coastal bonus) ----
             private method belt(float alat) returns float {
                 if (alat < 0.12) {
@@ -174,72 +124,26 @@ public bundle Agents {
                 return 0.70 - 0.50 * t;
             }
 
-            private method absLat(int y) returns float {
-                float ny = cast<float>(y) / cast<float>(this.h - 1);
-                mutable float d = 2.0 * ny - 1.0;
-                if (d < 0.0) {
-                    d = 0.0 - d;
-                }
-                return d;
-            }
-
-            // ring distance to the nearest water cell (approximate, K dilation passes)
-            private method distToWater(int rings) returns void {
-                mutable int i = 0;
-                int n = this.w * this.h;
-                while (i < n) {
-                    if (this.eb[i] < this.sea) {
-                        this.wtr[i] = 0;
-                    } else {
-                        this.wtr[i] = 9999;
-                    }
-                    i = i + 1;
-                }
-                mutable int p = 0;
-                while (p < rings) {
-                    mutable int y = 0;
-                    while (y < this.h) {
-                        mutable int x = 0;
-                        while (x < this.w) {
-                            int idx = y * this.w + x;
-                            mutable int m = this.wtr[idx];
-                            int a = this.wtr[this.sidx(x - 1, y)] + 1;
-                            int b = this.wtr[this.sidx(x + 1, y)] + 1;
-                            int c = this.wtr[this.sidx(x, y - 1)] + 1;
-                            int e = this.wtr[this.sidx(x, y + 1)] + 1;
-                            if (a < m) { m = a; }
-                            if (b < m) { m = b; }
-                            if (c < m) { m = c; }
-                            if (e < m) { m = e; }
-                            this.wtr[idx] = m;
-                            x = x + 1;
-                        }
-                        y = y + 1;
-                    }
-                    p = p + 1;
-                }
-            }
-
             private method climate(Grid* g) returns void {
                 // 32 rings: how far ocean moisture reaches inland. 8 cells on a 2560-wide map died
                 // inside the beach band, so no m>=0.8 biome (rainforest/wetland/ice cap) ever formed;
                 // 32 gives real coastal climate bands with a continental dry interior.
                 int rings = 32;
-                this.distToWater(rings);
+                this.scratch.distanceToWater(rings);
                 mutable int y = 0;
                 while (y < this.h) {
-                    float alat = this.absLat(y);
+                    float alat = this.scratch.absLat(y);
                     float latBand = 1.0 - alat;
                     float beltM = this.belt(alat);
                     mutable int x = 0;
                     while (x < this.w) {
                         int i = y * this.w + x;
-                        float e = this.eb[i];
+                        float e = this.scratch.elevation[i];
                         mutable float lapse = 0.0;
-                        if (e > this.sea) {
+                        if (e > this.scratch.sea) {
                             // 0.75: high ground cools into rock/glacier/meadow bands without
                             // freezing whole continents (0.9 froze everything above e~0.70)
-                            lapse = 0.75 * (e - this.sea);
+                            lapse = 0.75 * (e - this.scratch.sea);
                         }
                         float tnoise = (this.fbm(x, y, 17) - 0.5) * 0.14;   // wavy climate bands, not straight lines
                         mutable float t = latBand - lapse + tnoise;
@@ -247,8 +151,8 @@ public bundle Agents {
                         if (t > 1.0) { t = 1.0; }
                         float mn = this.fbm(x, y, 37);
                         mutable float coast = 0.0;
-                        if (this.wtr[i] < rings) {
-                            coast = 1.0 - cast<float>(this.wtr[i]) / cast<float>(rings);
+                        if (this.scratch.water[i] < rings) {
+                            coast = 1.0 - cast<float>(this.scratch.water[i]) / cast<float>(rings);
                         }
                         // coast-heavy blend: oceans are where moisture comes from -- the top decile
                         // (rainforests, wetlands, ice caps) forms along wet coasts and fades inland
@@ -293,7 +197,7 @@ public bundle Agents {
                     if (e >= 0.70 && t < 0.22) {
                         return true;                              // Glacier
                     }
-                    if (e >= 0.74 && this.absLat(y) >= 0.52) {
+                    if (e >= 0.74 && this.scratch.absLat(y) >= 0.52) {
                         return true;                              // Glacier
                     }
                 }
@@ -306,40 +210,40 @@ public bundle Agents {
                 // wtr is free after climate(): reuse it as the visited flag.
                 mutable int i = 0;
                 while (i < n) {
-                    this.wtr[i] = 0;
-                    this.fld[i] = this.eb[i];
-                    this.dn[i] = 0 - 1;
-                    this.fl[i] = 1.0;
+                    this.scratch.water[i] = 0;
+                    this.scratch.flooded[i] = this.scratch.elevation[i];
+                    this.scratch.downstream[i] = 0 - 1;
+                    this.scratch.flow[i] = 1.0;
                     i = i + 1;
                 }
                 // Seed the heap with every sea cell (the outlets, at their true elevation).
                 mutable int s = 0;
                 while (s < n) {
-                    if (this.eb[s] < this.sea) {
-                        this.wtr[s] = 1;
-                        this.drain.push(this.eb[s], s);
+                    if (this.scratch.elevation[s] < this.scratch.sea) {
+                        this.scratch.water[s] = 1;
+                        this.scratch.drain.push(this.scratch.elevation[s], s);
                     }
                     s = s + 1;
                 }
                 // A fully-land world (no sea) still needs an outlet: seed the single lowest cell.
-                if (this.drain.size() == 0) {
+                if (this.scratch.drain.size() == 0) {
                     mutable int lo = 0;
                     mutable int k = 1;
                     while (k < n) {
-                        if (this.eb[k] < this.eb[lo]) {
+                        if (this.scratch.elevation[k] < this.scratch.elevation[lo]) {
                             lo = k;
                         }
                         k = k + 1;
                     }
-                    this.wtr[lo] = 1;
-                    this.drain.push(this.eb[lo], lo);
+                    this.scratch.water[lo] = 1;
+                    this.scratch.drain.push(this.scratch.elevation[lo], lo);
                 }
                 int[] order = new int[n]();   // pop order, for downstream flow accumulation in reverse
                 mutable int oc = 0;
-                while (this.drain.size() > 0) {
-                    int cell = this.drain.topVal();
-                    float cfld = this.drain.topKey();
-                    this.drain.pop();
+                while (this.scratch.drain.size() > 0) {
+                    int cell = this.scratch.drain.topVal();
+                    float cfld = this.scratch.drain.topKey();
+                    this.scratch.drain.pop();
                     order[oc] = cell;
                     oc = oc + 1;
                     int cx = cell % this.w;
@@ -351,16 +255,16 @@ public bundle Agents {
                             if (!(ox == 0 && oy == 0)) {
                                 int nyy = cy + oy;
                                 if (nyy >= 0 && nyy < this.h) {
-                                    int j = this.sidx(cx + ox, nyy);
-                                    if (this.wtr[j] == 0) {
-                                        this.wtr[j] = 1;
-                                        mutable float nf = this.eb[j];
+                                    int j = this.scratch.idx(cx + ox, nyy);
+                                    if (this.scratch.water[j] == 0) {
+                                        this.scratch.water[j] = 1;
+                                        mutable float nf = this.scratch.elevation[j];
                                         if (nf < cfld + eps) {
                                             nf = cfld + eps;
                                         }
-                                        this.fld[j] = nf;
-                                        this.dn[j] = cell;
-                                        this.drain.push(nf, j);
+                                        this.scratch.flooded[j] = nf;
+                                        this.scratch.downstream[j] = cell;
+                                        this.scratch.drain.push(nf, j);
                                     }
                                 }
                             }
@@ -377,10 +281,10 @@ public bundle Agents {
                 // sea. The reverse-fld accumulation order below stays valid for any descending link.
                 mutable int rc = 0;
                 while (rc < n) {
-                    if (this.dn[rc] != 0 - 1) {
+                    if (this.scratch.downstream[rc] != 0 - 1) {
                         int rcx = rc % this.w;
                         int rcy = rc / this.w;
-                        mutable float bestF = this.fld[rc];
+                        mutable float bestF = this.scratch.flooded[rc];
                         mutable int bestJ = 0 - 1;
                         mutable int ry = 0 - 1;
                         while (ry <= 1) {
@@ -391,8 +295,8 @@ public bundle Agents {
                                     int nyy = rcy + ry;
                                     if (nxx >= 0 && nxx < this.w && nyy >= 0 && nyy < this.h) {
                                         int j = nyy * this.w + nxx;
-                                        if (this.fld[j] < bestF) {
-                                            bestF = this.fld[j];
+                                        if (this.scratch.flooded[j] < bestF) {
+                                            bestF = this.scratch.flooded[j];
                                             bestJ = j;
                                         }
                                     }
@@ -402,7 +306,7 @@ public bundle Agents {
                             ry = ry + 1;
                         }
                         if (bestJ != 0 - 1) {
-                            this.dn[rc] = bestJ;
+                            this.scratch.downstream[rc] = bestJ;
                         }
                     }
                     rc = rc + 1;
@@ -411,9 +315,9 @@ public bundle Agents {
                 mutable int r = oc - 1;
                 while (r >= 0) {
                     int cell = order[r];
-                    int d = this.dn[cell];
+                    int d = this.scratch.downstream[cell];
                     if (d != 0 - 1) {
-                        this.fl[d] = this.fl[d] + this.fl[cell];
+                        this.scratch.flow[d] = this.scratch.flow[d] + this.scratch.flow[cell];
                     }
                     r = r - 1;
                 }
@@ -424,7 +328,7 @@ public bundle Agents {
                 // accumulation is recomputed over the same (still strictly descending) order.
                 mutable int cc = 0;
                 while (cc < n) {
-                    if (this.dn[cc] != 0 - 1) {
+                    if (this.scratch.downstream[cc] != 0 - 1) {
                         int ccx = cc % this.w;
                         int ccy = cc / this.w;
                         mutable float bestFl = 0.0 - 1.0;
@@ -438,8 +342,8 @@ public bundle Agents {
                                     int nyy = ccy + cy2;
                                     if (nxx >= 0 && nxx < this.w && nyy >= 0 && nyy < this.h) {
                                         int j = nyy * this.w + nxx;
-                                        if (this.fld[j] < this.fld[cc] && this.fl[j] > bestFl) {
-                                            bestFl = this.fl[j];
+                                        if (this.scratch.flooded[j] < this.scratch.flooded[cc] && this.scratch.flow[j] > bestFl) {
+                                            bestFl = this.scratch.flow[j];
                                             bestJ = j;
                                         }
                                     }
@@ -449,7 +353,7 @@ public bundle Agents {
                             cy2 = cy2 + 1;
                         }
                         if (bestJ != 0 - 1) {
-                            this.dn[cc] = bestJ;
+                            this.scratch.downstream[cc] = bestJ;
                         }
                     }
                     cc = cc + 1;
@@ -468,17 +372,17 @@ public bundle Agents {
                 // instead of through it -- and the mountain itself is never touched.
                 mutable int vv = 0;
                 while (vv < n) {
-                    int d0 = this.dn[vv];
+                    int d0 = this.scratch.downstream[vv];
                     if (d0 != 0 - 1) {
                         int vx = vv % this.w;
                         int vy = vv / this.w;
-                        boolean iceHere = this.glaciated(g, vx, vy, this.eb[vv]);
-                        boolean climbs = this.eb[d0] > this.eb[vv] + 0.0005;
-                        boolean intoIce = this.glaciated(g, d0 % this.w, d0 / this.w, this.eb[d0]);
+                        boolean iceHere = this.glaciated(g, vx, vy, this.scratch.elevation[vv]);
+                        boolean climbs = this.scratch.elevation[d0] > this.scratch.elevation[vv] + 0.0005;
+                        boolean intoIce = this.glaciated(g, d0 % this.w, d0 / this.w, this.scratch.elevation[d0]);
                         if (iceHere) {
-                            this.dn[vv] = 0 - 1;
+                            this.scratch.downstream[vv] = 0 - 1;
                         } else if (climbs || intoIce) {
-                            mutable float bestE = this.eb[vv];
+                            mutable float bestE = this.scratch.elevation[vv];
                             mutable int bj = 0 - 1;
                             mutable int vy2 = 0 - 1;
                             while (vy2 <= 1) {
@@ -491,9 +395,9 @@ public bundle Agents {
                                             int j = nyy * this.w + nxx;
                                             // still strictly descending on fld, so the accumulation
                                             // order below stays valid
-                                            if (this.fld[j] < this.fld[vv] && this.eb[j] <= bestE
-                                                && !this.glaciated(g, nxx, nyy, this.eb[j])) {
-                                                bestE = this.eb[j];
+                                            if (this.scratch.flooded[j] < this.scratch.flooded[vv] && this.scratch.elevation[j] <= bestE
+                                                && !this.glaciated(g, nxx, nyy, this.scratch.elevation[j])) {
+                                                bestE = this.scratch.elevation[j];
                                                 bj = j;
                                             }
                                         }
@@ -502,22 +406,22 @@ public bundle Agents {
                                 }
                                 vy2 = vy2 + 1;
                             }
-                            this.dn[vv] = bj;
+                            this.scratch.downstream[vv] = bj;
                         }
                     }
                     vv = vv + 1;
                 }
                 mutable int z = 0;
                 while (z < n) {
-                    this.fl[z] = 1.0;
+                    this.scratch.flow[z] = 1.0;
                     z = z + 1;
                 }
                 r = oc - 1;
                 while (r >= 0) {
                     int cell = order[r];
-                    int d = this.dn[cell];
+                    int d = this.scratch.downstream[cell];
                     if (d != 0 - 1) {
-                        this.fl[d] = this.fl[d] + this.fl[cell];
+                        this.scratch.flow[d] = this.scratch.flow[d] + this.scratch.flow[cell];
                     }
                     r = r - 1;
                 }
@@ -528,7 +432,7 @@ public bundle Agents {
                 while (q < n) {
                     int x = q % this.w;
                     int y = q / this.w;
-                    if (this.eb[q] >= this.sea) {
+                    if (this.scratch.elevation[q] >= this.scratch.sea) {
                         // THE COAST, which nothing has ever marked.
                         //
                         // FLAG_COAST has been declared since the grid was written and set exactly
@@ -541,24 +445,24 @@ public bundle Agents {
                         //
                         // It belongs on the LAND side: a quay is built on the shore, and a person
                         // has to stand where they build. Land whose neighbour is below sea level.
-                        if ((x > 0 && this.eb[q - 1] < this.sea)
-                            || (x + 1 < this.w && this.eb[q + 1] < this.sea)
-                            || (y > 0 && this.eb[q - this.w] < this.sea)
-                            || (y + 1 < this.h && this.eb[q + this.w] < this.sea)) {
+                        if ((x > 0 && this.scratch.elevation[q - 1] < this.scratch.sea)
+                            || (x + 1 < this.w && this.scratch.elevation[q + 1] < this.scratch.sea)
+                            || (y > 0 && this.scratch.elevation[q - this.w] < this.scratch.sea)
+                            || (y + 1 < this.h && this.scratch.elevation[q + this.w] < this.scratch.sea)) {
                             g.setCoast(x, y);
                         }
-                        if (this.fld[q] > this.eb[q] + 0.005) {
+                        if (this.scratch.flooded[q] > this.scratch.elevation[q] + 0.005) {
                             g.setLake(x, y);
-                        } else if (this.dn[q] == 0 - 1 && this.fl[q] > riverThr) {
+                        } else if (this.scratch.downstream[q] == 0 - 1 && this.scratch.flow[q] > riverThr) {
                             // A channel whose link was cut for climbing or for running into ice has
                             // to END somewhere. It ends in a pool -- a proglacial lake at the ice
                             // margin, or a terminal lake against the ridge it may not climb. Without
                             // this the river simply stopped in open grass, which reads as broken.
                             g.setLake(x, y);
                         } else {
-                            if (this.dn[q] != 0 - 1 && this.fl[q] > riverThr) {
+                            if (this.scratch.downstream[q] != 0 - 1 && this.scratch.flow[q] > riverThr) {
                                 g.setRiver(x, y);
-                                int d = this.dn[q];
+                                int d = this.scratch.downstream[q];
                                 mutable int gdx = d % this.w - x;
                                 if (gdx > 1) {
                                     gdx = gdx - this.w;
@@ -582,12 +486,12 @@ public bundle Agents {
                     mutable int x = 0;
                     while (x < this.w) {
                         int i = y * this.w + x;
-                        float e = this.eb[i];
+                        float e = this.scratch.elevation[i];
                         float t = cast<float>(g.tempAt(x, y)) / 100.0;
                         float m = cast<float>(g.moistAt(x, y)) / 100.0;
                         int fg = g.flagsAt(x, y);
                         g.setElev(x, y, cast<int>(e * 10000.0));
-                        g.setBiome(x, y, this.classify(e, t, m, fg, this.wtr[i], x, y));
+                        g.setBiome(x, y, this.classify(e, t, m, fg, this.scratch.water[i], x, y));
                         x = x + 1;
                     }
                     y = y + 1;
@@ -605,24 +509,24 @@ public bundle Agents {
                 // so it is trusted. The old distance-to-water gate existed to stop volcanic blobs
                 // appearing wherever noise happened to peak inland; it would also have cut the real
                 // arcs, which sit tens of cells behind the coastal range.
-                if (CellFlags.hasVent(fg) && e >= this.sea && e >= 0.55) { return cast<int>(Biome.Volcanic); }
-                if (CellFlags.isLake(fg) && e >= this.sea) {
+                if (CellFlags.hasVent(fg) && e >= this.scratch.sea && e >= 0.55) { return cast<int>(Biome.Volcanic); }
+                if (CellFlags.isLake(fg) && e >= this.scratch.sea) {
                     // a basin in a bone-dry climate is a dried-up salt flat, not a lake
                     if (m < 0.22) { return cast<int>(Biome.SaltFlat); }
                     return cast<int>(Biome.Lake);
                 }
                 // water -- depth bands RELATIVE to the percentile sea level (absolute cuts squeezed
                 // whole bands out of existence whenever the sea level moved)
-                if (e < this.sea) {
+                if (e < this.scratch.sea) {
                     // sea ice is a SURFACE sheet -- it covers polar water of any depth, so it must
                     // outrank the depth bands
                     if (t < 0.15) { return cast<int>(Biome.SeaIce); }
                     // trenches only in the deep INTERIOR basins -- the border falloff also drives
                     // elevation under the trench cut, which drew an artificial trench ring hugging
                     // the map edges (the "giant trench in the south")
-                    if (e < this.sea - 0.21 && !this.nearEdge(x, y)) { return cast<int>(Biome.MarineTrench); }
-                    if (e < this.sea - 0.09) { return cast<int>(Biome.DeepOcean); }
-                    if (e >= this.sea - 0.03) {
+                    if (e < this.scratch.sea - 0.21 && !this.nearEdge(x, y)) { return cast<int>(Biome.MarineTrench); }
+                    if (e < this.scratch.sea - 0.09) { return cast<int>(Biome.DeepOcean); }
+                    if (e >= this.scratch.sea - 0.03) {
                         // reefs are scattered ATOLL PATCHES in warm shallows, not a carpet over the
                         // whole tropical band -- a coarse noise mask keeps ~1 in 6 warm shallows
                         if (t >= 0.85 && m >= 0.80) {
@@ -637,7 +541,7 @@ public bundle Agents {
                 }
                 // coast: low ground TOUCHING the water (distw), not every low flat -- a wide flat
                 // shelf inland of the shore is ordinary lowland, not kilometres of beach/rocky shore
-                if (e < this.sea + 0.03 && distw <= 2) {
+                if (e < this.scratch.sea + 0.03 && distw <= 2) {
                     if (t >= 0.85 && m >= 0.60) { return cast<int>(Biome.Mangrove); }
                     if (t < 0.35) { return cast<int>(Biome.RockyShore); }
                     return cast<int>(Biome.Beach);
@@ -651,7 +555,7 @@ public bundle Agents {
                 if (e >= 0.74) {
                     // poleward half of the map: high ridges carry glaciers (latitude directly, so
                     // the band survives any lapse/temperature retuning)
-                    if (this.absLat(y) >= 0.52) { return cast<int>(Biome.Glacier); }
+                    if (this.scratch.absLat(y) >= 0.52) { return cast<int>(Biome.Glacier); }
                     if (m >= 0.45) { return cast<int>(Biome.AlpineMeadow); }
                     return cast<int>(Biome.Mountain);
                 }
@@ -760,13 +664,7 @@ public bundle Agents {
                 }
                 int n = w * h;
                 Grid* g = new Grid(w, h) on heap;
-                this.freeScratch();          // the empty ones, or a previous generate's
-                this.eb = new float[n]();
-                this.wtr = new int[n]();
-                this.dn = new int[n]();
-                this.fl = new float[n]();
-                this.fld = new float[n]();
-                this.drain = new DrainHeap(n) on heap;
+                this.scratch.sizeFor(w, h);  // frees the empty ones, or a previous generate's
 
                 // Elevation is built by the passes, through the interface: Landmass builds the
                 // relief and floods it, then (from the next slice) Tectonics deforms the plate
@@ -794,7 +692,7 @@ public bundle Agents {
                 }
                 mutable int ci = 0;
                 while (ci < n) {
-                    this.eb[ci] = wf.eb[ci];
+                    this.scratch.elevation[ci] = wf.eb[ci];
                     if (cast<int>(wf.vent[ci]) != 0) {
                         g.setVent(ci % w, ci / w);
                     }
@@ -806,12 +704,15 @@ public bundle Agents {
                 //
                 // The flood already placed the coastline at the requested land ratio, so the sea
                 // level is whatever contour it chose -- not a number tuned here.
-                this.sea = wf.sea;
+                this.scratch.sea = wf.sea;
                 this.climate(g);
                 this.hydrology(g);
-                // hydrology reused wtr as its visited flag -- rebuild the distance-to-water field
-                // classify needs (coast band <= 2, volcanic-arc gate <= 24)
-                this.distToWater(24);
+                // The hydrology overwrote the water plane as its visited flag -- see Scratch's
+                // header, where that reuse is written down -- so rebuild the distance the
+                // classifier needs. Twenty-four rings rather than the climate's thirty-two,
+                // because what the classifier asks of it is nearer: a coast band of two, and a
+                // volcanic-arc gate of twenty-four.
+                this.scratch.distanceToWater(24);
                 this.classifyAll(g);
                 // Content passes: the terrain is settled, and what LIVES on it goes in now.
                 //
@@ -840,10 +741,10 @@ public bundle Agents {
                 }
                 delete relief;
                 delete wf;
-                // Back to owning seven empty arrays rather than seven freed ones: the state after
+                // Back to owning an empty scratch rather than a freed one: the state after
                 // generating is the state before it, which is what makes the destructor safe.
-                this.freeScratch();
-                this.emptyScratch();
+                this.scratch.release();
+                this.scratch.empty();
                 return g;
             }
 

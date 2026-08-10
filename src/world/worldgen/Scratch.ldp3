@@ -1,0 +1,165 @@
+import System.IO.Console;
+program AgentsExe;
+
+// The working state of ONE generation: the five full-resolution planes the climate, the hydrology
+// and the classifier hand between them, the flood's frontier, and the two coordinate questions all
+// three of them ask.
+//
+// ---- THE ONE PLANE THAT MEANS THREE THINGS ----
+//
+// `water` is written three times in a generation and it does not mean the same thing each time.
+// First `distanceToWater` fills it with a ring distance for the climate to read. Then the hydrology
+// OVERWRITES IT as a visited flag, because a Priority-Flood needs one plane of exactly that shape
+// and this one is finished with. Then `distanceToWater` runs a second time to rebuild the distance
+// the classifier needs -- with a shorter reach, because what the classifier wants of it (a coast
+// band and a volcanic-arc gate) is nearer than what the climate wanted.
+//
+// That is a deliberate reuse of eleven megabytes, not an accident, and it is written here because
+// it is invisible at any one of the three sites. Anything that reads `water` must know which of the
+// three phases it is in. Splitting it into two planes is a legitimate change -- it is also a change
+// to the peak memory of a generation, so it is a measurement, not a tidy-up.
+//
+// The planes are reachable rather than behind accessors for the same reason WorldField's are: they
+// are indexed inside per-cell loops over millions of cells, written straight into the arithmetic.
+public bundle Agents {
+    public namespace World {
+
+        public class Scratch {
+            public mutable int w;
+            public mutable int h;
+            // Sea level in 0..1 -- the flood contour the relief pass reports, not a number tuned
+            // here. Every stage below it reads this to know what counts as water.
+            public mutable float sea;
+
+            public mutable float[] elevation;   // 0..1
+            public mutable int[] water;         // see the header: three meanings, in order
+            public mutable int[] downstream;    // downstream cell index, or -1
+            public mutable float[] flow;        // flow accumulation
+            public mutable float[] flooded;     // pit/flat-filled elevation (priority-flood)
+            // The Priority-Flood's frontier. Its tie order IS the river network, which is why it
+            // is a named type and not the same min-heap the plate growth uses.
+            public mutable DrainHeap* drain;
+
+            public constructor Scratch() {
+                this.w = 0;
+                this.h = 0;
+                this.sea = 0.42;
+                this.empty();
+            }
+
+            public destructor ~Scratch() returns void {
+                this.release();
+            }
+
+            // Five zero-length arrays and an empty heap: the object always owns something valid, so
+            // there is no state in which a delete is a guess. The heap gets capacity one rather
+            // than zero because a heap that cannot hold anything is not a valid empty heap -- it is
+            // one whose first push writes past the end.
+            public method empty() returns void {
+                this.elevation = new float[0]();
+                this.water = new int[0]();
+                this.downstream = new int[0]();
+                this.flow = new float[0]();
+                this.flooded = new float[0]();
+                this.drain = new DrainHeap(1) on heap;
+                return;
+            }
+
+            public method release() returns void {
+                delete this.elevation;
+                delete this.water;
+                delete this.downstream;
+                delete this.flow;
+                delete this.flooded;
+                delete this.drain;
+                return;
+            }
+
+            // Size for a world. Frees what was there first -- the empty ones, or a previous
+            // generation's.
+            public method sizeFor(int w, int h) returns void {
+                this.release();
+                this.w = w;
+                this.h = h;
+                int n = w * h;
+                this.elevation = new float[n]();
+                this.water = new int[n]();
+                this.downstream = new int[n]();
+                this.flow = new float[n]();
+                this.flooded = new float[n]();
+                this.drain = new DrainHeap(n) on heap;
+                return;
+            }
+
+            // Scratch index, clamped on both axes -- parallel to the Grid's layout.
+            public method idx(int x, int y) returns int {
+                mutable int xx = x;
+                if (xx < 0) {
+                    xx = 0;
+                }
+                if (xx >= this.w) {
+                    xx = this.w - 1;
+                }
+                mutable int yy = y;
+                if (yy < 0) {
+                    yy = 0;
+                }
+                if (yy >= this.h) {
+                    yy = this.h - 1;
+                }
+                return yy * this.w + xx;
+            }
+
+            // Distance from the equator, 0 at it and 1 at either pole. Asked by all three stages.
+            public method absLat(int y) returns float {
+                float ny = cast<float>(y) / cast<float>(this.h - 1);
+                mutable float d = 2.0 * ny - 1.0;
+                if (d < 0.0) {
+                    d = 0.0 - d;
+                }
+                return d;
+            }
+
+            // Ring distance to the nearest water cell, by K dilation passes. IN PLACE and in scan
+            // order: a pass reads cells the same pass has already written, which is what makes one
+            // sweep carry a distance further than one ring. Double-buffering it or reversing the
+            // loop would change the field, not just its speed.
+            public method distanceToWater(int rings) returns void {
+                mutable int i = 0;
+                int n = this.w * this.h;
+                while (i < n) {
+                    if (this.elevation[i] < this.sea) {
+                        this.water[i] = 0;
+                    } else {
+                        this.water[i] = 9999;
+                    }
+                    i = i + 1;
+                }
+                mutable int p = 0;
+                while (p < rings) {
+                    mutable int y = 0;
+                    while (y < this.h) {
+                        mutable int x = 0;
+                        while (x < this.w) {
+                            int at = y * this.w + x;
+                            mutable int m = this.water[at];
+                            int a = this.water[this.idx(x - 1, y)] + 1;
+                            int b = this.water[this.idx(x + 1, y)] + 1;
+                            int c = this.water[this.idx(x, y - 1)] + 1;
+                            int e = this.water[this.idx(x, y + 1)] + 1;
+                            if (a < m) { m = a; }
+                            if (b < m) { m = b; }
+                            if (c < m) { m = c; }
+                            if (e < m) { m = e; }
+                            this.water[at] = m;
+                            x = x + 1;
+                        }
+                        y = y + 1;
+                    }
+                    p = p + 1;
+                }
+                return;
+            }
+        }
+    }
+}
