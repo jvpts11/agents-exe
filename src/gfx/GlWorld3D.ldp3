@@ -27,7 +27,7 @@ program AgentsExe;
 public bundle Agents {
     public namespace Gfx {
 
-        public class GlWorld3D {
+        public class GlWorld3D implements Orbitable {
             private mutable Gl gl;
             private mutable int prog;
             private mutable int uProj;
@@ -163,16 +163,10 @@ public bundle Agents {
             // that is what made a meadow read as a grid -- but unlike the resource nodes it carries
             // no state, so the renderer scatters it from a hash and stores nothing.
             public static int CLUTTER = 3;
-            // framing + inspection camera (elevation gimbal-locked between horizon and top-down)
-            private mutable float cx;
-            private mutable float cy;
-            private mutable float cz;
-            private mutable float radius;
-            private mutable float camAz;
-            private mutable float camEl;
-            private mutable float camDist;
-            private mutable float camTx;
-            private mutable float camTy;
+            // WHERE THE VIEWER IS, and the world extent that bounds it. Reached by forwarding:
+            // `delegate` means the compiler writes orbit/zoomBy/pan/aimAt/setView/curDist, so the
+            // twenty call sites in main go on saying `r.orbit(...)` and never learn anything moved.
+            private mutable delegate OrbitCamera* camera;
             // pixel post-process toggle: off = raw full-resolution render (no low-res, no outline)
             public mutable boolean pixelate;
             // pixel post-process
@@ -248,11 +242,7 @@ public bundle Agents {
                 this.haveDetail = false;
                 this.detailOn = false;
                 this.detailCap = 384;
-                this.camAz = 45.0;
-                this.camEl = 40.0;
-                this.camDist = 20.0;
-                this.camTx = 0.0;
-                this.camTy = 0.0;
+                this.camera = new OrbitCamera() on heap;
                 this.pixelate = false;
                 this.fbo = 0;
                 this.colorTex = 0;
@@ -268,6 +258,7 @@ public bundle Agents {
             }
 
             public destructor ~GlWorld3D() returns void {
+                delete this.camera;
                 this.projM.dispose();
                 delete this.projM;
                 this.viewM.dispose();
@@ -422,14 +413,13 @@ public bundle Agents {
                 this.initScatter();
                 this.initNodes();
                 this.bakeCoarse();
-                this.cx = cast<float>(this.srcW);
-                this.cy = cast<float>(this.srcH);
-                this.cz = 1.5;
-                this.radius = this.fsqrt(this.cx * this.cx + this.cy * this.cy) + stepH * 8.0 + 2.0;
-                this.camTx = this.cx;
-                this.camTy = this.cy;
-                this.camDist = this.radius * 1.6;
-                this.camAz = 0.0;                    // start facing NORTH (looking toward the top edge)
+                // The camera is fitted to the world here rather than fitting itself: the radius
+                // comes off THIS path's square root, whose iteration count is part of its pixel
+                // contract, and a second root inside the camera would be a second answer.
+                float halfW = cast<float>(this.srcW);
+                float halfH = cast<float>(this.srcH);
+                this.camera.frame(halfW, halfH, 1.5,
+                                  this.fsqrt(halfW * halfW + halfH * halfH) + stepH * 8.0 + 2.0);
                 this.haveDetail = false;
             }
 
@@ -2029,8 +2019,8 @@ public bundle Agents {
                     return;
                 }
                 float pi = 3.14159265;
-                float e = this.camEl * pi / 180.0;
-                float a = this.camAz * pi / 180.0;
+                float e = this.camera.el() * pi / 180.0;
+                float a = this.camera.az() * pi / 180.0;
                 // HOW FAR THE CAMERA CAN ACTUALLY SEE on the ground, as a half-extent in world
                 // units measured from the window's centre. Along the view the frustum's lower edge
                 // reaches d*tan(halfFov)/sin(elevation) past the target -- which is why a shallow
@@ -2038,7 +2028,7 @@ public bundle Agents {
                 // window's centre sits midway between the camera's footprint and the target, so
                 // half of that separation has to be covered too.
                 float phi = 0.3665;                          // 21 deg, the vertical half-FOV
-                float altH = this.camDist * this.fsin(e);
+                float altH = this.camera.curDist() * this.fsin(e);
                 // Where the frustum's edges MEET THE GROUND, which is the whole question. The far
                 // edge is at altitude / tan(elevation - halfFov) from the camera's footprint and the
                 // near edge at altitude / tan(elevation + halfFov). The first version of this used
@@ -2127,8 +2117,8 @@ public bundle Agents {
                 // holds both, and it works out because the window's size grows with altitude on the
                 // same scale that this separation does.
                 float ce = this.fcos(e);
-                float egx = this.camTx + this.camDist * ce * this.fsin(a);
-                float egy = this.camTy + this.camDist * ce * this.fcos(a);
+                float egx = this.camera.tx() + this.camera.curDist() * ce * this.fsin(a);
+                float egy = this.camera.ty() + this.camera.curDist() * ce * this.fcos(a);
                 float cxw = egx - this.fsin(a) * midD;
                 float cyw = egy - this.fcos(a) * midD;
                 mutable int tx = cast<int>(cxw / 2.0) - this.detW / 2;
@@ -2153,53 +2143,7 @@ public bundle Agents {
                 this.beginBake(tx, ty);
             }
 
-            // ---- inspection camera ----
-            public method orbit(float dAz, float dEl) returns void {
-                this.camAz = this.camAz + dAz;
-                this.camEl = this.camEl + dEl;
-                if (this.camEl > 89.0) { this.camEl = 89.0; }
-                if (this.camEl < 3.0) { this.camEl = 3.0; }
-            }
-
-            public method zoomBy(float factor) returns void {
-                this.camDist = this.camDist * factor;
-                float minD = 9.0;
-                float maxD = this.radius * 2.6;
-                if (this.camDist < minD) { this.camDist = minD; }
-                if (this.camDist > maxD) { this.camDist = maxD; }
-            }
-
-            // Pan the look-at target on the ground, relative to the view (forward = away from the
-            // viewer on screen, right = screen right).
-            public method pan(float dForward, float dRight) returns void {
-                float a = this.camAz * 3.14159265 / 180.0;
-                float fx = this.fsin(a);
-                float fy = this.fcos(a);
-                this.camTx = this.camTx + fx * dForward - fy * dRight;
-                this.camTy = this.camTy + fy * dForward + fx * dRight;
-                if (this.camTx < 0.0) { this.camTx = 0.0; }
-                if (this.camTy < 0.0) { this.camTy = 0.0; }
-                float hix = this.cx * 2.0;
-                float hiy = this.cy * 2.0;
-                if (this.camTx > hix) { this.camTx = hix; }
-                if (this.camTy > hiy) { this.camTy = hiy; }
-            }
-
-            public method aimAt(int cellX, int cellY) returns void {
-                this.camTx = cast<float>(cellX * 2 + 1);
-                this.camTy = cast<float>(cellY * 2 + 1);
-            }
-
-            public method setView(float az, float el, float dist) returns void {
-                this.camAz = az;
-                this.camEl = el;
-                this.camDist = dist;
-                this.zoomBy(1.0);
-            }
-
-            public method curDist() returns float {
-                return this.camDist;
-            }
+            // ---- inspection camera: the six methods are forwarded to OrbitCamera by `delegate` ----
 
             // ---- frame ----
             // The meter is opened and closed by the LOOP, not here: a frame is more than the part
@@ -2240,21 +2184,22 @@ public bundle Agents {
                 Wgl.glClear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
                 float pi = 3.14159265;
-                float a = this.camAz * pi / 180.0;
-                float e = this.camEl * pi / 180.0;
+                float a = this.camera.az() * pi / 180.0;
+                float e = this.camera.el() * pi / 180.0;
                 float ce = this.fcos(e);
-                float d = this.camDist;
-                float ex = this.camTx + d * ce * this.fsin(a);
-                float ey = this.camTy + d * ce * this.fcos(a);
-                float ez = this.cz + d * this.fsin(e);
+                float d = this.camera.curDist();
+                float ex = this.camera.tx() + d * ce * this.fsin(a);
+                float ey = this.camera.ty() + d * ce * this.fcos(a);
+                float ez = this.camera.groundHeight() + d * this.fsin(e);
 
                 float aspect = cast<float>(fbW) / cast<float>(fbH);
                 mutable float nearP = d * 0.012;
                 if (nearP < 0.8) {
                     nearP = 0.8;
                 }
-                this.projM.perspective(42.0, aspect, nearP, (d + this.radius) * 3.0);
-                this.viewM.lookAt(ex, ey, ez, this.camTx, this.camTy, this.cz, 0.0, 0.0, 1.0);
+                this.projM.perspective(42.0, aspect, nearP, (d + this.camera.worldRadius()) * 3.0);
+                this.viewM.lookAt(ex, ey, ez, this.camera.tx(), this.camera.ty(),
+                                  this.camera.groundHeight(), 0.0, 0.0, 1.0);
 
                 this.timeSec = this.timeSec + 0.016;
                 this.gl.useProgram(this.prog);
@@ -2354,7 +2299,7 @@ public bundle Agents {
                            cast<int>(ccx), cast<int>(ccy + R), cast<int>(ccx - R), cast<int>(ccy),
                            0.06, 0.08, 0.12, 0.35);
                 // North is the TOP edge of the map (y = 0), matching how the top-down map reads.
-                float a = this.camAz * 3.14159265 / 180.0;
+                float a = this.camera.az() * 3.14159265 / 180.0;
                 float nxp = 0.0 - this.fsin(a);
                 float nyp = 0.0 - this.fcos(a);
                 float exp = 0.0 - this.fcos(a);

@@ -1,0 +1,154 @@
+import System.IO.Console;
+program AgentsExe;
+
+// Where the viewer is standing and what they are looking at: an orbit around a point on the ground.
+//
+// Nine fields carried this on the renderer -- five spelled `cam*` and four more beside them for the
+// world's extent -- among ninety-four others. A shared prefix is not a type: it says these belong
+// together without saying what they ARE, and nothing marked where the camera ended and the rest of
+// a two-and-a-half-thousand-line renderer began.
+//
+// A CLASS and not a struct, because this has identity and a life: it is one camera, mutated in
+// place by orbit, zoom and pan, and the renderer forwards to it rather than copying it about.
+//
+// The world extent lives here rather than in a type of its own, and that is the second decision.
+// It is not a separate fact -- it is what the camera is BOUNDED BY: pan clamps against the map's
+// far corner and zoom against its radius. A bound that lives away from the thing it bounds is a
+// bound somebody forgets.
+public bundle Agents {
+    public namespace Gfx {
+
+        public class OrbitCamera implements Orbitable {
+            // Where the viewer is: degrees around the target, degrees above the ground, and how far
+            // out.
+            private mutable float azimuth;
+            private mutable float elevation;
+            private mutable float distance;
+            // The point on the ground being looked at, in world units.
+            private mutable float targetX;
+            private mutable float targetY;
+            // The world's extent, which is what the two clamps are made of: half-width and
+            // half-height in world units, the height of the ground plane, and the far corner's
+            // distance from the middle.
+            private mutable float halfW;
+            private mutable float halfH;
+            private mutable float groundZ;
+            private mutable float radius;
+
+            public constructor OrbitCamera() {
+                this.azimuth = 45.0;
+                this.elevation = 40.0;
+                this.distance = 20.0;
+                this.targetX = 0.0;
+                this.targetY = 0.0;
+                this.halfW = 0.0;
+                this.halfH = 0.0;
+                this.groundZ = 1.5;
+                this.radius = 0.0;
+            }
+
+            // Fit to a world. The radius is handed in rather than computed here: it comes off the
+            // renderer's own square root, whose iteration count is part of that path's pixel
+            // contract, and a second root in here would be a second answer.
+            //
+            // Starts facing NORTH -- looking toward the top edge.
+            public method frame(float halfW, float halfH, float groundZ, float radius) returns void {
+                this.halfW = halfW;
+                this.halfH = halfH;
+                this.groundZ = groundZ;
+                this.radius = radius;
+                this.targetX = halfW;
+                this.targetY = halfH;
+                this.distance = radius * 1.6;
+                this.azimuth = 0.0;
+                return;
+            }
+
+            public override method orbit(float dAz, float dEl) returns void {
+                this.azimuth = this.azimuth + dAz;
+                this.elevation = this.elevation + dEl;
+                if (this.elevation > 89.0) { this.elevation = 89.0; }
+                if (this.elevation < 3.0) { this.elevation = 3.0; }
+                return;
+            }
+
+            public override method zoomBy(float factor) returns void {
+                this.distance = this.distance * factor;
+                float minD = 9.0;
+                float maxD = this.radius * 2.6;
+                if (this.distance < minD) { this.distance = minD; }
+                if (this.distance > maxD) { this.distance = maxD; }
+                return;
+            }
+
+            // Pan the look-at target on the ground, relative to the view (forward = away from the
+            // viewer on screen, right = screen right).
+            public override method pan(float dForward, float dRight) returns void {
+                float a = this.azimuth * 3.14159265 / 180.0;
+                float fx = Newton.sin(a);
+                float fy = Newton.cos(a);
+                this.targetX = this.targetX + fx * dForward - fy * dRight;
+                this.targetY = this.targetY + fy * dForward + fx * dRight;
+                if (this.targetX < 0.0) { this.targetX = 0.0; }
+                if (this.targetY < 0.0) { this.targetY = 0.0; }
+                float hix = this.halfW * 2.0;
+                float hiy = this.halfH * 2.0;
+                if (this.targetX > hix) { this.targetX = hix; }
+                if (this.targetY > hiy) { this.targetY = hiy; }
+                return;
+            }
+
+            public override method aimAt(int cellX, int cellY) returns void {
+                this.targetX = cast<float>(cellX * 2 + 1);
+                this.targetY = cast<float>(cellY * 2 + 1);
+                return;
+            }
+
+            public override method setView(float az, float el, float dist) returns void {
+                this.azimuth = az;
+                this.elevation = el;
+                this.distance = dist;
+                this.zoomBy(1.0);
+                return;
+            }
+
+            public override method curDist() returns float {
+                return this.distance;
+            }
+
+            // ---- what the renderer asks while it builds a frame ----
+
+            public method az() returns float {
+                return this.azimuth;
+            }
+
+            public method el() returns float {
+                return this.elevation;
+            }
+
+            public method tx() returns float {
+                return this.targetX;
+            }
+
+            public method ty() returns float {
+                return this.targetY;
+            }
+
+            public method groundHeight() returns float {
+                return this.groundZ;
+            }
+
+            public method worldRadius() returns float {
+                return this.radius;
+            }
+
+            public method halfWidth() returns float {
+                return this.halfW;
+            }
+
+            public method halfHeight() returns float {
+                return this.halfH;
+            }
+        }
+    }
+}
