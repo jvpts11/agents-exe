@@ -1,0 +1,191 @@
+import System.IO.Console;
+program AgentsExe;
+
+// The per-species engine: what a species IS -- where it can live, what it eats, how it herds and
+// what comes off it when it is killed. Rows are keyed by CONSTANTS and typed (a Diet is a Diet,
+// a band is a HabitatBand); the band->biome rules are DATA rows here, baked once into the LIVES
+// bit masks the fauna tick reads. That is enough for a hunter to have something to hunt and for
+// the hunting to be able to go too far, which is the point of the slice: a real population that
+// can be wiped out.
+public bundle Agents {
+    public namespace World {
+
+        public class Beasts {
+            private static mutable int[] DIET;
+            private static mutable int[] HERD;      // how many run together
+            private static mutable int[] MEAT;
+            private static mutable int[] HIDE;
+            private static mutable float[] PACE;    // cells a second
+            private static mutable float[] LIFE;    // seconds
+            private static mutable float[] SHY;     // cells at which it runs from a person
+            private static mutable int[] BAND;      // HabitatBand ordinal, tested by `livesIn`
+            // The same fact as BAND, as one bit per biome. `livesIn` is asked twice per animal per
+            // tick -- fifteen thousand animals at twenty ticks is six hundred thousand questions a
+            // second -- and answering it by walking a band's list of comparisons is most of why an
+            // animal cost two and a half times what a person costs to move. Forty biomes fit inside
+            // a long, so the same answer becomes a shift and an and.
+            private static mutable long[] LIVES;
+
+            onClassLoad {
+                int n = Beasts.count();
+                Beasts.DIET = new int[n]();
+                Beasts.HERD = new int[n]();
+                Beasts.MEAT = new int[n]();
+                Beasts.HIDE = new int[n]();
+                Beasts.PACE = new float[n]();
+                Beasts.LIFE = new float[n]();
+                Beasts.SHY = new float[n]();
+                Beasts.BAND = new int[n]();
+                Beasts.LIVES = new long[n]();
+
+                // The band->biome rules, as data: one row per membership, stated once. NoBand
+                // holds nothing, which is how NoBeast lives nowhere.
+                mutable long[] bandMask = new long[HabitatBand.count()]();
+                Beasts.bandRow(bandMask, HabitatBand.Temperate, Biome.DeciduousForest);
+                Beasts.bandRow(bandMask, HabitatBand.Temperate, Biome.LaurelForest);
+                Beasts.bandRow(bandMask, HabitatBand.Temperate, Biome.TemperateRainforest);
+                Beasts.bandRow(bandMask, HabitatBand.Temperate, Biome.MedShrubland);
+                Beasts.bandRow(bandMask, HabitatBand.Temperate, Biome.Prairie);
+                Beasts.bandRow(bandMask, HabitatBand.Temperate, Biome.Hills);
+                Beasts.bandRow(bandMask, HabitatBand.Grassland, Biome.Prairie);
+                Beasts.bandRow(bandMask, HabitatBand.Grassland, Biome.Steppe);
+                Beasts.bandRow(bandMask, HabitatBand.Grassland, Biome.WarmGrassland);
+                Beasts.bandRow(bandMask, HabitatBand.Grassland, Biome.Savanna);
+                Beasts.bandRow(bandMask, HabitatBand.Cold, Biome.Taiga);
+                Beasts.bandRow(bandMask, HabitatBand.Cold, Biome.Tundra);
+                Beasts.bandRow(bandMask, HabitatBand.Cold, Biome.Snowfield);
+                Beasts.bandRow(bandMask, HabitatBand.Cold, Biome.ColdDesert);
+                Beasts.bandRow(bandMask, HabitatBand.Mountain, Biome.Hills);
+                Beasts.bandRow(bandMask, HabitatBand.Mountain, Biome.Mountain);
+                Beasts.bandRow(bandMask, HabitatBand.Mountain, Biome.AlpineMeadow);
+                Beasts.bandRow(bandMask, HabitatBand.Desert, Biome.HotDesert);
+                Beasts.bandRow(bandMask, HabitatBand.Desert, Biome.ThornScrub);
+                Beasts.bandRow(bandMask, HabitatBand.Desert, Biome.Badlands);
+                Beasts.bandRow(bandMask, HabitatBand.Desert, Biome.Oasis);
+                Beasts.bandRow(bandMask, HabitatBand.Tropical, Biome.TropicalRainforest);
+                Beasts.bandRow(bandMask, HabitatBand.Tropical, Biome.TropSeasonalForest);
+                Beasts.bandRow(bandMask, HabitatBand.Tropical, Biome.Mangrove);
+                Beasts.bandRow(bandMask, HabitatBand.Wetland, Biome.Marsh);
+                Beasts.bandRow(bandMask, HabitatBand.Wetland, Biome.Swamp);
+                Beasts.bandRow(bandMask, HabitatBand.Wetland, Biome.Bog);
+                Beasts.bandRow(bandMask, HabitatBand.Wetland, Biome.Mangrove);
+                Beasts.bandRow(bandMask, HabitatBand.Shore, Biome.Beach);
+                Beasts.bandRow(bandMask, HabitatBand.Shore, Biome.RockyShore);
+                Beasts.bandRow(bandMask, HabitatBand.Shore, Biome.SeaIce);
+
+                // species, diet, herd, meat, hide, pace, life, shyness, band
+                Beasts.put(Species.Deer, Diet.Browser, 8, 30, 8, 2.2, 300.0, 14.0,
+                           HabitatBand.Temperate);
+                Beasts.put(Species.Boar, Diet.Browser, 5, 26, 6, 1.9, 260.0, 9.0,
+                           HabitatBand.Temperate);
+                Beasts.put(Species.Rabbit, Diet.Grazer, 3, 5, 1, 2.6, 120.0, 8.0,
+                           HabitatBand.Temperate);
+                Beasts.put(Species.Bison, Diet.Grazer, 14, 70, 20, 1.7, 380.0, 12.0,
+                           HabitatBand.Grassland);
+                Beasts.put(Species.Reindeer, Diet.Browser, 16, 34, 10, 2.1, 300.0, 15.0,
+                           HabitatBand.Cold);
+                Beasts.put(Species.Ibex, Diet.Browser, 6, 22, 6, 2.3, 280.0, 16.0,
+                           HabitatBand.Mountain);
+                Beasts.put(Species.Camel, Diet.Browser, 5, 44, 14, 1.6, 420.0, 11.0,
+                           HabitatBand.Desert);
+                Beasts.put(Species.Antelope, Diet.Grazer, 12, 24, 7, 2.8, 260.0, 18.0,
+                           HabitatBand.Grassland);
+                Beasts.put(Species.Mammoth, Diet.Browser, 6, 160, 40, 1.3, 600.0, 10.0,
+                           HabitatBand.Cold);
+                Beasts.put(Species.Sheep, Diet.Grazer, 10, 18, 5, 1.5, 240.0, 10.0,
+                           HabitatBand.Mountain);
+                Beasts.put(Species.Cattle, Diet.Grazer, 10, 60, 18, 1.4, 340.0, 9.0,
+                           HabitatBand.Grassland);
+                Beasts.put(Species.Horse, Diet.Grazer, 8, 50, 15, 3.0, 380.0, 13.0,
+                           HabitatBand.Grassland);
+                Beasts.put(Species.Seal, Diet.Marine, 9, 30, 9, 1.2, 280.0, 8.0,
+                           HabitatBand.Shore);
+
+                Beasts.put(Species.Wolf, Diet.Predator, 6, 16, 6, 2.7, 280.0, 4.0,
+                           HabitatBand.Cold);
+                Beasts.put(Species.Bear, Diet.Predator, 1, 60, 18, 2.0, 360.0, 3.0,
+                           HabitatBand.Temperate);
+                Beasts.put(Species.Lion, Diet.Predator, 4, 40, 12, 2.9, 300.0, 3.0,
+                           HabitatBand.Grassland);
+                Beasts.put(Species.Crocodile, Diet.Predator, 2, 46, 16, 1.1, 460.0, 3.0,
+                           HabitatBand.Wetland);
+
+                // Bake the bands onto the species, once. The mask was built from the rows above,
+                // so a species' answer is its band's answer -- stated in one place each.
+                for (mutable int sp = 0; sp < n; sp++) {
+                    Beasts.LIVES[sp] = bandMask[Beasts.BAND[sp]];
+                }
+                delete bandMask;
+            }
+
+            private static method bandRow(long[] mask, HabitatBand band, Biome biome) returns void {
+                mask[cast<int>(band)] = mask[cast<int>(band)] | (cast<long>(1) << cast<int>(biome));
+            }
+
+            private static method put(Species s, Diet diet, int herd, int meat, int hide,
+                                      float pace, float life, float shy, HabitatBand band) returns void {
+                int ord = cast<int>(s);
+                Beasts.DIET[ord] = cast<int>(diet);
+                Beasts.HERD[ord] = herd;
+                Beasts.MEAT[ord] = meat;
+                Beasts.HIDE[ord] = hide;
+                Beasts.PACE[ord] = pace;
+                Beasts.LIFE[ord] = life;
+                Beasts.SHY[ord] = shy;
+                Beasts.BAND[ord] = cast<int>(band);
+            }
+
+            public static method count() returns int {
+                return Species.count();
+            }
+
+            // The declared identifier, straight off the enum.
+            public static method name(int ord) returns String {
+                return cast<Species>(ord).name();
+            }
+
+            public static method diet(int ord) returns int {
+                return Beasts.DIET[ord];
+            }
+
+            public static method band(int ord) returns int {
+                return Beasts.BAND[ord];
+            }
+
+            public static method herd(int ord) returns int {
+                return Beasts.HERD[ord];
+            }
+
+            public static method meat(int ord) returns int {
+                return Beasts.MEAT[ord];
+            }
+
+            public static method hide(int ord) returns int {
+                return Beasts.HIDE[ord];
+            }
+
+            public static method pace(int ord) returns float {
+                return Beasts.PACE[ord];
+            }
+
+            public static method life(int ord) returns float {
+                return Beasts.LIFE[ord];
+            }
+
+            public static method shy(int ord) returns float {
+                return Beasts.SHY[ord];
+            }
+
+            public static method isPrey(int ord) returns boolean {
+                return Beasts.DIET[ord] != cast<int>(Diet.Predator)
+                    && Beasts.DIET[ord] != cast<int>(Diet.NoDiet);
+            }
+
+            // Whether this species can live on this ground: one bit out of the mask built at class
+            // load from the band rows above.
+            public static method livesIn(int ord, int biome) returns boolean {
+                return ((Beasts.LIVES[ord] >> biome) & cast<long>(1)) != 0;
+            }
+        }
+    }
+}
