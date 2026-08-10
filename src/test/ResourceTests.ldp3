@@ -3,7 +3,9 @@ import System.Test.Test;
 import Agents.World.Grid;
 import Agents.World.WorldGen;
 import Agents.World.NodeField;
+import Agents.World.NodeState;
 import Agents.World.Nodes;
+import Agents.World.PropNode;
 import Agents.World.Harvest;
 import Agents.World.ExtractedGood;
 program AgentsExe;
@@ -323,6 +325,53 @@ public bundle Agents {
                 Test.assertAtLeast(Woods.standingGood(ExtractedGood.Clay.index()), 1);
                 Test.checking("and a shore is sand");
                 Test.assertAtLeast(Woods.standingGood(ExtractedGood.Sand.index()), 1);
+                return;
+            }
+        }
+
+        // What happens to a node field when it outgrows itself.
+        public class Growth {
+
+            // A FIELD DOUBLES, AND EVERYTHING IT HOLDS HAS TO DOUBLE WITH IT.
+            //
+            // Four of its six arrays did and two did not. `born` and `blind` are filled by
+            // finish(), so while a world is being generated -- every add before the one finish --
+            // nothing reads them, and finish reallocates both at the current capacity, quietly
+            // repairing the gap every time. That is the only order in which it is harmless, and it
+            // is the only order the world has ever run in.
+            //
+            // Append anything AFTER finish -- which regrowth seeding a node, or any slice after
+            // this one, will -- and the two arrays are shorter than the field is long, so asking a
+            // late slot what stood there or whether it was ever opened reads off the end.
+            //
+            // This test is that order, exactly: fill past the first doubling, settle, then append
+            // past the second one with no finish to repair it, and ask a slot beyond the old
+            // capacity what it is. Bounds are checked in this language, so before the fix the read
+            // does not answer wrongly -- it stops, which is the loud kind of red.
+            [Tag(name: "world")]
+            [Test]
+            public static method a_field_that_grows_after_settling_keeps_all_six_arrays() returns void {
+                NodeField* f = new NodeField(64, 64) on heap;
+                int kind = PropNode.Broadleaf.index();
+                // Two thousand and forty-eight: one doubling past the initial capacity, so the
+                // field is exactly full when it settles.
+                mutable int i = 0;
+                while (i < 2048) {
+                    f.add(cast<float>(i % 64) + 0.5, cast<float>((i / 64) % 64) + 0.5, kind, 10);
+                    i = i + 1;
+                }
+                f.finish();
+                Test.checking("the field holds everything that was put in it");
+                Test.assertEqual(f.size(), 2048);
+                // Past the SECOND doubling now, with nothing to repair the two arrays after.
+                mutable int j = 0;
+                while (j < 64) {
+                    f.add(cast<float>(j) + 0.5, 1.5, kind, 10);
+                    j = j + 1;
+                }
+                Test.checking("a slot beyond the old capacity still knows what it is");
+                Test.assertTrue(f.stateAt(2100) == NodeState.Live);
+                delete f;
                 return;
             }
         }
