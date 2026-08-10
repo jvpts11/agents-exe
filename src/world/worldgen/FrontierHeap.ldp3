@@ -1,0 +1,114 @@
+import System.IO.Console;
+program AgentsExe;
+
+// The plate growth's min-heap: the frontier of the cost-distance spread, ordered by accumulated
+// travel cost from the owning seed.
+//
+// THE TIE ORDER IS THE PLATE PARTITION. Two seeds reaching a cell at the same cost is not a corner
+// case here -- the resistance field is smooth, so equal-cost arrivals happen along whole stretches
+// of every margin -- and which of them is popped first is which plate owns the ground. Every
+// coastline in every golden world was drawn through exactly this order.
+//
+// It SWAPS, and it compares differently from the other heap in this worldgen. Pop moves the last
+// leaf to the root and then, at each step, picks the smallest of self/left/right with strict `<`
+// and exchanges the two slots; DrainHeap instead holds the leaf in a local, walks a hole down and
+// breaks on `>=`. The two are not interchangeable however alike they look at a glance: unifying
+// them would redraw the plates or the rivers, and it would do it silently.
+//
+// The push guard is part of the algorithm too. A full heap DROPS the entry rather than growing --
+// the array is sized at eight times the coarse grid, so it has never happened, and if it ever does
+// the cell simply never joins a plate rather than the world dying.
+public bundle Agents {
+    public namespace World {
+
+        public class FrontierHeap {
+            private mutable float[] key;    // accumulated travel cost
+            private mutable int[] val;      // coarse cell index
+            private mutable int n;
+            private mutable int cap;
+
+            public constructor FrontierHeap(int capacity) {
+                this.key = new float[capacity]();
+                this.val = new int[capacity]();
+                this.n = 0;
+                this.cap = capacity;
+            }
+
+            public destructor ~FrontierHeap() returns void {
+                delete this.key;
+                delete this.val;
+            }
+
+            public method size() returns int {
+                return this.n;
+            }
+
+            public method topKey() returns float {
+                return this.key[0];
+            }
+
+            public method clear() returns void {
+                this.n = 0;
+                return;
+            }
+
+            public method push(float k, int v) returns void {
+                if (this.n >= this.cap) {
+                    return;
+                }
+                mutable int i = this.n;
+                this.key[i] = k;
+                this.val[i] = v;
+                this.n = this.n + 1;
+                while (i > 0) {
+                    int p = (i - 1) / 2;
+                    if (this.key[p] <= this.key[i]) {
+                        i = 0;
+                    } else {
+                        float tk = this.key[p];
+                        int tv = this.val[p];
+                        this.key[p] = this.key[i];
+                        this.val[p] = this.val[i];
+                        this.key[i] = tk;
+                        this.val[i] = tv;
+                        i = p;
+                    }
+                }
+                return;
+            }
+
+            // Take the minimum and return its value.
+            public method pop() returns int {
+                int top = this.val[0];
+                this.n = this.n - 1;
+                this.key[0] = this.key[this.n];
+                this.val[0] = this.val[this.n];
+                mutable int i = 0;
+                mutable boolean go = true;
+                while (go) {
+                    int l = 2 * i + 1;
+                    int r = l + 1;
+                    mutable int s = i;
+                    if (l < this.n && this.key[l] < this.key[s]) {
+                        s = l;
+                    }
+                    if (r < this.n && this.key[r] < this.key[s]) {
+                        s = r;
+                    }
+                    if (s == i) {
+                        go = false;
+                    } else {
+                        float tk = this.key[s];
+                        int tv = this.val[s];
+                        this.key[s] = this.key[i];
+                        this.val[s] = this.val[i];
+                        this.key[i] = tk;
+                        this.val[i] = tv;
+                        i = s;
+                    }
+                }
+                return top;
+            }
+        }
+    }
+}

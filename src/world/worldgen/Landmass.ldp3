@@ -38,11 +38,9 @@ public bundle Agents {
             private mutable float[] dt;         // chamfer scratch
             private mutable float[] crust;      // crust thickness, saturated
 
-            // binary min-heap for the cost-distance growth
-            private mutable float[] hk;
-            private mutable int[] hv;
-            private mutable int hn;
-            private mutable int hcap;
+            // The cost-distance growth's frontier. Its tie order IS the plate partition, which is
+            // why it is a named type and not the same min-heap the hydrology uses.
+            private mutable FrontierHeap* frontier;
 
             // per plate: seed, kind, continent, area, edge, centroid and motion, one row each
             private mutable Plate[] plates;
@@ -58,16 +56,13 @@ public bundle Agents {
                 this.ph = 1;
                 this.nPlates = 0;
                 this.nCont = 0;
-                this.hn = 0;
-                this.hcap = 1;
+                this.frontier = new FrontierHeap(1) on heap;
                 this.owner = new int[1]();
                 this.cost = new float[1]();
                 this.dist = new float[1]();
                 this.sdf = new float[1]();
                 this.dt = new float[1]();
                 this.crust = new float[1]();
-                this.hk = new float[1]();
-                this.hv = new int[1]();
                 this.plates = new Plate[1]();
                 this.cw = new float[1]();
                 this.adj = new byte[1]();
@@ -90,8 +85,7 @@ public bundle Agents {
                 delete this.sdf;
                 delete this.dt;
                 delete this.crust;
-                delete this.hk;
-                delete this.hv;
+                delete this.frontier;
                 delete this.plates;
                 delete this.cw;
                 delete this.adj;
@@ -155,18 +149,16 @@ public bundle Agents {
                 delete this.sdf;
                 delete this.dt;
                 delete this.crust;
-                delete this.hk;
-                delete this.hv;
+                delete this.frontier;
                 this.owner = new int[pn]();
                 this.cost = new float[pn]();
                 this.dist = new float[pn]();
                 this.sdf = new float[pn]();
                 this.dt = new float[pn]();
                 this.crust = new float[pn]();
-                this.hcap = pn * 8;
-                this.hk = new float[this.hcap]();
-                this.hv = new int[this.hcap]();
-                this.hn = 0;
+                // Eight times the coarse grid: a cell can sit in the frontier once per relaxation,
+                // and this has never come near full.
+                this.frontier = new FrontierHeap(pn * 8) on heap;
                 return;
             }
 
@@ -266,18 +258,18 @@ public bundle Agents {
                     this.owner[i] = 0 - 1;
                     i = i + 1;
                 }
-                this.hn = 0;
+                this.frontier.clear();
                 i = 0;
                 while (i < this.nPlates) {
                     int c = this.plates[i].sy * this.pw + this.plates[i].sx;
                     this.dist[c] = 0.0;
                     this.owner[c] = i;
-                    this.hpush(0.0, c);
+                    this.frontier.push(0.0, c);
                     i = i + 1;
                 }
-                while (this.hn > 0) {
-                    float d = this.hk[0];
-                    int c = this.hpop();
+                while (this.frontier.size() > 0) {
+                    float d = this.frontier.topKey();
+                    int c = this.frontier.pop();
                     // stale heap entry: this cell was relaxed again after being pushed
                     if (d <= this.dist[c] + 0.0000001) {
                         int cx = c % this.pw;
@@ -297,7 +289,7 @@ public bundle Agents {
                                 if (nd < this.dist[nc]) {
                                     this.dist[nc] = nd;
                                     this.owner[nc] = who;
-                                    this.hpush(nd, nc);
+                                    this.frontier.push(nd, nc);
                                 }
                             }
                             k = k + 1;
@@ -331,63 +323,6 @@ public bundle Agents {
                     i = i + 1;
                 }
                 return best;
-            }
-
-            private method hpush(float key, int val) returns void {
-                if (this.hn >= this.hcap) {
-                    return;
-                }
-                mutable int i = this.hn;
-                this.hk[i] = key;
-                this.hv[i] = val;
-                this.hn = this.hn + 1;
-                while (i > 0) {
-                    int p = (i - 1) / 2;
-                    if (this.hk[p] <= this.hk[i]) {
-                        i = 0;
-                    } else {
-                        float tk = this.hk[p];
-                        int tv = this.hv[p];
-                        this.hk[p] = this.hk[i];
-                        this.hv[p] = this.hv[i];
-                        this.hk[i] = tk;
-                        this.hv[i] = tv;
-                        i = p;
-                    }
-                }
-                return;
-            }
-
-            private method hpop() returns int {
-                int top = this.hv[0];
-                this.hn = this.hn - 1;
-                this.hk[0] = this.hk[this.hn];
-                this.hv[0] = this.hv[this.hn];
-                mutable int i = 0;
-                mutable boolean go = true;
-                while (go) {
-                    int l = 2 * i + 1;
-                    int r = l + 1;
-                    mutable int s = i;
-                    if (l < this.hn && this.hk[l] < this.hk[s]) {
-                        s = l;
-                    }
-                    if (r < this.hn && this.hk[r] < this.hk[s]) {
-                        s = r;
-                    }
-                    if (s == i) {
-                        go = false;
-                    } else {
-                        float tk = this.hk[s];
-                        int tv = this.hv[s];
-                        this.hk[s] = this.hk[i];
-                        this.hv[s] = this.hv[i];
-                        this.hk[i] = tk;
-                        this.hv[i] = tv;
-                        i = s;
-                    }
-                }
-                return top;
             }
 
             // ---- 4. plate statistics and adjacency ----------------------------------------------

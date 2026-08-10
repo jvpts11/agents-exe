@@ -1,0 +1,98 @@
+import System.IO.Console;
+program AgentsExe;
+
+// The hydrology's min-heap: the frontier of the Priority-Flood, ordered by flood elevation.
+//
+// THE TIE ORDER IS THE RIVER NETWORK, and that is the whole reason this is its own type rather
+// than "a min-heap" shared with the other one in this pass. Flat ground floods at equal keys
+// constantly -- a plain is thousands of cells within an epsilon of each other -- and which of two
+// equal cells comes out first decides which one becomes the other's downstream. Every river in
+// every golden world was drawn by exactly this order.
+//
+// It shifts the HOLE rather than swapping. Push carries the parent down into the child's slot and
+// writes the new key once at the end; pop holds the last leaf in a local, walks the hole down, and
+// writes it once. Both stop on `>=`, so equal keys never move past each other. The other heap in
+// this worldgen -- FrontierHeap, for plate growth -- swaps instead and compares differently, and
+// the two are NOT interchangeable however alike they look: an honest-looking unification of the
+// two would silently redraw every river.
+public bundle Agents {
+    public namespace World {
+
+        public class DrainHeap {
+            private mutable float[] key;    // flood elevation
+            private mutable int[] val;      // cell index
+            private mutable int n;
+
+            public constructor DrainHeap(int capacity) {
+                this.key = new float[capacity]();
+                this.val = new int[capacity]();
+                this.n = 0;
+            }
+
+            public destructor ~DrainHeap() returns void {
+                delete this.key;
+                delete this.val;
+            }
+
+            public method size() returns int {
+                return this.n;
+            }
+
+            public method topKey() returns float {
+                return this.key[0];
+            }
+
+            public method topVal() returns int {
+                return this.val[0];
+            }
+
+            // Bubble the new leaf up by shifting the hole, writing the key once at the end.
+            public method push(float k, int v) returns void {
+                mutable int c = this.n;
+                while (c > 0) {
+                    int p = (c - 1) / 2;
+                    if (this.key[p] <= k) {
+                        break;
+                    }
+                    this.key[c] = this.key[p];
+                    this.val[c] = this.val[p];
+                    c = p;
+                }
+                this.key[c] = k;
+                this.val[c] = v;
+                this.n = this.n + 1;
+                return;
+            }
+
+            // Remove the minimum -- already read from the top by the caller. The last leaf is held
+            // in a local and the hole walks down; the break on `>=` is what holds the tie order.
+            public method pop() returns void {
+                int newn = this.n - 1;
+                float k = this.key[newn];
+                int v = this.val[newn];
+                mutable int c = 0;
+                while (true) {
+                    int l = 2 * c + 1;
+                    if (l >= newn) {
+                        break;
+                    }
+                    mutable int child = l;
+                    int rr = l + 1;
+                    if (rr < newn && this.key[rr] < this.key[l]) {
+                        child = rr;
+                    }
+                    if (this.key[child] >= k) {
+                        break;
+                    }
+                    this.key[c] = this.key[child];
+                    this.val[c] = this.val[child];
+                    c = child;
+                }
+                this.key[c] = k;
+                this.val[c] = v;
+                this.n = newn;
+                return;
+            }
+        }
+    }
+}

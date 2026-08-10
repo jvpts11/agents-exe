@@ -36,8 +36,9 @@ public bundle Agents {
             private mutable int[] dn;           // downstream cell index, or -1
             private mutable float[] fl;         // flow accumulation
             private mutable float[] fld;        // pit/flat-filled elevation (priority-flood)
-            private mutable float[] hkey;       // binary min-heap: keys (flood elevation)
-            private mutable int[] hval;         // binary min-heap: values (cell index)
+            // The Priority-Flood's frontier. Its tie order IS the river network, which is why it
+            // is a named type and not the same min-heap the plate growth uses.
+            private mutable DrainHeap* drain;
 
             public constructor WorldGen(int seed) {
                 this.seed = seed;
@@ -59,16 +60,17 @@ public bundle Agents {
                 this.emptyScratch();
             }
 
-            // Seven zero-length arrays: the object always owns something valid, so there is no state
-            // in which a delete is a guess.
+            // Five zero-length arrays and an empty heap: the object always owns something valid, so
+            // there is no state in which a delete is a guess. The heap gets capacity one rather
+            // than zero because a heap that cannot hold anything is not a valid empty heap -- it is
+            // one whose first push writes past the end.
             private method emptyScratch() returns void {
                 this.eb = new float[0]();
                 this.wtr = new int[0]();
                 this.dn = new int[0]();
                 this.fl = new float[0]();
                 this.fld = new float[0]();
-                this.hkey = new float[0]();
-                this.hval = new int[0]();
+                this.drain = new DrainHeap(1) on heap;
                 return;
             }
 
@@ -78,8 +80,7 @@ public bundle Agents {
                 delete this.dn;
                 delete this.fl;
                 delete this.fld;
-                delete this.hkey;
-                delete this.hval;
+                delete this.drain;
                 return;
             }
 
@@ -268,52 +269,6 @@ public bundle Agents {
             }
 
             // ---- pass 5: hydrology (steepest descent -> rivers; pits -> lakes) ----
-            // Binary min-heap over (flood-elevation key, cell value). Push bubbles the new leaf up.
-            private method heapPush(int hn, float key, int val) returns int {
-                mutable int c = hn;
-                while (c > 0) {
-                    int p = (c - 1) / 2;
-                    if (this.hkey[p] <= key) {
-                        break;
-                    }
-                    this.hkey[c] = this.hkey[p];
-                    this.hval[c] = this.hval[p];
-                    c = p;
-                }
-                this.hkey[c] = key;
-                this.hval[c] = val;
-                return hn + 1;
-            }
-
-            // Remove the minimum (already read from index 0 by the caller): move the last leaf to the root
-            // and sift it down. Returns the new size.
-            private method heapPop(int hn) returns int {
-                int newn = hn - 1;
-                float key = this.hkey[newn];
-                int val = this.hval[newn];
-                mutable int c = 0;
-                while (true) {
-                    int l = 2 * c + 1;
-                    if (l >= newn) {
-                        break;
-                    }
-                    mutable int child = l;
-                    int rr = l + 1;
-                    if (rr < newn && this.hkey[rr] < this.hkey[l]) {
-                        child = rr;
-                    }
-                    if (this.hkey[child] >= key) {
-                        break;
-                    }
-                    this.hkey[c] = this.hkey[child];
-                    this.hval[c] = this.hval[child];
-                    c = child;
-                }
-                this.hkey[c] = key;
-                this.hval[c] = val;
-                return newn;
-            }
-
             // Priority-Flood + epsilon (Barnes et al.): flood inward from the sea through a min-heap, so
             // every land cell gets a monotonic downhill path to the ocean. This fills pits AND resolves
             // flats (a tiny epsilon gradient), and the order in which cells are discovered IS the drainage
@@ -358,17 +313,16 @@ public bundle Agents {
                     i = i + 1;
                 }
                 // Seed the heap with every sea cell (the outlets, at their true elevation).
-                mutable int hn = 0;
                 mutable int s = 0;
                 while (s < n) {
                     if (this.eb[s] < this.sea) {
                         this.wtr[s] = 1;
-                        hn = this.heapPush(hn, this.eb[s], s);
+                        this.drain.push(this.eb[s], s);
                     }
                     s = s + 1;
                 }
                 // A fully-land world (no sea) still needs an outlet: seed the single lowest cell.
-                if (hn == 0) {
+                if (this.drain.size() == 0) {
                     mutable int lo = 0;
                     mutable int k = 1;
                     while (k < n) {
@@ -378,14 +332,14 @@ public bundle Agents {
                         k = k + 1;
                     }
                     this.wtr[lo] = 1;
-                    hn = this.heapPush(hn, this.eb[lo], lo);
+                    this.drain.push(this.eb[lo], lo);
                 }
                 int[] order = new int[n]();   // pop order, for downstream flow accumulation in reverse
                 mutable int oc = 0;
-                while (hn > 0) {
-                    int cell = this.hval[0];
-                    float cfld = this.hkey[0];
-                    hn = this.heapPop(hn);
+                while (this.drain.size() > 0) {
+                    int cell = this.drain.topVal();
+                    float cfld = this.drain.topKey();
+                    this.drain.pop();
                     order[oc] = cell;
                     oc = oc + 1;
                     int cx = cell % this.w;
@@ -406,7 +360,7 @@ public bundle Agents {
                                         }
                                         this.fld[j] = nf;
                                         this.dn[j] = cell;
-                                        hn = this.heapPush(hn, nf, j);
+                                        this.drain.push(nf, j);
                                     }
                                 }
                             }
@@ -801,8 +755,7 @@ public bundle Agents {
                 this.dn = new int[n]();
                 this.fl = new float[n]();
                 this.fld = new float[n]();
-                this.hkey = new float[n]();
-                this.hval = new int[n]();
+                this.drain = new DrainHeap(n) on heap;
 
                 // Elevation is built by the passes, through the interface: Landmass builds the
                 // relief and floods it, then (from the next slice) Tectonics deforms the plate
