@@ -391,133 +391,6 @@ public bundle Agents {
                 delete order;
             }
 
-            // ---- pass 6: classify every cell into a Biome ordinal ----
-            private method classifyAll(Grid* g) returns void {
-                mutable int y = 0;
-                while (y < this.h) {
-                    mutable int x = 0;
-                    while (x < this.w) {
-                        int i = y * this.w + x;
-                        float e = this.scratch.elevation[i];
-                        float t = cast<float>(g.tempAt(x, y)) / 100.0;
-                        float m = cast<float>(g.moistAt(x, y)) / 100.0;
-                        int fg = g.flagsAt(x, y);
-                        g.setElev(x, y, cast<int>(e * 10000.0));
-                        g.setBiome(x, y, this.classify(e, t, m, fg, this.scratch.water[i], x, y));
-                        x = x + 1;
-                    }
-                    y = y + 1;
-                }
-            }
-
-            private method classify(float e, float t, float m, int fg, int distw, int x, int y) returns int {
-                // hard overrides. NOTE: a river cell keeps its terrain biome -- the renderer draws a blue
-                // channel over the land following the stored flow direction (spec: rivers wind through
-                // terrain, they don't paint the whole tile). Lakes and vents still recolour the cell.
-                // Volcanic lands live on HIGH ground near the convergent ridges, and volcanic ARCS
-                // hug the coast (distw): where a subduction boundary runs deep under a continent's
-                // interior, the same uplift shows as an ordinary mountain range instead.
-                // A vent is now PLACED, by Tectonics, on the volcanic arc of a subduction zone --
-                // so it is trusted. The old distance-to-water gate existed to stop volcanic blobs
-                // appearing wherever noise happened to peak inland; it would also have cut the real
-                // arcs, which sit tens of cells behind the coastal range.
-                if (CellFlags.hasVent(fg) && e >= this.scratch.sea && e >= 0.55) { return cast<int>(Biome.Volcanic); }
-                if (CellFlags.isLake(fg) && e >= this.scratch.sea) {
-                    // a basin in a bone-dry climate is a dried-up salt flat, not a lake
-                    if (m < 0.22) { return cast<int>(Biome.SaltFlat); }
-                    return cast<int>(Biome.Lake);
-                }
-                // water -- depth bands RELATIVE to the percentile sea level (absolute cuts squeezed
-                // whole bands out of existence whenever the sea level moved)
-                if (e < this.scratch.sea) {
-                    // sea ice is a SURFACE sheet -- it covers polar water of any depth, so it must
-                    // outrank the depth bands
-                    if (t < 0.15) { return cast<int>(Biome.SeaIce); }
-                    // trenches only in the deep INTERIOR basins -- the border falloff also drives
-                    // elevation under the trench cut, which drew an artificial trench ring hugging
-                    // the map edges (the "giant trench in the south")
-                    if (e < this.scratch.sea - 0.21 && !this.nearEdge(x, y)) { return cast<int>(Biome.MarineTrench); }
-                    if (e < this.scratch.sea - 0.09) { return cast<int>(Biome.DeepOcean); }
-                    if (e >= this.scratch.sea - 0.03) {
-                        // reefs are scattered ATOLL PATCHES in warm shallows, not a carpet over the
-                        // whole tropical band -- a coarse noise mask keeps ~1 in 6 warm shallows
-                        if (t >= 0.85 && m >= 0.80) {
-                            float rn = LandMath.vnoise(this.seed,
-                                                   cast<float>(x) / cast<float>(this.w) * 23.0,
-                                                   cast<float>(y) / cast<float>(this.h) * 23.0, 23);
-                            if (rn > 0.62) { return cast<int>(Biome.CoralReef); }
-                        }
-                        return cast<int>(Biome.ShallowSea);
-                    }
-                    return cast<int>(Biome.Ocean);
-                }
-                // coast: low ground TOUCHING the water (distw), not every low flat -- a wide flat
-                // shelf inland of the shore is ordinary lowland, not kilometres of beach/rocky shore
-                if (e < this.scratch.sea + 0.03 && distw <= 2) {
-                    if (t >= 0.85 && m >= 0.60) { return cast<int>(Biome.Mangrove); }
-                    if (t < 0.35) { return cast<int>(Biome.RockyShore); }
-                    return cast<int>(Biome.Beach);
-                }
-                // peaks & mountains: the SNOW LINE is pure altitude (high enough = snow, whatever
-                // the tuning of latitude/lapse does), and the band under it partitions by climate --
-                // cold face = glacier, warm wet shoulder = alpine meadow, the rest bare rock.
-                if (e >= 0.80) {
-                    return cast<int>(Biome.SnowPeak);
-                }
-                if (e >= 0.74) {
-                    // poleward half of the map: high ridges carry glaciers (latitude directly, so
-                    // the band survives any lapse/temperature retuning)
-                    if (this.scratch.absLat(y) >= 0.52) { return cast<int>(Biome.Glacier); }
-                    if (m >= 0.45) { return cast<int>(Biome.AlpineMeadow); }
-                    return cast<int>(Biome.Mountain);
-                }
-                // 0.63 is THE contract line, shared by three places that must agree: Landmass caps
-                // ordinary land below it, the renderer's stackLvl starts stacking at it, and the
-                // highland biomes begin here. When this said 0.58 the flat plateau interiors landed
-                // in the mountain band and half the world came out as hills and badlands.
-                if (e >= Contour.HIGHLAND) {
-                    // cold high ground ices over -- glacier tongues wherever the seed actually put
-                    // its poleward ranges, whatever the lapse/latitude tuning does
-                    if (e >= 0.70 && t < 0.22) { return cast<int>(Biome.Glacier); }
-                    if (t < 0.10) { return cast<int>(Biome.Glacier); }
-                    if (m < 0.26) { return cast<int>(Biome.Badlands); }
-                    if (t < 0.28) { return cast<int>(Biome.Mountain); }   // truly cold highland (glacier rims) = rock
-                    // the green shoulder under the peaks: warm-enough, wet-enough high ground
-                    // (0.64: anchored to where warm land actually exists -- a seed can roll every
-                    // tall ridge into polar latitudes, and the meadow must survive that)
-                    if (e >= 0.64 && t >= 0.30 && m >= 0.32) { return cast<int>(Biome.AlpineMeadow); }
-                    return cast<int>(Biome.Hills);
-                }
-                // lowland specials
-                if (m < 0.20 && CellFlags.isEndorheic(fg)) { return cast<int>(Biome.SaltFlat); }
-                // An oasis is a RARE, isolated pool cell inside hot desert -- not a coastal band.
-                if (t >= 0.55 && m < 0.20
-                    && LandMath.hash01(this.seed, x * 13 + 7, y * 17 + 3) > 0.995) {
-                    return cast<int>(Biome.Oasis);
-                }
-                // wetlands (a cold bog waterlogs at lower moisture -- barely any evaporation)
-                if (t < 0.35 && m >= 0.78) { return cast<int>(Biome.Bog); }
-                if (m >= 0.84) {
-                    if (t >= 0.78) { return cast<int>(Biome.Swamp); }
-                    return cast<int>(Biome.Marsh);
-                }
-                return Whittaker.biomeFor(t, m);
-            }
-
-            // Inside the outer 10% frame of the map, where the border-ocean falloff (not geology)
-            // controls the depth.
-            private method nearEdge(int x, int y) returns boolean {
-                int bx = this.w / 10;
-                int by = this.h / 10;
-                if (x < bx || x >= this.w - bx) {
-                    return true;
-                }
-                if (y < by || y >= this.h - by) {
-                    return true;
-                }
-                return false;
-            }
-
             public method generate(int w, int h) returns Grid* {
                 // The highland line is written in two units -- 0..1 here, and scaled by ten
                 // thousand where the Grid stores it -- and nine places test one or the other. They
@@ -591,7 +464,9 @@ public bundle Agents {
                 // because what the classifier asks of it is nearer: a coast band of two, and a
                 // volcanic-arc gate of twenty-four.
                 this.scratch.distanceToWater(24);
-                this.classifyAll(g);
+                Classifier* classifier = new Classifier(this.seed) on heap;
+                classifier.apply(g, this.scratch);
+                delete classifier;
                 // Content passes: the terrain is settled, and what LIVES on it goes in now.
                 //
                 // Groundcover reads what Flora wrote -- undergrowth is defined by where the trees
