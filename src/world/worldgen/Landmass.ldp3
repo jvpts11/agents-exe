@@ -44,17 +44,8 @@ public bundle Agents {
             private mutable int hn;
             private mutable int hcap;
 
-            // per plate
-            private mutable int[] psx;
-            private mutable int[] psy;
-            private mutable int[] pkind;
-            private mutable int[] pcont;        // continent id, or -1
-            private mutable int[] parea;
-            private mutable int[] pedge;        // 1 when the plate touches the map border
-            private mutable float[] pcx;        // centroid, coarse coords
-            private mutable float[] pcy;
-            private mutable float[] pmx;        // plate motion, unit vector (Tectonics reads it)
-            private mutable float[] pmy;
+            // per plate: seed, kind, continent, area, edge, centroid and motion, one row each
+            private mutable Plate[] plates;
             private mutable float[] cw;         // per continent: its drawn share weight
             private mutable byte[] adj;         // nPlates*nPlates adjacency
 
@@ -77,16 +68,7 @@ public bundle Agents {
                 this.crust = new float[1]();
                 this.hk = new float[1]();
                 this.hv = new int[1]();
-                this.psx = new int[1]();
-                this.psy = new int[1]();
-                this.pkind = new int[1]();
-                this.pcont = new int[1]();
-                this.parea = new int[1]();
-                this.pedge = new int[1]();
-                this.pcx = new float[1]();
-                this.pcy = new float[1]();
-                this.pmx = new float[1]();
-                this.pmy = new float[1]();
+                this.plates = new Plate[1]();
                 this.cw = new float[1]();
                 this.adj = new byte[1]();
                 this.offX = new int[8]();
@@ -110,16 +92,7 @@ public bundle Agents {
                 delete this.crust;
                 delete this.hk;
                 delete this.hv;
-                delete this.psx;
-                delete this.psy;
-                delete this.pkind;
-                delete this.pcont;
-                delete this.parea;
-                delete this.pedge;
-                delete this.pcx;
-                delete this.pcy;
-                delete this.pmx;
-                delete this.pmy;
+                delete this.plates;
                 delete this.cw;
                 delete this.adj;
                 delete this.offX;
@@ -198,28 +171,10 @@ public bundle Agents {
             }
 
             private method allocPlates(int np) returns void {
-                delete this.psx;
-                delete this.psy;
-                delete this.pkind;
-                delete this.pcont;
-                delete this.parea;
-                delete this.pedge;
-                delete this.pcx;
-                delete this.pcy;
-                delete this.pmx;
-                delete this.pmy;
+                delete this.plates;
                 delete this.cw;
                 delete this.adj;
-                this.psx = new int[np]();
-                this.psy = new int[np]();
-                this.pkind = new int[np]();
-                this.pcont = new int[np]();
-                this.parea = new int[np]();
-                this.pedge = new int[np]();
-                this.pcx = new float[np]();
-                this.pcy = new float[np]();
-                this.pmx = new float[np]();
-                this.pmy = new float[np]();
+                this.plates = new Plate[np]();
                 this.cw = new float[np]();
                 this.adj = new byte[np * np]();
                 return;
@@ -265,8 +220,8 @@ public bundle Agents {
                     mutable boolean ok = true;
                     mutable int j = 0;
                     while (j < placed) {
-                        float dx = cast<float>(tx - this.psx[j]);
-                        float dy = cast<float>(ty - this.psy[j]);
+                        float dx = cast<float>(tx - this.plates[j].sx);
+                        float dy = cast<float>(ty - this.plates[j].sy);
                         if (dx * dx + dy * dy < minSep * minSep) {
                             ok = false;
                             j = placed;
@@ -274,8 +229,8 @@ public bundle Agents {
                         j = j + 1;
                     }
                     if (ok) {
-                        this.psx[placed] = tx;
-                        this.psy[placed] = ty;
+                        this.plates[placed].sx = tx;
+                        this.plates[placed].sy = ty;
                         placed = placed + 1;
                     }
                     guard = guard + 1;
@@ -284,15 +239,15 @@ public bundle Agents {
                     }
                 }
                 while (placed < this.nPlates) {
-                    this.psx[placed] = rng.nextInt(this.pw);
-                    this.psy[placed] = rng.nextInt(this.ph);
+                    this.plates[placed].sx = rng.nextInt(this.pw);
+                    this.plates[placed].sy = rng.nextInt(this.ph);
                     placed = placed + 1;
                 }
                 mutable int i = 0;
                 while (i < this.nPlates) {
                     float a = rng.unit() * 6.28318;
-                    this.pmx[i] = LandMath.cos(a);
-                    this.pmy[i] = LandMath.sin(a);
+                    this.plates[i].mx = LandMath.cos(a);
+                    this.plates[i].my = LandMath.sin(a);
                     i = i + 1;
                 }
                 return;
@@ -314,7 +269,7 @@ public bundle Agents {
                 this.hn = 0;
                 i = 0;
                 while (i < this.nPlates) {
-                    int c = this.psy[i] * this.pw + this.psx[i];
+                    int c = this.plates[i].sy * this.pw + this.plates[i].sx;
                     this.dist[c] = 0.0;
                     this.owner[c] = i;
                     this.hpush(0.0, c);
@@ -366,8 +321,8 @@ public bundle Agents {
                 mutable int bd = 2000000000;
                 mutable int i = 0;
                 while (i < this.nPlates) {
-                    int dx = x - this.psx[i];
-                    int dy = y - this.psy[i];
+                    int dx = x - this.plates[i].sx;
+                    int dy = y - this.plates[i].sy;
                     int d = dx * dx + dy * dy;
                     if (d < bd) {
                         bd = d;
@@ -439,10 +394,10 @@ public bundle Agents {
             private method measurePlates() returns void {
                 mutable int i = 0;
                 while (i < this.nPlates) {
-                    this.parea[i] = 0;
-                    this.pedge[i] = 0;
-                    this.pcx[i] = 0.0;
-                    this.pcy[i] = 0.0;
+                    this.plates[i].area = 0;
+                    this.plates[i].edge = 0;
+                    this.plates[i].cx = 0.0;
+                    this.plates[i].cy = 0.0;
                     i = i + 1;
                 }
                 int pn = this.pw * this.ph;
@@ -451,19 +406,19 @@ public bundle Agents {
                     int p = this.owner[i];
                     int x = i % this.pw;
                     int y = i / this.pw;
-                    this.parea[p] = this.parea[p] + 1;
-                    this.pcx[p] = this.pcx[p] + cast<float>(x);
-                    this.pcy[p] = this.pcy[p] + cast<float>(y);
+                    this.plates[p].area = this.plates[p].area + 1;
+                    this.plates[p].cx = this.plates[p].cx + cast<float>(x);
+                    this.plates[p].cy = this.plates[p].cy + cast<float>(y);
                     if (x == 0 || y == 0 || x == this.pw - 1 || y == this.ph - 1) {
-                        this.pedge[p] = 1;
+                        this.plates[p].edge = 1;
                     }
                     i = i + 1;
                 }
                 i = 0;
                 while (i < this.nPlates) {
-                    if (this.parea[i] > 0) {
-                        this.pcx[i] = this.pcx[i] / cast<float>(this.parea[i]);
-                        this.pcy[i] = this.pcy[i] / cast<float>(this.parea[i]);
+                    if (this.plates[i].area > 0) {
+                        this.plates[i].cx = this.plates[i].cx / cast<float>(this.plates[i].area);
+                        this.plates[i].cy = this.plates[i].cy / cast<float>(this.plates[i].area);
                     }
                     i = i + 1;
                 }
@@ -512,7 +467,7 @@ public bundle Agents {
             private method nextToCont(int p, int c) returns boolean {
                 mutable int i = 0;
                 while (i < this.nPlates) {
-                    if (this.pcont[i] == c && this.touches(p, i)) {
+                    if (this.plates[i].continent == c && this.touches(p, i)) {
                         return true;
                     }
                     i = i + 1;
@@ -524,7 +479,7 @@ public bundle Agents {
             private method nextToOther(int p, int c) returns boolean {
                 mutable int i = 0;
                 while (i < this.nPlates) {
-                    if (this.pcont[i] >= 0 && this.pcont[i] != c && this.touches(p, i)) {
+                    if (this.plates[i].continent >= 0 && this.plates[i].continent != c && this.touches(p, i)) {
                         return true;
                     }
                     i = i + 1;
@@ -545,14 +500,14 @@ public bundle Agents {
                 Rng rng = new Rng(this.seed ^ 0x1BEE) on stack;
                 mutable int i = 0;
                 while (i < this.nPlates) {
-                    this.pkind[i] = cast<int>(PlateKind.Oceanic);
-                    this.pcont[i] = 0 - 1;
+                    this.plates[i].kind = cast<int>(PlateKind.Oceanic);
+                    this.plates[i].continent = 0 - 1;
                     i = i + 1;
                 }
                 mutable float avg = 0.0;
                 i = 0;
                 while (i < this.nPlates) {
-                    avg = avg + cast<float>(this.parea[i]);
+                    avg = avg + cast<float>(this.plates[i].area);
                     i = i + 1;
                 }
                 avg = avg / cast<float>(this.nPlates);
@@ -565,8 +520,8 @@ public bundle Agents {
                 mutable float bestA = 0.0 - 1.0;
                 i = 0;
                 while (i < this.nPlates) {
-                    mutable float a = cast<float>(this.parea[i]);
-                    if (this.pedge[i] != 0) {
+                    mutable float a = cast<float>(this.plates[i].area);
+                    if (this.plates[i].edge != 0) {
                         a = a * 0.35;
                     }
                     if (a > bestA) {
@@ -575,8 +530,8 @@ public bundle Agents {
                     }
                     i = i + 1;
                 }
-                this.pkind[first] = cast<int>(PlateKind.Craton);
-                this.pcont[first] = 0;
+                this.plates[first].kind = cast<int>(PlateKind.Craton);
+                this.plates[first].continent = 0;
                 mutable int made = 1;
                 mutable boolean more = true;
                 while (made < this.nCont && more) {
@@ -584,13 +539,13 @@ public bundle Agents {
                     mutable float bestScore = 0.0 - 1.0;
                     i = 0;
                     while (i < this.nPlates) {
-                        if (this.pcont[i] < 0 && !this.nextToOther(i, 0 - 1)) {
+                        if (this.plates[i].continent < 0 && !this.nextToOther(i, 0 - 1)) {
                             mutable float md = 1000000000.0;
                             mutable int j = 0;
                             while (j < this.nPlates) {
-                                if (this.pcont[j] >= 0) {
-                                    float dx = this.pcx[i] - this.pcx[j];
-                                    float dy = this.pcy[i] - this.pcy[j];
+                                if (this.plates[j].continent >= 0) {
+                                    float dx = this.plates[i].cx - this.plates[j].cx;
+                                    float dy = this.plates[i].cy - this.plates[j].cy;
                                     float dd = LandMath.sqrt(dx * dx + dy * dy);
                                     if (dd < md) {
                                         md = dd;
@@ -598,8 +553,8 @@ public bundle Agents {
                                 }
                                 j = j + 1;
                             }
-                            mutable float sc = md * (0.55 + 0.90 * cast<float>(this.parea[i]) / avg);
-                            if (this.pedge[i] != 0) {
+                            mutable float sc = md * (0.55 + 0.90 * cast<float>(this.plates[i].area) / avg);
+                            if (this.plates[i].edge != 0) {
                                 sc = sc * 0.60;
                             }
                             if (sc > bestScore) {
@@ -612,8 +567,8 @@ public bundle Agents {
                     if (pick < 0) {
                         more = false;
                     } else {
-                        this.pkind[pick] = cast<int>(PlateKind.Craton);
-                        this.pcont[pick] = made;
+                        this.plates[pick].kind = cast<int>(PlateKind.Craton);
+                        this.plates[pick].continent = made;
                         made = made + 1;
                     }
                 }
@@ -722,15 +677,15 @@ public bundle Agents {
                     mutable float bestSc = 0.0 - 1.0;
                     i = 0;
                     while (i < this.nPlates) {
-                        if (this.pkind[i] == cast<int>(PlateKind.Oceanic)
+                        if (this.plates[i].kind == cast<int>(PlateKind.Oceanic)
                             && this.adjacentContinents(i) <= 1
-                            && cast<float>(this.parea[i]) > avg * 0.35) {
+                            && cast<float>(this.plates[i].area) > avg * 0.35) {
                             mutable float far = 1000000000.0;
                             mutable int j = 0;
                             while (j < this.nPlates) {
-                                if (this.pkind[j] == cast<int>(PlateKind.Craton)) {
-                                    float dx = this.pcx[i] - this.pcx[j];
-                                    float dy = this.pcy[i] - this.pcy[j];
+                                if (this.plates[j].kind == cast<int>(PlateKind.Craton)) {
+                                    float dx = this.plates[i].cx - this.plates[j].cx;
+                                    float dy = this.plates[i].cy - this.plates[j].cy;
                                     float dd = LandMath.sqrt(dx * dx + dy * dy);
                                     if (dd < far) {
                                         far = dd;
@@ -749,8 +704,8 @@ public bundle Agents {
                     if (pick < 0) {
                         going = false;
                     } else {
-                        this.pkind[pick] = cast<int>(PlateKind.Island);
-                        this.pcont[pick] = 0 - 1;
+                        this.plates[pick].kind = cast<int>(PlateKind.Island);
+                        this.plates[pick].continent = 0 - 1;
                         isl = isl + 1;
                     }
                 }
@@ -764,9 +719,9 @@ public bundle Agents {
                 mutable int pickA = 0 - 1;
                 mutable int i = 0;
                 while (i < this.nPlates) {
-                    if (this.pcont[i] < 0 && this.nextToCont(i, c) && !this.nextToOther(i, c)) {
-                        if (this.parea[i] > pickA) {
-                            pickA = this.parea[i];
+                    if (this.plates[i].continent < 0 && this.nextToCont(i, c) && !this.nextToOther(i, c)) {
+                        if (this.plates[i].area > pickA) {
+                            pickA = this.plates[i].area;
                             pick = i;
                         }
                     }
@@ -775,8 +730,8 @@ public bundle Agents {
                 if (pick < 0) {
                     return false;
                 }
-                this.pkind[pick] = cast<int>(PlateKind.Craton);
-                this.pcont[pick] = c;
+                this.plates[pick].kind = cast<int>(PlateKind.Craton);
+                this.plates[pick].continent = c;
                 return true;
             }
 
@@ -784,8 +739,8 @@ public bundle Agents {
                 mutable int a = 0;
                 mutable int i = 0;
                 while (i < this.nPlates) {
-                    if (this.pkind[i] == cast<int>(PlateKind.Craton)) {
-                        a = a + this.parea[i];
+                    if (this.plates[i].kind == cast<int>(PlateKind.Craton)) {
+                        a = a + this.plates[i].area;
                     }
                     i = i + 1;
                 }
@@ -830,8 +785,8 @@ public bundle Agents {
                 mutable int a = 0;
                 mutable int i = 0;
                 while (i < this.nPlates) {
-                    if (this.pcont[i] == c) {
-                        a = a + this.parea[i];
+                    if (this.plates[i].continent == c) {
+                        a = a + this.plates[i].area;
                     }
                     i = i + 1;
                 }
@@ -855,7 +810,7 @@ public bundle Agents {
                 this.chamfer(false);
                 i = 0;
                 while (i < pn) {
-                    if (this.pkind[this.owner[i]] == cast<int>(PlateKind.Oceanic)) {
+                    if (this.plates[this.owner[i]].kind == cast<int>(PlateKind.Oceanic)) {
                         this.sdf[i] = 0.0 - this.dt[i];
                     }
                     i = i + 1;
@@ -870,7 +825,7 @@ public bundle Agents {
                 // decided by the water level rather than by which plate a cell happens to be in.
                 i = 0;
                 while (i < pn) {
-                    if (this.pkind[this.owner[i]] == cast<int>(PlateKind.Island)) {
+                    if (this.plates[this.owner[i]].kind == cast<int>(PlateKind.Island)) {
                         this.dt[i] = 1.0;
                     } else {
                         this.dt[i] = 0.0;
@@ -950,7 +905,7 @@ public bundle Agents {
                 int pn = this.pw * this.ph;
                 mutable int i = 0;
                 while (i < pn) {
-                    boolean oceanic = this.pkind[this.owner[i]] == cast<int>(PlateKind.Oceanic);
+                    boolean oceanic = this.plates[this.owner[i]].kind == cast<int>(PlateKind.Oceanic);
                     mutable boolean isSeed = oceanic;
                     if (!fromOceanic) {
                         isSeed = !oceanic;
@@ -1276,10 +1231,10 @@ public bundle Agents {
                 }
                 i = 0;
                 while (i < this.nPlates) {
-                    f.pkind[i] = this.pkind[i];
-                    f.pcont[i] = this.pcont[i];
-                    f.pmx[i] = this.pmx[i];
-                    f.pmy[i] = this.pmy[i];
+                    f.pkind[i] = this.plates[i].kind;
+                    f.pcont[i] = this.plates[i].continent;
+                    f.pmx[i] = this.plates[i].mx;
+                    f.pmy[i] = this.plates[i].my;
                     i = i + 1;
                 }
                 return;
@@ -1301,7 +1256,7 @@ public bundle Agents {
                     mutable int plates = 0;
                     mutable int i = 0;
                     while (i < this.nPlates) {
-                        if (this.pcont[i] == c) {
+                        if (this.plates[i].continent == c) {
                             plates = plates + 1;
                         }
                         i = i + 1;
@@ -1316,10 +1271,10 @@ public bundle Agents {
                 mutable int islands = 0;
                 mutable int i2 = 0;
                 while (i2 < this.nPlates) {
-                    if (this.pkind[i2] == cast<int>(PlateKind.Craton)) {
+                    if (this.plates[i2].kind == cast<int>(PlateKind.Craton)) {
                         cratons = cratons + 1;
                     }
-                    if (this.pkind[i2] == cast<int>(PlateKind.Island)) {
+                    if (this.plates[i2].kind == cast<int>(PlateKind.Island)) {
                         islands = islands + 1;
                     }
                     i2 = i2 + 1;
@@ -1340,7 +1295,7 @@ public bundle Agents {
                         land = land + 1;
                         int gx = (cell % w) * this.pw / w;
                         int gy = (cell / w) * this.ph / h;
-                        if (this.pkind[this.owner[gy * this.pw + gx]] != cast<int>(PlateKind.Oceanic)) {
+                        if (this.plates[this.owner[gy * this.pw + gx]].kind != cast<int>(PlateKind.Oceanic)) {
                             onCraton = onCraton + 1;
                         }
                     }
