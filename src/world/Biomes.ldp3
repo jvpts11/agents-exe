@@ -1,0 +1,189 @@
+import System.IO.Console;
+program AgentsExe;
+
+// The per-biome engine: colour for the far-zoom map and the software renderer, and the four
+// movement/settlement facts. Columns are sized from the enum and every row is keyed by the
+// CONSTANT -- a bare ordinal cannot name a row here any more, and adding a forty-first biome
+// widens every array the moment it exists.
+public bundle Agents {
+    public namespace World {
+
+        public class Biomes {
+            private static mutable int[] R;
+            private static mutable int[] G;
+            private static mutable int[] B;
+            // THREE QUESTIONS, NOT ONE.
+            //
+            // `walkable` used to answer all of them at once and got two of them wrong. Whether a
+            // body may BE somewhere, whether a town may BUILD there, and how fast the ground is
+            // crossed are three different facts, and folding them together put stone and ore
+            // behind a wall: they live on mountain rock, mountain rock was "unwalkable", and so
+            // nobody in the world could ever reach a single one of them.
+            //
+            //   PASS  -- a body may be here, on foot or swimming. False only for open sea, which
+            //            needs a ship.
+            //   SWIM  -- being here means swimming: faster, and drawn half under.
+            //   BUILD -- a settlement may be founded and raised here. Never true of water or of
+            //            high rock; being NEXT to either has nothing to do with it.
+            //   PACE  -- how fast it is crossed. High rock is slow, which is what makes a walker
+            //            go round it when the way round is not much longer.
+            private static mutable boolean[] WALK;
+            private static mutable boolean[] SWIM;
+            private static mutable boolean[] BUILD;
+            private static mutable float[] PACE;
+
+            onClassLoad {
+                int n = Biomes.count();
+                Biomes.R = new int[n]();
+                Biomes.G = new int[n]();
+                Biomes.B = new int[n]();
+                Biomes.WALK = new boolean[n]();
+                Biomes.SWIM = new boolean[n]();
+                Biomes.BUILD = new boolean[n]();
+                Biomes.PACE = new float[n]();
+                // constant, r, g, b, a body may be here
+                Biomes.put(Biome.MarineTrench, 12, 20, 60, false);      // a ship or nothing
+                Biomes.put(Biome.DeepOcean, 18, 42, 96, false);         // a ship or nothing
+                Biomes.put(Biome.Ocean, 28, 74, 140, false);            // a ship or nothing
+                Biomes.put(Biome.ShallowSea, 58, 132, 188, true);       // swum
+                Biomes.put(Biome.CoralReef, 60, 190, 190, true);        // swum
+                Biomes.put(Biome.SeaIce, 200, 224, 236, true);          // walked, and slow
+                Biomes.put(Biome.Lake, 46, 110, 168, true);             // swum
+                Biomes.put(Biome.River, 52, 120, 176, false);
+                Biomes.put(Biome.Beach, 226, 214, 160, true);
+                Biomes.put(Biome.RockyShore, 140, 138, 130, true);
+                Biomes.put(Biome.Marsh, 96, 128, 84, true);
+                Biomes.put(Biome.Swamp, 70, 96, 66, true);
+                Biomes.put(Biome.Bog, 84, 96, 78, true);
+                Biomes.put(Biome.Mangrove, 58, 110, 74, true);
+                Biomes.put(Biome.TropicalRainforest, 28, 118, 48, true);
+                Biomes.put(Biome.TropSeasonalForest, 74, 140, 58, true);
+                Biomes.put(Biome.Savanna, 178, 168, 88, true);
+                Biomes.put(Biome.ThornScrub, 158, 150, 96, true);
+                Biomes.put(Biome.HotDesert, 224, 196, 130, true);
+                Biomes.put(Biome.MedShrubland, 150, 156, 96, true);
+                Biomes.put(Biome.WarmGrassland, 150, 176, 84, true);
+                Biomes.put(Biome.LaurelForest, 52, 126, 78, true);
+                Biomes.put(Biome.DeciduousForest, 66, 132, 62, true);
+                Biomes.put(Biome.TemperateRainforest, 40, 108, 74, true);
+                Biomes.put(Biome.Prairie, 150, 176, 92, true);
+                Biomes.put(Biome.Steppe, 176, 172, 110, true);
+                Biomes.put(Biome.ColdDesert, 178, 168, 140, true);
+                Biomes.put(Biome.Taiga, 56, 100, 82, true);
+                Biomes.put(Biome.Tundra, 150, 158, 140, true);
+                Biomes.put(Biome.IceCap, 232, 240, 248, true);
+                Biomes.put(Biome.Glacier, 206, 224, 240, true);
+                Biomes.put(Biome.Snowfield, 224, 232, 240, true);
+                Biomes.put(Biome.Hills, 120, 148, 96, true);
+                Biomes.put(Biome.Mountain, 122, 116, 108, true);
+                Biomes.put(Biome.AlpineMeadow, 132, 168, 120, true);
+                Biomes.put(Biome.SnowPeak, 238, 242, 248, true);
+                Biomes.put(Biome.Volcanic, 70, 48, 46, true);
+                Biomes.put(Biome.Badlands, 176, 128, 92, true);
+                Biomes.put(Biome.SaltFlat, 226, 226, 220, true);
+                Biomes.put(Biome.Oasis, 72, 160, 120, true);
+
+                // The default is dry ground a town may stand on, crossed at walking pace. What
+                // follows is only the exceptions, so the special cases are the short list rather
+                // than something to be read off forty lines.
+                mutable int o = 0;
+                while (o < n) {
+                    Biomes.SWIM[o] = false;
+                    Biomes.BUILD[o] = Biomes.WALK[o];
+                    Biomes.PACE[o] = 1.0;
+                    o = o + 1;
+                }
+                // SWUM: shallow sea, reef, lake, oasis. Faster than walking, and nothing is built
+                // on them. A river is walked -- it is shallow and it is crossed -- but a house
+                // does not stand in one.
+                Biomes.wet(Biome.ShallowSea);
+                Biomes.wet(Biome.CoralReef);
+                Biomes.wet(Biome.Lake);
+                Biomes.wet(Biome.Oasis);
+                Biomes.BUILD[cast<int>(Biome.River)] = false;   // forded, never built in
+                // HIGH ROCK: walked, slowly, and never settled. Territory may cover it and a
+                // gatherer may climb it -- the ore and the stone are up there and this is what
+                // finally lets anybody reach them -- but no town is founded on a mountain.
+                Biomes.high(Biome.SeaIce);
+                Biomes.high(Biome.IceCap);
+                Biomes.high(Biome.Glacier);
+                Biomes.high(Biome.Mountain);
+                Biomes.high(Biome.SnowPeak);
+                Biomes.high(Biome.Volcanic);
+            }
+
+            private static method put(Biome b, int r, int g, int bl, boolean w) returns void {
+                int o = cast<int>(b);
+                Biomes.R[o] = r;
+                Biomes.G[o] = g;
+                Biomes.B[o] = bl;
+                Biomes.WALK[o] = w;
+            }
+
+            private static method wet(Biome b) returns void {
+                int o = cast<int>(b);
+                Biomes.SWIM[o] = true;
+                Biomes.BUILD[o] = false;
+                Biomes.PACE[o] = 1.35;
+                return;
+            }
+
+            private static method high(Biome b) returns void {
+                int o = cast<int>(b);
+                Biomes.BUILD[o] = false;
+                Biomes.PACE[o] = 0.45;
+                return;
+            }
+
+            public static method count() returns int {
+                return Biome.count();
+            }
+
+            // The declared identifier, straight off the enum -- the forty-branch chain this
+            // replaces had a silent wrong-answer default; an out-of-range ordinal now traps at
+            // the checked cast instead of answering "Oasis".
+            public static method name(int ordinal) returns String {
+                return cast<Biome>(ordinal).name();
+            }
+
+            public static method red(int ordinal) returns int {
+                return Biomes.R[ordinal];
+            }
+
+            public static method green(int ordinal) returns int {
+                return Biomes.G[ordinal];
+            }
+
+            public static method blue(int ordinal) returns int {
+                return Biomes.B[ordinal];
+            }
+
+            // A body may be here at all -- on foot, or swimming. False only for open sea.
+            public static method walkable(int ordinal) returns boolean {
+                return Biomes.WALK[ordinal];
+            }
+
+            // Being here means swimming: drawn half under, and quicker than walking.
+            public static method swims(int ordinal) returns boolean {
+                return Biomes.SWIM[ordinal];
+            }
+
+            // A town may be founded here and a building raised here. What is NEXT to the tile
+            // never enters into it: a house on the shore is a house on the shore.
+            public static method buildable(int ordinal) returns boolean {
+                return Biomes.BUILD[ordinal];
+            }
+
+            // How fast it is crossed, against ordinary ground at one.
+            public static method pace(int ordinal) returns float {
+                return Biomes.PACE[ordinal];
+            }
+
+            // High rock and ice: passable, slow, never settled. The thing a walker goes round
+            // when the target is not itself up there.
+            public static method rough(int ordinal) returns boolean {
+                return Biomes.PACE[ordinal] < 1.0;
+            }
+        }
+    }
+}
