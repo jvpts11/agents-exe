@@ -47,8 +47,9 @@ public bundle Agents {
             private mutable int[] massId;         // per 16-cell block; -1 where there is no land
             private mutable boolean[] massEmpty;  // this mass began with nobody on it
             private mutable int masses;
-            private mutable int bw;
-            private mutable int bh;
+            // The sixteen-cell lattice the masses are labelled on -- the same geometry the
+            // NodeField counts its work map on, asked of the one class that owns it.
+            private mutable BlockGrid* blocks;
 
             public constructor Grid(int w, int h) {
                 this.w = w;
@@ -63,17 +64,16 @@ public bundle Agents {
                 this.sub = new byte[n]();
                 this.subQty = new short[n]();
                 this.surf = new NodeField(w, h) on heap;
-                this.bw = (w + 15) / 16;
-                this.bh = (h + 15) / 16;
-                this.massId = new int[this.bw * this.bh]();
-                this.massEmpty = new boolean[this.bw * this.bh]();
+                this.blocks = new BlockGrid(w, h) on heap;
+                this.massId = new int[this.blocks.count()]();
+                this.massEmpty = new boolean[this.blocks.count()]();
                 this.masses = 0;
             }
 
             // Flood the blocks that hold walkable ground. Called once, after the terrain is final
             // and before anybody is placed on it.
             public method labelMasses() returns void {
-                int nb = this.bw * this.bh;
+                int nb = this.blocks.count();
                 for (int b in 0..nb) {
                     this.massId[b] = 0 - 1;
                     this.massEmpty[b] = true;
@@ -95,8 +95,8 @@ public bundle Agents {
                     while (qh < qt) {
                         int at = queue[qh];
                         qh = qh + 1;
-                        int ax = at % this.bw;
-                        int ay = at / this.bw;
+                        int ax = this.blocks.colOf(at);
+                        int ay = this.blocks.rowOf(at);
                         mutable int d = 0;
                         while (d < 4) {
                             mutable int nx = ax;
@@ -111,10 +111,10 @@ public bundle Agents {
                                 ny = ay + 1;
                             }
                             d = d + 1;
-                            if (nx < 0 || ny < 0 || nx >= this.bw || ny >= this.bh) {
+                            if (!this.blocks.holds(nx, ny)) {
                                 continue;
                             }
-                            int nb2 = ny * this.bw + nx;
+                            int nb2 = this.blocks.at(nx, ny);
                             if (this.massId[nb2] >= 0 || !this.blockIsLand(nb2)) {
                                 continue;
                             }
@@ -133,8 +133,8 @@ public bundle Agents {
             // A block counts as land if any of its four corners is walkable -- a coastline block is
             // mostly water and still part of the continent behind it.
             private method blockIsLand(int b) returns boolean {
-                int bx = (b % this.bw) * 16;
-                int by = (b / this.bw) * 16;
+                int bx = this.blocks.originX(b);
+                int by = this.blocks.originY(b);
                 mutable int k = 0;
                 while (k < 4) {
                     int px = bx + (k % 2) * 15;
@@ -154,7 +154,7 @@ public bundle Agents {
                 if (x < 0 || y < 0 || x >= this.w || y >= this.h) {
                     return 0 - 1;
                 }
-                return this.massId[(y / 16) * this.bw + (x / 16)];
+                return this.massId[this.blocks.ofCell(x, y)];
             }
 
             public method massCount() returns int {
@@ -168,7 +168,7 @@ public bundle Agents {
                 if (m < 0) {
                     return;
                 }
-                for (int b in 0..this.bw * this.bh) {
+                for (int b in 0..this.blocks.count()) {
                     if (this.massId[b] == m) {
                         this.massEmpty[b] = false;
                     }
@@ -181,7 +181,7 @@ public bundle Agents {
                 if (m < 0) {
                     return false;
                 }
-                return this.massEmpty[(y / 16) * this.bw + (x / 16)];
+                return this.massEmpty[this.blocks.ofCell(x, y)];
             }
 
             public destructor ~Grid() returns void {
@@ -194,6 +194,7 @@ public bundle Agents {
                 delete this.sub;
                 delete this.subQty;
                 delete this.surf;
+                delete this.blocks;
                 delete this.massId;
                 delete this.massEmpty;
             }

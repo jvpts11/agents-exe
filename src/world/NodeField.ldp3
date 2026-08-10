@@ -61,9 +61,10 @@ public bundle Agents {
             // four a stone quarry -- and clay, sand and salt were never brought home anywhere in the
             // world. Two and a half megabytes buys the question the villagers were actually asking.
             private mutable int[] blockGood;
-            private mutable int bw;
-            private mutable int bh;
-            private mutable int bplane;        // bw * bh, the stride between Harvest classes
+            // The sixteen-cell lattice the counts above are kept on -- the same geometry the Grid
+            // labels its landmasses on, asked of the one class that owns it.
+            private mutable BlockGrid* blocks;
+            private mutable int bplane;        // blocks.count(), the stride between Harvest classes
             private mutable int renewAt;       // where the regrowth sweep resumes
             private mutable float renewDebt;   // nodes owed a top-up, carried between frames
             private mutable int renewSweeps;   // full passes completed: the clock a felled tree waits on
@@ -82,9 +83,8 @@ public bundle Agents {
                 this.rowStart = new int[h + 1]();
                 this.cellFirst = new int[1]();
                 this.ordered = false;
-                this.bw = (w + 15) / 16;
-                this.bh = (h + 15) / 16;
-                this.bplane = this.bw * this.bh;
+                this.blocks = new BlockGrid(w, h) on heap;
+                this.bplane = this.blocks.count();
                 this.blockHave = new int[this.bplane * Harvest.count()]();
                 this.blockGood = new int[this.bplane * Goods.count()]();
                 this.renewAt = 0;
@@ -103,6 +103,7 @@ public bundle Agents {
                 delete this.cellFirst;
                 delete this.blockHave;
                 delete this.blockGood;
+                delete this.blocks;
             }
 
             public method size() returns int {
@@ -291,46 +292,32 @@ public bundle Agents {
             }
 
             private method blockOf(int i) returns int {
-                mutable int bx = cast<int>(this.px[i]) / 16;
-                mutable int by = cast<int>(this.py[i]) / 16;
-                if (bx < 0) {
-                    bx = 0;
-                }
-                if (bx >= this.bw) {
-                    bx = this.bw - 1;
-                }
-                if (by < 0) {
-                    by = 0;
-                }
-                if (by >= this.bh) {
-                    by = this.bh - 1;
-                }
-                return by * this.bw + bx;
+                return this.blocks.ofCellClamped(cast<int>(this.px[i]), cast<int>(this.py[i]));
             }
 
             public method blockCols() returns int {
-                return this.bw;
+                return this.blocks.cols();
             }
 
             public method blockRows() returns int {
-                return this.bh;
+                return this.blocks.rows();
             }
 
             // Live nodes of one Harvest class in the 16x16 block (bx, by). Zero outside the world.
             public method inBlock(int bx, int by, int hclass) returns int {
-                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                if (!this.blocks.holds(bx, by)) {
                     return 0;
                 }
-                return this.blockHave[hclass * this.bplane + by * this.bw + bx];
+                return this.blockHave[hclass * this.bplane + this.blocks.at(bx, by)];
             }
 
             // Live nodes yielding one particular GOOD in the block. Same map, asked the way the
             // people asking it actually think: not "is there mining here" but "is there COAL here".
             public method inBlockGood(int bx, int by, int good) returns int {
-                if (bx < 0 || by < 0 || bx >= this.bw || by >= this.bh) {
+                if (!this.blocks.holds(bx, by)) {
                     return 0;
                 }
-                return this.blockGood[good * this.bplane + by * this.bw + bx];
+                return this.blockGood[good * this.bplane + this.blocks.at(bx, by)];
             }
 
             // Whole-world stock of one good still standing in the ground.
@@ -603,20 +590,21 @@ public bundle Agents {
             // Living timber in the four blocks around this one. Four reads, and only ever asked
             // about a slot that is already known to be bare.
             private method neighbourWood(int b, int plane) returns int {
-                int bx = b % this.bw;
-                int by = b / this.bw;
+                int bx = this.blocks.colOf(b);
+                int by = this.blocks.rowOf(b);
+                int stride = this.blocks.cols();
                 mutable int total = 0;
                 if (bx > 0) {
                     total = total + this.blockHave[plane + b - 1];
                 }
-                if (bx < this.bw - 1) {
+                if (bx < stride - 1) {
                     total = total + this.blockHave[plane + b + 1];
                 }
                 if (by > 0) {
-                    total = total + this.blockHave[plane + b - this.bw];
+                    total = total + this.blockHave[plane + b - stride];
                 }
-                if (by < this.bh - 1) {
-                    total = total + this.blockHave[plane + b + this.bw];
+                if (by < this.blocks.rows() - 1) {
+                    total = total + this.blockHave[plane + b + stride];
                 }
                 return total;
             }

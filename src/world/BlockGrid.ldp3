@@ -1,0 +1,95 @@
+import System.IO.Console;
+program AgentsExe;
+
+// The world divided into sixteen-cell blocks, and the only place that arithmetic is written.
+//
+// Two classes need it and they must agree: `Grid` labels a landmass per block -- ten thousand
+// blocks to flood rather than two and a half million cells -- and `NodeField` keeps its coarse
+// work map on the same lattice, one count per block per harvest class. They computed
+// `(w + 15) / 16` and `by * bw + bx` separately, which is two chances to disagree about the same
+// grid and no way to notice: a block that meant one thing to the masses and another to the counts
+// would answer both questions plausibly and one of them wrongly.
+//
+// Cell-to-block comes in two forms on purpose. The masses ask about a cell they have already
+// checked is inside the world, so `ofCell` divides and no more. The nodes ask about a POSITION,
+// which is a float that may sit a hair outside after rounding, so `ofCellClamped` pins it to the
+// edge block -- the same clamp `Grid.idx` applies to cells, at block scale.
+public bundle Agents {
+    public namespace World {
+
+        public class BlockGrid {
+            private mutable int bw;
+            private mutable int bh;
+
+            public constructor BlockGrid(int w, int h) {
+                this.bw = (w + 15) / 16;
+                this.bh = (h + 15) / 16;
+            }
+
+            public method cols() returns int {
+                return this.bw;
+            }
+
+            public method rows() returns int {
+                return this.bh;
+            }
+
+            // How many blocks the world holds -- the stride between one plane of per-block counts
+            // and the next.
+            public method count() returns int {
+                return this.bw * this.bh;
+            }
+
+            public method holds(int bx, int by) returns boolean {
+                return bx >= 0 && by >= 0 && bx < this.bw && by < this.bh;
+            }
+
+            public method at(int bx, int by) returns int {
+                return by * this.bw + bx;
+            }
+
+            // The block a cell falls in. The caller has already established the cell is in the
+            // world; this only divides.
+            public method ofCell(int cx, int cy) returns int {
+                return (cy / 16) * this.bw + (cx / 16);
+            }
+
+            // The block a position falls in, pinned to the edge block if it sits outside.
+            public method ofCellClamped(int cx, int cy) returns int {
+                mutable int bx = cx / 16;
+                mutable int by = cy / 16;
+                if (bx < 0) {
+                    bx = 0;
+                }
+                if (bx >= this.bw) {
+                    bx = this.bw - 1;
+                }
+                if (by < 0) {
+                    by = 0;
+                }
+                if (by >= this.bh) {
+                    by = this.bh - 1;
+                }
+                return by * this.bw + bx;
+            }
+
+            // Back the other way: the cell a block starts at, which is what a block-wide sweep
+            // needs to look at the ground under it.
+            public method originX(int b) returns int {
+                return (b % this.bw) * 16;
+            }
+
+            public method originY(int b) returns int {
+                return (b / this.bw) * 16;
+            }
+
+            public method colOf(int b) returns int {
+                return b % this.bw;
+            }
+
+            public method rowOf(int b) returns int {
+                return b / this.bw;
+            }
+        }
+    }
+}
