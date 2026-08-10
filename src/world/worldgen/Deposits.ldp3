@@ -29,10 +29,7 @@ public bundle Agents {
             // per cell -- an ore field that produced no outcrop anywhere is invisible, and one such
             // field is a whole resource an agent can never reach.
             private mutable int[] owner;
-            private mutable int[] shallow;      // 0..100 per body: how near the surface it sits
-            private mutable int[] outCount;     // outcrops produced, per body
-            private mutable int[] outFallback;  // an exposed cell of that body, or -1
-            private mutable int[] bodyOrigin;   // which OreOrigin seeded it
+            private mutable OreBody[] bodies;
             private mutable int nBodies;
 
             public constructor Deposits(int seed) {
@@ -43,11 +40,8 @@ public bundle Agents {
                 this.found = new int[6]();
                 this.cells = new int[6]();
                 this.owner = new int[1]();
-                this.shallow = new int[1]();
-                this.outCount = new int[1]();
+                this.bodies = new OreBody[1]();
                 this.seamCount = new int[1]();
-                this.outFallback = new int[1]();
-                this.bodyOrigin = new int[1]();
                 this.nBodies = 0;
             }
 
@@ -56,11 +50,8 @@ public bundle Agents {
                 delete this.found;
                 delete this.cells;
                 delete this.owner;
-                delete this.shallow;
-                delete this.outCount;
+                delete this.bodies;
                 delete this.seamCount;
-                delete this.outFallback;
-                delete this.bodyOrigin;
             }
 
             public override method name() returns String {
@@ -396,8 +387,8 @@ public bundle Agents {
             private method outcrops(Grid* g) returns int {
                 mutable int made = 0;
                 for (int b in 0..this.nBodies) {
-                    this.outCount[b] = 0;
-                    this.outFallback[b] = 0 - 1;
+                    this.bodies[b].outcrops = 0;
+                    this.bodies[b].fallback = 0 - 1;
                 }
                 for (int y in 0..this.h) {
                     for (int x in 0..this.w) {
@@ -413,29 +404,29 @@ public bundle Agents {
                         if (!this.exposedFor(g, kind, x, y)) {
                             continue;
                         }
-                        if (this.outFallback[b] < 0) {
-                            this.outFallback[b] = i;
+                        if (this.bodies[b].fallback < 0) {
+                            this.bodies[b].fallback = i;
                         }
                         // A shallow body breaks the surface all along its length; a deep one barely
                         // shows at all.
-                        float p = 0.006 + 0.030 * cast<float>(this.shallow[b]) / 100.0;
+                        float p = 0.006 + 0.030 * cast<float>(this.bodies[b].shallow) / 100.0;
                         if (LandMath.hash01(this.seed ^ 0x0C90, x * 5 + 1, y * 9 + 3) >= p) {
                             continue;
                         }
                         this.placeOutcrop(g, x, y, kind);
-                        this.outCount[b] = this.outCount[b] + 1;
+                        this.bodies[b].outcrops = this.bodies[b].outcrops + 1;
                         made = made + 1;
                     }
                 }
                 // The guarantee: a body that showed nowhere, but has somewhere it could have, gets
                 // exactly one.
                 for (int b in 0..this.nBodies) {
-                    if (this.outCount[b] == 0 && this.outFallback[b] >= 0) {
-                        int i = this.outFallback[b];
+                    if (this.bodies[b].outcrops == 0 && this.bodies[b].fallback >= 0) {
+                        int i = this.bodies[b].fallback;
                         int x = i % this.w;
                         int y = i / this.w;
                         this.placeOutcrop(g, x, y, g.subAt(x, y));
-                        this.outCount[b] = 1;
+                        this.bodies[b].outcrops = 1;
                         made = made + 1;
                     }
                 }
@@ -541,14 +532,8 @@ public bundle Agents {
                 for (int k in 1..6) {
                     maxBodies = maxBodies + this.quotaFor(k, n);
                 }
-                delete this.shallow;
-                delete this.outCount;
-                delete this.outFallback;
-                delete this.bodyOrigin;
-                this.bodyOrigin = new int[maxBodies + 1]();
-                this.shallow = new int[maxBodies + 1]();
-                this.outCount = new int[maxBodies + 1]();
-                this.outFallback = new int[maxBodies + 1]();
+                delete this.bodies;
+                this.bodies = new OreBody[maxBodies + 1]();
                 this.nBodies = 0;
                 Rng rng = new Rng(this.seed ^ 0x0DEB0) on stack;
                 // Rejection sampling: throw a dart at the map, ask the geology what is under it, and
@@ -581,8 +566,8 @@ public bundle Agents {
                     }
                     int body = this.nBodies;
                     this.nBodies = this.nBodies + 1;
-                    this.shallow[body] = 100 - cast<int>(deep * 100.0);
-                    this.bodyOrigin[body] = origin;
+                    this.bodies[body].shallow = 100 - cast<int>(deep * 100.0);
+                    this.bodies[body].origin = origin;
                     this.paint(g, x, y, rad, kind, rich, origin, body);
                     this.found[origin] = this.found[origin] + 1;
                     placed = placed + 1;
@@ -591,9 +576,9 @@ public bundle Agents {
                 mutable int reachable = 0;
                 int[] reachBy = new int[6]();
                 for (int b in 0..this.nBodies) {
-                    if (this.outCount[b] > 0) {
+                    if (this.bodies[b].outcrops > 0) {
                         reachable = reachable + 1;
-                        int o = this.bodyOrigin[b];
+                        int o = this.bodies[b].origin;
                         reachBy[o] = reachBy[o] + 1;
                     }
                 }
