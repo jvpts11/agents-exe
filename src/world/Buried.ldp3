@@ -1,0 +1,103 @@
+import System.IO.Console;
+program AgentsExe;
+
+// What lies UNDER the cells.
+//
+// This layer really is per-tile -- an ore body occupies the ground beneath a square, and nothing
+// about it has a position finer than that. What STANDS on the ground does not: that lives in the
+// NodeField as instances with real positions, because plants are spaced by distance and not by the
+// grid. The two are different shapes because they are different things, and keeping them in
+// separate classes is what stops one being written as if it were the other.
+//
+// Whether a cell has been PROSPECTED is a flag on the grid's own bitset, not a fact about the
+// deposit, so this asks the grid for it: what is buried and who has found it are two questions,
+// and only the second one changes when somebody goes looking.
+public bundle Agents {
+    public namespace World {
+
+        public class Buried implements Prospectable {
+            private mutable Grid* world;      // borrowed: the grid owns this, never the other way
+            private mutable byte[] sub;       // buried node kind ordinal, 0 = none
+            private mutable short[] qty;      // units left in the buried deposit
+
+            public constructor Buried(Grid* world, int cells) {
+                this.world = world;
+                this.sub = new byte[cells]();
+                this.qty = new short[cells]();
+            }
+
+            public destructor ~Buried() returns void {
+                delete this.sub;
+                delete this.qty;
+            }
+
+            public override method subAt(int x, int y) returns int {
+                return cast<int>(this.sub[this.world.idx(x, y)]) & 255;
+            }
+
+            public override method subQtyAt(int x, int y) returns int {
+                return cast<int>(this.qty[this.world.idx(x, y)]);
+            }
+
+            public override method hasSub(int x, int y) returns boolean {
+                return this.subAt(x, y) != 0;
+            }
+
+            // Only a kind with a body underground may be buried -- the contract that keeps biology
+            // on the surface, checked here rather than trusted at every call site.
+            public override method setSub(int x, int y, int kind, int qty) returns void
+                requires kind > 0
+                requires kind < Nodes.count()
+                requires Nodes.buryable(kind)
+                requires qty >= 0
+                requires qty <= 32767
+            {
+                int i = this.world.idx(x, y);
+                this.sub[i] = cast<byte>(kind);
+                this.qty[i] = cast<short>(qty);
+            }
+
+            // What a player may see of the buried layer: its kind once the cell is prospected, and
+            // 0 -- indistinguishable from bare ground -- until then.
+            public override method knownSubAt(int x, int y) returns int {
+                if (!this.world.hasFlag(x, y, Grid.FLAG_PROSPECTED)) {
+                    return 0;
+                }
+                return this.subAt(x, y);
+            }
+
+            // The prospecting action itself, for whatever technology comes to gate it. It reveals
+            // what is ALREADY THERE -- worldgen placed every deposit, and prospecting only stops
+            // them being invisible. Returns how many buried cells became known, which is the
+            // feedback the action wants: prospecting bare ground tells you something too.
+            public override method prospect(int cx, int cy, int radius) returns int
+                requires radius >= 0
+            {
+                mutable int revealed = 0;
+                mutable int y = cy - radius;
+                while (y <= cy + radius) {
+                    if (y >= 0 && y < this.world.height()) {
+                        mutable int x = cx - radius;
+                        while (x <= cx + radius) {
+                            if (x >= 0 && x < this.world.width()) {
+                                int dx = x - cx;
+                                int dy = y - cy;
+                                if (dx * dx + dy * dy <= radius * radius) {
+                                    if (!this.world.hasFlag(x, y, Grid.FLAG_PROSPECTED)) {
+                                        this.world.setFlag(x, y, Grid.FLAG_PROSPECTED);
+                                        if (this.hasSub(x, y)) {
+                                            revealed = revealed + 1;
+                                        }
+                                    }
+                                }
+                            }
+                            x = x + 1;
+                        }
+                    }
+                    y = y + 1;
+                }
+                return revealed;
+            }
+        }
+    }
+}
