@@ -110,28 +110,47 @@ public bundle Agents {
                 return this.n;
             }
 
+            // ALL SIX ARRAYS, and the two that used to be left behind are why this wants a
+            // comment. `born` and `blind` are filled by `finish()`, so while a world is being
+            // generated -- every add before the one finish -- nothing reads them, and growing
+            // without them looked harmless. It was only harmless in that order: finish
+            // reallocates both at the current capacity, which quietly repaired the gap every
+            // time.
+            //
+            // Append ANYTHING after finish -- regrowth seeding a node, a slice adding one -- and
+            // the two are shorter than the field is long, so every read past the old capacity is
+            // a wrong answer about what stood there and whether a seam was ever opened. Six
+            // arrays are one field; they grow together.
             private method grow() returns void {
                 int nc = this.cap * 2;
                 float[] nx = new float[nc]();
                 float[] ny = new float[nc]();
                 byte[] nk = new byte[nc]();
                 short[] nq = new short[nc]();
+                byte[] nbo = new byte[nc]();
+                byte[] nbl = new byte[nc]();
                 mutable int i = 0;
                 while (i < this.n) {
                     nx[i] = this.px[i];
                     ny[i] = this.py[i];
                     nk[i] = this.kind[i];
                     nq[i] = this.qty[i];
+                    nbo[i] = this.born[i];
+                    nbl[i] = this.blind[i];
                     i = i + 1;
                 }
                 delete this.px;
                 delete this.py;
                 delete this.kind;
                 delete this.qty;
+                delete this.born;
+                delete this.blind;
                 this.px = nx;
                 this.py = ny;
                 this.kind = nk;
                 this.qty = nq;
+                this.born = nbo;
+                this.blind = nbl;
                 this.cap = nc;
                 return;
             }
@@ -251,16 +270,7 @@ public bundle Agents {
                 for (int j in 0..this.n) {
                     int k = cast<int>(this.kind[j]) & 255;
                     if (k != 0 && cast<int>(this.qty[j]) > 0) {
-                        int hc = Nodes.work(k);
-                        if (hc != cast<int>(Harvest.Nothing)) {
-                            int b = hc * this.bplane + this.blockOf(j);
-                            this.blockHave[b] = this.blockHave[b] + 1;
-                            int gd = Nodes.gives(k);
-                            if (gd != Goods.NOTHING) {
-                                int gb = gd * this.bplane + this.blockOf(j);
-                                this.blockGood[gb] = this.blockGood[gb] + 1;
-                            }
-                        }
+                        this.creditBlock(j, k);
                     }
                 }
                 // Seal the blind seams.
@@ -288,6 +298,60 @@ public bundle Agents {
                     sIdx = sIdx + 1;
                 }
                 this.ordered = true;
+                return;
+            }
+
+            // WHAT IS GOING ON AT ONE SLOT, as a word rather than a pair of sentinel comparisons.
+            // Sealed is asked first because a sealed seam also carries a kind of zero: the two
+            // states that look alike from the kind alone are exactly the two this exists to
+            // separate. The bytes underneath are untouched -- this is how to ask, not how it is
+            // kept.
+            public method stateAt(int i) returns NodeState {
+                if (cast<int>(this.blind[i]) != 0) {
+                    return NodeState.Sealed;
+                }
+                if ((cast<int>(this.kind[i]) & 255) != 0) {
+                    return NodeState.Live;
+                }
+                return NodeState.Cleared;
+            }
+
+            // ONE NODE'S CONTRIBUTION TO THE TWO COARSE MAPS, added and taken away.
+            //
+            // The same nine lines stood in five places -- the recount at finish, a node worked to
+            // nothing, a seam opened, a wood reseeded, a flow refilled -- and all five had to agree
+            // about a thing that is easy to get half right: the class plane and the GOOD plane are
+            // two maps, and crediting one without the other leaves the world claiming there is
+            // mining here but no coal, which is a question people actually ask.
+            private method creditBlock(int i, int k) returns void {
+                int hc = Nodes.work(k);
+                if (hc == cast<int>(Harvest.Nothing)) {
+                    return;
+                }
+                int blk = this.blockOf(i);
+                int b = hc * this.bplane + blk;
+                this.blockHave[b] = this.blockHave[b] + 1;
+                int gd = Nodes.gives(k);
+                if (gd != Goods.NOTHING) {
+                    int gb = gd * this.bplane + blk;
+                    this.blockGood[gb] = this.blockGood[gb] + 1;
+                }
+                return;
+            }
+
+            private method debitBlock(int i, int k) returns void {
+                int hc = Nodes.work(k);
+                if (hc == cast<int>(Harvest.Nothing)) {
+                    return;
+                }
+                int blk = this.blockOf(i);
+                int b = hc * this.bplane + blk;
+                this.blockHave[b] = this.blockHave[b] - 1;
+                int gd = Nodes.gives(k);
+                if (gd != Goods.NOTHING) {
+                    int gb = gd * this.bplane + blk;
+                    this.blockGood[gb] = this.blockGood[gb] - 1;
+                }
                 return;
             }
 
@@ -462,15 +526,7 @@ public bundle Agents {
                 if (have == 0) {
                     int k = cast<int>(this.kind[i]) & 255;
                     int hc = Nodes.work(k);
-                    if (hc != cast<int>(Harvest.Nothing)) {
-                        int b = hc * this.bplane + this.blockOf(i);
-                        this.blockHave[b] = this.blockHave[b] - 1;
-                        int gd = Nodes.gives(k);
-                        if (gd != Goods.NOTHING) {
-                            int gb = gd * this.bplane + this.blockOf(i);
-                            this.blockGood[gb] = this.blockGood[gb] - 1;
-                        }
-                    }
+                    this.debitBlock(i, k);
                     // A picked bush is not a destroyed bush. Forage and fishing are FLOWS -- the
                     // berries come back, the shoal swims back -- so the node stays where it is with
                     // nothing on it and `regrow` fills it again.
@@ -516,14 +572,7 @@ public bundle Agents {
                             this.blind[i] = cast<byte>(0);
                             this.kind[i] = cast<byte>(k);
                             this.qty[i] = cast<short>(Nodes.baseQty(k));
-                            int hc = Nodes.work(k);
-                            int b = hc * this.bplane + this.blockOf(i);
-                            this.blockHave[b] = this.blockHave[b] + 1;
-                            int gd = Nodes.gives(k);
-                            if (gd != Goods.NOTHING) {
-                                int gb = gd * this.bplane + this.blockOf(i);
-                                this.blockGood[gb] = this.blockGood[gb] + 1;
-                            }
+                            this.creditBlock(i, k);
                             return k;
                         }
                     }
@@ -578,12 +627,7 @@ public bundle Agents {
                 }
                 this.kind[i] = cast<byte>(was);
                 this.qty[i] = cast<short>(Nodes.baseQty(was));
-                this.blockHave[plane + b] = here + 1;
-                int gd = Nodes.gives(was);
-                if (gd != Goods.NOTHING) {
-                    int gb = gd * this.bplane + b;
-                    this.blockGood[gb] = this.blockGood[gb] + 1;
-                }
+                this.creditBlock(i, was);
                 return;
             }
 
@@ -668,13 +712,7 @@ public bundle Agents {
                     }
                     this.qty[i] = cast<short>(now);
                     if (have == 0 && now > 0) {
-                        int b = hc * this.bplane + this.blockOf(i);
-                        this.blockHave[b] = this.blockHave[b] + 1;
-                        int gd = Nodes.gives(k);
-                        if (gd != Goods.NOTHING) {
-                            int gb = gd * this.bplane + this.blockOf(i);
-                            this.blockGood[gb] = this.blockGood[gb] + 1;
-                        }
+                        this.creditBlock(i, k);
                     }
                 }
                 return;
