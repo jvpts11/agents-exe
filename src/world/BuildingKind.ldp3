@@ -1,0 +1,372 @@
+import System.IO.Console;
+program AgentsExe;
+
+// What a community can build. docs/BUILDING_CATALOG.md holds a hundred and forty-five buildings
+// across four eras and all of them are modelled and exported; what is HERE is the set the world
+// can actually run today, and the report says how many meshes are still waiting so the gap is
+// visible rather than quietly forgotten.
+//
+// The name is the identifier AND the .mesh file, so a kind that cannot be drawn is caught when
+// the atlas is bound rather than at the first frame somebody looks at it. The whole of a kind's
+// row -- costs, recipe, era, ground, ladders -- is written in ONE place, its chain in Builds;
+// the methods below are that row read back as questions on the kind itself.
+public bundle Agents {
+    public namespace World {
+
+        public enum BuildingKind {
+            NoBuilding,
+            TownHall,        // the seat, placed free at founding
+            Sawmill,         // Wood -> Plank
+            CharcoalKiln,    // Wood -> Charcoal
+            Kiln,            // Clay -> Brick
+            Pottery,         // Clay -> Pottery
+            Glassworks,      // Sand + Charcoal -> Glass
+            Weaver,          // Flax -> Cloth
+            Smithy,          // IronOre + Charcoal -> IronIngot
+            Forge,           // CopperOre -> CopperIngot
+            Windmill,        // Grain -> Flour
+            Bakery,          // Flour -> Bread
+            Brewery,         // Grain -> Beer
+            Smokehouse,      // Fish -> DriedMeat
+            // Housing. It makes nothing and it is the only chain in the catalogue that UPGRADES IN
+            // PLACE: a plot densifies under pressure rather than a second house appearing beside the
+            // first, which is the exception BUILDING_CATALOG.md carved out and the reason a thriving
+            // village looks different from a big one.
+            Hut,             // era I
+            House,           // era II
+            Tenement,        // era III
+            ResidentialTower,// era IV
+            // ---- husbandry ----
+            //
+            // The one chain in the catalogue whose input is LAND rather than a good, and the reason
+            // it had to exist: everything else here transforms something somebody carried home, so
+            // the ceiling on how much food a world holds was whatever worldgen happened to scatter
+            // on it. Foraging wild wheat cannot feed a city however many people do it. A field can,
+            // because a field turns LABOUR into bread -- and that is the whole of why farming makes
+            // countries possible and gathering does not.
+            Farm,            // arable ground -> Grain
+            Pasture,         // grazing        -> Milk
+            SheepFold,       // grazing        -> Wool
+            Orchard,         // arable ground  -> Fruit
+            Apiary,          // grazing        -> Honey
+            Henhouse,        // grazing        -> Egg
+            // ---- the rest of the chains, now that their inputs exist ----
+            Dairy,           // Milk -> Cheese
+            Vineyard,        // Grapes -> Wine
+            Tannery,         // Hide -> Leather
+            PaperMill,       // Reeds -> Paper
+            Preservery,      // Berries -> Preserves
+            Bronzeworks,     // CopperIngot + TinOre -> BronzeIngot
+            GoldSmelter,     // GoldOre -> GoldBar
+            SilverSmelter,   // SilverOre -> SilverBar
+            Ropewalk,        // Reeds -> Rope
+            TextileMill,     // Cotton -> Cloth
+            Ironworks,       // IronOre + Coal -> IronIngot, at industrial scale
+            SteelMill,       // IronIngot + Coal -> Steel
+            CementFactory,   // Stone + Coal -> Cement
+            Cannery,         // DriedMeat + Steel -> CannedFood
+            // ---- what a town puts between itself and an army ----
+            //
+            // A wall makes nothing and houses nobody, and it is the only thing in the catalogue
+            // that changes what happens to the town rather than what comes out of it. Before this
+            // a raid and a war were the same event: somebody walked in. A wall is what makes a
+            // siege a thing that takes TIME, and time is what turns a raid into a war.
+            Palisade,        // era I  -- a stake fence
+            Rampart,         // era II -- stone, and the reason a siege exists at all
+            Keep,            // era III
+            Watchtower,      // sees them coming
+            Barracks,        // where soldiers are kept, and the only way a place has any
+            // ---- what a person carries ----
+            //
+            // The three that make an agent better at what it already does, rather than making a
+            // good that sits on a shelf. This is where the iron chain finally arrives somewhere:
+            // up to here a village could smelt all the iron in the hill and have nothing to show
+            // for it but a number.
+            Toolmaker,       // Wood + Stone -> Tools, the stone-age version
+            Toolsmith,       // Plank + IronIngot -> Tools, twice as many for the same hour
+            Weaponsmith,     // IronIngot + Plank -> Weapon
+            Armory,          // IronIngot + Leather -> Armour
+            // ---- learning ----
+            //
+            // These make nothing anybody can hold, and that is the point. A nation's era used to be
+            // a side effect of having eaten well; here it is something a people BUILDS, staffs and
+            // keeps up. A scriptorium eats paper and produces knowledge, so the reed beds at the
+            // river turn into the university on the hill by a chain you can follow the whole way.
+            Shrine,          // era I  -- the first place anybody wrote anything down
+            Temple,
+            Scriptorium,
+            Library,
+            School,
+            University,
+            // ---- the sea ----
+            //
+            // A harbour makes nothing either, and it belongs beside the wall for the same reason:
+            // what it changes is what can HAPPEN to the town, not what comes out of it. A wall
+            // decides who can reach you; a harbour decides who you can reach.
+            //
+            // It is the first thing in this catalogue that is worth building because of somewhere
+            // ELSE. Every other want is a shortfall on the town's own shelves, answered by the town's
+            // own hands; a port is a want answered by strangers, and it is the only way a place cut
+            // off by land gets anything it cannot make.
+            Harbor,          // era I -- Plank and Rope, and the far side of the water
+            Shipwright,      // era I -- Plank + Rope -> Boat, and the reason rope is worth making
+            // ---- water ----
+            //
+            // A person drinks every day of their life and this world had nothing to say about it.
+            // Six meshes were cut for it and not one had a kind behind it, which made thirst the
+            // largest thing in the catalogue that did not exist.
+            //
+            // These are shaped like the ROOF line and not like a workshop, because that is what they
+            // are: a well does not make a good, it makes room for people, exactly as a hut does. A
+            // town is watered or it is not, the same way it is housed or it is not, and the number
+            // that matters is heads served.
+            //
+            // Geography decides who needs them at all. A village on a river never thinks about
+            // water; a village on the steppe thinks about nothing else. That asymmetry is the whole
+            // reason to have the line -- it puts a cost on ground that looked free.
+            Well,            // era I  -- a hole and a bucket; a hamlet's worth
+            RainCatcher,     // era I  -- for places with rain and no river
+            Aqueduct,        // era II -- brings a river to a town that has none
+            Fountain,        // era II -- a public source, and the first civic building
+            WaterTower,      // era III
+            WaterTreatment,  // era IV -- and the end of what dirty water does to people
+            // ---- what looks after people ----
+            //
+            // Sickness is the only thing in this world that kills somebody who is doing everything
+            // right, and until now it did not exist: hunger, tiredness, fear and loneliness are all
+            // the body's own clocks, and there was nothing that came from OUTSIDE. Crowding and
+            // dirty water are what a town does to the people in it, and these are what it can do
+            // about that.
+            Bathhouse,       // era II  -- the first thing anybody built against filth
+            Apothecary,      // era II  -- Herbs into somebody getting better
+            Hospital,        // era III
+            ModernHospital,  // era IV
+            // ---- what the orphaned goods are FOR ----
+            //
+            // Six goods came out of the ground and appeared nowhere else in this catalogue at all:
+            // marble, salt, sulfur, gems, oil and rare earth. Three more -- bronze, gold and silver
+            // -- appeared exactly once each, in the recipe that makes them, so nothing in the world
+            // was ever made OF them. A good with a producer and no consumer is not scarce, it is
+            // fictional: the want machinery cannot see it, so nobody mines it, so it never exists.
+            //
+            // These four close the ones that have both a mesh already cut and an age to live in.
+            // Every one of them carries no other chain on its back, which is the rule three material
+            // costs had to be reverted to learn. Sulfur, gems, oil and rare earth belong to the
+            // third and fourth ages -- powder, jewellery, refining, electronics -- and wait for the
+            // kinds that use them rather than getting a home that does not fit.
+            Church,          // era II  -- gilding, and the rung between shrine and temple
+            Manor,           // era II  -- a hall with silver on the table
+            Lighthouse,      // era II  -- a bronze lamp and its reflector
+            DryingRack,      // era II  -- salting meat, which is what salt is FOR
+            Cathedral,       // era III -- marble, and the top of the ladder of learning
+            // ---- the first two ages, filled in ----
+            //
+            // A hundred and forty-eight building meshes were cut for this game and sixty-nine of
+            // them had a kind behind them. The rest were not missing features, they were features
+            // that had been DRAWN and never wired: a village had one shelter and one shrine where
+            // the art department gave it a tent, a longhouse, a cottage, a totem and a stone
+            // circle. Everything below already has a mesh sitting on disk under its own name.
+            //
+            // Ordered by age, and every one of them earns its place on a ladder or in a chain that
+            // already exists rather than inventing a mechanic to justify itself.
+            Tent,            // era I   -- the roof below a hut
+            StoragePit,      // era I   -- the first thing anybody built to keep food in
+            Totem,           // era I   -- the rung below a shrine
+            StoneCircle,     // era I   -- and the rung above it
+            Longhouse,       // era I   -- a roof for a whole band
+            Cottage,         // era II  -- and one for a family
+            Carpenter,       // era II  -- plank into furniture
+            Cooper,          // era II  -- plank into a barrel, which is how anything travels
+            Mason,           // era II  -- stone dressed into blocks that hold a wall up
+            Brickworks,      // era II  -- clay into brick, at a scale the village kiln cannot
+            WaterMill,       // era II  -- grain into flour, on a river instead of in the wind
+            Granary,         // era II  -- and somewhere to keep what the mill makes
+            Marketplace,     // era II  -- where a town's spare goods find their way out of it
+            TradingPost,     // era II  -- and where a road ends
+            Tavern,          // era II  -- what beer is FOR
+            Stable,          // era II  -- horses, which is how an army moves
+            Dock,            // era II  -- a quay smaller than a harbour
+            Shipyard,        // era II  -- and where the hulls come from
+            Monastery,       // era II  -- learning, kept by people who do nothing else
+            PrintingPress,   // era II  -- paper into books
+            Jeweler,         // era II  -- gold, silver and gems into something worth guarding
+            Quarry,          // era II  -- stone, dug rather than gathered
+            Mine,            // era II  -- and ore, the same way
+            CoalMine,        // era II  -- coal, which the third age runs on
+            SaltMine,        // era II  -- salt, for the drying rack
+            Courthouse,      // era II  -- somewhere a theft is answered
+            WatchPost,       // era II  -- and somewhere it is seen from
+            Fort,            // era II  -- a wall between a palisade and a keep
+            Castle,          // era II  -- and the one above a keep
+            Gate,            // era II  -- the way through either of them
+            Monument,        // era II  -- marble, standing up, so everyone can see it
+            Statue,          // era II  -- bronze, doing the same
+            // ---- the third age: coal, steel and the machine ----
+            Forum,           // civic ground, and somewhere an argument is settled in public
+            House_Medium,    // the roof ladder, continued
+            House_Large,
+            SuburbanHouse,
+            OilSource,       // oil, out of the ground
+            OilRefinery,     // and into fuel
+            Gasworks,        // coal, cooked, into chemicals
+            CoalPowerPlant,  // and burnt, into power
+            ChemicalPlant,   // sulfur and coal -- the last orphan good, closed
+            PlasticsPlant,
+            MachineShop,     // steel to a tolerance no hand holds
+            Factory,         // parts and power into tools by the score
+            Arsenal,         // and into weapons the same way
+            AmmoFactory,
+            CarFactory,
+            TrainStation,
+            MetroStation,
+            Warehouse,
+            Bank,
+            StockExchange,
+            DepartmentStore,
+            Supermarket,
+            FishMarket,
+            PostOffice,
+            PoliceStation,
+            FireStation,
+            College,
+            // ---- the fourth age: the atom, the chip and the tower ----
+            RareElementsMine,
+            NuclearPlant,
+            SolarFarm,
+            OffshoreRig,
+            RecyclingPlant,
+            ChipFactory,
+            ComputerFactory,
+            RoboticsPlant,
+            DrugFactory,
+            DataCenter,
+            SoftwareStudio,
+            ResearchLab,
+            TechCampus,
+            BroadcastTower,
+            TVStudio,
+            Airport,
+            Skyscraper,
+            CorporateHQ,
+            Mall,
+            Stadium;
+
+            // ---- the row, read back as questions ----
+
+            // The trade that works inside, or NoCraft for everything nobody staffs.
+            public method craft() returns Craft {
+                return cast<Craft>(Builds.craft(cast<int>(this)));
+            }
+
+            // The Ground it needs under it. Anywhere for almost everything; the husbandry chain
+            // and the sea are the exceptions, and the reason Ground exists.
+            public method site() returns Ground {
+                return cast<Ground>(Builds.site(cast<int>(this)));
+            }
+
+            // The age this becomes buildable in -- a floor, never a window.
+            public method era() returns Era {
+                return cast<Era>(Builds.era(cast<int>(this)));
+            }
+
+            // The .mesh this kind draws with, which is not always its own name.
+            public method mesh() returns String {
+                return Builds.mesh(cast<int>(this));
+            }
+
+            public method woodCost() returns int {
+                return Builds.woodCost(cast<int>(this));
+            }
+
+            public method stoneCost() returns int {
+                return Builds.stoneCost(cast<int>(this));
+            }
+
+            // The third material this kind is built out of, or Nothing.
+            public method matCost() returns int {
+                return Builds.matCost(cast<int>(this));
+            }
+
+            public method matCostN() returns int {
+                return Builds.matCostN(cast<int>(this));
+            }
+
+            public method hands() returns int {
+                return Builds.hands(cast<int>(this));
+            }
+
+            public method in1() returns int {
+                return Builds.in1(cast<int>(this));
+            }
+
+            public method n1() returns int {
+                return Builds.n1(cast<int>(this));
+            }
+
+            public method in2() returns int {
+                return Builds.in2(cast<int>(this));
+            }
+
+            public method n2() returns int {
+                return Builds.n2(cast<int>(this));
+            }
+
+            public method out() returns int {
+                return Builds.out(cast<int>(this));
+            }
+
+            public method nout() returns int {
+                return Builds.nout(cast<int>(this));
+            }
+
+            public method secs() returns float {
+                return Builds.secs(cast<int>(this));
+            }
+
+            public method roof() returns int {
+                return Builds.roof(cast<int>(this));
+            }
+
+            public method wall() returns int {
+                return Builds.wall(cast<int>(this));
+            }
+
+            public method port() returns int {
+                return Builds.port(cast<int>(this));
+            }
+
+            public method water() returns int {
+                return Builds.water(cast<int>(this));
+            }
+
+            public method care() returns int {
+                return Builds.care(cast<int>(this));
+            }
+
+            public method keeps() returns int {
+                return Builds.keeps(cast<int>(this));
+            }
+
+            public method watches() returns int {
+                return Builds.watches(cast<int>(this));
+            }
+
+            public method study() returns int {
+                return Builds.study(cast<int>(this));
+            }
+
+            // Whether anybody works here at all -- goods or knowledge.
+            public method staffed() returns boolean {
+                return Builds.staffed(cast<int>(this));
+            }
+
+            public method produces() returns boolean {
+                return Builds.produces(cast<int>(this));
+            }
+
+            public method houses() returns boolean {
+                return Builds.houses(cast<int>(this));
+            }
+        }
+    }
+}

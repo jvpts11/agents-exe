@@ -1,0 +1,1285 @@
+import System.IO.Console;
+program AgentsExe;
+
+// The dense per-kind engine the census and the tick read, and the ONE home of every kind's row.
+// The old table wrote a kind in up to five places -- a thirteen-argument `put` here, an era
+// there, a mesh, a material and a ladder value pages apart -- and a transcription slip in any
+// of them was invisible until an arc ran. Here a row is one chain, written by a cursor: opening
+// `row.kind(X)` points every verb after it at X's columns, each verb names the fact it states
+// in the catalogue's own words, and the whole row reads top to bottom like the ledger entry it
+// is. The captured-table fingerprint proves the rewrite moved nothing.
+//
+// The columns stay dense arrays because that is what the tick wants; the typed questions live
+// on BuildingKind. A kind's NAME is no longer a column at all -- the enum constant IS the name,
+// and the compiler's own name() answers for it, so an identifier can never drift from its row.
+public bundle Agents {
+    public namespace World {
+
+        public class Builds {
+            // The .mesh a kind draws with, which is NOT always its own name: a bronzeworks and an
+            // ironworks are the same shed with a different fire in it, and two pens on a hillside
+            // look alike whether the animals in them give milk or wool. Splitting the two is what
+            // lets the catalogue name a chain honestly without waiting on a model for every one.
+            private static mutable String[] MESH;
+            // Knowledge made per census by one of these, staffed. Zero for everything that makes a
+            // good instead -- a building either produces something you can hold or something you
+            // can know, and the two are counted in different places for the same reason a granary
+            // and a library are different rooms.
+            private static mutable int[] STUDY;
+            private static mutable int[] SITE;      // the Ground it needs under it
+            private static mutable int[] CRAFT;
+            private static mutable int[] WOOD;      // to put it up
+            private static mutable int[] STONE;
+            // A third material, and the reason it had to exist: with a cost of wood and stone and
+            // nothing else, NOTHING in the world consumed a plank or a brick, so the sawmill and
+            // the kiln were never wanted and never built. A house is made of planks. Saying so is
+            // what gives the wright chain a customer.
+            private static mutable int[] MAT;
+            private static mutable int[] MATN;
+            private static mutable int[] HANDS;     // people who can work it at once
+            private static mutable int[] IN1;
+            private static mutable int[] N1;
+            private static mutable int[] IN2;
+            private static mutable int[] N2;
+            private static mutable int[] OUT;
+            private static mutable int[] NOUT;
+            private static mutable float[] SECS;    // one batch
+            // The era a kind becomes buildable in, from docs/ECONOMY.md and BUILDING_CATALOG.md.
+            // Unlocking an era only WIDENS the menu -- nothing is retired and a smithy keeps
+            // smelting forever -- so this is a floor and never a window.
+            private static mutable int[] ERA;
+            private static mutable int[] ROOF;      // people it houses, 0 for anything that works
+            // How much of an army's work this soaks up before the town is open. Zero for anything
+            // that is not a wall, which is everything else in the catalogue.
+            private static mutable int[] WALL;
+            // How far over water this reaches, in cells. Zero for everything that is not a harbour.
+            private static mutable int[] PORT;
+            // How many people this can keep in drinking water. Zero for everything else.
+            private static mutable int[] WATER;
+            // How many people this can nurse back. Zero for everything else.
+            private static mutable int[] CARE;
+            // Men a place keeps standing under arms whatever the weather. A barracks is not a wall
+            // and never was one: it was given a wall value of forty so it could get past the test
+            // that throws out anything with no output, and that made it the weakest rung of a
+            // ladder it does not belong on -- a palisade is sixty, so the day a village fenced
+            // itself it stopped being able to raise a barracks for ever. Not one stood anywhere.
+            private static mutable int[] KEEP;
+            // How well a place is WATCHED. Not the same as how well it is walled: a wall stops an
+            // army and a watch catches a thief, and until there was crime in the world there was
+            // nothing for the second number to do.
+            private static mutable int[] WATCH;
+
+            // The cursor. A row is written by opening a kind and stating its facts; the one field
+            // is which kind's columns the verbs write. It and its verbs are PRIVATE: the table is
+            // written once, at load, by the class that owns the columns, and is read-only to
+            // everybody else -- exactly the contract the old private `put` had.
+            private mutable int k;
+
+            private constructor Builds() {
+                this.k = 0;
+            }
+
+            onClassLoad {
+                int n = BuildingKind.count();
+                Builds.MESH = new String[n]();
+                Builds.STUDY = new int[n]();
+                Builds.SITE = new int[n]();
+                Builds.CRAFT = new int[n]();
+                Builds.WOOD = new int[n]();
+                Builds.STONE = new int[n]();
+                Builds.MAT = new int[n]();
+                Builds.MATN = new int[n]();
+                Builds.HANDS = new int[n]();
+                Builds.IN1 = new int[n]();
+                Builds.N1 = new int[n]();
+                Builds.IN2 = new int[n]();
+                Builds.N2 = new int[n]();
+                Builds.OUT = new int[n]();
+                Builds.NOUT = new int[n]();
+                Builds.SECS = new float[n]();
+                Builds.ERA = new int[n]();
+                Builds.ROOF = new int[n]();
+                Builds.WALL = new int[n]();
+                Builds.PORT = new int[n]();
+                Builds.WATER = new int[n]();
+                Builds.CARE = new int[n]();
+                Builds.KEEP = new int[n]();
+                Builds.WATCH = new int[n]();
+                // A fresh column is all zeroes, and zero already means "none": Goods.NOTHING,
+                // Craft.NoCraft and Ground.Anywhere all sit at nought on purpose. Only three
+                // defaults are worth stating: a kind draws with its own name, it is medieval
+                // unless its row says older, and an empty row's batch clock reads twenty.
+                mutable int i = 0;
+                while (i < n) {
+                    Builds.MESH[i] = cast<BuildingKind>(i).name();
+                    Builds.SECS[i] = 20.0;
+                    Builds.ERA[i] = cast<int>(Era.Medieval);
+                    i = i + 1;
+                }
+
+                Builds row = new Builds();
+
+                // ================= THE SEAT, AND THE FIRST TWO AGES' WORKSHOPS =================
+                //
+                // What a tribal village can put up at all. The catalogue's Era I list is shelter,
+                // gathering and the two crafts that need no metal -- so a place that has discovered
+                // nothing can fire clay and smoke fish and must invent its way to everything else.
+                // That is the whole point of the era gate: it makes discovery worth something.
+                //
+                // THE HALL SHELTERS THE PEOPLE WHO FOUNDED IT. A roof of zero here means a
+                // settlement has nowhere to put anybody on the day it is founded, so nobody is
+                // born, so nobody learns a trade, so no hut is ever raised -- the whole country
+                // stalls at one square. A seat is a roof before it is a seat.
+                row.kind(BuildingKind.TownHall).from(Era.Ancient).shelters(24);
+
+                row.kind(BuildingKind.Sawmill).trade(Craft.Wright).cost(wood: 60, stone: 20).crew(5)
+                   .takes(ExtractedGood.Wood.index(), 10).makes(ProcessedGood.Plank.index(), 6)
+                   .batch(14.0);
+                row.kind(BuildingKind.CharcoalKiln).trade(Craft.Wright).cost(wood: 30, stone: 40)
+                   .crew(3).takes(ExtractedGood.Wood.index(), 12)
+                   .makes(ProcessedGood.Charcoal.index(), 5).batch(18.0).from(Era.Ancient);
+                row.kind(BuildingKind.Kiln).trade(Craft.Wright).cost(wood: 25, stone: 45).crew(3)
+                   .takes(ExtractedGood.Clay.index(), 10).makes(ProcessedGood.Brick.index(), 8)
+                   .batch(16.0).from(Era.Ancient);
+                row.kind(BuildingKind.Pottery).trade(Craft.Wright).cost(wood: 40, stone: 30).crew(4)
+                   .takes(ExtractedGood.Clay.index(), 8).makes(ProcessedGood.Pottery.index(), 5)
+                   .batch(15.0);
+                // Glass. The catalogue named a Glassworks in a comment for months and never had
+                // one, because Sand had no source anywhere in the world -- so the entry would have
+                // been a workshop that could never run. Sand is a node now, so this is a real chain.
+                row.kind(BuildingKind.Glassworks).trade(Craft.Wright).cost(wood: 50, stone: 40)
+                   .crew(3).takes(ExtractedGood.Sand.index(), 6)
+                   .also(ProcessedGood.Charcoal.index(), 3).makes(ProcessedGood.Glass.index(), 4)
+                   .batch(22.0).from(Era.Medieval);
+                // The workshops that are more than a shed carry a third material: a forge wants
+                // brick to hold its heat, a mill wants sawn timber to turn.
+                row.kind(BuildingKind.Weaver).trade(Craft.Weaving).cost(wood: 50, stone: 15).crew(5)
+                   .takes(ExtractedGood.Flax.index(), 10).makes(ProcessedGood.Cloth.index(), 6)
+                   .batch(16.0).madeOf(ProcessedGood.Plank.index(), 8);
+                // The one with two inputs, and the reason it matters: a smithy with iron and no
+                // charcoal STALLS, and a stalled building is what tells a community to go and build
+                // the kiln. That is the whole "grown from need" mechanism in one recipe.
+                row.kind(BuildingKind.Smithy).trade(Craft.Smith).cost(wood: 45, stone: 60).crew(4)
+                   .takes(ExtractedGood.IronOre.index(), 6).also(ProcessedGood.Charcoal.index(), 4)
+                   .makes(ProcessedGood.IronIngot.index(), 4).batch(24.0)
+                   .madeOf(ProcessedGood.Brick.index(), 12);
+                row.kind(BuildingKind.Forge).trade(Craft.Smith).cost(wood: 40, stone: 55).crew(4)
+                   .takes(ExtractedGood.CopperOre.index(), 6)
+                   .makes(ProcessedGood.CopperIngot.index(), 4).batch(22.0);
+                row.kind(BuildingKind.Windmill).trade(Craft.Victualler).cost(wood: 70, stone: 25)
+                   .crew(3).takes(ExtractedGood.Grain.index(), 12)
+                   .makes(ProcessedGood.Flour.index(), 10).batch(14.0)
+                   .madeOf(ProcessedGood.Plank.index(), 12);
+                row.kind(BuildingKind.Bakery).trade(Craft.Victualler).cost(wood: 35, stone: 40)
+                   .crew(4).takes(ProcessedGood.Flour.index(), 8)
+                   .makes(ProcessedGood.Bread.index(), 12).batch(12.0)
+                   .madeOf(ProcessedGood.Brick.index(), 10);
+                row.kind(BuildingKind.Brewery).trade(Craft.Victualler).cost(wood: 50, stone: 35)
+                   .crew(3).takes(ExtractedGood.Grain.index(), 10)
+                   .makes(ProcessedGood.Beer.index(), 8).batch(18.0);
+                row.kind(BuildingKind.Smokehouse).trade(Craft.Victualler).cost(wood: 45, stone: 20)
+                   .crew(3).takes(ExtractedGood.Fish.index(), 10)
+                   .makes(ProcessedGood.DriedMeat.index(), 9).batch(16.0).from(Era.Ancient);
+
+                // ================= HOUSING =================
+                //
+                // Cheap and small at the bottom, dear and dense at the top. Each rung is an era
+                // later and holds about twice the last, which is what makes a plot worth
+                // rebuilding rather than a second one worth clearing.
+                //
+                // A HUT IS WOOD AND EARTH, NOT MASONRY. It cost four stone, and a settlement
+                // founded on grassland has no rock within forty cells of it -- so the first hut
+                // was never raised, the town froze at its founders, and the run said `2990 could
+                // not pay` beside a store holding seven hundred and fifty wood. Dressed stone is
+                // what separates a hut from a house; it cannot also be what stops the first hut.
+                //
+                // What a roof is MADE of, above the timber and stone every building needs, is the
+                // customer the wright chain never had. With a cost of wood and stone and nothing
+                // else, nothing in the world consumed a plank or a brick, so nobody ever wanted
+                // one, so the sawmill and the kiln were never raised and twenty-five goods in the
+                // catalogue had a lifetime total of zero. A hut is sticks and a house is planks;
+                // saying so out loud is the whole fix.
+                row.kind(BuildingKind.Hut).cost(wood: 14, stone: 0)
+                   .madeOf(ExtractedGood.Clay.index(), 6).from(Era.Ancient).shelters(6);
+                row.kind(BuildingKind.House).cost(wood: 34, stone: 16).from(Era.Medieval)
+                   .shelters(14).madeOf(ProcessedGood.Plank.index(), 10);
+                row.kind(BuildingKind.Tenement).cost(wood: 70, stone: 60).from(Era.Industrial)
+                   .shelters(40).madeOf(ProcessedGood.Brick.index(), 24);
+                row.kind(BuildingKind.ResidentialTower).cost(wood: 120, stone: 180).from(Era.Modern)
+                   .shelters(120).madeOf(ProcessedGood.Cement.index(), 40);
+
+                // ================= HUSBANDRY: THE CHAIN WHOSE INPUT IS GROUND =================
+                //
+                // A field takes nothing, and that is not a gap in the table -- it is the whole
+                // point. Everything above turns a good into another good, so the amount of food a
+                // world can hold was fixed by what worldgen scattered on it: pick every berry and
+                // there are no more berries. A farm turns LABOUR into bread, and labour is the one
+                // input that grows when a place does. That is the difference between a village and
+                // a city, and between a world where the fourth era is a rumour and one where
+                // somebody reaches it.
+                row.kind(BuildingKind.Farm).trade(Craft.Tilling).cost(wood: 25, stone: 5).crew(8)
+                   .makes(ExtractedGood.Grain.index(), 14).batch(18.0).from(Era.Ancient)
+                   .ground(Ground.Arable);
+                row.kind(BuildingKind.Pasture).trade(Craft.Tilling).cost(wood: 18, stone: 0).crew(5)
+                   .makes(ExtractedGood.Milk.index(), 10).batch(20.0).from(Era.Ancient)
+                   .ground(Ground.Grazing);
+                row.kind(BuildingKind.SheepFold).trade(Craft.Tilling).cost(wood: 16, stone: 0)
+                   .crew(4).makes(ExtractedGood.Wool.index(), 8).batch(22.0).drawnAs("Pasture")
+                   .from(Era.Medieval).ground(Ground.Grazing);
+                row.kind(BuildingKind.Orchard).trade(Craft.Tilling).cost(wood: 20, stone: 0).crew(5)
+                   .makes(ExtractedGood.Fruit.index(), 10).batch(22.0).from(Era.Medieval)
+                   .ground(Ground.Arable);
+                row.kind(BuildingKind.Apiary).trade(Craft.Tilling).cost(wood: 12, stone: 0).crew(3)
+                   .makes(ExtractedGood.Honey.index(), 6).batch(26.0).from(Era.Medieval)
+                   .ground(Ground.Grazing);
+                row.kind(BuildingKind.Henhouse).trade(Craft.Tilling).cost(wood: 10, stone: 0)
+                   .crew(3).makes(ExtractedGood.Egg.index(), 8).batch(18.0).drawnAs("Stable")
+                   .from(Era.Ancient).ground(Ground.Grazing);
+
+                // ================= THE CHAINS WHOSE INPUTS FINALLY EXIST =================
+                //
+                // Every one of these was already named in the goods catalogue and made by nobody:
+                // nineteen goods in the ledger with a lifetime total of zero. They are here now
+                // because the things they eat are being produced -- hides come off the hunt, reeds
+                // off the marshes, grapes and copper and tin out of the ground -- so each of these
+                // closes a chain rather than opening one that dead-ends.
+                row.kind(BuildingKind.Dairy).trade(Craft.Victualler).cost(wood: 30, stone: 20)
+                   .crew(3).takes(ExtractedGood.Milk.index(), 8)
+                   .makes(ProcessedGood.Cheese.index(), 6).batch(16.0).from(Era.Medieval);
+                row.kind(BuildingKind.Vineyard).trade(Craft.Victualler).cost(wood: 25, stone: 10)
+                   .crew(4).takes(ExtractedGood.Grapes.index(), 10)
+                   .makes(ProcessedGood.Wine.index(), 6).batch(20.0).from(Era.Medieval)
+                   .ground(Ground.Arable);
+                row.kind(BuildingKind.Tannery).trade(Craft.Weaving).cost(wood: 40, stone: 20)
+                   .crew(4).takes(ExtractedGood.Hide.index(), 8)
+                   .makes(ProcessedGood.Leather.index(), 6).batch(18.0).from(Era.Medieval);
+                row.kind(BuildingKind.PaperMill).trade(Craft.Wright).cost(wood: 45, stone: 25)
+                   .crew(4).takes(ExtractedGood.Reeds.index(), 12)
+                   .makes(ProcessedGood.Paper.index(), 8).batch(16.0).from(Era.Medieval);
+                // FOUR GOODS NOBODY CONSUMED, GIVEN THE ONE THING THAT MAKES A GOOD REAL HERE.
+                //
+                // Wool, Cloth, Pottery and Glass each had a workshop, a recipe and a name, and not
+                // one of them was ever produced in any arc -- because worth is unmet WANT, and
+                // nothing in this world wanted any of them. Nobody wore cloth, held a pot or looked
+                // through a glass, so their workshops were worth nought for ever.
+                //
+                // A building MATERIAL is the machinery that already answers this, and it is proven:
+                // it is what took brick from three hundred and sixty units in three towns to a
+                // hundred and twenty thousand in fifty-one. The seeding walks the CATALOGUE and not
+                // the buildings that happen to be standing, so attaching a good to a kind a village
+                // could raise is enough to make it wanted, and the explosion carries the want all
+                // the way down to the clay and the sand.
+                //
+                // Jars, here: you cannot put food by without something to put it in.
+                row.kind(BuildingKind.Preservery).trade(Craft.Victualler).cost(wood: 28, stone: 18)
+                   .crew(3).takes(ExtractedGood.Berries.index(), 12)
+                   .makes(ProcessedGood.Preserves.index(), 8).batch(18.0).drawnAs("DryingRack")
+                   .from(Era.Medieval).madeOf(ProcessedGood.Pottery.index(), 6);
+                row.kind(BuildingKind.Bronzeworks).trade(Craft.Smith).cost(wood: 45, stone: 70)
+                   .crew(4).takes(ProcessedGood.CopperIngot.index(), 4)
+                   .also(ExtractedGood.TinOre.index(), 4)
+                   .makes(ProcessedGood.BronzeIngot.index(), 4).batch(24.0).drawnAs("Ironworks")
+                   .from(Era.Medieval);
+                row.kind(BuildingKind.GoldSmelter).trade(Craft.Smith).cost(wood: 40, stone: 60)
+                   .crew(3).takes(ExtractedGood.GoldOre.index(), 6)
+                   .makes(ProcessedGood.GoldBar.index(), 4).batch(22.0).drawnAs("Jeweler")
+                   .from(Era.Medieval);
+                row.kind(BuildingKind.SilverSmelter).trade(Craft.Smith).cost(wood: 40, stone: 60)
+                   .crew(3).takes(ExtractedGood.SilverOre.index(), 6)
+                   .makes(ProcessedGood.SilverBar.index(), 4).batch(22.0).drawnAs("Jeweler")
+                   .from(Era.Medieval);
+                row.kind(BuildingKind.Ropewalk).trade(Craft.Wright).cost(wood: 30, stone: 10)
+                   .crew(3).takes(ExtractedGood.Reeds.index(), 10)
+                   .makes(ProcessedGood.Rope.index(), 8).batch(14.0).drawnAs("Cooper")
+                   .from(Era.Ancient);
+                // THE TEXTILE MILL LIVES IN THE SECOND AGE, and two dead goods came down with it.
+                //
+                // Wool and cotton have a producer each and one consumer between them -- this mill
+                // -- and it sat in an age hardly any people reach. So the only thing in the world
+                // that ever wanted wool was a building nobody could raise, which meant nothing
+                // wanted a sheepfold, which meant not one was built in twenty generations while six
+                // hundred and fifty-eight pastures were: milk is food and food is wanted, and wool
+                // was wanted by nobody. Cotton grew wild and was gathered by nobody for the same
+                // reason.
+                //
+                // A mill spins both fibres, and giving it two inputs is the shape the catalogue
+                // already says is worth having: a workshop that STALLS for want of one of them is
+                // what tells a village to go and keep sheep. The era-two weaver keeps its single
+                // flax input, so the cloth chain still has a cheap rung.
+                //
+                // AND RE-COSTED to match the age it now lives in, which the era move alone did not
+                // do: at eighty timber and sixty stone this was dearer than an IRONWORKS, priced
+                // when it sat among the third age's factories, and an era-two village never got
+                // near it however much it wanted one. A fulling mill is a shed with a water wheel,
+                // costed between the weaver it supersedes (50 and 15) and the ironworks it is not
+                // (60 and 80). This is a change to a COST and not to a want -- every reversal in
+                // this campaign has been a want made bigger, and a building priced out of its own
+                // age is a different defect with a different fix.
+                row.kind(BuildingKind.TextileMill).trade(Craft.Weaving).cost(wood: 55, stone: 30)
+                   .crew(5).takes(ExtractedGood.Cotton.index(), 12)
+                   .also(ExtractedGood.Wool.index(), 6).makes(ProcessedGood.Cloth.index(), 12)
+                   .batch(12.0).from(Era.Medieval);
+                row.kind(BuildingKind.Ironworks).trade(Craft.Smith).cost(wood: 60, stone: 80)
+                   .crew(6).takes(ExtractedGood.IronOre.index(), 8)
+                   .also(ExtractedGood.Coal.index(), 4).makes(ProcessedGood.IronIngot.index(), 8)
+                   .batch(20.0).from(Era.Industrial);
+                row.kind(BuildingKind.SteelMill).trade(Craft.Smith).cost(wood: 80, stone: 120)
+                   .crew(6).takes(ProcessedGood.IronIngot.index(), 6)
+                   .also(ExtractedGood.Coal.index(), 6).makes(ProcessedGood.Steel.index(), 5)
+                   .batch(26.0).from(Era.Industrial);
+                row.kind(BuildingKind.CementFactory).trade(Craft.Wright).cost(wood: 70, stone: 90)
+                   .crew(5).takes(ExtractedGood.Stone.index(), 12)
+                   .also(ExtractedGood.Coal.index(), 4).makes(ProcessedGood.Cement.index(), 8)
+                   .batch(18.0).from(Era.Industrial);
+                row.kind(BuildingKind.Cannery).trade(Craft.Victualler).cost(wood: 60, stone: 80)
+                   .crew(5).takes(ProcessedGood.DriedMeat.index(), 8)
+                   .also(ProcessedGood.Steel.index(), 2).makes(ProcessedGood.CannedFood.index(), 10)
+                   .batch(14.0).from(Era.Modern).madeOf(ProcessedGood.Pottery.index(), 24);
+
+                // ================= THE WALL =================
+                //
+                // Every one of these makes nothing. They are scored apart from the rest for that
+                // reason: a want is a shortfall of some good, and safety is not a good. What a town
+                // is short of here is the confidence to sleep, and it reads that off whether
+                // anybody is currently coming for it.
+                //
+                // A stake fence buys an afternoon; a rampart buys a season; a keep buys long enough
+                // that the army in front of it starts to starve first. That escalation is what
+                // makes the second and third eras worth reaching for a place with enemies.
+                row.kind(BuildingKind.Palisade).cost(wood: 40, stone: 8).from(Era.Ancient)
+                   .walls(60).eyes(1);
+                row.kind(BuildingKind.Rampart).cost(wood: 30, stone: 90).drawnAs("WallStraight")
+                   .from(Era.Medieval).madeOf(ProcessedGood.Brick.index(), 20).walls(260);
+                row.kind(BuildingKind.Keep).cost(wood: 80, stone: 200).from(Era.Industrial)
+                   .madeOf(ProcessedGood.Brick.index(), 50).walls(700).eyes(4);
+                // AND WHO IS LOOKING. A watchtower was a wall value and nothing else, so the one
+                // building in the catalogue whose whole purpose is SEEING did the same job as a
+                // fence. It sees a thief now, which is the job its name has always described.
+                //
+                // AND IRON, which the want machinery could not see at all. Measured: quarriers
+                // 3326, MINERS 710, iron ore down to nine thousand, no weaponsmith, nobody armed.
+                // The job census picks a harvest class by what the place is short of, so clay and
+                // sand -- newly wanted, by the materials above -- pulled the diggers off the ore,
+                // and iron had nothing to pull back with.
+                //
+                // The reason is `makerOf`, and it is not a bug: it returns the EARLIEST maker,
+                // which is right for the explosion because a village explodes toward what it can
+                // already build. Tools are made by the Toolmaker out of wood and stone, so the want
+                // for TOOLS -- five hundred and eighty thousand of them, the largest manufactured
+                // want in the world -- explodes into timber and rock and never once into iron. The
+                // Toolsmith, which makes twice as many out of plank and ingot, is never wanted and
+                // so never built. Iron's only large consumer is invisible.
+                //
+                // Same answer as the pottery and the glass, by the same proven machinery: give it
+                // a building that is MADE of it. A watchtower has a bell and hinges; it is era two,
+                // villages actually raise it, and it had no material at all -- so nothing regresses
+                // and every era-two town starts wanting ingots, which explodes down to the ore and
+                // the charcoal and puts somebody back in the mine. The watchtower stands alone as
+                // iron's consumer: few, marginal, and nothing downstream of it. Iron is thinner for
+                // that, and the world is not.
+                row.kind(BuildingKind.Watchtower).cost(wood: 45, stone: 30).from(Era.Medieval)
+                   .walls(80).eyes(6).madeOf(ProcessedGood.IronIngot.index(), 6);
+                // Six men, standing, whatever else is happening. Read as a KEEP and not as a wall,
+                // so a village that has already fenced itself can still raise one.
+                //
+                // NOT MADE OF IRON, THOUGH, and the arc that tried it is why. Iron worked: ore from
+                // nine thousand to forty-two thousand, ingots from nothing to thirteen hundred, a
+                // third more people down the mine, and behind the smithy a forge and a weaponsmith
+                // and an armoury for the first time. And the widest country in the world fell from
+                // twenty-five towns to seven, because the other half of the same change had quietly
+                // put every army behind a material nobody had yet. A cost on a barracks is a cost
+                // on war, and war is how this world gets big.
+                //
+                // AND NOT THE TOOLMAKER EITHER. Measured: toolmakers fell from six hundred and
+                // twenty-five to SIX, and the iron they were supposed to pull went the other way --
+                // ore forty-two thousand back down to ten, ingots thirteen hundred to two hundred,
+                // a third of the miners gone home. A material cost does not add demand to a kind
+                // that cannot pay it; it deletes the kind, and with the bench went the tools.
+                row.kind(BuildingKind.Barracks).cost(wood: 60, stone: 40).from(Era.Medieval)
+                   .musters(6).eyes(3);
+
+                // A tool is a neolithic idea, not an iron-age one, and putting the first one behind
+                // the second era was a design mistake caught by a ten-minute render: the world
+                // reported nought tools taken up because nobody had reached the era that makes
+                // them. A hafted stone is what a village HAS, and the smith's version is twice as
+                // many for the same hour rather than the first of its kind.
+                row.kind(BuildingKind.Toolmaker).trade(Craft.Smith).cost(wood: 20, stone: 12)
+                   .crew(3).takes(ExtractedGood.Wood.index(), 6)
+                   .also(ExtractedGood.Stone.index(), 4).makes(ManufacturedGood.Tools.index(), 3)
+                   .batch(20.0).drawnAs("GatheringHut").from(Era.Ancient);
+                row.kind(BuildingKind.Toolsmith).trade(Craft.Smith).cost(wood: 45, stone: 35)
+                   .crew(4).takes(ProcessedGood.Plank.index(), 4)
+                   .also(ProcessedGood.IronIngot.index(), 2).makes(ManufacturedGood.Tools.index(), 6)
+                   .batch(20.0).drawnAs("Carpenter").from(Era.Medieval)
+                   .madeOf(ProcessedGood.Plank.index(), 8);
+                row.kind(BuildingKind.Weaponsmith).trade(Craft.Smith).cost(wood: 50, stone: 45)
+                   .crew(4).takes(ProcessedGood.IronIngot.index(), 4)
+                   .also(ProcessedGood.Plank.index(), 2).makes(ManufacturedGood.Weapon.index(), 4)
+                   .batch(24.0).drawnAs("Arsenal").from(Era.Medieval);
+                row.kind(BuildingKind.Armory).trade(Craft.Smith).cost(wood: 55, stone: 50).crew(4)
+                   .takes(ProcessedGood.IronIngot.index(), 4)
+                   .also(ProcessedGood.Leather.index(), 2).makes(ManufacturedGood.Armour.index(), 3)
+                   .batch(26.0).from(Era.Medieval);
+
+                // ================= LEARNING =================
+                //
+                // A nation's era used to be a side effect of having eaten well, and nothing else.
+                // That is half true and it was the whole rule: a fed people has time to think, but
+                // thinking is also something a people BUILDS, staffs and keeps up, and a world
+                // where it is not shows nothing on the map for the difference between a kingdom
+                // that will reach the fourth era and one that will not.
+                //
+                // These make nothing anybody can hold. What they make is on `STUDY`, counted where
+                // knowledge is counted. A scriptorium eats paper, paper comes off the reed beds at
+                // the river, so the marshes turn into the university on the hill by a chain that
+                // can be followed the whole way -- which is the same standard every other chain
+                // here is held to.
+                row.kind(BuildingKind.Shrine).trade(Craft.Lettering).cost(wood: 20, stone: 10)
+                   .crew(2).batch(30.0).from(Era.Ancient).teaches(8);
+                row.kind(BuildingKind.Temple).trade(Craft.Lettering).cost(wood: 50, stone: 60)
+                   .crew(4).batch(30.0).from(Era.Medieval).teaches(20);
+                // Light. A room people read in needs a window, and that is what glass is for.
+                row.kind(BuildingKind.Scriptorium).trade(Craft.Lettering).cost(wood: 45, stone: 40)
+                   .crew(4).takes(ProcessedGood.Paper.index(), 4).batch(30.0).from(Era.Medieval)
+                   .teaches(40).madeOf(ProcessedGood.Glass.index(), 4);
+                row.kind(BuildingKind.Library).trade(Craft.Lettering).cost(wood: 70, stone: 90)
+                   .crew(6).takes(ProcessedGood.Paper.index(), 6).batch(30.0).from(Era.Medieval)
+                   .teaches(70).madeOf(ProcessedGood.Brick.index(), 20);
+                row.kind(BuildingKind.School).trade(Craft.Lettering).cost(wood: 90, stone: 110)
+                   .crew(8).takes(ProcessedGood.Paper.index(), 8).batch(30.0).from(Era.Industrial)
+                   .teaches(110).madeOf(ProcessedGood.Glass.index(), 12);
+                row.kind(BuildingKind.University).trade(Craft.Lettering).cost(wood: 160, stone: 220)
+                   .crew(12).takes(ProcessedGood.Paper.index(), 12).batch(30.0).from(Era.Modern)
+                   .teaches(180).madeOf(ProcessedGood.Cement.index(), 60);
+
+                // ================= THE HARBOUR =================
+                //
+                // Planks and rope, which is the whole of a jetty and a mooring, and the first thing
+                // in this world that ever wanted rope. The reed beds are worked, the ropewalk has a
+                // recipe and an era, and in twenty generations not one length of rope was ever made
+                // -- because nothing downstream asked for any. A want that nothing consumes is a
+                // dead branch of the chain however correct its recipe is.
+                //
+                // A harbour with nobody in it is a jetty. The sailor is the trade it was missing.
+                //
+                // Nine hundred cells of open water, against the two hundred and sixty a cart
+                // manages overland. That ratio is the whole reason a port is worth planks: the sea
+                // is the only road in this world that was already built.
+                row.kind(BuildingKind.Harbor).trade(Craft.Sailor).cost(wood: 60, stone: 20).crew(4)
+                   .from(Era.Ancient).ground(Ground.Coast).madeOf(ProcessedGood.Rope.index(), 12)
+                   .reaches(900);
+                // The shipwright, and the volume the whole sea chain was missing. Eighteen planks
+                // and sixteen rope for one hull: a jetty's dozen of rope was never going to be
+                // worth a ropewalk -- sixteen a boat, and a coast that wants boats, is. This is the
+                // shape that has worked twice already: not a want made bigger, but a want that had
+                // nowhere to come FROM given somewhere.
+                //
+                // Sailcloth for the yard that builds hulls -- cloth is not clothing in this world.
+                row.kind(BuildingKind.Shipwright).trade(Craft.Wright).cost(wood: 70, stone: 15)
+                   .crew(3).takes(ProcessedGood.Plank.index(), 18)
+                   .also(ProcessedGood.Rope.index(), 16).makes(ManufacturedGood.Boat.index(), 1)
+                   .batch(40.0).from(Era.Ancient).ground(Ground.Coast)
+                   .madeOf(ProcessedGood.Cloth.index(), 8);
+
+                // ================= WATER =================
+                //
+                // Heads served, and the escalation is the point: a well is a hamlet's answer and it
+                // stays a hamlet's answer for ever, so a place that grows past forty has to learn
+                // something. That is what makes a dry site a real cost rather than a texture.
+                //
+                // AND NO MATERIAL ON THE WELL. That was the third material cost tried in one day
+                // and the third failure, and the fallback that was supposed to make it safe is
+                // exactly what did the damage: every town in the world dropped to a RAIN CATCHER,
+                // six hundred and seventy-three wells became NONE, and a catcher waters twenty-five
+                // people where a well waters forty. The same thirst then cost half again as many
+                // buildings, which came out of the same timber and stone the workshops are made of
+                // -- sawmills halved, kilns halved, charcoal quartered, apothecaries down by six
+                // sevenths, and the fourth age went from eighteen nations to TWO.
+                //
+                // So the rule wants a fourth clause. A material cost is safe on a kind that is
+                // built in numbers, carries no other chain, HAS a fallback, and whose fallback is
+                // not WORSE at the job -- because a cheaper rung that does less of the same work is
+                // not a discount, it is a tax on everything else the town would have built.
+                // Written down in ECONOMY_MEASUREMENTS.md so it is not attempted a fourth time.
+                row.kind(BuildingKind.Well).cost(wood: 15, stone: 10).from(Era.Ancient).waters(40);
+                row.kind(BuildingKind.RainCatcher).cost(wood: 20, stone: 4).from(Era.Ancient)
+                   .waters(25);
+                // The aqueduct is the one that needs the WORLD and not just an era: it has to
+                // reach a river or a lake, so it sits on Waterside like the mills do. Everything
+                // else can be sunk or raised in the village itself.
+                row.kind(BuildingKind.Aqueduct).cost(wood: 30, stone: 90).from(Era.Medieval)
+                   .ground(Ground.Waterside).madeOf(ProcessedGood.Brick.index(), 24).waters(300);
+                row.kind(BuildingKind.Fountain).cost(wood: 10, stone: 45).from(Era.Medieval)
+                   .waters(120);
+                row.kind(BuildingKind.WaterTower).cost(wood: 40, stone: 60).from(Era.Industrial)
+                   .madeOf(ProcessedGood.IronIngot.index(), 10).waters(500);
+                row.kind(BuildingKind.WaterTreatment).cost(wood: 50, stone: 80).from(Era.Modern)
+                   .madeOf(ProcessedGood.Cement.index(), 40).waters(900);
+
+                // ================= WHAT LOOKS AFTER PEOPLE =================
+                row.kind(BuildingKind.Bathhouse).cost(wood: 25, stone: 55).from(Era.Medieval)
+                   .nurses(60);
+                // An apothecary EATS HERBS, which is the point of putting it here rather than
+                // giving care away with the era: six hundred and fifty thousand herbs are gathered
+                // in an arc and nothing downstream ever wanted one. Now the commonest thing in the
+                // world has somewhere to go, and a village that gathers well gets its sick back.
+                row.kind(BuildingKind.Apothecary).trade(Craft.Healing).cost(wood: 30, stone: 15)
+                   .crew(2).takes(ExtractedGood.Herbs.index(), 12).batch(16.0).from(Era.Medieval)
+                   .nurses(90);
+                row.kind(BuildingKind.Hospital).cost(wood: 60, stone: 70).from(Era.Industrial)
+                   .madeOf(ProcessedGood.Brick.index(), 20).nurses(260);
+                row.kind(BuildingKind.ModernHospital).cost(wood: 80, stone: 120).from(Era.Modern)
+                   .madeOf(ProcessedGood.Cement.index(), 50).nurses(700);
+
+                // ================= WHAT THE ORPHANED GOODS ARE FOR =================
+                //
+                // Marble, salt, silver and bronze are dug out of this world and appear nowhere
+                // else in this catalogue -- marble and salt not once, silver and bronze only in
+                // the recipe that makes them. A good with a producer and no consumer is not
+                // scarce, it is fictional: the want machinery cannot see it, so nobody digs it, so
+                // it never exists. Wool was in exactly this state until an hour ago.
+                //
+                // Each of these carries no other chain on its back, which is the rule three
+                // reverted material costs paid for. Each also has a mesh already cut and sitting
+                // unused on disk -- there are ninety-five of those, and the ones below are the
+                // four whose good, age and purpose all line up.
+
+                // GILDING, and the rung the ladder of learning was missing between the village
+                // shrine and the town temple. Study 13 sits between 8 and 20 on purpose.
+                row.kind(BuildingKind.Church).trade(Craft.Lettering).cost(wood: 40, stone: 45)
+                   .crew(2).from(Era.Medieval).teaches(13)
+                   .madeOf(ProcessedGood.GoldBar.index(), 3);
+                // A HALL WITH SILVER ON THE TABLE. It goes on the roof ladder above a house, so a
+                // rich town houses more people per building and a poor one still builds houses --
+                // the comfort ladder falls back on its own, which is what makes this safe. A hall
+                // holds more than a house and fewer than a tenement, which is the whole of what a
+                // manor is on this ladder.
+                row.kind(BuildingKind.Manor).cost(wood: 60, stone: 50).from(Era.Medieval)
+                   .madeOf(ProcessedGood.SilverBar.index(), 4).shelters(24);
+                // A BRONZE LAMP AND ITS REFLECTOR. Scored as a port, because what a lighthouse is
+                // worth is exactly what a harbour is worth -- it is the same road.
+                row.kind(BuildingKind.Lighthouse).cost(wood: 35, stone: 60).from(Era.Medieval)
+                   .ground(Ground.Coast).reaches(40).madeOf(ProcessedGood.BronzeIngot.index(), 6);
+                // SALTING MEAT, which is what salt is for and the reason anybody ever dug it. A
+                // second maker of dried meat, deliberately in the SECOND age so the smokehouse
+                // stays the earliest one: `makerOf` returns the earliest, so putting this first
+                // would make the whole world's dried meat depend on salt overnight. This one
+                // competes instead.
+                row.kind(BuildingKind.DryingRack).trade(Craft.Victualler).cost(wood: 20, stone: 5)
+                   .crew(2).takes(ExtractedGood.RawMeat.index(), 8)
+                   .also(ExtractedGood.Salt.index(), 4).makes(ProcessedGood.DriedMeat.index(), 10)
+                   .batch(14.0).from(Era.Medieval);
+                // MARBLE, and the top of the ladder of learning below the university.
+                row.kind(BuildingKind.Cathedral).trade(Craft.Lettering).cost(wood: 90, stone: 140)
+                   .crew(4).from(Era.Industrial).teaches(140)
+                   .madeOf(ExtractedGood.Marble.index(), 30);
+
+                // ================= THE FIRST TWO AGES, FILLED IN =================
+                //
+                // A hundred and forty-eight building meshes were cut for this game and sixty-nine
+                // had a kind behind them. What follows is not new design -- it is the art that was
+                // already drawn, wired to the ladders and chains this world already has. A village
+                // had one shelter and one shrine where the meshes gave it a tent, a longhouse, a
+                // cottage, a totem and a stone circle.
+                //
+                // Every one of them either sits on an existing ladder (roof, learning, wall, port,
+                // water, care, watch, muster) or runs a recipe out of goods that already exist. Not
+                // one of them invents a mechanic to justify itself, and where an honest recipe was
+                // not available the kind waits rather than getting a dishonest one.
+                //
+                // ---- THE FOUR GATHERING HUTS ARE NOT HERE, AND THE ARC THAT TRIED THEM IS WHY ----
+                //
+                // A gathering hut, a foragers' camp, a hunters' lodge and a fishing hut were given
+                // the obvious recipe -- labour into food, exactly as a farm is -- and they broke
+                // the economy in one arc. Seven hundred and ninety-nine fishing huts and four
+                // hundred and sixty-one totems went up; FARMS FELL FROM THREE HUNDRED AND THREE TO
+                // THIRTY-SEVEN; breweries, potteries and glassworks fell by four fifths; the goods
+                // never produced went from four back to thirteen, taking bread, weapons and armour
+                // with them, and the world's houses fell by a third.
+                //
+                // The error is not the numbers, it is the principle. Gathering by hand ALREADY
+                // EXISTS in this world -- foragers, hunters and fishers work nodes directly, for
+                // free, from the first minute. A building for it duplicates a mechanic and offers
+                // nothing except a cheaper way to make food than farming, so every village built
+                // one instead of a farm and the whole industrial half starved for want of the
+                // surplus a farm makes.
+                //
+                // What these four meshes actually want is a mechanic this world has not got: a
+                // place that lets somebody work nodes FURTHER AWAY than they otherwise could. That
+                // is a real feature and it is worth building. It is not a catalogue entry, so these
+                // wait for it rather than getting a recipe that happens to fit.
+
+                // ---- the roof ladder, from a tent up ----
+                row.kind(BuildingKind.Tent).cost(wood: 6, stone: 0).from(Era.Ancient).shelters(3);
+                // A cold pit with fruit in it is the oldest preserving there is, and it gives the
+                // first age a rung on a chain that until now started in the second.
+                // A PIT IS DUG, NOT MASONED. Four stone, on grassland with no rock inside forty
+                // tiles, and this is the FIRST thing a settlement builds -- so the stone it cannot
+                // get blocked every building after it. The run said so plainly: one and a third
+                // million refusals to pay, nothing raised, the town frozen at its hall. Wood and
+                // clay, like the hut.
+                row.kind(BuildingKind.StoragePit).trade(Craft.Victualler).cost(wood: 14, stone: 0)
+                   .crew(2).takes(ExtractedGood.Fruit.index(), 12)
+                   .makes(ProcessedGood.Preserves.index(), 8).batch(18.0)
+                   .madeOf(ExtractedGood.Clay.index(), 8).from(Era.Ancient);
+                // ---- and the ladder of learning, below the shrine ----
+                row.kind(BuildingKind.Totem).trade(Craft.Lettering).cost(wood: 8, stone: 0).crew(1)
+                   .from(Era.Ancient).teaches(4);
+                // The priest, not the scribe. A stone circle is worked by somebody who believes
+                // something about it, and lettering is a different life.
+                row.kind(BuildingKind.StoneCircle).trade(Craft.Priest).cost(wood: 0, stone: 20)
+                   .crew(1).from(Era.Ancient).teaches(6);
+                row.kind(BuildingKind.Longhouse).cost(wood: 30, stone: 0).from(Era.Ancient)
+                   .shelters(12);
+                row.kind(BuildingKind.Cottage).cost(wood: 22, stone: 14).from(Era.Medieval)
+                   .shelters(18);
+
+                // ---- era II: the crafts the meshes were drawn for ----
+                row.kind(BuildingKind.Carpenter).trade(Craft.Wright).cost(wood: 35, stone: 10)
+                   .crew(3).takes(ProcessedGood.Plank.index(), 8)
+                   .makes(ManufacturedGood.Furniture.index(), 5).batch(18.0).from(Era.Medieval);
+                row.kind(BuildingKind.Cooper).trade(Craft.Wright).cost(wood: 30, stone: 8).crew(2)
+                   .takes(ProcessedGood.Plank.index(), 6).makes(ProcessedGood.Rope.index(), 5)
+                   .batch(16.0).from(Era.Medieval);
+                // Lime mortar is stone and clay burnt together, and it is a mason's work four
+                // hundred years before anybody builds a cement factory. It gives cement a rung in
+                // the second age, which is where every other material in this catalogue starts.
+                row.kind(BuildingKind.Mason).trade(Craft.Masonry).cost(wood: 30, stone: 40).crew(3)
+                   .takes(ExtractedGood.Stone.index(), 14).also(ExtractedGood.Clay.index(), 6)
+                   .makes(ProcessedGood.Cement.index(), 6).batch(20.0).from(Era.Medieval);
+                row.kind(BuildingKind.Brickworks).trade(Craft.Masonry).cost(wood: 50, stone: 45)
+                   .crew(4).takes(ExtractedGood.Clay.index(), 16)
+                   .makes(ProcessedGood.Brick.index(), 14).batch(16.0).from(Era.Medieval);
+                // A mill on a river rather than in the wind. Same trade, different ground -- which
+                // is the asymmetry the waterside site exists for.
+                row.kind(BuildingKind.WaterMill).trade(Craft.Victualler).cost(wood: 60, stone: 30)
+                   .crew(3).takes(ExtractedGood.Grain.index(), 12)
+                   .makes(ProcessedGood.Flour.index(), 12).batch(12.0).ground(Ground.Waterside)
+                   .from(Era.Medieval);
+                // A granary with a hand quern in it: worse than a mill and available to a village
+                // that has no river and no millwright.
+                row.kind(BuildingKind.Granary).trade(Craft.Victualler).cost(wood: 40, stone: 20)
+                   .crew(3).takes(ExtractedGood.Grain.index(), 16)
+                   .makes(ProcessedGood.Flour.index(), 8).batch(22.0).from(Era.Medieval);
+                // ---- what a market is: the land's answer to being cut off ----
+                //
+                // The port column is scored on what a town CANNOT GET, which is exactly what a
+                // market answers -- the difference is that a quay needs the coast and a market
+                // does not. An inland town that nobody's cart reaches has the same problem a
+                // headland has, and until now only the headland had a building for it.
+                row.kind(BuildingKind.Marketplace).cost(wood: 35, stone: 25).from(Era.Medieval)
+                   .reaches(200);
+                row.kind(BuildingKind.TradingPost).cost(wood: 30, stone: 15).from(Era.Medieval)
+                   .reaches(120);
+                // A tavern is where a town rests, and rest is the one thing this world already
+                // measures as care. It is also the only consumer beer has ever had.
+                row.kind(BuildingKind.Tavern).trade(Craft.Victualler).cost(wood: 35, stone: 20)
+                   .crew(3).takes(ProcessedGood.Beer.index(), 8).batch(16.0).from(Era.Medieval)
+                   .nurses(45);
+                // A stable is muster capacity on four legs, which is the same column a barracks is
+                // scored on and the same reason: it is what a country can KEEP standing.
+                row.kind(BuildingKind.Stable).cost(wood: 40, stone: 15).from(Era.Medieval)
+                   .musters(4);
+                row.kind(BuildingKind.Dock).cost(wood: 40, stone: 20).from(Era.Medieval)
+                   .reaches(350).ground(Ground.Coast);
+                row.kind(BuildingKind.Shipyard).trade(Craft.Wright).cost(wood: 70, stone: 40)
+                   .crew(5).takes(ProcessedGood.Plank.index(), 20)
+                   .also(ProcessedGood.Rope.index(), 8).makes(ManufacturedGood.Boat.index(), 2)
+                   .batch(40.0).from(Era.Medieval).ground(Ground.Coast);
+                row.kind(BuildingKind.Monastery).trade(Craft.Lettering).cost(wood: 55, stone: 60)
+                   .crew(3).from(Era.Medieval).teaches(55);
+                row.kind(BuildingKind.PrintingPress).trade(Craft.Lettering).cost(wood: 45, stone: 35)
+                   .crew(3).takes(ProcessedGood.Paper.index(), 10)
+                   .makes(ManufacturedGood.Book.index(), 6).batch(18.0).from(Era.Medieval);
+                row.kind(BuildingKind.Jeweler).trade(Craft.Smith).cost(wood: 35, stone: 30).crew(2)
+                   .takes(ExtractedGood.Gems.index(), 6).also(ProcessedGood.SilverBar.index(), 2)
+                   .makes(ManufacturedGood.Jewelry.index(), 4).batch(22.0).from(Era.Medieval);
+                // ---- digging as an industry, rather than by hand at an outcrop ----
+                //
+                // People already quarry and mine at nodes. These are the places that do it at a
+                // scale a pair of hands cannot, and they need the ground under them to be the
+                // right ground -- which is the one thing in this catalogue that is about WHERE a
+                // town settled rather than what it can afford.
+                row.kind(BuildingKind.Quarry).trade(Craft.Masonry).cost(wood: 25, stone: 10).crew(4)
+                   .makes(ExtractedGood.Stone.index(), 16).batch(18.0).from(Era.Medieval)
+                   .ground(Ground.Rock);
+                row.kind(BuildingKind.Mine).trade(Craft.Digging).cost(wood: 40, stone: 20).crew(4)
+                   .makes(ExtractedGood.IronOre.index(), 10).batch(22.0).from(Era.Medieval)
+                   .ground(Ground.Rock);
+                row.kind(BuildingKind.CoalMine).trade(Craft.Digging).cost(wood: 40, stone: 20)
+                   .crew(4).makes(ExtractedGood.Coal.index(), 12).batch(20.0).from(Era.Medieval)
+                   .ground(Ground.Rock);
+                row.kind(BuildingKind.SaltMine).trade(Craft.Digging).cost(wood: 30, stone: 15)
+                   .crew(3).makes(ExtractedGood.Salt.index(), 10).batch(20.0).from(Era.Medieval)
+                   .ground(Ground.Rock);
+                // ---- law, and the walls ----
+                row.kind(BuildingKind.Courthouse).cost(wood: 45, stone: 55).from(Era.Medieval)
+                   .eyes(7);
+                row.kind(BuildingKind.WatchPost).cost(wood: 18, stone: 10).from(Era.Medieval)
+                   .eyes(4);
+                row.kind(BuildingKind.Fort).cost(wood: 60, stone: 90).from(Era.Medieval).walls(420)
+                   .eyes(5);
+                row.kind(BuildingKind.Castle).cost(wood: 120, stone: 220).from(Era.Industrial)
+                   .walls(1100).eyes(8).madeOf(ProcessedGood.Brick.index(), 40);
+                row.kind(BuildingKind.Gate).cost(wood: 25, stone: 45).from(Era.Medieval).walls(140);
+                // Marble and bronze, standing up where everybody can see them. They teach nothing
+                // a school teaches, but a people that can spare the stone to say who it is has
+                // something a people scratching for bread does not -- and study is the only column
+                // in this catalogue that measures that.
+                row.kind(BuildingKind.Monument).trade(Craft.Lettering).cost(wood: 20, stone: 80)
+                   .crew(1).from(Era.Medieval).teaches(10)
+                   .madeOf(ExtractedGood.Marble.index(), 20);
+                row.kind(BuildingKind.Statue).trade(Craft.Lettering).cost(wood: 15, stone: 40)
+                   .crew(1).from(Era.Medieval).teaches(7)
+                   .madeOf(ProcessedGood.BronzeIngot.index(), 8);
+
+                // ================= THE THIRD AND FOURTH AGES =================
+                //
+                // The whole rest of the catalogue, in one pass and deliberately WITHOUT balancing
+                // it kind by kind: a number tuned against half a chain is a number that has to be
+                // tuned again when the other half lands, and the arc it costs to learn that is
+                // twenty-five minutes each time. Everything goes in; the balancing is one round at
+                // the end, against the complete set.
+                //
+                // These close the last four goods that came out of the ground and went nowhere:
+                // sulfur into chemicals and ammunition, oil into fuel, rare earth into chips, and
+                // gems into jewelry in the age below.
+                row.kind(BuildingKind.Forum).trade(Craft.Lettering).cost(wood: 40, stone: 70)
+                   .crew(2).from(Era.Medieval).eyes(3).teaches(16);
+                // ---- the roof ladder, all the way up ----
+                row.kind(BuildingKind.House_Medium).cost(wood: 28, stone: 20).from(Era.Medieval)
+                   .shelters(20);
+                row.kind(BuildingKind.House_Large).cost(wood: 45, stone: 35).from(Era.Medieval)
+                   .shelters(30);
+                row.kind(BuildingKind.SuburbanHouse).cost(wood: 50, stone: 45).from(Era.Industrial)
+                   .shelters(34);
+                // ---- power and the things that come out of the ground for it ----
+                row.kind(BuildingKind.OilSource).trade(Craft.Digging).cost(wood: 50, stone: 30)
+                   .crew(4).makes(ExtractedGood.Oil.index(), 12).batch(20.0).ground(Ground.Rock)
+                   .from(Era.Industrial);
+                row.kind(BuildingKind.OilRefinery).trade(Craft.Chemistry).cost(wood: 90, stone: 110)
+                   .crew(6).takes(ExtractedGood.Oil.index(), 12)
+                   .makes(IndustrialGood.Fuel.index(), 10).batch(18.0).from(Era.Industrial);
+                row.kind(BuildingKind.Gasworks).trade(Craft.Chemistry).cost(wood: 70, stone: 80)
+                   .crew(5).takes(ExtractedGood.Coal.index(), 14)
+                   .makes(IndustrialGood.Chemicals.index(), 8).batch(20.0).from(Era.Industrial);
+                row.kind(BuildingKind.CoalPowerPlant).trade(Craft.Powering)
+                   .cost(wood: 100, stone: 140).crew(6).takes(ExtractedGood.Coal.index(), 16)
+                   .makes(IndustrialGood.Electricity.index(), 14).batch(16.0).from(Era.Industrial)
+                   .madeOf(ProcessedGood.Cement.index(), 30);
+                row.kind(BuildingKind.ChemicalPlant).trade(Craft.Chemistry)
+                   .cost(wood: 85, stone: 100).crew(5).takes(ExtractedGood.Sulfur.index(), 8)
+                   .also(ExtractedGood.Coal.index(), 6).makes(IndustrialGood.Chemicals.index(), 12)
+                   .batch(18.0).from(Era.Industrial);
+                row.kind(BuildingKind.PlasticsPlant).trade(Craft.Chemistry)
+                   .cost(wood: 80, stone: 90).crew(5).takes(IndustrialGood.Fuel.index(), 8)
+                   .also(IndustrialGood.Chemicals.index(), 6)
+                   .makes(IndustrialGood.Plastic.index(), 12).batch(16.0).from(Era.Industrial);
+                // ---- the machine, and what it makes by the score ----
+                // POWER AND NOT TOOLS, because a machine shop that eats tools while a factory and
+                // a robotics plant both make tools is a ring, and the suite says so: three cycles
+                // in the first pass over the industrial half, all of them mine. A shop turns steel
+                // into parts on a lathe that has to be driven, which is the honest input anyway.
+                row.kind(BuildingKind.MachineShop).trade(Craft.Machining).cost(wood: 70, stone: 60)
+                   .crew(5).takes(ProcessedGood.Steel.index(), 6)
+                   .also(IndustrialGood.Electricity.index(), 4)
+                   .makes(IndustrialGood.MachineParts.index(), 8).batch(18.0).from(Era.Industrial);
+                row.kind(BuildingKind.Factory).trade(Craft.Machining).cost(wood: 110, stone: 130)
+                   .crew(8).takes(IndustrialGood.MachineParts.index(), 6)
+                   .also(IndustrialGood.Electricity.index(), 8)
+                   .makes(ManufacturedGood.Tools.index(), 24).batch(14.0).from(Era.Industrial)
+                   .madeOf(ProcessedGood.Brick.index(), 40);
+                row.kind(BuildingKind.Arsenal).trade(Craft.Machining).cost(wood: 95, stone: 110)
+                   .crew(6).takes(ProcessedGood.Steel.index(), 8)
+                   .also(IndustrialGood.MachineParts.index(), 4)
+                   .makes(ManufacturedGood.Weapon.index(), 14).batch(16.0).from(Era.Industrial);
+                row.kind(BuildingKind.AmmoFactory).trade(Craft.Machining).cost(wood: 80, stone: 90)
+                   .crew(5).takes(ExtractedGood.Sulfur.index(), 8)
+                   .also(ProcessedGood.IronIngot.index(), 4).makes(IndustrialGood.Ammo.index(), 16)
+                   .batch(14.0).from(Era.Industrial);
+                row.kind(BuildingKind.CarFactory).trade(Craft.Machining).cost(wood: 120, stone: 140)
+                   .crew(8).takes(ProcessedGood.Steel.index(), 10)
+                   .also(IndustrialGood.MachineParts.index(), 8)
+                   .makes(IndustrialGood.Vehicle.index(), 4).batch(22.0).from(Era.Industrial);
+                // ---- trade, at the scale a market cannot ----
+                //
+                // All of these are scored on the port column, which asks what a town CANNOT GET.
+                // A station, a warehouse and an exchange are the same answer as a quay, reached by
+                // a different road -- and none of them needs money to exist, which is why they can
+                // be built now and priced later.
+                row.kind(BuildingKind.TrainStation).cost(wood: 80, stone: 100).from(Era.Industrial)
+                   .reaches(1400);
+                row.kind(BuildingKind.MetroStation).cost(wood: 60, stone: 120).from(Era.Modern)
+                   .reaches(1800);
+                row.kind(BuildingKind.Warehouse).cost(wood: 70, stone: 50).from(Era.Industrial)
+                   .reaches(500);
+                row.kind(BuildingKind.Bank).cost(wood: 50, stone: 90).from(Era.Industrial)
+                   .reaches(600);
+                row.kind(BuildingKind.StockExchange).cost(wood: 70, stone: 120).from(Era.Industrial)
+                   .reaches(1000);
+                row.kind(BuildingKind.DepartmentStore).cost(wood: 75, stone: 70)
+                   .from(Era.Industrial).reaches(700);
+                row.kind(BuildingKind.Supermarket).cost(wood: 65, stone: 60).from(Era.Modern)
+                   .reaches(900);
+                row.kind(BuildingKind.FishMarket).cost(wood: 35, stone: 25).from(Era.Medieval)
+                   .reaches(260).ground(Ground.Coast);
+                row.kind(BuildingKind.PostOffice).cost(wood: 45, stone: 40).from(Era.Industrial)
+                   .reaches(420);
+                // ---- law, learning and the civic ground ----
+                row.kind(BuildingKind.PoliceStation).cost(wood: 55, stone: 65).from(Era.Industrial)
+                   .eyes(14);
+                row.kind(BuildingKind.FireStation).cost(wood: 55, stone: 60).from(Era.Industrial)
+                   .eyes(6);
+                row.kind(BuildingKind.College).trade(Craft.Lettering).cost(wood: 85, stone: 95)
+                   .crew(4).from(Era.Industrial).teaches(125);
+                // ---- the fourth age ----
+                row.kind(BuildingKind.RareElementsMine).trade(Craft.Digging)
+                   .cost(wood: 90, stone: 70).crew(5).makes(ExtractedGood.RareEarth.index(), 8)
+                   .batch(24.0).ground(Ground.Rock).from(Era.Modern);
+                // Fuel only. It wanted steel as well, and a recycling plant makes steel out of the
+                // power a reactor gives it -- which is the third ring the suite found. The
+                // concrete it is poured from is already its material cost, which is where a
+                // reactor's mass honestly sits.
+                row.kind(BuildingKind.NuclearPlant).trade(Craft.Powering)
+                   .cost(wood: 180, stone: 260).crew(8).takes(ExtractedGood.RareEarth.index(), 6)
+                   .makes(IndustrialGood.Electricity.index(), 48).batch(20.0).from(Era.Modern)
+                   .madeOf(ProcessedGood.Cement.index(), 80);
+                row.kind(BuildingKind.SolarFarm).trade(Craft.Powering).cost(wood: 60, stone: 80)
+                   .crew(3).makes(IndustrialGood.Electricity.index(), 10).batch(20.0)
+                   .ground(Ground.Grazing).from(Era.Modern);
+                row.kind(BuildingKind.OffshoreRig).trade(Craft.Digging).cost(wood: 130, stone: 90)
+                   .crew(6).makes(ExtractedGood.Oil.index(), 20).batch(22.0).ground(Ground.Coast)
+                   .from(Era.Modern);
+                row.kind(BuildingKind.RecyclingPlant).trade(Craft.Machining)
+                   .cost(wood: 70, stone: 80).crew(5).takes(IndustrialGood.Plastic.index(), 10)
+                   .also(IndustrialGood.Electricity.index(), 4)
+                   .makes(ProcessedGood.Steel.index(), 8).batch(18.0).from(Era.Modern);
+                row.kind(BuildingKind.ChipFactory).trade(Craft.Powering)
+                   .cost(wood: 140, stone: 150).crew(6).takes(ExtractedGood.RareEarth.index(), 4)
+                   .also(IndustrialGood.Electricity.index(), 10)
+                   .makes(IndustrialGood.Chip.index(), 10).batch(16.0).from(Era.Modern);
+                row.kind(BuildingKind.ComputerFactory).trade(Craft.Machining)
+                   .cost(wood: 120, stone: 110).crew(6).takes(IndustrialGood.Chip.index(), 6)
+                   .also(IndustrialGood.Plastic.index(), 6)
+                   .makes(IndustrialGood.Computer.index(), 6).batch(18.0).from(Era.Modern);
+                row.kind(BuildingKind.RoboticsPlant).trade(Craft.Machining)
+                   .cost(wood: 150, stone: 140).crew(7)
+                   .takes(IndustrialGood.MachineParts.index(), 8)
+                   .also(IndustrialGood.Chip.index(), 4).makes(ManufacturedGood.Tools.index(), 36)
+                   .batch(14.0).from(Era.Modern);
+                row.kind(BuildingKind.DrugFactory).trade(Craft.Chemistry).cost(wood: 90, stone: 95)
+                   .crew(5).takes(IndustrialGood.Chemicals.index(), 8)
+                   .also(ExtractedGood.Herbs.index(), 6).makes(IndustrialGood.Medicine.index(), 12)
+                   .batch(16.0).from(Era.Modern);
+                // Knowledge, at the scale the fourth age keeps it. A data centre and a campus make
+                // no good and never will -- what they make is what a library makes, and this
+                // catalogue has had a column for that since the first shrine.
+                row.kind(BuildingKind.DataCenter).trade(Craft.Lettering)
+                   .cost(wood: 110, stone: 120).crew(4).takes(IndustrialGood.Computer.index(), 8)
+                   .also(IndustrialGood.Electricity.index(), 20).batch(16.0).from(Era.Modern)
+                   .teaches(320);
+                row.kind(BuildingKind.SoftwareStudio).trade(Craft.Lettering)
+                   .cost(wood: 70, stone: 60).crew(4).takes(IndustrialGood.Computer.index(), 4)
+                   .batch(18.0).from(Era.Modern).teaches(200);
+                row.kind(BuildingKind.ResearchLab).trade(Craft.Lettering)
+                   .cost(wood: 100, stone: 110).crew(5).takes(IndustrialGood.Chemicals.index(), 6)
+                   .batch(18.0).from(Era.Modern).teaches(260);
+                row.kind(BuildingKind.TechCampus).trade(Craft.Lettering)
+                   .cost(wood: 160, stone: 170).crew(8).takes(IndustrialGood.Computer.index(), 10)
+                   .batch(20.0).from(Era.Modern).teaches(420);
+                row.kind(BuildingKind.BroadcastTower).cost(wood: 60, stone: 90).from(Era.Modern)
+                   .reaches(2200);
+                row.kind(BuildingKind.TVStudio).trade(Craft.Lettering).cost(wood: 85, stone: 80)
+                   .crew(4).takes(IndustrialGood.Electricity.index(), 8).batch(18.0)
+                   .from(Era.Modern).teaches(150);
+                // And the last four: the airport, the tower a company sits in, the mall and the
+                // stadium. A stadium is scored as care because that is what a town gets out of
+                // one -- the same column an alehouse is on, four ages later.
+                row.kind(BuildingKind.Airport).cost(wood: 200, stone: 240).from(Era.Modern)
+                   .reaches(3200).madeOf(ProcessedGood.Cement.index(), 60);
+                row.kind(BuildingKind.Skyscraper).cost(wood: 140, stone: 260).from(Era.Modern)
+                   .shelters(300).madeOf(ProcessedGood.Steel.index(), 60);
+                row.kind(BuildingKind.CorporateHQ).cost(wood: 130, stone: 180).from(Era.Modern)
+                   .reaches(1600).madeOf(ProcessedGood.Steel.index(), 40);
+                row.kind(BuildingKind.Mall).cost(wood: 110, stone: 130).from(Era.Modern)
+                   .reaches(1300);
+                row.kind(BuildingKind.Stadium).cost(wood: 150, stone: 200).from(Era.Modern)
+                   .nurses(900);
+            }
+
+            // ---- the cursor's verbs: each one states a fact in the catalogue's words ----
+
+            // Open a kind's row. Opening clears the batch clock: a kind that transforms nothing
+            // takes no time, and the twenty-second default belongs only to the one row nobody
+            // opens. Everything else a fresh row needs is already the column default.
+            private method kind(BuildingKind b) returns Builds {
+                this.k = cast<int>(b);
+                Builds.SECS[this.k] = 0.0;
+                return this;
+            }
+
+            // The trade that works inside.
+            private method trade(Craft c) returns Builds {
+                Builds.CRAFT[this.k] = cast<int>(c);
+                return this;
+            }
+
+            // Timber and stone to put it up.
+            private method cost(int wood, int stone) returns Builds {
+                Builds.WOOD[this.k] = wood;
+                Builds.STONE[this.k] = stone;
+                return this;
+            }
+
+            // People who can work it at once.
+            private method crew(int hands) returns Builds {
+                Builds.HANDS[this.k] = hands;
+                return this;
+            }
+
+            // The first input of a batch.
+            private method takes(int good, int n) returns Builds {
+                Builds.IN1[this.k] = good;
+                Builds.N1[this.k] = n;
+                return this;
+            }
+
+            // The second input, for the recipes that stall without both.
+            private method also(int good, int n) returns Builds {
+                Builds.IN2[this.k] = good;
+                Builds.N2[this.k] = n;
+                return this;
+            }
+
+            // What comes out.
+            private method makes(int good, int n) returns Builds {
+                Builds.OUT[this.k] = good;
+                Builds.NOUT[this.k] = n;
+                return this;
+            }
+
+            // Seconds for one batch.
+            private method batch(float secs) returns Builds {
+                Builds.SECS[this.k] = secs;
+                return this;
+            }
+
+            // The age this becomes buildable in -- a floor, never a window.
+            private method from(Era e) returns Builds {
+                Builds.ERA[this.k] = cast<int>(e);
+                return this;
+            }
+
+            // The Ground it needs under it.
+            private method ground(Ground g) returns Builds {
+                Builds.SITE[this.k] = cast<int>(g);
+                return this;
+            }
+
+            // The .mesh it draws with, when that is not its own name.
+            private method drawnAs(String mesh) returns Builds {
+                Builds.MESH[this.k] = mesh;
+                return this;
+            }
+
+            // The third material it is built out of, beyond timber and stone.
+            private method madeOf(int good, int n) returns Builds {
+                Builds.MAT[this.k] = good;
+                Builds.MATN[this.k] = n;
+                return this;
+            }
+
+            // People it houses.
+            private method shelters(int n) returns Builds {
+                Builds.ROOF[this.k] = n;
+                return this;
+            }
+
+            // A besieger's work it soaks up before the town is open.
+            private method walls(int n) returns Builds {
+                Builds.WALL[this.k] = n;
+                return this;
+            }
+
+            // Cells of water it reaches across.
+            private method reaches(int n) returns Builds {
+                Builds.PORT[this.k] = n;
+                return this;
+            }
+
+            // People it keeps in drinking water.
+            private method waters(int n) returns Builds {
+                Builds.WATER[this.k] = n;
+                return this;
+            }
+
+            // People it nurses back.
+            private method nurses(int n) returns Builds {
+                Builds.CARE[this.k] = n;
+                return this;
+            }
+
+            // Men it keeps standing under arms.
+            private method musters(int n) returns Builds {
+                Builds.KEEP[this.k] = n;
+                return this;
+            }
+
+            // Eyes it puts on the store.
+            private method eyes(int n) returns Builds {
+                Builds.WATCH[this.k] = n;
+                return this;
+            }
+
+            // Knowledge a staffed one makes in a census.
+            private method teaches(int n) returns Builds {
+                Builds.STUDY[this.k] = n;
+                return this;
+            }
+
+            // ---- the table, read back ----
+
+            public static method count() returns int {
+                return BuildingKind.count();
+            }
+
+            // The kind's name IS the enum constant -- there is no column to drift from it.
+            public static method name(int ord) returns String {
+                return cast<BuildingKind>(ord).name();
+            }
+
+            // The .mesh this kind draws with, which is not always its own name.
+            public static method mesh(int ord) returns String {
+                return Builds.MESH[ord];
+            }
+
+            public static method craft(int ord) returns int {
+                return Builds.CRAFT[ord];
+            }
+
+            public static method site(int ord) returns int {
+                return Builds.SITE[ord];
+            }
+
+            public static method era(int ord) returns int {
+                return Builds.ERA[ord];
+            }
+
+            public static method woodCost(int ord) returns int {
+                return Builds.WOOD[ord];
+            }
+
+            public static method stoneCost(int ord) returns int {
+                return Builds.STONE[ord];
+            }
+
+            // The third material this kind is built out of, or Nothing.
+            public static method matCost(int ord) returns int {
+                return Builds.MAT[ord];
+            }
+
+            public static method matCostN(int ord) returns int {
+                return Builds.MATN[ord];
+            }
+
+            public static method hands(int ord) returns int {
+                return Builds.HANDS[ord];
+            }
+
+            public static method in1(int ord) returns int {
+                return Builds.IN1[ord];
+            }
+
+            public static method n1(int ord) returns int {
+                return Builds.N1[ord];
+            }
+
+            public static method in2(int ord) returns int {
+                return Builds.IN2[ord];
+            }
+
+            public static method n2(int ord) returns int {
+                return Builds.N2[ord];
+            }
+
+            public static method out(int ord) returns int {
+                return Builds.OUT[ord];
+            }
+
+            public static method nout(int ord) returns int {
+                return Builds.NOUT[ord];
+            }
+
+            public static method secs(int ord) returns float {
+                return Builds.SECS[ord];
+            }
+
+            // Knowledge a staffed one of these makes in a census, or 0.
+            public static method study(int ord) returns int {
+                return Builds.STUDY[ord];
+            }
+
+            public static method roof(int ord) returns int {
+                return Builds.ROOF[ord];
+            }
+
+            // How much of a besieger's work this soaks up, or 0.
+            public static method wall(int ord) returns int {
+                return Builds.WALL[ord];
+            }
+
+            // How far over water this reaches, in cells, or 0 for everything that is not a harbour.
+            public static method port(int ord) returns int {
+                return Builds.PORT[ord];
+            }
+
+            // How many people this keeps in drinking water, or 0.
+            public static method water(int ord) returns int {
+                return Builds.WATER[ord];
+            }
+
+            // How many people this nurses back, or 0.
+            public static method care(int ord) returns int {
+                return Builds.CARE[ord];
+            }
+
+            // Men this kind keeps standing under arms.
+            public static method keeps(int ord) returns int {
+                return Builds.KEEP[ord];
+            }
+
+            // How many eyes this kind puts on the store.
+            public static method watches(int ord) returns int {
+                return Builds.WATCH[ord];
+            }
+
+            public static method houses(int ord) returns boolean {
+                return Builds.ROOF[ord] > 0;
+            }
+
+            // Whether anybody works here at all -- goods or knowledge. A place of learning is a
+            // workplace like a forge: somebody has to be standing in it, it is idle without them,
+            // and it is pulled down when nobody has set foot in it for long enough.
+            public static method staffed(int ord) returns boolean {
+                return Builds.OUT[ord] != Goods.NOTHING || Builds.STUDY[ord] > 0;
+            }
+
+            // Whether anybody works here at all. The seat of power does not transform anything;
+            // it stands in the middle of the village and says who lives there.
+            public static method produces(int ord) returns boolean {
+                return Builds.OUT[ord] != Goods.NOTHING;
+            }
+
+            // ONE scan for every ladder in the catalogue: the tallest rung a people of this era
+            // can raise. The catalogue's rule holds here in one place -- a new era widens the menu
+            // and retires nothing, so the era test is a floor and the answer for a village that
+            // never grows never changes. The dry filter is the aqueduct's: a waterworks that has
+            // to reach a river cannot serve a place with no water in sight, however rich it is,
+            // which is exactly the constraint that makes dry ground cost something.
+            //
+            // The four public faces used to be four hand-copied scans with two different "none"
+            // sentinels and a guard that could never fire; now they are one scan and NoBuilding.
+            private static method best(int[] ladder, int era, boolean dry) returns int {
+                mutable int top = cast<int>(BuildingKind.NoBuilding);
+                for (int k in 1..BuildingKind.count()) {
+                    if (ladder[k] <= 0 || Builds.ERA[k] > era) {
+                        continue;
+                    }
+                    if (dry && Builds.SITE[k] == cast<int>(Ground.Waterside)) {
+                        continue;
+                    }
+                    if (ladder[k] > ladder[top]) {
+                        top = k;
+                    }
+                }
+                return top;
+            }
+
+            // The best housing a community of this era knows how to raise.
+            public static method bestRoof(int era) returns int {
+                return Builds.best(Builds.ROOF, era, false);
+            }
+
+            // The best wall a people of this era knows how to raise.
+            public static method bestWall(int era) returns int {
+                return Builds.best(Builds.WALL, era, false);
+            }
+
+            // The most people a waterworks of this era can serve, honouring the aqueduct's need
+            // for a river when the town has none.
+            public static method bestWater(int era, boolean onWater) returns int {
+                return Builds.best(Builds.WATER, era, !onWater);
+            }
+
+            // The best thing a people of this era knows how to build against sickness.
+            public static method bestCare(int era) returns int {
+                return Builds.best(Builds.CARE, era, false);
+            }
+
+            // Who makes this good, at this era. The cheapest one that can: a people that has both
+            // a Toolmaker and a Toolsmith is asked "what would I raise to get more of these" and
+            // the answer is whichever it can actually afford, which is the earlier of the two.
+            //
+            // NoBuilding for anything nobody makes -- a good that comes out of the ground rather
+            // than a bench, which is where the explosion of wants down a chain has to stop.
+            public static method makerOf(int good, int era) returns int {
+                mutable int top = cast<int>(BuildingKind.NoBuilding);
+                if (good <= 0) {
+                    return top;
+                }
+                for (int k in 1..BuildingKind.count()) {
+                    if (Builds.OUT[k] != good || Builds.NOUT[k] <= 0 || Builds.ERA[k] > era) {
+                        continue;
+                    }
+                    if (top == cast<int>(BuildingKind.NoBuilding)
+                        || Builds.ERA[k] < Builds.ERA[top]) {
+                        top = k;
+                    }
+                }
+                return top;
+            }
+
+            // HOW BIG A JOB IT IS, as one number.
+            //
+            // Two things come out of it -- the total work a site takes and the ceiling on builders
+            // -- and they come out of the SAME number on purpose. Held apart they drift, and a
+            // cathedral that admitted sixteen builders while wanting a hut's worth of work would
+            // go up as fast as a hut.
+            //
+            // It is read off what the thing is made of rather than typed in a hundred and
+            // forty-five times, because a number typed in beside a cost can disagree with that
+            // cost and this one cannot. A hut is fourteen wood and four stone: eighteen. A wall
+            // or a cathedral is hundreds.
+            public static method complexity(int ord) returns int {
+                mutable int c = Builds.WOOD[ord] + Builds.STONE[ord];
+                if (Builds.MAT[ord] != Goods.NOTHING) {
+                    c = c + Builds.MATN[ord];
+                }
+                if (c < 1) {
+                    return 1;
+                }
+                return c;
+            }
+
+            // The work a site takes, in hashes. Four to the unit of material, so a hut is seventy
+            // two hashes and not eighteen -- putting a thing up is more work than carrying it.
+            public static method totalWork(int ord) returns int {
+                return Builds.complexity(ord) * 4;
+            }
+
+            // How many builders may stand at one site, from the same number, capped at sixteen.
+            // A hut takes three; nothing takes more than sixteen however large it is, because a
+            // site is a place with edges and not a spreadsheet.
+            public static method builderCeiling(int ord) returns int {
+                mutable int m = Builds.complexity(ord) / 6;
+                if (m < 1) {
+                    m = 1;
+                }
+                if (m > 16) {
+                    m = 16;
+                }
+                return m;
+            }
+        }
+    }
+}
