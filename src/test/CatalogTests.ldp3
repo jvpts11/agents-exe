@@ -9,6 +9,7 @@ import Agents.World.Ground;
 import Agents.World.Goods;
 import Agents.World.ExtractedGood;
 import Agents.World.Biomes;
+import Agents.World.Beasts;
 import Agents.World.NodeField;
 import Agents.World.Nodes;
 import Agents.World.Harvest;
@@ -165,6 +166,114 @@ public bundle Agents {
                     Test.assertEqual(Biomes.swims(i) ? 1 : 0, wantSwim[i]);
                     Test.assertEqual(Biomes.buildable(i) ? 1 : 0, wantBuild[i]);
                     Test.assertTrue(Biomes.pace(i) == paceOf[wantPaceCode[i]]);
+                }
+                return;
+            }
+
+            // The species table, captured LITERALLY on 2026-08-09, before its band rewrite.
+            // Diet codes are Diet ordinals (0 NoDiet, 1 Grazer, 2 Browser, 3 Predator, 4 Marine);
+            // band codes are today's B_* ints (1 temperate .. 8 shore). The livesIn grid is
+            // checked against the band->biome sets RE-ENCODED AS DATA -- read off today's chain,
+            // so the rewrite's declared rows must reproduce the chain's every answer.
+            [Tag(name: "catalog")]
+            [Test]
+            public static method species_table_reads_as_it_always_has() returns void {
+                String[] wantName = ["NoBeast", "Deer", "Boar", "Rabbit", "Bison", "Reindeer",
+                    "Ibex", "Camel", "Antelope", "Mammoth", "Sheep", "Cattle", "Horse", "Seal",
+                    "Wolf", "Bear", "Lion", "Crocodile"];
+                int[] wantDiet = [0, 2, 2, 1, 1, 2, 2, 2, 1, 2, 1, 1, 1, 4, 3, 3, 3, 3];
+                int[] wantHerd = [0, 8, 5, 3, 14, 16, 6, 5, 12, 6, 10, 10, 8, 9, 6, 1, 4, 2];
+                int[] wantMeat = [0, 30, 26, 5, 70, 34, 22, 44, 24, 160, 18, 60, 50, 30, 16,
+                    60, 40, 46];
+                int[] wantHide = [0, 8, 6, 1, 20, 10, 6, 14, 7, 40, 5, 18, 15, 9, 6, 18, 12, 16];
+                int[] wantBand = [0, 1, 1, 1, 2, 3, 4, 5, 2, 3, 4, 2, 2, 8, 3, 1, 2, 7];
+                // pace*100, life, shy*100 -- exact because every source literal has at most two
+                // decimals, and both sides go through the same float literal on the way in.
+                mutable float[] wantPace = new float[18]();
+                mutable float[] wantLife = new float[18]();
+                mutable float[] wantShy = new float[18]();
+                wantPace[1] = 2.2;   wantLife[1] = 300.0;  wantShy[1] = 14.0;
+                wantPace[2] = 1.9;   wantLife[2] = 260.0;  wantShy[2] = 9.0;
+                wantPace[3] = 2.6;   wantLife[3] = 120.0;  wantShy[3] = 8.0;
+                wantPace[4] = 1.7;   wantLife[4] = 380.0;  wantShy[4] = 12.0;
+                wantPace[5] = 2.1;   wantLife[5] = 300.0;  wantShy[5] = 15.0;
+                wantPace[6] = 2.3;   wantLife[6] = 280.0;  wantShy[6] = 16.0;
+                wantPace[7] = 1.6;   wantLife[7] = 420.0;  wantShy[7] = 11.0;
+                wantPace[8] = 2.8;   wantLife[8] = 260.0;  wantShy[8] = 18.0;
+                wantPace[9] = 1.3;   wantLife[9] = 600.0;  wantShy[9] = 10.0;
+                wantPace[10] = 1.5;  wantLife[10] = 240.0; wantShy[10] = 10.0;
+                wantPace[11] = 1.4;  wantLife[11] = 340.0; wantShy[11] = 9.0;
+                wantPace[12] = 3.0;  wantLife[12] = 380.0; wantShy[12] = 13.0;
+                wantPace[13] = 1.2;  wantLife[13] = 280.0; wantShy[13] = 8.0;
+                wantPace[14] = 2.7;  wantLife[14] = 280.0; wantShy[14] = 4.0;
+                wantPace[15] = 2.0;  wantLife[15] = 360.0; wantShy[15] = 3.0;
+                wantPace[16] = 2.9;  wantLife[16] = 300.0; wantShy[16] = 3.0;
+                wantPace[17] = 1.1;  wantLife[17] = 460.0; wantShy[17] = 3.0;
+                Test.checking("the table still holds eighteen species");
+                Test.assertEqual(Beasts.count(), 18);
+                for (mutable int i = 0; i < 18; i++) {
+                    Test.checking($"species {i} keeps its row");
+                    Test.assertTrue(Beasts.name(i).equals(wantName[i]));
+                    Test.assertEqual(Beasts.diet(i), wantDiet[i]);
+                    Test.assertEqual(Beasts.herd(i), wantHerd[i]);
+                    Test.assertEqual(Beasts.meat(i), wantMeat[i]);
+                    Test.assertEqual(Beasts.hide(i), wantHide[i]);
+                    Test.assertTrue(Beasts.pace(i) == wantPace[i]);
+                    Test.assertTrue(Beasts.life(i) == wantLife[i]);
+                    Test.assertTrue(Beasts.shy(i) == wantShy[i]);
+                }
+                // The band->biome sets, as data: band code, then the biome ordinals it holds.
+                // Everything not listed is out -- the loop checks all forty biomes per species.
+                mutable int[] bandOf = new int[18]();
+                for (mutable int s = 0; s < 18; s++) {
+                    bandOf[s] = wantBand[s];
+                }
+                mutable boolean[] inBand = new boolean[9 * 40]();
+                int temperate = 1;
+                inBand[temperate * 40 + 22] = true;   // DeciduousForest
+                inBand[temperate * 40 + 21] = true;   // LaurelForest
+                inBand[temperate * 40 + 23] = true;   // TemperateRainforest
+                inBand[temperate * 40 + 19] = true;   // MedShrubland
+                inBand[temperate * 40 + 24] = true;   // Prairie
+                inBand[temperate * 40 + 32] = true;   // Hills
+                int grassland = 2;
+                inBand[grassland * 40 + 24] = true;   // Prairie
+                inBand[grassland * 40 + 25] = true;   // Steppe
+                inBand[grassland * 40 + 20] = true;   // WarmGrassland
+                inBand[grassland * 40 + 16] = true;   // Savanna
+                int cold = 3;
+                inBand[cold * 40 + 27] = true;        // Taiga
+                inBand[cold * 40 + 28] = true;        // Tundra
+                inBand[cold * 40 + 31] = true;        // Snowfield
+                inBand[cold * 40 + 26] = true;        // ColdDesert
+                int mountainB = 4;
+                inBand[mountainB * 40 + 32] = true;   // Hills
+                inBand[mountainB * 40 + 33] = true;   // Mountain
+                inBand[mountainB * 40 + 34] = true;   // AlpineMeadow
+                int desert = 5;
+                inBand[desert * 40 + 18] = true;      // HotDesert
+                inBand[desert * 40 + 17] = true;      // ThornScrub
+                inBand[desert * 40 + 37] = true;      // Badlands
+                inBand[desert * 40 + 39] = true;      // Oasis
+                int tropical = 6;
+                inBand[tropical * 40 + 14] = true;    // TropicalRainforest
+                inBand[tropical * 40 + 15] = true;    // TropSeasonalForest
+                inBand[tropical * 40 + 13] = true;    // Mangrove
+                int wetland = 7;
+                inBand[wetland * 40 + 10] = true;     // Marsh
+                inBand[wetland * 40 + 11] = true;     // Swamp
+                inBand[wetland * 40 + 12] = true;     // Bog
+                inBand[wetland * 40 + 13] = true;     // Mangrove
+                int shore = 8;
+                inBand[shore * 40 + 8] = true;        // Beach
+                inBand[shore * 40 + 9] = true;        // RockyShore
+                inBand[shore * 40 + 5] = true;        // SeaIce
+                for (mutable int s = 0; s < 18; s++) {
+                    for (mutable int b = 0; b < 40; b++) {
+                        boolean want = inBand[bandOf[s] * 40 + b];
+                        Test.checking($"species {s} lives-in biome {b} as it always did");
+                        Test.assertTrue(Beasts.livesIn(s, b) == want);
+                    }
                 }
                 return;
             }
