@@ -1,0 +1,97 @@
+import System.IO.Console;
+import System.Text.Scanner;
+program AgentsExe;
+
+// The command line, read as NAMED options rather than by position.
+//
+// WHY NOT POSITION. The game already took three: seed, then gear, then a trace path. A fourth --
+// how long to run for -- has no obvious place in that queue, and by then nobody can read
+// `AgentsExe 12345 3 60 run.txt` and say which number is which. Worse, position makes the middle
+// one mandatory: you cannot ask for a trace without also stating a gear you did not care about.
+//
+// AND IT REMOVES THE TRAP THAT COST A DAY. A bare number used to be a seed, which meant a mistyped
+// command was indistinguishable from a world to generate -- `gensiz` silently became seed 42 and
+// opened the interactive window under a gate that waits for the process to exit. Every value now
+// arrives wearing its name, so a word that is not a command and not `name=value` is a mistake and
+// can be refused as one.
+//
+// WHAT IS READ IS MARKED, and that is the whole reason this is an object rather than a handful of
+// static lookups. The alternative is for each command to hold a second list of the names it
+// accepts, so an unknown option can be spotted -- two lists, written by hand, that must agree
+// forever. That pair is exactly the defect `Gear` was built to end, where a pace and its key
+// number lived in two if-ladders that had to be exact inverses. Here reading IS the declaration:
+// whatever nobody asked for is still unread at the end, and `stray()` names it.
+public bundle Agents {
+    public namespace App {
+
+        public class Options {
+            private mutable string[] words;
+            private mutable boolean[] taken;
+
+            // The array is BORROWED, not owned: an array variable holds the block, so this is the
+            // same array `main` was handed and there is nothing here to free. Only the tally of
+            // what has been read belongs to this object.
+            public constructor Options(string[] words) {
+                this.words = words;
+                taken = new boolean[words.length()]();
+                if (words.length() > 0) {
+                    taken[0] = true;               // words[0] is the command; it is not an option
+                }
+            }
+
+            public destructor ~Options() returns void {
+                delete taken;
+                return;
+            }
+
+            // The value of `name=...`, as a number. Absent, or present and unreadable as a number,
+            // both give the fallback: a command line is typed by a person and a run is not worth
+            // refusing over, which is the same judgement `Gear.onKey` makes about a number outside
+            // 1..6.
+            public method number(String name, int fallback) returns int {
+                String raw = text(name, "");
+                if (raw.length() == 0) {
+                    return fallback;
+                }
+                mutable Scanner sc = new Scanner(raw) on heap;
+                mutable int got = fallback;
+                if (sc.hasNext()) {
+                    got = sc.nextInt();
+                }
+                delete sc;
+                return got;
+            }
+
+            // The value of `name=...`, as text. Marks the option read, which is what lets an
+            // unknown one be found afterwards.
+            public method text(String name, String fallback) returns String {
+                String head = name.concat("=");
+                mutable int i = 1;
+                while (i < words.length()) {
+                    String word = words[i];
+                    if (word.length() >= head.length()
+                        && word.substring(0, head.length()).equals(head)) {
+                        taken[i] = true;
+                        return word.substring(head.length(), word.length());
+                    }
+                    i = i + 1;
+                }
+                return fallback;
+            }
+
+            // The first word the command never asked for, or "" if it read them all. A misspelt
+            // option is silence otherwise -- `ssed=7` would run seed 42 and report nothing, which
+            // is the quietest way to run the wrong world for an hour.
+            public method stray() returns String {
+                mutable int i = 0;
+                while (i < words.length()) {
+                    if (!taken[i]) {
+                        return words[i];
+                    }
+                    i = i + 1;
+                }
+                return "";
+            }
+        }
+    }
+}

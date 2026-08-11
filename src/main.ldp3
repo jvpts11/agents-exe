@@ -3,10 +3,8 @@ import System.IO.File;
 import System.Text.StringBuilder;
 import System.Text.Strings;
 import System.Time.Time;
-import System.Text.Scanner;
 import opengl.glfw.GlWindow;
 import opengl.glfw.InputEvent;
-import opengl.gl.Wgl;
 import Agents.World.Grid;
 import Agents.World.WorldGen;
 import Agents.World.Biomes;
@@ -16,16 +14,11 @@ import Agents.Sim.Meter;
 import Agents.Sim.Phase;
 import Agents.World.WorldAudit;
 import Agents.World.Landmass;
-import Agents.Gfx.SoftPainter;
-import Agents.Gfx.GlPainter;
 import Agents.Gfx.Batch2D;
 import Agents.Gfx.Hud;
-import Agents.Gfx.Camera;
-import Agents.Gfx.WorldRenderer;
 import Agents.Gfx.MeshAtlas;
-import Agents.Gfx.Raster3D;
-import Agents.Gfx.World3D;
 import Agents.Gfx.GlWorld3D;
+import Agents.App.Options;
 import Agents.App.Gear;
 import Agents.App.Ppm;
 import Agents.App.CellSearch;
@@ -35,10 +28,10 @@ import Agents.World.Contour;
 import Agents.App.ShotRig;
 import Agents.App.Key;
 
-// Entry point. Slice 4: generate a world and show it ISOMETRICALLY in a GL window -- pan with
-// WASD/arrows, zoom with the scroll wheel or +/-, ESC to quit. Running with any argument (or when no
-// GL window is available) instead writes a software snapshot PPM, the same scene the window draws --
-// used for headless verification.
+// Entry point. `AgentsExe game` opens the world in a GL window and is what the project is for;
+// everything else here is an instrument that measures or captures some part of it without a person
+// at the keyboard. Run with no argument, it plays -- a double-clicked executable must start the
+// game, not a diagnostic.
 program AgentsExe;
 
 public bundle Agents {
@@ -46,11 +39,15 @@ public bundle Agents {
 
         public class Main {
             public static method main(string[] args) returns void {
+                // THE GAME IS THE DEFAULT, and it is also a word. No argument at all has to play,
+                // because that is what a double-clicked executable does; `game` exists so the
+                // launch can be written down, so it can carry options, and so a run of the real
+                // thing looks like every other command rather than like the absence of one.
+                if (args.length() == 0 || args[0].equals("game")) {
+                    Main.game(args);
+                    return;
+                }
                 if (args.length() > 0) {
-                    if (args[0].equals("gen3d")) {
-                        Main.render3dSnapshot();
-                        return;
-                    }
                     if (args[0].equals("glworld")) {
                         Main.captureGlWorld();
                         return;
@@ -101,89 +98,49 @@ public bundle Agents {
                         delete lm;
                         return;
                     }
-                    if (args[0].equals("iso2d")) {
-                        Main.runIso2d();
-                        return;
-                    }
                     // A WORD THAT IS NOT A COMMAND IS A MISTAKE, and must say so.
                     //
-                    // Everything below reads an unrecognised argument as a SEED, which is
-                    // deliberate -- `AgentsExe 12345` runs the game on that map, and six windows on
-                    // six maps is the only way to watch the whole thing on ground it has never
-                    // seen. But a non-numeric word took that path too and silently became seed 42,
-                    // so a mistyped command opened the interactive world instead of refusing.
-                    //
-                    // That is not merely confusing: `check.ps1` runs commands by name and judges
-                    // them by exit code, so a typo there would have launched the game and waited
-                    // for a window nobody was going to close. It cost 73 seconds of CPU on a
-                    // machine where an older binary did not yet know `gensize`.
-                    if (!Main.looksNumeric(args[0])) {
-                        System.IO.Console.println($"agents.exe: '{args[0]}' is not a command.");
-                        System.IO.Console.println("commands: gen3d glworld worldmaps audit gensize");
-                        System.IO.Console.println("          highshot cliffshot nodeshot forestshot");
-                        System.IO.Console.println("          probe preview plates iso2d");
-                        System.IO.Console.println("a number instead of a command is a world seed; no argument runs seed 42.");
-                        return;
-                    }
+                    // This used to be unreachable for numbers: an unrecognised argument was read as
+                    // a SEED, so `gensiz` silently became seed 42 and opened the interactive
+                    // window. Under `check.ps1`, which runs commands by name and waits for the
+                    // process to exit, that meant waiting for a window nobody was going to close --
+                    // 73 seconds of CPU on the machine where it happened. Seeds are named now
+                    // (`game seed=12345`), so every word here is either a command or a mistake.
+                    System.IO.Console.println($"agents.exe: '{args[0]}' is not a command.");
+                    System.IO.Console.println("commands: game glworld worldmaps audit gensize");
+                    System.IO.Console.println("          highshot cliffshot nodeshot forestshot");
+                    System.IO.Console.println("          probe preview plates");
+                    System.IO.Console.println("no argument plays; `game` takes seed= gear= for= trace=");
+                    return;
                 }
-                // Default: the interactive true-3D world (free orbit camera).
-                //
-                // A SEED, so the real game can be run six times on six maps at once. Until now the
-                // world a player sees was hardwired to 42, which is fine for one window and useless
-                // for the only test that matters -- the whole thing, renderer included, on ground
-                // it has never seen. Any argument that is not a known command is read as a seed.
-                mutable int seed = 42;
-                if (args.length() > 0) {
-                    mutable Scanner sc = new Scanner(args[0]) on heap;
-                    if (sc.hasNext()) {
-                        int got = sc.nextInt();
-                        if (got != 0) {
-                            seed = got;
-                        }
-                    }
-                    delete sc;
-                }
-                // AND THE SPEED IT STARTS AT. The 1-6 keys already exist, but a window launched to
-                // be watched and audited for an hour cannot be asked to have somebody press a key
-                // in it -- and pressing that key in one of six windows only ever meant walking
-                // round to the other five.
-                mutable Gear gear = Gear.One;
-                if (args.length() > 1) {
-                    mutable Scanner ps = new Scanner(args[1]) on heap;
-                    if (ps.hasNext()) {
-                        int got = ps.nextInt();
-                        if (got > 0) {
-                            gear = Gear.onKey(got);
-                        }
-                    }
-                    delete ps;
-                }
-                // AND A THIRD ARGUMENT TURNS ON THE TRACE: every agent, every column, every tick,
-                // written to the path given. Empty without it, which is how the simulation knows
-                // to stay silent -- a mature world writes about a gigabyte a minute this way and no
-                // ordinary run should pay that. What it buys is the one question the counters
-                // cannot answer: not "how often does this happen" but "what is that ring of people
-                // actually doing", which only an instrument that keeps the individual can answer.
-                mutable String tracePath = "";
-                if (args.length() > 2) {
-                    tracePath = args[2];
-                }
-                Main.renderGlWorld(seed, gear, tracePath);
                 return;
             }
 
-            // Is this argument a seed rather than a mistyped command? A leading digit or minus is
-            // the whole test: the seed path parses with a Scanner and falls back to 42, so what
-            // matters here is only telling a NUMBER from a WORD, not validating the number.
-            private static method looksNumeric(String s) returns boolean {
-                if (s.length() == 0) {
-                    return false;
+            // THE GAME. Everything else in this file exists to measure it.
+            //
+            // Each option is here because a run had to be repeatable without a person in the room.
+            // `seed=` because the world a player sees was hardwired to 42, which is fine for one
+            // window and useless for the only test that counts -- the whole thing, renderer
+            // included, on ground it has never seen. `gear=` because a window launched to be
+            // watched for an hour cannot be asked to have somebody press a key in it, and pressing
+            // it in one of six windows only ever meant walking round to the other five. `for=`
+            // because a session that ends by itself is one anybody, or anything, can start.
+            // `trace=` because the counters answer "how often" and never "what is that ring of
+            // people actually doing".
+            private static method game(string[] args) returns void {
+                Options cmd = new Options(args) on stack;
+                int seed = cmd.number("seed", 42);
+                Gear gear = Gear.onKey(cmd.number("gear", 1));
+                int seconds = cmd.number("for", 0);
+                String tracePath = cmd.text("trace", "");
+                String odd = cmd.stray();
+                if (odd.length() > 0) {
+                    System.IO.Console.println($"agents.exe game: '{odd}' is not an option.");
+                    System.IO.Console.println("options: seed=N  gear=1..6  for=SECONDS  trace=PATH");
+                    return;
                 }
-                char c = s.charAt(0);
-                if (c == '-') {
-                    return s.length() > 1;
-                }
-                return c >= '0' && c <= '9';
+                Main.renderGlWorld(seed, gear, seconds, tracePath);
+                return;
             }
 
             // Generate one world at a given size and say how long each stage took.
@@ -195,15 +152,14 @@ public bundle Agents {
             // steeper is an algorithm in the wrong complexity class rather than an honest price --
             // and which stage owns the time.
             private static method genSize(string[] args) returns void {
-                mutable int w = 2560;
-                mutable int h = 1440;
-                if (args.length() > 2) {
-                    mutable Scanner sw = new Scanner(args[1]) on heap;
-                    if (sw.hasNext()) { w = sw.nextInt(); }
-                    delete sw;
-                    mutable Scanner sh = new Scanner(args[2]) on heap;
-                    if (sh.hasNext()) { h = sh.nextInt(); }
-                    delete sh;
+                Options cmd = new Options(args) on stack;
+                int w = cmd.number("w", 2560);
+                int h = cmd.number("h", 1440);
+                String odd = cmd.stray();
+                if (odd.length() > 0) {
+                    System.IO.Console.println($"agents.exe gensize: '{odd}' is not an option.");
+                    System.IO.Console.println("options: w=N  h=N");
+                    return;
                 }
                 long t0 = Time.millis();
                 WorldGen gen = new WorldGen(42) on stack;
@@ -232,107 +188,6 @@ public bundle Agents {
                 return;
             }
 
-            // The legacy 2D isometric view (kept behind `iso2d`).
-            private static method runIso2d() returns void {
-                int w = 2560;
-                int h = 1440;
-                System.IO.Console.println("iso2d: generating a world...");
-                WorldGen gen = new WorldGen(42) on stack;
-                gen.setWorld(0, 0.0 - 1.0);
-                Grid* g = gen.generate(w, h);
-                System.IO.Console.println("world ready.");
-                if (Main.runWindow(g, w, h)) {
-                    delete g;
-                    return;
-                }
-                System.IO.Console.println("no GL window; writing a snapshot instead.");
-                Main.writeSnapshot(g, w, h);
-                delete g;
-                return;
-            }
-
-            // The interactive isometric window. Returns false if no GL window could be opened.
-            private static method runWindow(Grid* g, int w, int h) returns boolean {
-                int sw = 1280;
-                int sh = 720;
-                GlWindow* win = new GlWindow() on heap;
-                if (win.open("agents.exe -- world", sw, sh, 3, 3) == 0) {
-                    delete win;
-                    return false;
-                }
-                win.setVSync(1);
-                Batch2D* batch = new Batch2D(win.gl) on heap;
-                GlPainter* gp = new GlPainter(batch) on heap;
-                Camera cam = new Camera(sw, sh) on heap;
-                cam.focusCell(w / 2, h / 2);
-                cam.setZoom(0.42);
-                int pan = 18;
-                while (win.isOpen()) {
-                    win.pump();
-                    if (win.keyDown(Key.ESCAPE)) {
-                        break;
-                    }
-                    if (win.keyDown(Key.W) || win.keyDown(Key.ARROW_UP)) { cam.panPixels(0, pan); }
-                    if (win.keyDown(Key.S) || win.keyDown(Key.ARROW_DOWN)) { cam.panPixels(0, 0 - pan); }
-                    if (win.keyDown(Key.A) || win.keyDown(Key.ARROW_LEFT)) { cam.panPixels(pan, 0); }
-                    if (win.keyDown(Key.D) || win.keyDown(Key.ARROW_RIGHT)) { cam.panPixels(0 - pan, 0); }
-                    int sc = win.takeScroll();
-                    if (sc > 0) { cam.zoomBy(1.12); }
-                    if (sc < 0) { cam.zoomBy(0.89); }
-                    if (win.keyDown(0xBB) || win.keyDown(0x6B)) { cam.zoomBy(1.03); }             // +
-                    if (win.keyDown(0xBD) || win.keyDown(0x6D)) { cam.zoomBy(0.97); }             // -
-                    int cw = win.width();
-                    int ch = win.height();
-                    cam.resize(cw, ch);
-                    Wgl.glViewport(0, 0, cw, ch);
-                    Wgl.glClearColor(0.07, 0.16, 0.26, 1.0);
-                    Wgl.glClear(0x4000);
-                    batch.begin(cw, ch, 0);
-                    WorldRenderer.draw(gp, g, cam, cw, ch);
-                    batch.flush();
-                    win.swap();
-                }
-                delete cam;
-                delete gp;
-                delete batch;
-                delete win;
-                return true;
-            }
-
-            // Headless verification of the TRUE-3D path: generate a small real world and render it with
-            // the baked biome models (elevation -> height), writing world3d.ppm.
-            private static method render3dSnapshot() returns void {
-                int w = 64;
-                int h = 40;
-                System.IO.Console.println("gen3d: generating a small world...");
-                WorldGen gen = new WorldGen(42) on stack;
-                gen.setWorld(0, 0.0 - 1.0);
-                Grid* g = gen.generate(w, h);
-                Main.worldStats(g, w, h);
-                String root = Main.assetRoot();
-                if (root.length() == 0) {
-                    System.IO.Console.println("gen3d: assets/models not found.");
-                    delete g;
-                    return;
-                }
-                System.IO.Console.println("gen3d: loading models...");
-                MeshAtlas* atlas = MeshAtlas.loadTerrain(root);
-                System.IO.Console.println("gen3d: rendering in 3D...");
-                Raster3D* r = new Raster3D(960, 600, 2) on heap;
-                World3D.render(r, g, atlas, 0, 0, w, h, 9.0);
-                r.savePPM("world3d.ppm", 20, 26, 36);
-                System.IO.Console.println("gen3d: wrote world3d.ppm");
-                delete r;
-                delete atlas;
-                delete g;
-                return;
-            }
-
-            // GL true-3D path: generate a world, bake it into a VBO, render one frame with the orbit
-            // camera + cel shading, and read it back to gl_world.ppm (headless-verifiable). The free
-            // camera loop runs when a real window is present.
-            // Find assets/models regardless of the working directory (double-click runs from the exe's
-            // folder, the terminal from the repo root). Returns "" if none of the candidates has it.
             // A walkable cell, uniformly drawn. Returns the packed cell, or -1 if the world has no
             // walkable ground at all -- which is a worldgen failure and says so.
             private static method somewhereWalkable(Grid* g, int seed) returns int {
@@ -356,6 +211,8 @@ public bundle Agents {
                 return 0 - 1;
             }
 
+            // Find assets/models regardless of the working directory (double-click runs from the
+            // exe's folder, the terminal from the repo root). Returns "" if no candidate has it.
             private static method assetRoot() returns String {
                 if (File.readAll("assets/models/terrain.index").length() > 0) {
                     return "assets/models";
@@ -369,15 +226,23 @@ public bundle Agents {
                 return "";
             }
 
-            // The interactive true-3D world: generate, bake into a VBO (LOD stride so the whole
-            // 2560x1080 fits), then an inspection camera loop -- left-drag or arrows rotate/tilt (tilt
-            // gimbal-locked between horizontal and top-down), wheel or +/- zoom, WASD pan, ESC quits.
             // At most this many world ticks in one frame. Without it, gear 6 on a slow machine
             // spends the whole frame simulating and the window stops answering the keyboard --
             // including the key that would slow it back down.
             public static fixed int TICK_CAP = 64;
 
-            private static method renderGlWorld(int seed, Gear startGear, String tracePath) returns void {
+            // The interactive true-3D world: generate, bake into a VBO (LOD stride so the whole
+            // 2560x1440 fits), then the camera loop -- left-drag or arrows rotate/tilt (tilt
+            // gimbal-locked between horizontal and top-down), wheel or +/- zoom, WASD pan, 1-6
+            // gears, space pauses, ESC quits.
+            //
+            // `seconds` closes the window by itself when it runs out, and 0 means never. IT IS NOT
+            // A TEST MODE: the same world, the same loop, the same report on the way out -- only
+            // the ESC is on a clock. Development is verified against the real game rather than
+            // against a probe, and that rule needs a way for the real game to end without a hand on
+            // the keyboard, or every check costs a person watching a window.
+            private static method renderGlWorld(int seed, Gear startGear, int seconds,
+                                                String tracePath) returns void {
                 int w = 2560;
                 int h = 1440;
                 System.IO.Console.println("agents.exe: generating the world...");
@@ -446,10 +311,18 @@ public bundle Agents {
                 // out to be most of the frame. The clock now opens here and every stretch between
                 // one `lap` and the next belongs to a named phase.
                 Meter* gauge = r.frameMeter();
+                // Started AFTER the world is built and the atlases are loaded, so `for=60` is sixty
+                // seconds of the game rather than sixty seconds minus however long generation took
+                // that day.
+                long stopAt = Time.millis() + cast<long>(seconds) * 1000;
                 while (win.isOpen()) {
                     gauge.begin();
                     win.pump();
                     if (win.keyDown(Key.ESCAPE)) {
+                        break;
+                    }
+                    if (seconds > 0 && Time.millis() >= stopAt) {
+                        System.IO.Console.println($"agents.exe: {seconds} seconds are up.");
                         break;
                     }
                     int mx = win.cursorX();
@@ -1156,26 +1029,6 @@ public bundle Agents {
                 return;
             }
 
-            // The same buffer read bottom-up, which is how a frame comes off the card: OpenGL's
-            // origin is the bottom-left and a PPM's is the top-left.
-            private static method writePpmFlipped(byte[] px, int w, int h, String path) returns void {
-                mutable Ppm* file = new Ppm(w, h) on heap;
-                mutable int y = 0;
-                while (y < h) {
-                    int srcRow = h - 1 - y;
-                    mutable int x = 0;
-                    while (x < w) {
-                        int i = (srcRow * w + x) * 3;
-                        file.pixel(cast<int>(px[i]) & 255, cast<int>(px[i + 1]) & 255,
-                                   cast<int>(px[i + 2]) & 255);
-                        x = x + 1;
-                    }
-                    y = y + 1;
-                }
-                file.save(path);
-                delete file;
-            }
-
             // Generate all four world modes and write a top-down biome-colour overview PNG of each --
             // the fast way to verify continent shapes per mode.
             private static method worldMaps() returns void {
@@ -1582,18 +1435,6 @@ public bundle Agents {
                 return;
             }
 
-            private static method writeSnapshot(Grid* g, int w, int h) returns void {
-                int sw = 1280;
-                int sh = 720;
-                SoftPainter sp = new SoftPainter(sw, sh) on stack;
-                sp.fillRect(0, 0, sw, sh, 18, 41, 66);
-                Camera cam = new Camera(sw, sh) on stack;
-                cam.focusCell(w / 2, h / 2);
-                cam.setZoom(0.42);
-                WorldRenderer.draw(sp, g, cam, sw, sh);
-                sp.save("world_iso.ppm");
-                System.IO.Console.println("wrote world_iso.ppm");
-            }
         }
     }
 }
