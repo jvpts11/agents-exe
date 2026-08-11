@@ -1,0 +1,63 @@
+import System.IO.Console;
+program AgentsExe;
+
+// How every terrain model sits, by model.
+//
+// Two parallel float arrays read together at thirty-one sites. What makes them one subject is the
+// lift: the art's plate heights differ a little per biome, which stepped random ledges across flat
+// plains, so every LAND tile is raised onto one shared ground level. Water and the coast keep
+// their authored heights -- the shoreline drop is intended, and that exception is the reason the
+// lift cannot simply be folded into the top.
+public bundle Agents {
+    public namespace Gfx {
+
+        public class TerrainLooks {
+            // Below this ordinal are the water and coast models, which are NOT levelled.
+            public static fixed int FIRST_LAND = 10;
+
+            private mutable TerrainLook[] rows;
+
+            public constructor TerrainLooks() {
+                this.rows = new TerrainLook[1]();
+            }
+
+            public destructor ~TerrainLooks() returns void {
+                delete this.rows;
+            }
+
+            public method load(MeshAtlas* terr) returns void {
+                delete this.rows;
+                this.rows = new TerrainLook[terr.count]();
+                mutable int m = 0;
+                while (m < terr.count) {
+                    // _tilebox emits 4 side quads (tris 0..7) then the top quad (tris 8,9): any
+                    // vertex of tri 8 carries the top-plate height.
+                    int vi = (terr.triStart[m] + 8) * 3;
+                    this.rows[m].top = terr.pz[vi];
+                    this.rows[m].lift = 0.0;
+                    m = m + 1;
+                }
+                // One shared ground level for every land tile: the tallest authored plate wins and
+                // the rest are lifted to meet it.
+                mutable float groundTop = 0.0;
+                mutable int gi = TerrainLooks.FIRST_LAND;
+                while (gi < terr.count) {
+                    if (this.rows[gi].top > groundTop) {
+                        groundTop = this.rows[gi].top;
+                    }
+                    gi = gi + 1;
+                }
+                gi = TerrainLooks.FIRST_LAND;
+                while (gi < terr.count) {
+                    this.rows[gi].lift = groundTop - this.rows[gi].top;
+                    gi = gi + 1;
+                }
+                return;
+            }
+
+            public operator [] (int model) returns TerrainLook {
+                return this.rows[model];
+            }
+        }
+    }
+}

@@ -117,21 +117,18 @@ public bundle Agents {
             private mutable int srcH;
             private mutable int stride;
             private mutable float stepH;        // height of one mountain stack step
-            private mutable float[] tileTop;    // per-terrain-model top-plate height (z of the box top)
-            private mutable float[] zAdj;       // per-terrain lift so all LAND plates share one ground level
+            // Where each terrain model's top plate is, and the lift that puts every land plate on
+            // one ground level.
+            private mutable TerrainLooks* terrainLook;
             // per-frame matrices, allocated once (a heap alloc per frame is how leaks are born)
             private mutable GlMat4* projM;
             private mutable GlMat4* viewM;
-            // scatter tables, indexed by biome ordinal
-            private mutable int[] sProp;
-            private mutable int[] sMilli;
-            private mutable float[] sScale;
+            // What each biome scatters on a cell that holds nothing else.
+            private mutable ScatterRules* scatter;
             private mutable int hintProp;       // cheap tree drawn on forest blocks in the coarse LOD
             // resource nodes, indexed by NodeKind ordinal. A kind's mesh lives in whichever atlas
             // Nodes.atlas says: the seven promoted tree species and the boulder are still props.
-            private mutable int[] nModel;       // model index inside that atlas, or -1 if absent
-            private mutable boolean[] nInProps; // true = props atlas, false = nodes atlas
-            private mutable float[] nScale;
+            private mutable NodeArt* nodeArt;
             // detail window state (cell coords of the window origin)
             private mutable int detW;
             private mutable int detH;
@@ -182,12 +179,9 @@ public bundle Agents {
                 this.gauge = new Meter() on heap;
                 this.projM = new GlMat4() on heap;
                 this.viewM = new GlMat4() on heap;
-                this.tileTop = new float[1]();
-                this.zAdj = new float[1]();
+                this.terrainLook = new TerrainLooks() on heap;
                 this.riverTop = new float[1]();
-                this.sProp = new int[1]();
-                this.sMilli = new int[1]();
-                this.sScale = new float[1]();
+                this.scatter = new ScatterRules() on heap;
                 this.baking = false;
                 this.bkBuf = cast<address>(0);
                 this.wrCap = 0;
@@ -205,9 +199,7 @@ public bundle Agents {
                 this.dNodeK = new int[1]();
                 this.dNodeN = 0;
                 this.dNodeCur = 0;
-                this.nModel = new int[1]();
-                this.nInProps = new boolean[1]();
-                this.nScale = new float[1]();
+                this.nodeArt = new NodeArt() on heap;
                 this.btally = new int[40]();
                 this.riverTiles = new RiverSet() on heap;
                 this.uProj = gl.getUniformLocation(this.prog, "uProj");
@@ -246,20 +238,15 @@ public bundle Agents {
                 delete this.projM;
                 this.viewM.dispose();
                 delete this.viewM;
-                delete this.tileTop;
-                delete this.zAdj;
+                delete this.terrainLook;
                 delete this.riverTop;
-                delete this.sProp;
-                delete this.sMilli;
-                delete this.sScale;
+                delete this.scatter;
                 delete this.dRiverC;
                 delete this.dPropC;
                 delete this.dNodeA;
                 delete this.dNodeB;
                 delete this.dNodeK;
-                delete this.nModel;
-                delete this.nInProps;
-                delete this.nScale;
+                delete this.nodeArt;
                 delete this.btally;
                 delete this.riverTiles;
             }
@@ -317,34 +304,7 @@ public bundle Agents {
                 this.srcH = g.height();
                 this.stride = stride;
                 this.stepH = stepH;
-                delete this.tileTop;
-                this.tileTop = new float[terr.count]();
-                mutable int m = 0;
-                while (m < terr.count) {
-                    // _tilebox emits 4 side quads (tris 0..7) then the top quad (tris 8,9): any vertex of
-                    // tri 8 carries the top-plate height.
-                    int vi = (terr.triStart[m] + 8) * 3;
-                    this.tileTop[m] = terr.pz[vi];
-                    m = m + 1;
-                }
-                // One shared ground level for every LAND tile: the art's plate heights differ a
-                // little per biome, which stepped random ledges across flat plains. Water and the
-                // coast (ords 0..9) keep their authored heights -- the shoreline drop is intended.
-                delete this.zAdj;
-                this.zAdj = new float[terr.count]();
-                mutable float groundTop = 0.0;
-                mutable int gi = 10;
-                while (gi < terr.count) {
-                    if (this.tileTop[gi] > groundTop) {
-                        groundTop = this.tileTop[gi];
-                    }
-                    gi = gi + 1;
-                }
-                gi = 10;
-                while (gi < terr.count) {
-                    this.zAdj[gi] = groundTop - this.tileTop[gi];
-                    gi = gi + 1;
-                }
+                this.terrainLook.load(terr);
                 delete this.riverTop;
                 this.riverTop = new float[rivers.count]();
                 mutable int rm = 0;
@@ -394,26 +354,12 @@ public bundle Agents {
             }
 
             private method setScatter(int ord, String prop, int milli, float scale) returns void {
-                int p = this.props.ordOf(prop);
-                if (p >= 0) {
-                    this.sProp[ord] = p;
-                    this.sMilli[ord] = milli;
-                    this.sScale[ord] = scale;
-                }
+                this.scatter.set(cast<Biome>(ord), this.props, prop, milli, scale);
             }
 
             private method initScatter() returns void {
-                delete this.sProp;
-                delete this.sMilli;
-                delete this.sScale;
-                this.sProp = new int[40]();
-                this.sMilli = new int[40]();
-                this.sScale = new float[40]();
-                mutable int i = 0;
-                while (i < 40) {
-                    this.sProp[i] = 0 - 1;
-                    i = i + 1;
-                }
+                delete this.scatter;
+                this.scatter = new ScatterRules() on heap;
                 // NO TREES here any more. Every tree in the world is a resource node placed by the
                 // Flora worldgen pass, which is the only thing that knows where a wood actually is;
                 // what is left is undergrowth and ground clutter, whose whole job is to give a cell
@@ -436,44 +382,16 @@ public bundle Agents {
                 this.hintProp = this.props.ordOf("Pine");
             }
 
-            // Resolve every NodeKind to a model, once. A kind names its own mesh file, so the lookup
-            // is the kind's name in whichever atlas Nodes.atlas points at; a kind whose mesh is
-            // missing resolves to -1 and is simply never drawn, rather than indexing off the end of
-            // an atlas.
+            // Resolve every node kind to a model, once, and then say what is missing.
             private method initNodes() returns void {
                 int n = Nodes.count();
-                delete this.nModel;
-                delete this.nInProps;
-                delete this.nScale;
-                this.nModel = new int[n]();
-                this.nInProps = new boolean[n]();
-                this.nScale = new float[n]();
-                mutable int k = 0;
-                while (k < n) {
-                    boolean inProps = Nodes.atlas(k) == cast<int>(NodeAtlas.Props);
-                    this.nInProps[k] = inProps;
-                    if (k == 0) {
-                        this.nModel[k] = 0 - 1;                 // None is never drawn
-                    } else if (inProps) {
-                        this.nModel[k] = this.props.ordOf(Nodes.name(k));
-                    } else {
-                        this.nModel[k] = this.nodes.ordOf(Nodes.name(k));
-                    }
-                    // Trees carry the scale their prop scatter used; the mineral art is authored at
-                    // tile scale already.
-                    if (Nodes.isTree(k)) {
-                        this.nScale[k] = 1.1;
-                    } else {
-                        this.nScale[k] = 1.0;
-                    }
-                    k = k + 1;
-                }
+                this.nodeArt.load(this.props, this.nodes);
                 // A kind with no mesh is silently invisible in the world, and an invisible resource
                 // reads as a generator that failed to place it. Say so, once, at load.
                 mutable int miss = 0;
                 mutable int j = 1;
                 while (j < n) {
-                    if (this.nModel[j] < 0) {
+                    if (!this.nodeArt[j].drawable()) {
                         System.IO.Console.println($"GlWorld3D: no mesh for node kind {Nodes.name(j)}");
                         miss = miss + 1;
                     }
@@ -485,7 +403,7 @@ public bundle Agents {
             }
 
             private method nodeAtlasOf(int kind) returns MeshAtlas* {
-                if (this.nInProps[kind]) {
+                if (this.nodeArt[kind].inProps) {
                     return this.props;
                 }
                 return this.nodes;
@@ -493,11 +411,11 @@ public bundle Agents {
 
             // Triangles one node of this kind costs, or 0 where its mesh is missing.
             private method nodeTris(int kind) returns int {
-                int m = this.nModel[kind];
-                if (m < 0) {
+                NodeLook look = this.nodeArt[kind];
+                if (!look.drawable()) {
                     return 0;
                 }
-                return this.nodeAtlasOf(kind).triCount[m];
+                return this.nodeAtlasOf(kind).triCount[look.model];
             }
 
             // ---- deterministic per-cell hash (scatter placement) ----
@@ -753,7 +671,7 @@ public bundle Agents {
                 float top = this.riverTop[variant];
                 // raise/lower the river tile so its plate sits EXACTLY at the neighbouring terrain's
                 // plate height -- otherwise the river runs with a visible lip around it
-                float zOff = zOffIn + this.tileTop[underOrd] - top;
+                float zOff = zOffIn + this.terrainLook[underOrd].top - top;
                 int ut = this.terr.triStart[underOrd] + 8;      // biome top-face colour
                 int us = this.terr.triStart[underOrd];          // biome side colour
                 float topR = cast<float>(this.terr.cr[ut]) / 255.0;
@@ -841,7 +759,7 @@ public bundle Agents {
             private method groundTopAt(int gx, int gy) returns float {
                 int ord = this.grid.biomeAt(gx, gy);
                 int lvl = this.stackLvl(ord, gx, gy);
-                return this.tileTop[ord] + cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
+                return this.terrainLook[ord].top + cast<float>(lvl) * this.stepH + this.terrainLook[ord].lift + 0.8;
             }
 
             // A prop's shadow: its silhouette sheared along the sun direction, laid on the ground.
@@ -1059,7 +977,7 @@ public bundle Agents {
             private method isDecor(int ord, int tri) returns boolean {
                 // ANY vertex above the plate marks the whole triangle as decoration -- dome/cone BASE
                 // rings have plate-level verts too, and keeping them left giant hoops in the far LOD.
-                float top = this.tileTop[ord] + 0.02;
+                float top = this.terrainLook[ord].top + 0.02;
                 int vb = tri * 3;
                 if (this.terr.pz[vb] > top || this.terr.pz[vb + 1] > top || this.terr.pz[vb + 2] > top) {
                     return true;
@@ -1141,7 +1059,7 @@ public bundle Agents {
                     //
                     // Only a TALL feature on a mountain survives, because a cone is what makes a
                     // range read as a range from across the world.
-                    float top = this.tileTop[ord];
+                    float top = this.terrainLook[ord].top;
                     if (this.triTop(tri) > top + 0.0001) {
                         if (!(this.isMountainOrd(ord) && this.triTop(tri) > top + 0.05)) {
                             return false;
@@ -1252,7 +1170,7 @@ public bundle Agents {
             private method emitTile(address buf, int w, int ord, float wx, float wy, float zOff,
                                     float scale, boolean dropExtras, boolean dropDecor, float shade) returns int {
                 int t0 = this.terr.triStart[ord];
-                float top = this.tileTop[ord];
+                float top = this.terrainLook[ord].top;
                 mutable int p = w;
                 if (this.hasSkirt(zOff)) {
                     float sr = cast<float>(this.terr.cr[t0]) / 255.0 * shade;
@@ -1427,7 +1345,7 @@ public bundle Agents {
                         // when it is written. This asked `lvl > 0` and the emitting pass asks whether
                         // the lift clears half a unit -- and `zAdj` is part of the lift, so the two
                         // disagreed on every block whose biome sits proud of the ground plane.
-                        tris = tris + this.countTile(ord, cast<float>(lvl) * this.stepH + this.zAdj[ord],
+                        tris = tris + this.countTile(ord, cast<float>(lvl) * this.stepH + this.terrainLook[ord].lift,
                                                      true, false);
                         if (this.coarseHint(bx, by, ord)) {
                             htris = htris + this.props.triCount[this.hintProp] * 2;
@@ -1473,14 +1391,14 @@ public bundle Agents {
                         int sy = by * this.stride;
                         int ord = bOrd[by * bw + bx];
                         int lvl = bLvl[by * bw + bx];
-                        float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord];
+                        float zOff = cast<float>(lvl) * this.stepH + this.terrainLook[ord].lift;
                         float wx = cast<float>(sx * 2 + this.stride);
                         float wy = cast<float>(sy * 2 + this.stride);
                         float sc = cast<float>(this.stride);
                         float shade = this.shadeAt(sx, sy, this.stride, lvl);
                         w = this.emitTile(buf, w, ord, wx, wy, zOff, sc, true, false, shade);
                         if (this.coarseHint(bx, by, ord)) {
-                            float topZ = this.tileTop[ord] + zOff;
+                            float topZ = this.terrainLook[ord].top + zOff;
                             int ut = this.terr.triStart[ord] + 8;
                             float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
@@ -1502,12 +1420,12 @@ public bundle Agents {
                             int nx = rx + this.grid.flowDx(rx, ry);
                             int ny = ry + this.grid.flowDy(rx, ry);
                             int b0 = (ry / this.stride) * bw + rx / this.stride;
-                            float z0 = this.tileTop[bOrd[b0]] + this.zAdj[bOrd[b0]]
+                            float z0 = this.terrainLook[bOrd[b0]].groundedTop()
                                        + cast<float>(bLvl[b0]) * this.stepH + 0.20;
                             mutable float z1 = z0;
                             if (nx >= 0 && ny >= 0 && nx < this.srcW && ny < this.srcH) {
                                 int b1 = (ny / this.stride) * bw + nx / this.stride;
-                                z1 = this.tileTop[bOrd[b1]] + this.zAdj[bOrd[b1]]
+                                z1 = this.terrainLook[bOrd[b1]].groundedTop()
                                      + cast<float>(bLvl[b1]) * this.stepH + 0.20;
                             }
                             w = this.emitSlopeSeg(buf, w, cast<float>(rx * 2 + 1), cast<float>(ry * 2 + 1), z0,
@@ -1531,16 +1449,16 @@ public bundle Agents {
 
             // ---- detail LOD: full-res window around the camera target, foam + scattered props ----
             private method detailPropAt(int x, int y, int ord) returns int {
-                int p = this.sProp[ord];
-                if (p < 0) {
+                ScatterRule rule = this.scatter.at(ord);
+                if (!rule.scatters()) {
                     return 0 - 1;
                 }
                 if (this.grid.hasRiver(x, y)) {
                     return 0 - 1;
                 }
                 float h = this.hash01(x, y);
-                if (h * 1000.0 < cast<float>(this.sMilli[ord])) {
-                    return p;
+                if (h * 1000.0 < cast<float>(rule.perMille)) {
+                    return rule.prop;
                 }
                 return 0 - 1;
             }
@@ -1619,7 +1537,7 @@ public bundle Agents {
                             // are the shape this whole defect came in, so it is derived now -- from
                             // the same lift the emitting pass uses, through the same question.
                             tris = tris + this.countTile(ord,
-                                                         cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8,
+                                                         cast<float>(lvl) * this.stepH + this.terrainLook[ord].lift + 0.8,
                                                          false, this.thinDecor(ord, gx, gy));
                         }
                         // Decorative clutter only: the resource nodes are instances with their own
@@ -1681,7 +1599,7 @@ public bundle Agents {
                         }
                         this.dNodeK[this.dNodeN] = nk;
                         this.dNodeN = this.dNodeN + 1;
-                        if (nk != 0 && this.nModel[nk] >= 0) {
+                        if (nk != 0 && this.nodeArt[nk].drawable()) {
                             tris = tris + this.nodeTris(nk);
                             if (Nodes.castsShadow(nk)) {
                                 tris = tris + this.nodeTris(nk);
@@ -1742,7 +1660,7 @@ public bundle Agents {
                         int gy = oy + y;
                         int ord = this.grid.biomeAt(gx, gy);
                         int lvl = this.stackLvl(ord, gx, gy);
-                        float zOff = cast<float>(lvl) * this.stepH + this.zAdj[ord] + 0.8;
+                        float zOff = cast<float>(lvl) * this.stepH + this.terrainLook[ord].lift + 0.8;
                                                                              // +0.8: clear of EVERYTHING
                                                                              // coarse (plates + decals)
                         float wx = cast<float>(gx * 2 + 1);
@@ -1759,7 +1677,7 @@ public bundle Agents {
                         }
                         int p = this.dPropC[slot];
                         if (p >= 0) {
-                            float topZ = this.tileTop[ord] + zOff;
+                            float topZ = this.terrainLook[ord].top + zOff;
                             int ut = this.terr.triStart[ord] + 8;
                             float gr = cast<float>(this.terr.cr[ut]) / 255.0 * shade * 0.55;
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * shade * 0.55;
@@ -1775,11 +1693,12 @@ public bundle Agents {
                                              + this.hash01(gx * 8 + 4, gy * 8 + c) * 0.70) * 1.0;
                                 float px2 = cast<float>(gx * 2) + ox2;
                                 float py2 = cast<float>(gy * 2) + oy2;
+                                float clutterScale = this.scatter.at(ord).scale;
                                 w = this.emitMeshShadow(this.props, buf, w, p, px2, py2,
-                                                        topZ + 0.012, this.sScale[ord],
+                                                        topZ + 0.012, clutterScale,
                                                         gr, gg, gb, true);
                                 w = this.emitMesh(this.props, buf, w, p, px2, py2, topZ,
-                                                  this.sScale[ord], shade);
+                                                  clutterScale, shade);
                                 c = c + 1;
                             }
                         }
@@ -1804,21 +1723,22 @@ public bundle Agents {
                             nk = this.dNodeK[this.dNodeCur];
                         }
                         this.dNodeCur = this.dNodeCur + 1;
-                        if (nk != 0 && this.nModel[nk] >= 0) {
+                        if (nk != 0 && this.nodeArt[nk].drawable()) {
                             int cx2 = nf.cellXAt(ni);
                             int cy2 = nf.cellYAt(ni);
                             int nord = this.grid.biomeAt(cx2, cy2);
                             int nlvl = this.stackLvl(nord, cx2, cy2);
-                            float nzOff = cast<float>(nlvl) * this.stepH + this.zAdj[nord] + 0.8;
+                            float nzOff = cast<float>(nlvl) * this.stepH
+                                        + this.terrainLook[nord].lift + 0.8;
                             float nshade = this.shadeAt(cx2, cy2, 1, nlvl);
-                            float topZ = this.tileTop[nord] + nzOff;
+                            float topZ = this.terrainLook[nord].top + nzOff;
                             int ut = this.terr.triStart[nord] + 8;
                             float gr = cast<float>(this.terr.cr[ut]) / 255.0 * nshade * 0.55;
                             float gg = cast<float>(this.terr.cg[ut]) / 255.0 * nshade * 0.55;
                             float gb = cast<float>(this.terr.cb[ut]) / 255.0 * nshade * 0.55;
                             MeshAtlas* at = this.nodeAtlasOf(nk);
-                            int mord = this.nModel[nk];
-                            float msc = this.nScale[nk];
+                            int mord = this.nodeArt[nk].model;
+                            float msc = this.nodeArt[nk].scale;
                             float px2 = nf.xAt(ni) * 2.0;
                             float py2 = nf.yAt(ni) * 2.0;
                             if (Nodes.castsShadow(nk)) {
