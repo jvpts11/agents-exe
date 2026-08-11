@@ -31,11 +31,11 @@ public bundle Agents {
 
             public constructor Batch2D(Gl gl) {
                 this.gl = gl;
-                this.prog = Shader.fromSource(gl, Batch2D.vertSrc(), Batch2D.fragSrc());
-                this.vao = gl.genVertexArray();
-                this.vbo = gl.genBuffer();
-                gl.bindVertexArray(this.vao);
-                gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
+                prog = Shader.fromSource(gl, Batch2D.vertSrc(), Batch2D.fragSrc());
+                vao = gl.genVertexArray();
+                vbo = gl.genBuffer();
+                gl.bindVertexArray(vao);
+                gl.bindBuffer(GL.ARRAY_BUFFER, vbo);
                 gl.vertexAttribPointer(0, 2, GL.FLOAT, cast<byte>(0), 36, 0);    // pos
                 gl.enableVertexAttribArray(0);
                 gl.vertexAttribPointer(1, 2, GL.FLOAT, cast<byte>(0), 36, 8);    // uv
@@ -45,42 +45,42 @@ public bundle Agents {
                 gl.vertexAttribPointer(3, 1, GL.FLOAT, cast<byte>(0), 36, 32);   // texFlag
                 gl.enableVertexAttribArray(3);
                 gl.bindVertexArray(0);
-                this.uScreen = gl.getUniformLocation(this.prog, "uScreen");
-                this.uTex = gl.getUniformLocation(this.prog, "uTex");
-                this.cap = 65536;
-                this.verts = Allocator.alloc(cast<long>(this.cap * 4));
-                this.count = 0;
-                this.tex = 0;
-                this.sw = 1.0;
-                this.sh = 1.0;
+                uScreen = gl.getUniformLocation(prog, "uScreen");
+                uTex = gl.getUniformLocation(prog, "uTex");
+                cap = 65536;
+                verts = Allocator.alloc(cast<long>(cap * 4));
+                count = 0;
+                tex = 0;
+                sw = 1.0;
+                sh = 1.0;
             }
 
             // Start a frame: set the screen size (for the pixel->NDC transform) and the atlas texture.
             public method begin(int screenW, int screenH, int atlasTex) returns void {
-                this.sw = cast<float>(screenW);
-                this.sh = cast<float>(screenH);
-                this.tex = atlasTex;
-                this.count = 0;
+                sw = cast<float>(screenW);
+                sh = cast<float>(screenH);
+                tex = atlasTex;
+                count = 0;
             }
 
             private method ensure(int need) returns void {
-                if (this.count + need <= this.cap) {
+                if (count + need <= cap) {
                     return;
                 }
-                mutable int nc = this.cap * 2;
-                while (this.count + need > nc) {
+                mutable int nc = cap * 2;
+                while (count + need > nc) {
                     nc = nc * 2;
                 }
                 address nb = Allocator.alloc(cast<long>(nc * 4));
-                Allocator.copy(nb, this.verts, cast<long>(this.count * 4));
-                Allocator.free(this.verts);
-                this.verts = nb;
-                this.cap = nc;
+                Allocator.copy(nb, verts, cast<long>(count * 4));
+                Allocator.free(verts);
+                verts = nb;
+                cap = nc;
             }
 
             private method vert(int x, int y, float u, float v, float r, float g, float b, float a, float t)
                     returns void {
-                address p = this.verts + cast<address>(this.count * 4);
+                address p = verts + cast<address>(count * 4);
                 Raw.write<float>(p, cast<float>(x));
                 Raw.write<float>(p + cast<address>(4), cast<float>(y));
                 Raw.write<float>(p + cast<address>(8), u);
@@ -90,110 +90,110 @@ public bundle Agents {
                 Raw.write<float>(p + cast<address>(24), b);
                 Raw.write<float>(p + cast<address>(28), a);
                 Raw.write<float>(p + cast<address>(32), t);
-                this.count = this.count + 9;
+                count = count + 9;
             }
 
             // A textured glyph quad at pixel (x,y) size (w,h) sampling the atlas rect (u0,v0)-(u1,v1).
             public method glyph(int x, int y, int w, int h, float u0, float v0, float u1, float v1,
                                 float r, float g, float b, float a) returns void {
-                this.ensure(54);
-                this.vert(x, y, u0, v0, r, g, b, a, 1.0);
-                this.vert(x + w, y, u1, v0, r, g, b, a, 1.0);
-                this.vert(x + w, y + h, u1, v1, r, g, b, a, 1.0);
-                this.vert(x, y, u0, v0, r, g, b, a, 1.0);
-                this.vert(x + w, y + h, u1, v1, r, g, b, a, 1.0);
-                this.vert(x, y + h, u0, v1, r, g, b, a, 1.0);
+                ensure(54);
+                vert(x, y, u0, v0, r, g, b, a, 1.0);
+                vert(x + w, y, u1, v0, r, g, b, a, 1.0);
+                vert(x + w, y + h, u1, v1, r, g, b, a, 1.0);
+                vert(x, y, u0, v0, r, g, b, a, 1.0);
+                vert(x + w, y + h, u1, v1, r, g, b, a, 1.0);
+                vert(x, y + h, u0, v1, r, g, b, a, 1.0);
             }
 
             // A solid-colour rectangle (texFlag 0 -> the atlas is ignored).
             public method rect(int x, int y, int w, int h, float r, float g, float b, float a) returns void {
-                this.ensure(54);
-                this.vert(x, y, 0.0, 0.0, r, g, b, a, 0.0);
-                this.vert(x + w, y, 0.0, 0.0, r, g, b, a, 0.0);
-                this.vert(x + w, y + h, 0.0, 0.0, r, g, b, a, 0.0);
-                this.vert(x, y, 0.0, 0.0, r, g, b, a, 0.0);
-                this.vert(x + w, y + h, 0.0, 0.0, r, g, b, a, 0.0);
-                this.vert(x, y + h, 0.0, 0.0, r, g, b, a, 0.0);
+                ensure(54);
+                vert(x, y, 0.0, 0.0, r, g, b, a, 0.0);
+                vert(x + w, y, 0.0, 0.0, r, g, b, a, 0.0);
+                vert(x + w, y + h, 0.0, 0.0, r, g, b, a, 0.0);
+                vert(x, y, 0.0, 0.0, r, g, b, a, 0.0);
+                vert(x + w, y + h, 0.0, 0.0, r, g, b, a, 0.0);
+                vert(x, y + h, 0.0, 0.0, r, g, b, a, 0.0);
             }
 
             // A solid-colour arbitrary quad from four corners (in order), as two triangles -- the
             // primitive for isometric diamond tiles and cube side-faces. texFlag 0 ignores the atlas.
             public method quad(int x0, int y0, int x1, int y1, int x2, int y2, int x3, int y3,
                                float r, float g, float b, float a) returns void {
-                this.ensure(54);
-                this.vert(x0, y0, 0.0, 0.0, r, g, b, a, 0.0);
-                this.vert(x1, y1, 0.0, 0.0, r, g, b, a, 0.0);
-                this.vert(x2, y2, 0.0, 0.0, r, g, b, a, 0.0);
-                this.vert(x0, y0, 0.0, 0.0, r, g, b, a, 0.0);
-                this.vert(x2, y2, 0.0, 0.0, r, g, b, a, 0.0);
-                this.vert(x3, y3, 0.0, 0.0, r, g, b, a, 0.0);
+                ensure(54);
+                vert(x0, y0, 0.0, 0.0, r, g, b, a, 0.0);
+                vert(x1, y1, 0.0, 0.0, r, g, b, a, 0.0);
+                vert(x2, y2, 0.0, 0.0, r, g, b, a, 0.0);
+                vert(x0, y0, 0.0, 0.0, r, g, b, a, 0.0);
+                vert(x2, y2, 0.0, 0.0, r, g, b, a, 0.0);
+                vert(x3, y3, 0.0, 0.0, r, g, b, a, 0.0);
             }
 
             // A textured sprite quad sampling an atlas sub-rect (u0,v0)-(u1,v1); texFlag 2 -> the texture
             // supplies the colour, its alpha times `alpha` for transparency. The primitive for real art.
             public method sprite(int x, int y, int w, int h, float u0, float v0, float u1, float v1,
                                  float alpha) returns void {
-                this.ensure(54);
-                this.vert(x, y, u0, v0, 1.0, 1.0, 1.0, alpha, 2.0);
-                this.vert(x + w, y, u1, v0, 1.0, 1.0, 1.0, alpha, 2.0);
-                this.vert(x + w, y + h, u1, v1, 1.0, 1.0, 1.0, alpha, 2.0);
-                this.vert(x, y, u0, v0, 1.0, 1.0, 1.0, alpha, 2.0);
-                this.vert(x + w, y + h, u1, v1, 1.0, 1.0, 1.0, alpha, 2.0);
-                this.vert(x, y + h, u0, v1, 1.0, 1.0, 1.0, alpha, 2.0);
+                ensure(54);
+                vert(x, y, u0, v0, 1.0, 1.0, 1.0, alpha, 2.0);
+                vert(x + w, y, u1, v0, 1.0, 1.0, 1.0, alpha, 2.0);
+                vert(x + w, y + h, u1, v1, 1.0, 1.0, 1.0, alpha, 2.0);
+                vert(x, y, u0, v0, 1.0, 1.0, 1.0, alpha, 2.0);
+                vert(x + w, y + h, u1, v1, 1.0, 1.0, 1.0, alpha, 2.0);
+                vert(x, y + h, u0, v1, 1.0, 1.0, 1.0, alpha, 2.0);
             }
 
             // A tinted sprite quad (texFlag 3): the texture's colour is multiplied by (r,g,b) -- so a
             // white/greyscale sprite takes on a nation's banner colour. The primitive for team-coloured art.
             public method spriteTinted(int x, int y, int w, int h, float u0, float v0, float u1, float v1,
                                        float r, float g, float b, float alpha) returns void {
-                this.ensure(54);
-                this.vert(x, y, u0, v0, r, g, b, alpha, 3.0);
-                this.vert(x + w, y, u1, v0, r, g, b, alpha, 3.0);
-                this.vert(x + w, y + h, u1, v1, r, g, b, alpha, 3.0);
-                this.vert(x, y, u0, v0, r, g, b, alpha, 3.0);
-                this.vert(x + w, y + h, u1, v1, r, g, b, alpha, 3.0);
-                this.vert(x, y + h, u0, v1, r, g, b, alpha, 3.0);
+                ensure(54);
+                vert(x, y, u0, v0, r, g, b, alpha, 3.0);
+                vert(x + w, y, u1, v0, r, g, b, alpha, 3.0);
+                vert(x + w, y + h, u1, v1, r, g, b, alpha, 3.0);
+                vert(x, y, u0, v0, r, g, b, alpha, 3.0);
+                vert(x + w, y + h, u1, v1, r, g, b, alpha, 3.0);
+                vert(x, y + h, u0, v1, r, g, b, alpha, 3.0);
             }
 
             // Draw an image filling the given rectangle (texFlag 2 -> the texture supplies the colour).
             // The caller flushes, swaps the bound texture, draws, flushes again and restores the atlas:
             // the batch holds one texture at a time, so an image cannot share a draw call with glyphs.
             public method image(int x, int y, int w, int h, float alpha) returns void {
-                this.ensure(54);
-                this.vert(x, y, 0.0, 0.0, 1.0, 1.0, 1.0, alpha, 2.0);
-                this.vert(x + w, y, 1.0, 0.0, 1.0, 1.0, 1.0, alpha, 2.0);
-                this.vert(x + w, y + h, 1.0, 1.0, 1.0, 1.0, 1.0, alpha, 2.0);
-                this.vert(x, y, 0.0, 0.0, 1.0, 1.0, 1.0, alpha, 2.0);
-                this.vert(x + w, y + h, 1.0, 1.0, 1.0, 1.0, 1.0, alpha, 2.0);
-                this.vert(x, y + h, 0.0, 1.0, 1.0, 1.0, 1.0, alpha, 2.0);
+                ensure(54);
+                vert(x, y, 0.0, 0.0, 1.0, 1.0, 1.0, alpha, 2.0);
+                vert(x + w, y, 1.0, 0.0, 1.0, 1.0, 1.0, alpha, 2.0);
+                vert(x + w, y + h, 1.0, 1.0, 1.0, 1.0, 1.0, alpha, 2.0);
+                vert(x, y, 0.0, 0.0, 1.0, 1.0, 1.0, alpha, 2.0);
+                vert(x + w, y + h, 1.0, 1.0, 1.0, 1.0, 1.0, alpha, 2.0);
+                vert(x, y + h, 0.0, 1.0, 1.0, 1.0, 1.0, alpha, 2.0);
             }
             // Swap the bound texture mid-frame. Flush first, or the queued glyphs draw with this one.
             public method setTexture(int texId) returns void {
-                this.tex = texId;
+                tex = texId;
             }
             public method currentTexture() returns int {
-                return this.tex;
+                return tex;
             }
 
             // Upload the accumulated vertices and issue the single draw call.
             public method flush() returns void {
-                if (this.count == 0) {
+                if (count == 0) {
                     return;
                 }
                 Wgl.glEnable(GL.BLEND);
                 Wgl.glBlendFunc(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA);
-                this.gl.useProgram(this.prog);
-                this.gl.uniform2f(this.uScreen, this.sw, this.sh);
-                this.gl.activeTexture(GL.TEXTURE0);
-                Wgl.glBindTexture(GL.TEXTURE_2D, this.tex);
-                this.gl.uniform1i(this.uTex, 0);
-                this.gl.bindVertexArray(this.vao);
-                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
-                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(this.count * 4),
-                                   cast<long>(this.verts), GL.DYNAMIC_DRAW);
-                Wgl.glDrawArrays(GL.TRIANGLES, 0, this.count / 9);
-                this.gl.bindVertexArray(0);
-                this.count = 0;
+                gl.useProgram(prog);
+                gl.uniform2f(uScreen, sw, sh);
+                gl.activeTexture(GL.TEXTURE0);
+                Wgl.glBindTexture(GL.TEXTURE_2D, tex);
+                gl.uniform1i(uTex, 0);
+                gl.bindVertexArray(vao);
+                gl.bindBuffer(GL.ARRAY_BUFFER, vbo);
+                gl.bufferData(GL.ARRAY_BUFFER, cast<long>(count * 4),
+                                   cast<long>(verts), GL.DYNAMIC_DRAW);
+                Wgl.glDrawArrays(GL.TRIANGLES, 0, count / 9);
+                gl.bindVertexArray(0);
+                count = 0;
             }
 
             private static method vertSrc() returns String {

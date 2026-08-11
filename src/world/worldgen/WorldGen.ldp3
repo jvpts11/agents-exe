@@ -41,11 +41,11 @@ public bundle Agents {
 
             public constructor WorldGen(int seed) {
                 this.seed = seed;
-                this.octaves = 6;
-                this.baseCells = 3;
-                this.worldType = 0;
-                this.landRatio = 0.0 - 1.0;
-                this.nContinents = 0;
+                octaves = 6;
+                baseCells = 3;
+                worldType = 0;
+                landRatio = 0.0 - 1.0;
+                nContinents = 0;
                 // THE SCRATCH IS OWNED FROM THE FIRST MOMENT, EMPTY.
                 //
                 // Its planes were left unassigned until `generate` ran, on the grounds that nothing
@@ -53,27 +53,27 @@ public bundle Agents {
                 // they did not start empty -- they started WRONG, and `generate` ends by deleting
                 // them, so a WorldGen that never generated held pointers into somebody else's
                 // memory. It owns a valid empty Scratch from the first moment instead.
-                this.w = 0;
-                this.h = 0;
-                this.scratch = new Scratch() on heap;
+                w = 0;
+                h = 0;
+                scratch = new Scratch() on heap;
             }
 
             public destructor ~WorldGen() returns void {
-                delete this.scratch;
+                delete scratch;
                 return;
             }
 
             // Continental mode only: how many distinct continents to grow (<= 0 keeps the aspect-based
             // default). A New-Game knob.
             public method setContinents(int n) returns void {
-                this.nContinents = n;
+                nContinents = n;
             }
 
             // Pick a world shape (0 Continents, 1 Pangaea, 2 Archipelago, 3 InlandSeas) and the fraction of
             // the map that should be land. A land < 0 keeps the world's default ratio.
             public method setWorld(int worldType, float land) returns void {
                 this.worldType = worldType;
-                this.landRatio = land;
+                landRatio = land;
             }
 
             private method defaultLand(int t) returns float {
@@ -111,13 +111,13 @@ public bundle Agents {
                 }
                 int n = w * h;
                 Grid* g = new Grid(w, h) on heap;
-                this.scratch.sizeFor(w, h);  // frees the empty ones, or a previous generate's
+                scratch.sizeFor(w, h);  // frees the empty ones, or a previous generate's
 
-                WorldField* wf = new WorldField(w, h, this.seed) on heap;
-                wf.nContinents = this.nContinents;
-                mutable float land = this.landRatio;
+                WorldField* wf = new WorldField(w, h, seed) on heap;
+                wf.nContinents = nContinents;
+                mutable float land = landRatio;
                 if (land < 0.0) {
-                    land = this.defaultLand(this.worldType);
+                    land = defaultLand(worldType);
                 }
                 wf.landRatio = land;
                 // THE PIPELINE IS A LIST, and being a list is the point: the order of these two is
@@ -129,14 +129,14 @@ public bundle Agents {
                 // deleted because a sequencing diagnostic is its customer, and it is named here so
                 // the next person knows it is waiting rather than unused.
                 ElevationPass*[] relief = new ElevationPass*[2]();
-                relief[0] = new Landmass(this.seed) on heap;
-                relief[1] = new Tectonics(this.seed) on heap;
+                relief[0] = new Landmass(seed) on heap;
+                relief[1] = new Tectonics(seed) on heap;
                 for (int r in 0..relief.length()) {
                     relief[r].apply(wf);
                 }
                 mutable int ci = 0;
                 while (ci < n) {
-                    this.scratch.elevation[ci] = wf.eb[ci];
+                    scratch.elevation[ci] = wf.eb[ci];
                     if (cast<int>(wf.vent[ci]) != 0) {
                         g.setVent(ci % w, ci / w);
                     }
@@ -148,26 +148,26 @@ public bundle Agents {
                 //
                 // The flood already placed the coastline at the requested land ratio, so the sea
                 // level is whatever contour it chose -- not a number tuned here.
-                this.scratch.sea = wf.sea;
+                scratch.sea = wf.sea;
 
                 // The three stages that turn a height field into a world. Each is handed the same
                 // scratch, and each depends on what the one before it wrote: the hydrology needs
                 // the climate because permanent ice is not a channel, and the classification needs
                 // both because what a cell IS depends on how high, how warm and how wet it is.
-                Climate* climate = new Climate(this.seed, this.octaves, this.baseCells) on heap;
-                climate.apply(g, this.scratch);
+                Climate* climate = new Climate(seed, octaves, baseCells) on heap;
+                climate.apply(g, scratch);
                 delete climate;
                 Hydrology* hydrology = new Hydrology() on heap;
-                hydrology.apply(g, this.scratch);
+                hydrology.apply(g, scratch);
                 delete hydrology;
                 // The hydrology overwrote the water plane as its visited flag -- see Scratch's
                 // header, where that reuse is written down -- so rebuild the distance the
                 // classifier needs. Twenty-four rings rather than the climate's thirty-two,
                 // because what the classifier asks of it is nearer: a coast band of two, and a
                 // volcanic-arc gate of twenty-four.
-                this.scratch.distanceToWater(24);
-                Classifier* classifier = new Classifier(this.seed) on heap;
-                classifier.apply(g, this.scratch);
+                scratch.distanceToWater(24);
+                Classifier* classifier = new Classifier(seed) on heap;
+                classifier.apply(g, scratch);
                 delete classifier;
 
                 // Content passes: the terrain is settled, and what LIVES on it goes in now.
@@ -177,9 +177,9 @@ public bundle Agents {
                 // goes last because it is the only one that writes UNDER the ground and wants the
                 // surface settled first.
                 WorldPass*[] content = new WorldPass*[3]();
-                content[0] = new Flora(this.seed) on heap;
-                content[1] = new Groundcover(this.seed) on heap;
-                content[2] = new Deposits(this.seed) on heap;
+                content[0] = new Flora(seed) on heap;
+                content[1] = new Groundcover(seed) on heap;
+                content[2] = new Deposits(seed) on heap;
                 for (int c in 0..content.length()) {
                     content[c].apply(g, wf);
                 }
@@ -199,8 +199,8 @@ public bundle Agents {
                 delete wf;
                 // Back to owning an empty scratch rather than a freed one: the state after
                 // generating is the state before it, which is what makes the destructor safe.
-                this.scratch.release();
-                this.scratch.empty();
+                scratch.release();
+                scratch.empty();
                 return g;
             }
 
