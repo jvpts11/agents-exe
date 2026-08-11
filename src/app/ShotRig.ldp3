@@ -1,0 +1,144 @@
+import System.IO.Console;
+import opengl.glfw.GlWindow;
+import opengl.gl.Gl;
+import Agents.Gfx.MeshAtlas;
+import Agents.Gfx.GlWorld3D;
+import Agents.World.Grid;
+import Agents.App.Ppm;
+program AgentsExe;
+
+// Everything a headless shot needs standing up, and taken down again.
+//
+// Five commands each opened a window, checked for the asset folder, loaded four atlases, built a
+// renderer, and then unwound all of it in reverse -- and each wrote that out by hand. The opening
+// is six lines and the teardown is seven, and the teardown is the half that goes wrong: it has to
+// name the same five things in the opposite order, and a command that returns early has to name
+// the ones it got as far as and no more. Every early return in those five methods is its own
+// hand-written partial teardown.
+//
+// One object owns the lot, so the teardown is written once and happens on the way out of scope
+// whatever route the caller took. What is left at each call site is the thing that shot is
+// actually about: where to point, and from how far.
+public bundle Agents {
+    public namespace App {
+
+        public class ShotRig {
+            // The detail window's stride and step height, the same for every shot. They were four
+            // repeated magic arguments to `setup`.
+            public static fixed int STRIDE = 8;
+
+            private mutable GlWindow* win;
+            private mutable MeshAtlas* terr;
+            private mutable MeshAtlas* props;
+            private mutable MeshAtlas* nodeMesh;
+            private mutable MeshAtlas* rivers;
+            private mutable GlWorld3D* view;
+            // Whether the art and the renderer exist. The window always does -- it is allocated
+            // before anything can fail, which is what makes the teardown unconditional for it.
+            private mutable boolean up;
+
+            // Opens the window and loads the art. `standing()` answers false when there is no
+            // assets folder and when the window will not open -- the two ways a headless shot
+            // legitimately gives up -- and in neither case is anything loaded that is not freed.
+            public constructor ShotRig(String title, int wide, int high, String root) {
+                up = false;
+                win = new GlWindow() on heap;
+                if (root.length() == 0 || win.open(title, wide, high, 3, 3) == 0) {
+                    return;
+                }
+                terr = MeshAtlas.loadTerrain(root);
+                props = MeshAtlas.loadNamed(root, "props.index");
+                nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
+                rivers = MeshAtlas.loadNamed(root, "rivers.index");
+                view = new GlWorld3D(win.gl) on heap;
+                up = true;
+            }
+
+            // The teardown the five commands each wrote out by hand, in reverse, once per exit.
+            public destructor ~ShotRig() returns void {
+                if (up) {
+                    delete view;
+                    delete rivers;
+                    delete nodeMesh;
+                    delete props;
+                    delete terr;
+                }
+                delete win;
+            }
+
+            public method standing() returns boolean {
+                return up;
+            }
+
+            public method renderer() returns GlWorld3D* {
+                return view;
+            }
+
+            // Hand the renderer the world it is to draw.
+            public method show(Grid* g, float stepH) returns void {
+                view.setup(g, terr, props, nodeMesh, rivers, ShotRig.STRIDE, stepH);
+                return;
+            }
+
+            public method aimAt(int x, int y) returns void {
+                view.aimAt(x, y);
+                return;
+            }
+
+            // One picture: stand the camera there, finish the bake, draw, and write the file.
+            //
+            // ONE flush, not two -- see the note in `highShot`, where a second call was measured
+            // to leave three golden images byte for byte identical.
+            public method shoot(String path, float az, float el, float dist) returns void {
+                view.setView(az, el, dist);
+                view.flushDetail();
+                view.render(win.width(), win.height());
+                capture(path);
+                return;
+            }
+
+            public method width() returns int {
+                return win.width();
+            }
+
+            public method height() returns int {
+                return win.height();
+            }
+
+            public method gl() returns Gl {
+                return win.gl;
+            }
+
+            // Whatever is on the card right now, written to a file. Split out of `shoot` for the
+            // one command that draws an overlay between the render and the read -- the compass on
+            // the world captures -- which is a frame `shoot` cannot describe.
+            public method capture(String path) returns void {
+                byte[] px = win.gl.readPixelsRgb(0, 0, win.width(), win.height());
+                ShotRig.writeFlipped(px, win.width(), win.height(), path);
+                delete px;
+                return;
+            }
+
+            // A frame as it comes off the card, written the right way up: OpenGL's origin is the
+            // bottom-left and a PPM's is the top-left.
+            public static method writeFlipped(byte[] px, int w, int h, String path) returns void {
+                mutable Ppm* file = new Ppm(w, h) on heap;
+                mutable int y = 0;
+                while (y < h) {
+                    int srcRow = h - 1 - y;
+                    mutable int x = 0;
+                    while (x < w) {
+                        int i = (srcRow * w + x) * 3;
+                        file.pixel(cast<int>(px[i]) & 255, cast<int>(px[i + 1]) & 255,
+                                   cast<int>(px[i + 2]) & 255);
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                file.save(path);
+                delete file;
+                return;
+            }
+        }
+    }
+}

@@ -31,6 +31,7 @@ import Agents.App.CellSearch;
 import Agents.App.CellHit;
 import System.Errors.Option;
 import Agents.World.Contour;
+import Agents.App.ShotRig;
 
 // Entry point. Slice 4: generate a world and show it ISOMETRICALLY in a GL window -- pan with
 // WASD/arrows, zoom with the scroll wheel or +/-, ESC to quit. Running with any argument (or when no
@@ -562,30 +563,28 @@ public bundle Agents {
                     delete g;
                     return;
                 }
-                GlWindow* win = new GlWindow() on heap;
-                if (win.open("capture", 960, 600, 3, 3) == 0) {
+                mutable ShotRig* rig = new ShotRig("capture", 960, 600, root) on heap;
+                if (!rig.standing()) {
                     System.IO.Console.println("captureGlWorld: no GL window.");
-                    delete win;
+                    delete rig;
                     delete g;
                     return;
                 }
-                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
-                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
-                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
-                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                Batch2D* hud = new Batch2D(win.gl) on heap;
-                int cw = win.width();
-                int ch = win.height();
+                rig.show(g, 1.1);
+                // THIS ONE DRIVES ITS OWN FRAMES rather than calling `shoot`, because two of the
+                // three carry the compass: an overlay drawn between the render and the read, which
+                // is a frame `shoot` has no way to describe. It still hands over the window, the
+                // four atlases, the renderer and the whole teardown.
+                GlWorld3D* r = rig.renderer();
+                Batch2D* hud = new Batch2D(rig.gl()) on heap;
+                int cw = rig.width();
+                int ch = rig.height();
                 // far frame (whole world, coarse LOD) + compass
                 r.render(cw, ch);
                 hud.begin(cw, ch, 0);
                 r.drawCompass(hud, cw, ch);
                 hud.flush();
-                byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
-                Main.writePpmFlipped(px, cw, ch, "gl_world.ppm");
-                delete px;
+                rig.capture("gl_world.ppm");
                 // near frame: aim at the closest river (falls back to a forest), under the detail threshold
                 mutable int packed = Main.findRiver(g, w, h);
                 if (packed < 0) {
@@ -597,25 +596,13 @@ public bundle Agents {
                 hud.begin(cw, ch, 0);
                 r.drawCompass(hud, cw, ch);
                 hud.flush();
-                byte[] px2 = win.gl.readPixelsRgb(0, 0, cw, ch);
-                Main.writePpmFlipped(px2, cw, ch, "gl_world_near.ppm");
-                delete px2;
+                rig.capture("gl_world_near.ppm");
                 // grazing frame: far target but LOW camera -- the detail LOD must key off the height
                 // above the ground, and the window must cover the foreground in front of the camera
-                r.setView(120.0, 10.0, 500.0);
-                r.flushDetail();
-                r.render(cw, ch);
-                byte[] px3 = win.gl.readPixelsRgb(0, 0, cw, ch);
-                Main.writePpmFlipped(px3, cw, ch, "gl_world_low.ppm");
-                delete px3;
+                rig.shoot("gl_world_low.ppm", 120.0, 10.0, 500.0);
                 delete hud;
-                delete r;
-                delete rivers;
-                delete nodeMesh;
-                delete props;
-                delete terr;
+                delete rig;
                 delete g;
-                delete win;
                 System.IO.Console.println("captureGlWorld: wrote gl_world.ppm + gl_world_near.ppm");
                 return;
             }
@@ -673,43 +660,20 @@ public bundle Agents {
                     return;
                 }
                 System.IO.Console.println($"cliffshot: volcanic edge at {fx},{fy}");
-                String root = Main.assetRoot();
-                GlWindow* win = new GlWindow() on heap;
-                if (root.length() == 0 || win.open("cliff", 1100, 700, 3, 3) == 0) {
+                mutable ShotRig* rig = new ShotRig("cliff", 1100, 700, Main.assetRoot()) on heap;
+                if (!rig.standing()) {
                     System.IO.Console.println("cliffshot: no GL window.");
-                    delete win;
+                    delete rig;
                     delete g;
                     return;
                 }
-                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
-                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
-                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
-                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                r.aimAt(fx, fy);
-                r.setView(35.0, 28.0, 90.0);
-                int cw = win.width();
-                int ch = win.height();
-                r.flushDetail();
-                r.render(cw, ch);
-                byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
-                Main.writePpmFlipped(px, cw, ch, "cliff.ppm");
-                delete px;
+                rig.show(g, 1.1);
+                rig.aimAt(fx, fy);
+                rig.shoot("cliff.ppm", 35.0, 28.0, 90.0);
                 // and again from far and low, which is the only place the COARSE layer is on screen
-                r.setView(35.0, 11.0, 520.0);
-                r.flushDetail();
-                r.render(cw, ch);
-                byte[] px2 = win.gl.readPixelsRgb(0, 0, cw, ch);
-                Main.writePpmFlipped(px2, cw, ch, "cliff_far.ppm");
-                delete px2;
-                delete r;
-                delete rivers;
-                delete nodeMesh;
-                delete props;
-                delete terr;
+                rig.shoot("cliff_far.ppm", 35.0, 11.0, 520.0);
+                delete rig;
                 delete g;
-                delete win;
                 System.IO.Console.println("cliffshot: wrote cliff.ppm");
                 return;
             }
@@ -788,36 +752,18 @@ public bundle Agents {
                 System.IO.Console.println(order.toString());
                 delete order;
                 g.surface().finish();
-                String root = Main.assetRoot();
-                GlWindow* win = new GlWindow() on heap;
-                if (root.length() == 0 || win.open("nodes", 1400, 900, 3, 3) == 0) {
+                mutable ShotRig* rig = new ShotRig("nodes", 1400, 900, Main.assetRoot()) on heap;
+                if (!rig.standing()) {
                     System.IO.Console.println("nodeshot: no GL window.");
-                    delete win;
+                    delete rig;
                     delete g;
                     return;
                 }
-                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
-                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
-                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
-                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                int cw = win.width();
-                int ch = win.height();
-                r.aimAt(fx + spanX / 2, fy + spanY / 2);
-                r.setView(0.0, 62.0, 74.0);
-                r.flushDetail();
-                r.render(cw, ch);
-                byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
-                Main.writePpmFlipped(px, cw, ch, "nodes_a.ppm");
-                delete px;
-                delete r;
-                delete rivers;
-                delete nodeMesh;
-                delete props;
-                delete terr;
+                rig.show(g, 1.1);
+                rig.aimAt(fx + spanX / 2, fy + spanY / 2);
+                rig.shoot("nodes_a.ppm", 0.0, 62.0, 74.0);
+                delete rig;
                 delete g;
-                delete win;
                 System.IO.Console.println("nodeshot: wrote nodes_a.ppm");
                 return;
             }
@@ -872,52 +818,20 @@ public bundle Agents {
                 delete tc;
                 int biome = g.biomeAt(fx, fy);
                 System.IO.Console.println($"forestshot: densest wood at {fx},{fy} in {Biomes.name(biome)}, {best} trees per 256 sampled cells");
-                String root = Main.assetRoot();
-                GlWindow* win = new GlWindow() on heap;
-                if (root.length() == 0 || win.open("forest", 1200, 750, 3, 3) == 0) {
+                mutable ShotRig* rig = new ShotRig("forest", 1200, 750, Main.assetRoot()) on heap;
+                if (!rig.standing()) {
                     System.IO.Console.println("forestshot: no GL window.");
-                    delete win;
+                    delete rig;
                     delete g;
                     return;
                 }
-                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
-                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
-                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
-                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                r.aimAt(fx, fy);
-                int cw = win.width();
-                int ch = win.height();
-                mutable int k = 0;
-                while (k < 3) {
-                    if (k == 0) {
-                        r.setView(20.0, 26.0, 55.0);        // in among the trees
-                    } else if (k == 1) {
-                        r.setView(20.0, 45.0, 150.0);       // the wood and its clearings
-                    } else {
-                        r.setView(20.0, 60.0, 420.0);       // where the wood ends
-                    }
-                    r.flushDetail();
-                    r.render(cw, ch);
-                    byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
-                    if (k == 0) {
-                        Main.writePpmFlipped(px, cw, ch, "forest_a.ppm");
-                    } else if (k == 1) {
-                        Main.writePpmFlipped(px, cw, ch, "forest_b.ppm");
-                    } else {
-                        Main.writePpmFlipped(px, cw, ch, "forest_c.ppm");
-                    }
-                    delete px;
-                    k = k + 1;
-                }
-                delete r;
-                delete rivers;
-                delete nodeMesh;
-                delete props;
-                delete terr;
+                rig.show(g, 1.1);
+                rig.aimAt(fx, fy);
+                rig.shoot("forest_a.ppm", 20.0, 26.0, 55.0);    // in among the trees
+                rig.shoot("forest_b.ppm", 20.0, 45.0, 150.0);   // the wood and its clearings
+                rig.shoot("forest_c.ppm", 20.0, 60.0, 420.0);   // where the wood ends
+                delete rig;
                 delete g;
-                delete win;
                 System.IO.Console.println("forestshot: wrote forest_a.ppm, forest_b.ppm, forest_c.ppm");
                 return;
             }
@@ -961,56 +875,25 @@ public bundle Agents {
                     return;
                 }
                 System.IO.Console.println($"highshot: plateau rim at {fx},{fy}");
-                String root = Main.assetRoot();
-                GlWindow* win = new GlWindow() on heap;
-                if (root.length() == 0 || win.open("high", 1100, 700, 3, 3) == 0) {
+                mutable ShotRig* rig = new ShotRig("high", 1100, 700, Main.assetRoot()) on heap;
+                if (!rig.standing()) {
                     System.IO.Console.println("highshot: no GL window.");
-                    delete win;
+                    delete rig;
                     delete g;
                     return;
                 }
-                MeshAtlas* terr = MeshAtlas.loadTerrain(root);
-                MeshAtlas* props = MeshAtlas.loadNamed(root, "props.index");
-                MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
-                MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
-                GlWorld3D* r = new GlWorld3D(win.gl) on heap;
-                r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
-                r.aimAt(fx, fy);
-                int cw = win.width();
-                int ch = win.height();
-                mutable int k = 0;
-                while (k < 3) {
-                    if (k == 0) {
-                        r.setView(40.0, 16.0, 70.0);        // on the ground, looking across
-                    } else if (k == 1) {
-                        r.setView(40.0, 32.0, 170.0);       // mid orbit
-                    } else {
-                        r.setView(40.0, 30.0, 420.0);       // pulled back
-                    }
-                    // ONE flush, not two. A second call stood here and it was a no-op: the three
-                    // pictures come out byte for byte identical without it, which is what the
-                    // golden hashes are for. `flushDetail` runs `ensureDetail` and drains the
-                    // bake, and the second `ensureDetail` finds the window in the same place with
-                    // a mesh already on it, so it starts nothing. Measured, not reasoned about.
-                    r.flushDetail();
-                    r.render(cw, ch);
-                    byte[] px = win.gl.readPixelsRgb(0, 0, cw, ch);
-                    StringBuilder nm = new StringBuilder() on heap;
-                    nm.append("high");
-                    nm.appendInt(k);
-                    nm.append(".ppm");
-                    Main.writePpmFlipped(px, cw, ch, nm.toString());
-                    delete nm;
-                    delete px;
-                    k = k + 1;
-                }
-                delete r;
-                delete rivers;
-                delete nodeMesh;
-                delete props;
-                delete terr;
+                rig.show(g, 1.1);
+                rig.aimAt(fx, fy);
+                // ONE flush per shot, not two -- a second call stood in this loop and it was a
+                // no-op: the three pictures come out byte for byte identical without it, which is
+                // what the golden hashes are for. `flushDetail` runs `ensureDetail` and drains the
+                // bake, and a second `ensureDetail` finds the window in the same place with a mesh
+                // already on it, so it starts nothing. Measured, not reasoned about.
+                rig.shoot("high0.ppm", 40.0, 16.0, 70.0);    // on the ground, looking across
+                rig.shoot("high1.ppm", 40.0, 32.0, 170.0);   // mid orbit
+                rig.shoot("high2.ppm", 40.0, 30.0, 420.0);   // pulled back
+                delete rig;
                 delete g;
-                delete win;
                 System.IO.Console.println("highshot: wrote high0.ppm high1.ppm high2.ppm");
                 return;
             }
