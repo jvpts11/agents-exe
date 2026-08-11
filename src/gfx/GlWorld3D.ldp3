@@ -148,20 +148,9 @@ public bundle Agents {
             // `delegate` means the compiler writes orbit/zoomBy/pan/aimAt/setView/curDist, so the
             // twenty call sites in main go on saying `r.orbit(...)` and never learn anything moved.
             private mutable delegate OrbitCamera* camera;
-            // pixel post-process toggle: off = raw full-resolution render (no low-res, no outline)
-            public mutable boolean pixelate;
-            // pixel post-process
-            private mutable int fbo;
-            private mutable int colorTex;
-            private mutable int depthTex;
-            private mutable int fboW;
-            private mutable int fboH;
-            private mutable int postProg;
-            private mutable int postVao;
-            private mutable int postVbo;
-            private mutable int uColor;
-            private mutable int uDepth;
-            private mutable int uTexel;
+            // The pixel look: rendered small, blown up with nearest sampling and outlined. Owns
+            // its own framebuffer, its own shader and that shader's uniform slots.
+            private mutable PostFx* post;
 
             public constructor GlWorld3D(Gl gl) {
                 this.gl = gl;
@@ -218,21 +207,19 @@ public bundle Agents {
                 this.detailOn = false;
                 this.detailCap = 384;
                 this.camera = new OrbitCamera() on heap;
-                this.pixelate = false;
-                this.fbo = 0;
-                this.colorTex = 0;
-                this.depthTex = 0;
-                this.fboW = 0;
-                this.fboH = 0;
-                this.postProg = 0;
-                this.postVao = 0;
-                this.postVbo = 0;
-                this.uColor = 0;
-                this.uDepth = 0;
-                this.uTexel = 0;
+                this.post = new PostFx(gl) on heap;
+            }
+
+            // The pixel look, on or off. The app asks for the flip rather than writing a field, so
+            // "off" and "never built" can be one state: the effect allocates its framebuffer on the
+            // first frame that wants it, and a session that never presses the key never allocates.
+            public method togglePixelate() returns void {
+                this.post.toggle();
+                return;
             }
 
             public destructor ~GlWorld3D() returns void {
+                delete this.post;
                 delete this.camera;
                 this.projM.dispose();
                 delete this.projM;
@@ -2047,13 +2034,7 @@ public bundle Agents {
                 // stay in the enum and their laps come back ONE AT A TIME, as the new model gives
                 // the renderer something real to draw -- which is how the frame budget stays
                 // honest while it grows back.
-                if (this.pixelate) {
-                    if (this.fbo == 0) {
-                        this.initPost(640, 400);
-                    }
-                    this.gl.bindFramebuffer(0x8D40, this.fbo);
-                    Wgl.glViewport(0, 0, this.fboW, this.fboH);
-                } else {
+                if (!this.post.beginFrame()) {
                     this.gl.bindFramebuffer(0x8D40, 0);
                     Wgl.glViewport(0, 0, fbW, fbH);
                 }
@@ -2099,31 +2080,13 @@ public bundle Agents {
                 this.gl.bindVertexArray(0);
                 this.gauge.lap(cast<int>(Phase.Draw));
 
-                if (!this.pixelate) {
+                if (!this.post.enabled()) {
                     // raw render went straight to the screen; just drop depth so the HUD draws on top
                     Wgl.glDisable(GL.DEPTH_TEST);
                     this.gauge.lap(cast<int>(Phase.Post));
                     return;
                 }
-
-                // ---- post-process pass: FBO -> screen, nearest upscale + outline ----
-                this.gl.bindFramebuffer(0x8D40, 0);
-                Wgl.glViewport(0, 0, fbW, fbH);
-                Wgl.glDisable(GL.DEPTH_TEST);
-                Wgl.glClearColor(0.08, 0.10, 0.14, 1.0);
-                Wgl.glClear(GL.COLOR_BUFFER_BIT);
-                this.gl.useProgram(this.postProg);
-                this.gl.activeTexture(0x84C0);
-                Wgl.glBindTexture(0x0DE1, this.colorTex);
-                this.gl.uniform1i(this.uColor, 0);
-                this.gl.activeTexture(0x84C1);
-                Wgl.glBindTexture(0x0DE1, this.depthTex);
-                this.gl.uniform1i(this.uDepth, 1);
-                this.gl.uniform2f(this.uTexel, 1.0 / cast<float>(this.fboW), 1.0 / cast<float>(this.fboH));
-                this.gl.bindVertexArray(this.postVao);
-                Wgl.glDrawArrays(GL.TRIANGLES, 0, 6);
-                this.gl.bindVertexArray(0);
-                this.gl.activeTexture(0x84C0);
+                this.post.present(fbW, fbH);
                 this.gauge.lap(cast<int>(Phase.Post));
             }
 
@@ -2211,79 +2174,6 @@ public bundle Agents {
                 return Newton.cos(x);
             }
 
-            private method makeTex(int fw, int fh, int internalFmt, int fmt, int typ) returns int {
-                address idb = Allocator.alloc(4);
-                Wgl.glGenTextures(1, cast<long>(idb));
-                int tex = Raw.read<int>(idb);
-                Allocator.free(idb);
-                Wgl.glBindTexture(0x0DE1, tex);
-                Wgl.glTexImage2D(0x0DE1, 0, internalFmt, fw, fh, 0, fmt, typ, cast<long>(0));
-                Wgl.glTexParameteri(0x0DE1, 0x2801, 0x2600);
-                Wgl.glTexParameteri(0x0DE1, 0x2800, 0x2600);
-                Wgl.glTexParameteri(0x0DE1, 0x2802, 0x812F);
-                Wgl.glTexParameteri(0x0DE1, 0x2803, 0x812F);
-                return tex;
-            }
-
-            private method initPost(int fw, int fh) returns void {
-                this.fboW = fw;
-                this.fboH = fh;
-                this.colorTex = this.makeTex(fw, fh, 0x1907, 0x1907, 0x1401);
-                this.depthTex = this.makeTex(fw, fh, 0x81A6, 0x1902, 0x1406);
-                address fb = Allocator.alloc(4);
-                this.gl.genFramebuffers(1, cast<long>(fb));
-                this.fbo = Raw.read<int>(fb);
-                Allocator.free(fb);
-                this.gl.bindFramebuffer(0x8D40, this.fbo);
-                this.gl.framebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, this.colorTex, 0);
-                this.gl.framebufferTexture2D(0x8D40, 0x8D00, 0x0DE1, this.depthTex, 0);
-                this.gl.bindFramebuffer(0x8D40, 0);
-                this.postProg = Shader.fromSource(this.gl, GlWorld3D.postVert(), GlWorld3D.postFrag());
-                this.postVao = this.gl.genVertexArray();
-                this.postVbo = this.gl.genBuffer();
-                float[] q = new float[24]();
-                GlWorld3D.fillQuad(q);
-                this.gl.bindVertexArray(this.postVao);
-                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.postVbo);
-                this.gl.bufferDataFloats(GL.ARRAY_BUFFER, q, GL.STATIC_DRAW);
-                this.gl.vertexAttribPointer(0, 2, GL.FLOAT, cast<byte>(0), 16, 0);
-                this.gl.enableVertexAttribArray(0);
-                this.gl.vertexAttribPointer(1, 2, GL.FLOAT, cast<byte>(0), 16, 8);
-                this.gl.enableVertexAttribArray(1);
-                this.gl.bindVertexArray(0);
-                delete q;
-                this.uColor = this.gl.getUniformLocation(this.postProg, "uColor");
-                this.uDepth = this.gl.getUniformLocation(this.postProg, "uDepth");
-                this.uTexel = this.gl.getUniformLocation(this.postProg, "uTexel");
-            }
-
-            private static method fillQuad(float[] q) returns void {
-                q[0] = 0.0 - 1.0;
-                q[1] = 0.0 - 1.0;
-                q[2] = 0.0;
-                q[3] = 0.0;
-                q[4] = 1.0;
-                q[5] = 0.0 - 1.0;
-                q[6] = 1.0;
-                q[7] = 0.0;
-                q[8] = 1.0;
-                q[9] = 1.0;
-                q[10] = 1.0;
-                q[11] = 1.0;
-                q[12] = 0.0 - 1.0;
-                q[13] = 0.0 - 1.0;
-                q[14] = 0.0;
-                q[15] = 0.0;
-                q[16] = 1.0;
-                q[17] = 1.0;
-                q[18] = 1.0;
-                q[19] = 1.0;
-                q[20] = 0.0 - 1.0;
-                q[21] = 1.0;
-                q[22] = 0.0;
-                q[23] = 1.0;
-            }
-
             // The sea foam crests (their exact baked colour) bob with time -- the water animation.
             private static method vertSrc() returns String {
                 return "#version 330 core\nlayout(location=0) in vec3 aPos;\nlayout(location=1) in vec3 aNrm;\nlayout(location=2) in vec3 aCol;\nuniform mat4 uProj;\nuniform mat4 uView;\nuniform float uTime;\nout vec3 vNrm;\nout vec3 vCol;\nvoid main(){\n  vec3 p = aPos;\n  if (abs(aCol.r-0.8157)<0.03 && abs(aCol.g-0.9020)<0.03 && abs(aCol.b-0.9725)<0.03) {\n    p.y += sin(uTime*1.8 + p.x*1.3 + p.y*0.7)*0.18;\n    p.x += cos(uTime*1.4 + p.y*1.1)*0.12;\n  }\n  gl_Position = uProj * uView * vec4(p,1.0);\n  vNrm=aNrm; vCol=aCol;\n}\n";
@@ -2300,13 +2190,6 @@ public bundle Agents {
                 return "#version 330 core\nin vec3 vNrm;\nin vec3 vCol;\nout vec4 FragColor;\nuniform float uAlpha;\nuniform float uFlat;\nvoid main(){\n  vec3 L = normalize(vec3(0.35,0.55,0.95));\n  float ndl = max(0.0, dot(normalize(vNrm), L));\n  float sh = min(1.0, 0.60 + 0.42*ndl);\n  sh = mix(sh, 1.0, uFlat);\n  FragColor = vec4(vCol*sh, uAlpha);\n}\n";
             }
 
-            private static method postVert() returns String {
-                return "#version 330 core\nlayout(location=0) in vec2 aPos;\nlayout(location=1) in vec2 aUV;\nout vec2 vUV;\nvoid main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
-            }
-
-            private static method postFrag() returns String {
-                return "#version 330 core\nin vec2 vUV;\nout vec4 FragColor;\nuniform sampler2D uColor;\nuniform sampler2D uDepth;\nuniform vec2 uTexel;\nvoid main(){\n  vec3 bg = vec3(0.08,0.10,0.14);\n  float d = texture(uDepth, vUV).r;\n  if (d >= 0.9999) { FragColor = vec4(bg,1.0); return; }\n  vec3 c = texture(uColor, vUV).rgb;\n  float dl = texture(uDepth, vUV+vec2(-uTexel.x,0.0)).r;\n  float dr = texture(uDepth, vUV+vec2(uTexel.x,0.0)).r;\n  float du = texture(uDepth, vUV+vec2(0.0,-uTexel.y)).r;\n  float dd = texture(uDepth, vUV+vec2(0.0,uTexel.y)).r;\n  bool sil = (dl>=0.9999)||(dr>=0.9999)||(du>=0.9999)||(dd>=0.9999);\n  float dmax = max(max(abs(d-dl),abs(d-dr)),max(abs(d-du),abs(d-dd)));\n  vec3 cl = texture(uColor, vUV+vec2(-uTexel.x,0.0)).rgb;\n  vec3 cu = texture(uColor, vUV+vec2(0.0,-uTexel.y)).rgb;\n  float cd = max(length(c-cl), length(c-cu));\n  if (sil || dmax > 0.004 || cd > 0.34) { FragColor = vec4(0.20,0.20,0.24,1.0); return; }\n  vec3 q = floor(c*8.0 + 0.5)/8.0;\n  FragColor = vec4(q,1.0);\n}\n";
-            }
         }
     }
 }

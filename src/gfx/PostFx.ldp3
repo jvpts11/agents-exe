@@ -1,0 +1,195 @@
+import System.IO.Console;
+import opengl.gl.Gl;
+import opengl.gl.Wgl;
+import opengl.gl.GL;
+import opengl.glsl.Shader;
+import System.Memory.Allocator;
+import System.Memory.Raw;
+program AgentsExe;
+
+// The pixel look: render the world small, then blow it up with nearest sampling and draw an
+// outline where the depth or the colour breaks.
+//
+// Twelve fields carried this on the renderer -- a framebuffer, two textures, its size, a second
+// shader program, that program's vertex array and buffer, and three of ITS uniform slots sitting
+// in the same flat list as the world program's five. A uniform location is an index into one
+// particular program's table and means nothing anywhere else; two programs' slots told apart by a
+// prefix is not a compile error when they are crossed, it is a uniform that silently does nothing.
+//
+// A CLASS: it owns GL objects, it is built once on first use and lives as long as the renderer.
+//
+// The toggle used to be a public mutable field the app wrote directly. It is asked and told now,
+// which is what lets "turned off" and "never built" be one state instead of two -- the effect is
+// built lazily on the first frame that wants it, so a session that never presses the key never
+// allocates a framebuffer.
+public bundle Agents {
+    public namespace Gfx {
+
+        public class PostFx {
+            // The low resolution the world is rendered at before it is blown up. Small on purpose:
+            // this is what makes a pixel a pixel.
+            public static fixed int WIDTH = 640;
+            public static fixed int HEIGHT = 400;
+
+            private mutable Gl gl;
+            private mutable boolean wanted;
+            private mutable int fbo;
+            private mutable int colorTex;
+            private mutable int depthTex;
+            private mutable int fbW;
+            private mutable int fbH;
+            private mutable int prog;
+            private mutable int vao;
+            private mutable int vbo;
+            private mutable int slotColor;
+            private mutable int slotDepth;
+            private mutable int slotTexel;
+
+            public constructor PostFx(Gl gl) {
+                this.gl = gl;
+                this.wanted = false;
+                this.fbo = 0;
+                this.colorTex = 0;
+                this.depthTex = 0;
+                this.fbW = 0;
+                this.fbH = 0;
+                this.prog = 0;
+                this.vao = 0;
+                this.vbo = 0;
+                this.slotColor = 0;
+                this.slotDepth = 0;
+                this.slotTexel = 0;
+            }
+
+            public method enabled() returns boolean {
+                return this.wanted;
+            }
+
+            public method toggle() returns void {
+                this.wanted = !this.wanted;
+                return;
+            }
+
+            // Point rendering at the low-resolution buffer, building it on the first frame that
+            // asks. Answers false when the effect is off, so the caller draws straight to screen.
+            public method beginFrame() returns boolean {
+                if (!this.wanted) {
+                    return false;
+                }
+                if (this.fbo == 0) {
+                    this.build(PostFx.WIDTH, PostFx.HEIGHT);
+                }
+                this.gl.bindFramebuffer(0x8D40, this.fbo);
+                Wgl.glViewport(0, 0, this.fbW, this.fbH);
+                return true;
+            }
+
+            // Blow the small picture up to the screen and outline it.
+            public method present(int screenW, int screenH) returns void {
+                this.gl.bindFramebuffer(0x8D40, 0);
+                Wgl.glViewport(0, 0, screenW, screenH);
+                Wgl.glDisable(GL.DEPTH_TEST);
+                Wgl.glClearColor(0.08, 0.10, 0.14, 1.0);
+                Wgl.glClear(GL.COLOR_BUFFER_BIT);
+                this.gl.useProgram(this.prog);
+                this.gl.activeTexture(0x84C0);
+                Wgl.glBindTexture(0x0DE1, this.colorTex);
+                this.gl.uniform1i(this.slotColor, 0);
+                this.gl.activeTexture(0x84C1);
+                Wgl.glBindTexture(0x0DE1, this.depthTex);
+                this.gl.uniform1i(this.slotDepth, 1);
+                this.gl.uniform2f(this.slotTexel, 1.0 / cast<float>(this.fbW),
+                                  1.0 / cast<float>(this.fbH));
+                this.gl.bindVertexArray(this.vao);
+                Wgl.glDrawArrays(GL.TRIANGLES, 0, 6);
+                this.gl.bindVertexArray(0);
+                this.gl.activeTexture(0x84C0);
+                return;
+            }
+
+            private method makeTex(int fw, int fh, int internalFmt, int fmt, int typ) returns int {
+                address idb = Allocator.alloc(4);
+                Wgl.glGenTextures(1, cast<long>(idb));
+                int tex = Raw.read<int>(idb);
+                Allocator.free(idb);
+                Wgl.glBindTexture(0x0DE1, tex);
+                Wgl.glTexImage2D(0x0DE1, 0, internalFmt, fw, fh, 0, fmt, typ, cast<long>(0));
+                Wgl.glTexParameteri(0x0DE1, 0x2801, 0x2600);
+                Wgl.glTexParameteri(0x0DE1, 0x2800, 0x2600);
+                Wgl.glTexParameteri(0x0DE1, 0x2802, 0x812F);
+                Wgl.glTexParameteri(0x0DE1, 0x2803, 0x812F);
+                return tex;
+            }
+
+            private method build(int fw, int fh) returns void {
+                this.fbW = fw;
+                this.fbH = fh;
+                this.colorTex = this.makeTex(fw, fh, 0x1907, 0x1907, 0x1401);
+                this.depthTex = this.makeTex(fw, fh, 0x81A6, 0x1902, 0x1406);
+                address fb = Allocator.alloc(4);
+                this.gl.genFramebuffers(1, cast<long>(fb));
+                this.fbo = Raw.read<int>(fb);
+                Allocator.free(fb);
+                this.gl.bindFramebuffer(0x8D40, this.fbo);
+                this.gl.framebufferTexture2D(0x8D40, 0x8CE0, 0x0DE1, this.colorTex, 0);
+                this.gl.framebufferTexture2D(0x8D40, 0x8D00, 0x0DE1, this.depthTex, 0);
+                this.gl.bindFramebuffer(0x8D40, 0);
+                this.prog = Shader.fromSource(this.gl, PostFx.vertSrc(), PostFx.fragSrc());
+                this.vao = this.gl.genVertexArray();
+                this.vbo = this.gl.genBuffer();
+                float[] q = new float[24]();
+                PostFx.fillQuad(q);
+                this.gl.bindVertexArray(this.vao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
+                this.gl.bufferDataFloats(GL.ARRAY_BUFFER, q, GL.STATIC_DRAW);
+                this.gl.vertexAttribPointer(0, 2, GL.FLOAT, cast<byte>(0), 16, 0);
+                this.gl.enableVertexAttribArray(0);
+                this.gl.vertexAttribPointer(1, 2, GL.FLOAT, cast<byte>(0), 16, 8);
+                this.gl.enableVertexAttribArray(1);
+                this.gl.bindVertexArray(0);
+                delete q;
+                // These three belong to THIS program and nowhere else.
+                this.slotColor = this.gl.getUniformLocation(this.prog, "uColor");
+                this.slotDepth = this.gl.getUniformLocation(this.prog, "uDepth");
+                this.slotTexel = this.gl.getUniformLocation(this.prog, "uTexel");
+                return;
+            }
+
+            // The full-screen quad, two triangles with their texture coordinates.
+            private static method fillQuad(float[] q) returns void {
+                q[0] = 0.0 - 1.0;
+                q[1] = 0.0 - 1.0;
+                q[2] = 0.0;
+                q[3] = 0.0;
+                q[4] = 1.0;
+                q[5] = 0.0 - 1.0;
+                q[6] = 1.0;
+                q[7] = 0.0;
+                q[8] = 1.0;
+                q[9] = 1.0;
+                q[10] = 1.0;
+                q[11] = 1.0;
+                q[12] = 0.0 - 1.0;
+                q[13] = 0.0 - 1.0;
+                q[14] = 0.0;
+                q[15] = 0.0;
+                q[16] = 1.0;
+                q[17] = 1.0;
+                q[18] = 1.0;
+                q[19] = 1.0;
+                q[20] = 0.0 - 1.0;
+                q[21] = 1.0;
+                q[22] = 0.0;
+                q[23] = 1.0;
+            }
+
+            private static method vertSrc() returns String {
+                return "#version 330 core\nlayout(location=0) in vec2 aPos;\nlayout(location=1) in vec2 aUV;\nout vec2 vUV;\nvoid main(){ vUV=aUV; gl_Position=vec4(aPos,0.0,1.0); }\n";
+            }
+
+            private static method fragSrc() returns String {
+                return "#version 330 core\nin vec2 vUV;\nout vec4 FragColor;\nuniform sampler2D uColor;\nuniform sampler2D uDepth;\nuniform vec2 uTexel;\nvoid main(){\n  vec3 bg = vec3(0.08,0.10,0.14);\n  float d = texture(uDepth, vUV).r;\n  if (d >= 0.9999) { FragColor = vec4(bg,1.0); return; }\n  vec3 c = texture(uColor, vUV).rgb;\n  float dl = texture(uDepth, vUV+vec2(-uTexel.x,0.0)).r;\n  float dr = texture(uDepth, vUV+vec2(uTexel.x,0.0)).r;\n  float du = texture(uDepth, vUV+vec2(0.0,-uTexel.y)).r;\n  float dd = texture(uDepth, vUV+vec2(0.0,uTexel.y)).r;\n  bool sil = (dl>=0.9999)||(dr>=0.9999)||(du>=0.9999)||(dd>=0.9999);\n  float dmax = max(max(abs(d-dl),abs(d-dr)),max(abs(d-du),abs(d-dd)));\n  vec3 cl = texture(uColor, vUV+vec2(-uTexel.x,0.0)).rgb;\n  vec3 cu = texture(uColor, vUV+vec2(0.0,-uTexel.y)).rgb;\n  float cd = max(length(c-cl), length(c-cu));\n  if (sil || dmax > 0.004 || cd > 0.34) { FragColor = vec4(0.20,0.20,0.24,1.0); return; }\n  vec3 q = floor(c*8.0 + 0.5)/8.0;\n  FragColor = vec4(q,1.0);\n}\n";
+            }
+        }
+    }
+}
