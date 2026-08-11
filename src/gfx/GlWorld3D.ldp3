@@ -40,16 +40,12 @@ public bundle Agents {
             // at all -- and because "the frame is slow" and "the tick is slow" are two questions.
             private mutable Meter* gauge;
             private mutable float timeSec;
-            // coarse (whole world) and detail (near window) batches
-            private mutable int vao;
-            private mutable int vbo;
-            private mutable int nverts;
-            private mutable int dvao;
-            private mutable int dvbo;
-            private mutable int dnverts;
-            private mutable int hvao;           // far-view forest hint trees (hidden when the detail is up)
-            private mutable int hvbo;
-            private mutable int hnverts;
+            // The three meshes on the card. Nine loose fields until they had a type: the whole
+            // world at low detail, the window near the camera at full detail, and the forest hints
+            // that stand in for trees out where the window does not reach (hidden when it does).
+            private mutable MeshBuffer* coarse;
+            private mutable MeshBuffer* detail;
+            private mutable MeshBuffer* hint;
             // world + sources
             private mutable Grid* grid;
             private mutable MeshAtlas* terr;
@@ -170,16 +166,9 @@ public bundle Agents {
             public constructor GlWorld3D(Gl gl) {
                 this.gl = gl;
                 this.prog = Shader.fromSource(gl, GlWorld3D.vertSrc(), GlWorld3D.fragSrc());
-                this.vao = gl.genVertexArray();
-                this.vbo = gl.genBuffer();
-                this.setupVao(this.vao, this.vbo);
-                this.dvao = gl.genVertexArray();
-                this.dvbo = gl.genBuffer();
-                this.setupVao(this.dvao, this.dvbo);
-                this.hvao = gl.genVertexArray();
-                this.hvbo = gl.genBuffer();
-                this.setupVao(this.hvao, this.hvbo);
-                this.hnverts = 0;
+                this.coarse = new MeshBuffer(gl) on heap;
+                this.detail = new MeshBuffer(gl) on heap;
+                this.hint = new MeshBuffer(gl) on heap;
                 this.gauge = new Meter() on heap;
                 this.projM = new GlMat4() on heap;
                 this.viewM = new GlMat4() on heap;
@@ -212,8 +201,17 @@ public bundle Agents {
                 this.uAlpha = gl.getUniformLocation(this.prog, "uAlpha");
                 this.uFlat = gl.getUniformLocation(this.prog, "uFlat");
                 this.timeSec = 0.0;
-                this.nverts = 0;
-                this.dnverts = 0;
+                // Everything the world supplies, before there is a world. `setup` fills the first
+                // five and nothing reads them until it has; `reBake` is the odd one out -- it was
+                // only ever assigned inside the bake, so its first read was of whatever the
+                // allocator had left there. hintProp starts at the -1 that means "no such model",
+                // which is the answer that suppresses the hint layer.
+                this.srcW = 0;
+                this.srcH = 0;
+                this.stride = 1;
+                this.stepH = 0.0;
+                this.hintProp = 0 - 1;
+                this.reBake = false;
                 this.detW = 144;
                 this.detH = 144;
                 this.detX0 = 0;
@@ -234,6 +232,9 @@ public bundle Agents {
             }
 
             public destructor ~GlWorld3D() returns void {
+                delete this.coarse;
+                delete this.detail;
+                delete this.hint;
                 delete this.post;
                 delete this.camera;
                 this.projM.dispose();
@@ -251,44 +252,6 @@ public bundle Agents {
                 delete this.nodeArt;
                 delete this.btally;
                 delete this.riverTiles;
-            }
-
-            // A BUFFER IS ONLY UPLOADED IF IT WAS FILLED EXACTLY.
-            //
-            // Every buffer in this file is sized by a counting pass and filled by an emitting pass,
-            // and the file already knew that those two drifting apart is its recurring defect: `wr`
-            // refuses a write past the end, `wrOver` counts the refusals, and a line at the end of
-            // the run reports them. That is a contract written as a comment and enforced by a
-            // number nobody has to read -- it reports the disagreement long after the picture was
-            // drawn wrong, and only in the over-filling direction.
-            //
-            // UNDER-filling is the quieter half and had no guard at all. `bufferData` uploads the
-            // whole COUNTED size, so a pass that writes fewer floats than it counted hands the card
-            // whatever the allocator left in the tail and calls it geometry.
-            //
-            // So the upload is the one operation both halves have to pass through, and it says what
-            // it needs: filled exactly, or do not upload. The three call sites were four identical
-            // lines each.
-            private method upload(int vao, int vbo, address buf, int wrote, int counted) returns void
-                requires wrote == counted
-            {
-                this.gl.bindVertexArray(vao);
-                this.gl.bindBuffer(GL.ARRAY_BUFFER, vbo);
-                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(counted * 4), cast<long>(buf), GL.STATIC_DRAW);
-                this.gl.bindVertexArray(0);
-                return;
-            }
-
-            private method setupVao(int vao, int vbo) returns void {
-                this.gl.bindVertexArray(vao);
-                this.gl.bindBuffer(GL.ARRAY_BUFFER, vbo);
-                this.gl.vertexAttribPointer(0, 3, GL.FLOAT, cast<byte>(0), 36, 0);
-                this.gl.enableVertexAttribArray(0);
-                this.gl.vertexAttribPointer(1, 3, GL.FLOAT, cast<byte>(0), 36, 12);
-                this.gl.enableVertexAttribArray(1);
-                this.gl.vertexAttribPointer(2, 3, GL.FLOAT, cast<byte>(0), 36, 24);
-                this.gl.enableVertexAttribArray(2);
-                this.gl.bindVertexArray(0);
             }
 
             // ---- setup: store sources, build the scatter tables, bake the coarse world ----
@@ -1472,10 +1435,8 @@ public bundle Agents {
                 }
                 delete bOrd;
                 delete bLvl;
-                this.upload(this.vao, this.vbo, buf, w, tris * 27);
-                this.upload(this.hvao, this.hvbo, hbuf, hw, htris * 27);
-                this.nverts = tris * 3;
-                this.hnverts = htris * 3;
+                this.coarse.upload(buf, w, tris * 27);
+                this.hint.upload(hbuf, hw, htris * 27);
                 Allocator.free(buf);
                 Allocator.free(hbuf);
             }
@@ -1789,8 +1750,7 @@ public bundle Agents {
                 if (y < this.detH) {
                     return;
                 }
-                this.upload(this.dvao, this.dvbo, buf, w, this.bkTris * 27);
-                this.dnverts = this.bkTris * 3;
+                this.detail.upload(buf, w, this.bkTris * 27);
                 Allocator.free(buf);
                 this.detX0 = ox;
                 this.detY0 = oy;
@@ -1900,7 +1860,7 @@ public bundle Agents {
                     this.stepBake();
                     guard = guard + 1;
                 }
-                System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.dnverts / 3} terrain tris");
+                System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.detail.vertexCount() / 3} terrain tris");
                 return;
             }
 
@@ -2105,14 +2065,11 @@ public bundle Agents {
                 this.gl.uniform1f(this.uTime, this.timeSec);
                 this.gl.uniform1f(this.uAlpha, 1.0);
                 this.gl.uniform1f(this.uFlat, 0.0);
-                this.gl.bindVertexArray(this.vao);
-                Wgl.glDrawArrays(GL.TRIANGLES, 0, this.nverts);
+                this.coarse.draw();
                 if (this.detailOn && this.haveDetail) {
-                    this.gl.bindVertexArray(this.dvao);
-                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.dnverts);
+                    this.detail.draw();
                 } else {
-                    this.gl.bindVertexArray(this.hvao);
-                    Wgl.glDrawArrays(GL.TRIANGLES, 0, this.hnverts);
+                    this.hint.draw();
                 }
                 this.gl.bindVertexArray(0);
                 this.gauge.lap(cast<int>(Phase.Draw));

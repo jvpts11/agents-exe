@@ -1,0 +1,96 @@
+import opengl.gl.Gl;
+import opengl.gl.Wgl;
+import opengl.gl.GL;
+
+program AgentsExe;
+
+// One uploaded mesh on the card: its vertex array, its buffer, and how many vertices are in it.
+//
+// The renderer draws three of these -- the coarse world, the detail window, and the far-view hint
+// layer -- and carried all three as nine loose fields told apart by a letter: `vao/vbo/nverts`,
+// `dvao/dvbo/dnverts`, `hvao/hvbo/hnverts`. Nine fields, three subjects, and the prefix doing the
+// work a type should do. Drawing the coarse array with the detail count is not a compile error;
+// it is a draw call that reads past the end of a buffer.
+//
+// The count is not a separate fact any more either. It was set beside every upload as `tris * 3`
+// while the upload itself was passed `tris * 27`, so the same number was derived twice from the
+// same triangle count in two different units, at three call sites. Here the upload knows how many
+// floats a vertex is and works it out once.
+public bundle Agents {
+    public namespace Gfx {
+
+        public class MeshBuffer {
+            // Position, normal and colour, three floats each: the world vertex layout, shared by
+            // all three meshes because they all feed the same program.
+            public static fixed int FLOATS_PER_VERTEX = 9;
+            public static fixed int STRIDE = 36;
+
+            private mutable Gl gl;
+            private mutable int vao;
+            private mutable int vbo;
+            private mutable int verts;
+
+            public constructor MeshBuffer(Gl gl) {
+                this.gl = gl;
+                this.vao = gl.genVertexArray();
+                this.vbo = gl.genBuffer();
+                this.verts = 0;
+                gl.bindVertexArray(this.vao);
+                gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
+                gl.vertexAttribPointer(0, 3, GL.FLOAT, cast<byte>(0), MeshBuffer.STRIDE, 0);
+                gl.enableVertexAttribArray(0);
+                gl.vertexAttribPointer(1, 3, GL.FLOAT, cast<byte>(0), MeshBuffer.STRIDE, 12);
+                gl.enableVertexAttribArray(1);
+                gl.vertexAttribPointer(2, 3, GL.FLOAT, cast<byte>(0), MeshBuffer.STRIDE, 24);
+                gl.enableVertexAttribArray(2);
+                gl.bindVertexArray(0);
+            }
+
+            // A BUFFER IS ONLY UPLOADED IF IT WAS FILLED EXACTLY.
+            //
+            // Every mesh here is sized by a counting pass and filled by an emitting pass, and the
+            // renderer already knew that those two drifting apart is its recurring defect: its
+            // writer refuses a write past the end, counts the refusals, and reports them at the end
+            // of the run. That is a contract written as a comment and enforced by a number nobody
+            // has to read -- it reports the disagreement long after the picture was drawn wrong,
+            // and only in the over-filling direction.
+            //
+            // UNDER-filling is the quieter half and had no guard at all. `bufferData` uploads the
+            // whole COUNTED size, so a pass that writes fewer floats than it counted hands the card
+            // whatever the allocator left in the tail and calls it geometry.
+            //
+            // So the upload is the one operation both halves have to pass through, and it says what
+            // it needs: filled exactly, or do not upload.
+            public method upload(address buf, int wrote, int counted) returns void
+                requires wrote == counted
+            {
+                this.gl.bindVertexArray(this.vao);
+                this.gl.bindBuffer(GL.ARRAY_BUFFER, this.vbo);
+                this.gl.bufferData(GL.ARRAY_BUFFER, cast<long>(counted * 4), cast<long>(buf),
+                                   GL.STATIC_DRAW);
+                this.gl.bindVertexArray(0);
+                this.verts = counted / MeshBuffer.FLOATS_PER_VERTEX;
+                return;
+            }
+
+            // Nothing to draw until something is uploaded again.
+            public method clear() returns void {
+                this.verts = 0;
+                return;
+            }
+
+            public method draw() returns void {
+                if (this.verts == 0) {
+                    return;
+                }
+                this.gl.bindVertexArray(this.vao);
+                Wgl.glDrawArrays(GL.TRIANGLES, 0, this.verts);
+                return;
+            }
+
+            public method vertexCount() returns int {
+                return this.verts;
+            }
+        }
+    }
+}
