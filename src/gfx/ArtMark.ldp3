@@ -1,0 +1,61 @@
+import System.IO.Console;
+program AgentsExe;
+
+// Colours the art must carry for the renderer to treat a triangle specially.
+//
+// These are a CONTRACT, not a palette. A mesh painted 208,230,248 is water foam and gets animated
+// and left unshaded; 96,150,84 is the grass bank of a river tile and gets repainted in the biome's
+// own top colour, so a jungle river has jungle banks; 96,75,48 is the soil under that bank. The
+// renderer recognises them by exact equality, which means an artist nudging a colour by one unit
+// silently turns the feature off -- and nothing anywhere said which colours were spoken for.
+//
+// Foam was written three times in two number systems: once in `isFoam`, once inline in the river
+// tile emitter, and a third time inside the vertex shader's source as 0.8157, 0.9020, 0.9725 --
+// which is 208/255, 230/255, 248/255 hand-converted and hand-rounded. Two of the three agreeing is
+// how the third drifts.
+//
+// ---- THE SHADER'S COPY STAYS A LITERAL, ON PURPOSE ----
+//
+// It is not generated from these numbers. The shader compares with a tolerance of 0.03, which is
+// wide enough that a generated string with different digits would still match every foam pixel --
+// so the golden images could not tell a correct conversion from a sloppy one. A change no checker
+// can judge is a change made on faith. Anyone editing Foam below has to edit
+// `GlWorld3D.vertSrc()` too, and this is where they will be told.
+public bundle Agents {
+    public namespace Gfx {
+
+        public enum ArtMark {
+            // Water foam: animated in the vertex shader, and never shaded, because the animation
+            // is keyed off the colour surviving unchanged.
+            Foam(208, 230, 248),
+            // The grass top of a river tile's bank, repainted per biome.
+            GrassBank(96, 150, 84),
+            // The soil showing under that bank, likewise.
+            SoilSide(96, 75, 48);
+
+            private int r;
+            private int g;
+            private int b;
+
+            public constructor ArtMark(int r, int g, int b) {
+                this.r = r;
+                this.g = g;
+                this.b = b;
+            }
+
+            // Is triangle `tri` of this atlas painted with this mark?
+            public method matches(MeshAtlas* a, int tri) returns boolean {
+                if (a.cr[tri] != this.r) {
+                    return false;
+                }
+                if (a.cg[tri] != this.g) {
+                    return false;
+                }
+                if (a.cb[tri] != this.b) {
+                    return false;
+                }
+                return true;
+            }
+        }
+    }
+}

@@ -9,31 +9,42 @@ import System.Text.StringBuilder;
 // (see docs/RENDER3D_PIPELINE.md), so only integer parsing is needed (Scanner.nextInt).
 program AgentsExe;
 
+// ---- WHY FOURTEEN COLUMNS AND NOT ONE ARRAY OF VERTICES ----
+//
+// This is a struct of arrays on purpose and it stays one. The renderer walks a model's triangles
+// component by component -- every x, then every y -- and each column is contiguous, so a walk
+// touches only the bytes it uses. An array of vertex objects would interleave position, normal and
+// colour and drag all of them through cache to read one, on a walk that happens for every model in
+// every visible cell. The count of fields is the price of the layout, not clutter.
+//
+// The columns are assigned exactly once, in the constructor, and read for the life of the program.
+// Nothing rebinds them, so nothing may: they were `public mutable`, which said any caller could
+// hand the atlas a different array mid-frame.
 public bundle Agents {
     public namespace Gfx {
 
         public class MeshAtlas {
-            public mutable int count;         // number of models (40 terrain biomes)
-            public mutable int totalTris;
+            public int count;                 // number of models (40 terrain biomes)
+            public int totalTris;
 
             // per-vertex, length 3*totalTris (triangle soup: verts 3t, 3t+1, 3t+2 form tri t)
-            public mutable float[] px;
-            public mutable float[] py;
-            public mutable float[] pz;
-            public mutable float[] nx;
-            public mutable float[] ny;
-            public mutable float[] nz;
+            public float[] px;
+            public float[] py;
+            public float[] pz;
+            public float[] nx;
+            public float[] ny;
+            public float[] nz;
 
             // per-triangle, length totalTris
-            public mutable int[] cr;
-            public mutable int[] cg;
-            public mutable int[] cb;
-            public mutable int[] grp;
+            public int[] cr;
+            public int[] cg;
+            public int[] cb;
+            public int[] grp;
 
             // per-model, length count
-            public mutable int[] triStart;
-            public mutable int[] triCount;
-            public mutable String[] names;      // per-model name (named atlases: props/nodes); empty for terrain
+            public int[] triStart;
+            public int[] triCount;
+            public String[] names;            // per-model name (named atlases: props/nodes); empty for terrain
 
             public constructor MeshAtlas(int count, int totalTris) {
                 this.count = count;
@@ -167,6 +178,16 @@ public bundle Agents {
                 }
                 delete tc;
                 return a;
+            }
+
+            // The colour triangle `tri` is painted.
+            //
+            // Nine sites read `cr[t]`, `cg[t]`, `cb[t]` as three separate lookups, and five of them
+            // then divided each by 255 by hand. Three lookups is three chances to index the wrong
+            // triangle in one of them, and a colour with two components from one triangle and one
+            // from another is not a crash -- it is a tint, and a tint reads as art.
+            public method colourOf(int tri) returns Rgb {
+                return Rgb.fromBytes(this.cr[tri], this.cg[tri], this.cb[tri]);
             }
 
             // Model index by name (linear scan; atlases are small). Returns -1 if absent.

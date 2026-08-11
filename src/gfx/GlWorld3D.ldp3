@@ -676,12 +676,14 @@ public bundle Agents {
                 float zOff = zOffIn + this.terrainLook[underOrd].top - top;
                 int ut = this.terr.triStart[underOrd] + 8;      // biome top-face colour
                 int us = this.terr.triStart[underOrd];          // biome side colour
-                float topR = cast<float>(this.terr.cr[ut]) / 255.0;
-                float topG = cast<float>(this.terr.cg[ut]) / 255.0;
-                float topB = cast<float>(this.terr.cb[ut]) / 255.0;
-                float sidR = cast<float>(this.terr.cr[us]) / 255.0;
-                float sidG = cast<float>(this.terr.cg[us]) / 255.0;
-                float sidB = cast<float>(this.terr.cb[us]) / 255.0;
+                Rgb topC = this.terr.colourOf(ut);
+                Rgb sidC = this.terr.colourOf(us);
+                float topR = cast<float>(topC.r);
+                float topG = cast<float>(topC.g);
+                float topB = cast<float>(topC.b);
+                float sidR = cast<float>(sidC.r);
+                float sidG = cast<float>(sidC.g);
+                float sidB = cast<float>(sidC.b);
                 mutable int p = w;
                 if (this.hasSkirt(zOff)) {
                     // A river tile is always exactly one cell wide, and its shade is applied to
@@ -693,26 +695,23 @@ public bundle Agents {
                 mutable int t = 0;
                 while (t < tn) {
                     int tri = t0 + t;
-                    int cr = this.rivers.cr[tri];
-                    int cg = this.rivers.cg[tri];
-                    int cb = this.rivers.cb[tri];
-                    mutable float r = cast<float>(cr) / 255.0;
-                    mutable float g = cast<float>(cg) / 255.0;
-                    mutable float b = cast<float>(cb) / 255.0;
+                    mutable float r = cast<float>(this.rivers.cr[tri]) / 255.0;
+                    mutable float g = cast<float>(this.rivers.cg[tri]) / 255.0;
+                    mutable float b = cast<float>(this.rivers.cb[tri]) / 255.0;
                     mutable float sh = shade;
-                    if (cr == 96 && cg == 150 && cb == 84) {         // grass bank top -> biome top
+                    if (ArtMark.GrassBank.matches(this.rivers, tri)) {
                         r = topR;
                         g = topG;
                         b = topB;
                     } else {
-                        if (cr == 96 && cg == 75 && cb == 48) {      // soil side -> biome side
+                        if (ArtMark.SoilSide.matches(this.rivers, tri)) {
                             r = sidR;
                             g = sidG;
                             b = sidB;
                         }
                     }
-                    if (cr == 208 && cg == 230 && cb == 248) {
-                        sh = 1.0;                                    // foam: exact colour, animated
+                    if (ArtMark.Foam.matches(this.rivers, tri)) {
+                        sh = 1.0;                                    // animated: keep it unshaded
                     }
                     r = r * sh;
                     g = g * sh;
@@ -969,10 +968,7 @@ public bundle Agents {
             }
 
             private method isFoam(int tri) returns boolean {
-                if (this.terr.cr[tri] == 208 && this.terr.cg[tri] == 230 && this.terr.cb[tri] == 248) {
-                    return true;
-                }
-                return false;
+                return ArtMark.Foam.matches(this.terr, tri);
             }
 
             // ---- shared bake pieces --------------------------------------------------------------
@@ -1178,8 +1174,7 @@ public bundle Agents {
             // same is what makes them one method; two of three agreeing is how the third drifts.
             private method groundUnder(int ord, float shade) returns Rgb {
                 int ut = this.terr.triStart[ord] + 8;
-                return Rgb.fromBytes(this.terr.cr[ut], this.terr.cg[ut], this.terr.cb[ut])
-                       * shade * 0.55;
+                return this.terr.colourOf(ut) * shade * 0.55;
             }
 
             // The four side walls that fill 0..zOff under a tile whose base is lifted, so a raised
@@ -1219,8 +1214,7 @@ public bundle Agents {
                 float top = this.terrainLook[ord].top;
                 mutable int p = w;
                 if (this.hasSkirt(zOff)) {
-                    Rgb sc = Rgb.fromBytes(this.terr.cr[t0], this.terr.cg[t0],
-                                           this.terr.cb[t0]) * shade;
+                    Rgb sc = this.terr.colourOf(t0) * shade;
                     p = this.emitSkirt(buf, p, wx, wy, scale, zOff,
                                        cast<float>(sc.r), cast<float>(sc.g), cast<float>(sc.b));
                 }
@@ -1254,9 +1248,10 @@ public bundle Agents {
                     if (dropExtras && triMin > top - 0.0001 && triMax < top + 0.0001) {
                         cix = t0 + 8;
                     }
-                    float r = cast<float>(this.terr.cr[cix]) / 255.0 * sh;
-                    float g = cast<float>(this.terr.cg[cix]) / 255.0 * sh;
-                    float b = cast<float>(this.terr.cb[cix]) / 255.0 * sh;
+                    Rgb tc = this.terr.colourOf(cix) * sh;
+                    float r = cast<float>(tc.r);
+                    float g = cast<float>(tc.g);
+                    float b = cast<float>(tc.b);
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
@@ -1316,7 +1311,7 @@ public bundle Agents {
                 while (t < tn) {
                     int tri = t0 + t;
                     int vb = tri * 3;
-                    Rgb c = Rgb.fromBytes(a.cr[tri], a.cg[tri], a.cb[tri]) * shade;
+                    Rgb c = a.colourOf(tri) * shade;
                     float r = cast<float>(c.r);
                     float g = cast<float>(c.g);
                     float b = cast<float>(c.b);
@@ -2217,6 +2212,10 @@ public bundle Agents {
             }
 
             // The sea foam crests (their exact baked colour) bob with time -- the water animation.
+            // The 0.8157, 0.9020, 0.9725 below is `ArtMark.Foam` -- 208, 230, 248 over 255 -- and
+            // is the third place that colour is written. It is a literal here on purpose; see the
+            // note in ArtMark for why generating it would be a change no golden can judge. Change
+            // the mark and this string changes with it, by hand.
             private static method vertSrc() returns String {
                 return "#version 330 core\nlayout(location=0) in vec3 aPos;\nlayout(location=1) in vec3 aNrm;\nlayout(location=2) in vec3 aCol;\nuniform mat4 uProj;\nuniform mat4 uView;\nuniform float uTime;\nout vec3 vNrm;\nout vec3 vCol;\nvoid main(){\n  vec3 p = aPos;\n  if (abs(aCol.r-0.8157)<0.03 && abs(aCol.g-0.9020)<0.03 && abs(aCol.b-0.9725)<0.03) {\n    p.y += sin(uTime*1.8 + p.x*1.3 + p.y*0.7)*0.18;\n    p.x += cos(uTime*1.4 + p.y*1.1)*0.12;\n  }\n  gl_Position = uProj * uView * vec4(p,1.0);\n  vNrm=aNrm; vCol=aCol;\n}\n";
             }
