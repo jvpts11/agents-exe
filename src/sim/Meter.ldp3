@@ -54,47 +54,47 @@ public bundle Agents {
             private mutable int lastFps;
 
             public constructor Meter() {
-                this.ns = new long[Phase.count()]();
-                this.hits = new long[Phase.count()]();
-                this.mark = Time.nanos();
-                this.ticks = 0;
-                this.frames = 0;
-                this.since = Time.nanos();
-                this.winTicks = 0;
-                this.winFrames = 0;
-                this.lastTps = 0;
-                this.lastFps = 0;
+                ns = new long[Phase.count()]();
+                hits = new long[Phase.count()]();
+                mark = Time.nanos();
+                ticks = 0;
+                frames = 0;
+                since = Time.nanos();
+                winTicks = 0;
+                winFrames = 0;
+                lastTps = 0;
+                lastFps = 0;
             }
 
             public destructor ~Meter() returns void {
-                delete this.ns;
-                delete this.hits;
+                delete ns;
+                delete hits;
             }
 
             // Start a stretch. Call once before the first `lap` of a group.
             public method begin() returns void {
-                this.mark = Time.nanos();
+                mark = Time.nanos();
                 return;
             }
 
             // Close the stretch that just ran and open the next one.
             public method lap(int phase) returns void {
                 long now = Time.nanos();
-                this.ns[phase] = this.ns[phase] + (now - this.mark);
-                this.hits[phase] = this.hits[phase] + 1;
-                this.mark = now;
+                ns[phase] = ns[phase] + (now - mark);
+                hits[phase] = hits[phase] + 1;
+                mark = now;
                 return;
             }
 
             public method tick() returns void {
-                this.ticks = this.ticks + 1;
-                this.winTicks = this.winTicks + 1;
+                ticks = ticks + 1;
+                winTicks = winTicks + 1;
                 return;
             }
 
             public method frame() returns void {
-                this.frames = this.frames + 1;
-                this.winFrames = this.winFrames + 1;
+                frames = frames + 1;
+                winFrames = winFrames + 1;
                 return;
             }
 
@@ -102,46 +102,46 @@ public bundle Agents {
             // a caller can refresh a title or a HUD exactly when the numbers changed.
             public method roll() returns boolean {
                 long now = Time.nanos();
-                long span = now - this.since;
+                long span = now - since;
                 if (span < 1000000000) {
                     return false;
                 }
                 // Against the REAL elapsed span rather than assuming it was a second: a frame that
                 // took four hundred milliseconds would otherwise be reported as a rate it never had.
-                this.lastFps = cast<int>(cast<long>(this.winFrames) * 1000000000 / span);
-                this.lastTps = cast<int>(cast<long>(this.winTicks) * 1000000000 / span);
-                this.winFrames = 0;
-                this.winTicks = 0;
-                this.since = now;
+                lastFps = cast<int>(cast<long>(winFrames) * 1000000000 / span);
+                lastTps = cast<int>(cast<long>(winTicks) * 1000000000 / span);
+                winFrames = 0;
+                winTicks = 0;
+                since = now;
                 return true;
             }
 
             public method fps() returns int {
-                return this.lastFps;
+                return lastFps;
             }
 
             public method tps() returns int {
-                return this.lastTps;
+                return lastTps;
             }
 
             public method tickCount() returns long {
-                return this.ticks;
+                return ticks;
             }
 
             public method frameCount() returns long {
-                return this.frames;
+                return frames;
             }
 
             public method millisOf(int phase) returns long {
-                return this.ns[phase] / 1000000;
+                return ns[phase] / 1000000;
             }
 
             private method worst() returns int {
                 mutable int best = 0 - 1;
                 mutable long bestNs = 0;
                 for (int p in 0..Phase.count()) {
-                    if (this.ns[p] > bestNs) {
-                        bestNs = this.ns[p];
+                    if (ns[p] > bestNs) {
+                        bestNs = ns[p];
                         best = p;
                     }
                 }
@@ -153,26 +153,28 @@ public bundle Agents {
             // "what should I look at", and a one-second window would have the answer flickering
             // between two phases that are close.
             public method worstName() returns String {
-                int p = this.worst();
+                int p = worst();
                 if (p < 0) {
                     return "-";
                 }
+                // `this.` is load-bearing here: `label` is a reserved word (it names a loop label),
+                // so the bare call is read as the keyword and fails to parse.
                 return this.label(p);
             }
 
             public method worstShare() returns int {
-                int p = this.worst();
+                int p = worst();
                 if (p < 0) {
                     return 0;
                 }
                 mutable long total = 0;
                 for (int q in 0..Phase.count()) {
-                    total = total + this.ns[q];
+                    total = total + ns[q];
                 }
                 if (total == 0) {
                     return 0;
                 }
-                return cast<int>(this.ns[p] * 1000 / total);
+                return cast<int>(ns[p] * 1000 / total);
             }
 
             private method label(int p) returns String {
@@ -230,26 +232,26 @@ public bundle Agents {
             public method report(String what) returns void {
                 mutable long total = 0;
                 for (int p in 0..Phase.count()) {
-                    total = total + this.ns[p];
+                    total = total + ns[p];
                 }
                 if (total == 0) {
                     return;
                 }
                 mutable int shown = 0;
                 mutable long floor = 0 - 1;
-                System.IO.Console.println($"{what}: {total / 1000000} ms measured over {this.ticks} ticks, {this.frames} frames");
+                System.IO.Console.println($"{what}: {total / 1000000} ms measured over {ticks} ticks, {frames} frames");
                 while (shown < Phase.count()) {
                     mutable int best = 0 - 1;
                     mutable long bestNs = 0 - 1;
                     for (int p in 0..Phase.count()) {
-                        if (this.ns[p] <= 0) {
+                        if (ns[p] <= 0) {
                             continue;
                         }
-                        if (floor >= 0 && this.ns[p] >= floor) {
+                        if (floor >= 0 && ns[p] >= floor) {
                             continue;
                         }
-                        if (this.ns[p] > bestNs) {
-                            bestNs = this.ns[p];
+                        if (ns[p] > bestNs) {
+                            bestNs = ns[p];
                             best = p;
                         }
                     }
@@ -260,10 +262,10 @@ public bundle Agents {
                     shown = shown + 1;
                     int share = cast<int>(bestNs * 1000 / total);
                     mutable long per = 0;
-                    if (this.hits[best] > 0) {
-                        per = bestNs / this.hits[best] / 1000;      // microseconds a call
+                    if (hits[best] > 0) {
+                        per = bestNs / hits[best] / 1000;      // microseconds a call
                     }
-                    System.IO.Console.println($"  {this.label(best)}: {bestNs / 1000000} ms ({share}/1000) | {per} us a call over {this.hits[best]} calls");
+                    System.IO.Console.println($"  {this.label(best)}:{bestNs / 1000000} ms ({share}/1000) | {per} us a call over {hits[best]} calls");
                 }
                 return;
             }

@@ -41,13 +41,22 @@ public bundle Agents {
             public mutable DrainHeap* drain;
 
             public constructor Scratch() {
-                this.w = 0;
-                this.h = 0;
-                this.sea = 0.42;
+                w = 0;
+                h = 0;
+                sea = 0.42;
+                // `this.` here is not style either, and the reason is a compiler quirk worth
+                // knowing: the field-initialisation check treats a `this.method()` call in a
+                // constructor as discharging every pending field, and a BARE call as not one.
+                // `empty()` assigns all six arrays and the heap, so without the prefix the check
+                // reports six fields that are in fact filled -- which means, now that the prefix
+                // is optional, whether the check fires at all depends on how somebody typed the
+                // call. See the ledger.
                 this.empty();
             }
 
             public destructor ~Scratch() returns void {
+                // `this.` is load-bearing: `release` is a reserved word (it releases a region), so
+                // the bare call does not parse.
                 this.release();
             }
 
@@ -56,38 +65,40 @@ public bundle Agents {
             // than zero because a heap that cannot hold anything is not a valid empty heap -- it is
             // one whose first push writes past the end.
             public method empty() returns void {
-                this.elevation = new float[0]();
-                this.water = new int[0]();
-                this.downstream = new int[0]();
-                this.flow = new float[0]();
-                this.flooded = new float[0]();
-                this.drain = new DrainHeap(1) on heap;
+                elevation = new float[0]();
+                water = new int[0]();
+                downstream = new int[0]();
+                flow = new float[0]();
+                flooded = new float[0]();
+                drain = new DrainHeap(1) on heap;
                 return;
             }
 
             public method release() returns void {
-                delete this.elevation;
-                delete this.water;
-                delete this.downstream;
-                delete this.flow;
-                delete this.flooded;
-                delete this.drain;
+                delete elevation;
+                delete water;
+                delete downstream;
+                delete flow;
+                delete flooded;
+                delete drain;
                 return;
             }
 
             // Size for a world. Frees what was there first -- the empty ones, or a previous
             // generation's.
             public method sizeFor(int w, int h) returns void {
+                // `this.` is load-bearing: `release` is a reserved word (it releases a region), so
+                // the bare call does not parse.
                 this.release();
                 this.w = w;
                 this.h = h;
                 int n = w * h;
-                this.elevation = new float[n]();
-                this.water = new int[n]();
-                this.downstream = new int[n]();
-                this.flow = new float[n]();
-                this.flooded = new float[n]();
-                this.drain = new DrainHeap(n) on heap;
+                elevation = new float[n]();
+                water = new int[n]();
+                downstream = new int[n]();
+                flow = new float[n]();
+                flooded = new float[n]();
+                drain = new DrainHeap(n) on heap;
                 return;
             }
 
@@ -97,22 +108,22 @@ public bundle Agents {
                 if (xx < 0) {
                     xx = 0;
                 }
-                if (xx >= this.w) {
-                    xx = this.w - 1;
+                if (xx >= w) {
+                    xx = w - 1;
                 }
                 mutable int yy = y;
                 if (yy < 0) {
                     yy = 0;
                 }
-                if (yy >= this.h) {
-                    yy = this.h - 1;
+                if (yy >= h) {
+                    yy = h - 1;
                 }
-                return yy * this.w + xx;
+                return yy * w + xx;
             }
 
             // Distance from the equator, 0 at it and 1 at either pole. Asked by all three stages.
             public method absLat(int y) returns float {
-                float ny = cast<float>(y) / cast<float>(this.h - 1);
+                float ny = cast<float>(y) / cast<float>(h - 1);
                 mutable float d = 2.0 * ny - 1.0;
                 if (d < 0.0) {
                     d = 0.0 - d;
@@ -126,32 +137,32 @@ public bundle Agents {
             // loop would change the field, not just its speed.
             public method distanceToWater(int rings) returns void {
                 mutable int i = 0;
-                int n = this.w * this.h;
+                int n = w * h;
                 while (i < n) {
-                    if (this.elevation[i] < this.sea) {
-                        this.water[i] = 0;
+                    if (elevation[i] < sea) {
+                        water[i] = 0;
                     } else {
-                        this.water[i] = 9999;
+                        water[i] = 9999;
                     }
                     i = i + 1;
                 }
                 mutable int p = 0;
                 while (p < rings) {
                     mutable int y = 0;
-                    while (y < this.h) {
+                    while (y < h) {
                         mutable int x = 0;
-                        while (x < this.w) {
-                            int at = y * this.w + x;
-                            mutable int m = this.water[at];
-                            int a = this.water[this.idx(x - 1, y)] + 1;
-                            int b = this.water[this.idx(x + 1, y)] + 1;
-                            int c = this.water[this.idx(x, y - 1)] + 1;
-                            int e = this.water[this.idx(x, y + 1)] + 1;
+                        while (x < w) {
+                            int at = y * w + x;
+                            mutable int m = water[at];
+                            int a = water[idx(x - 1, y)] + 1;
+                            int b = water[idx(x + 1, y)] + 1;
+                            int c = water[idx(x, y - 1)] + 1;
+                            int e = water[idx(x, y + 1)] + 1;
                             if (a < m) { m = a; }
                             if (b < m) { m = b; }
                             if (c < m) { m = c; }
                             if (e < m) { m = e; }
-                            this.water[at] = m;
+                            water[at] = m;
                             x = x + 1;
                         }
                         y = y + 1;
