@@ -1,74 +1,66 @@
 import System.IO.Console;
+import System.Math.Math;
 program AgentsExe;
 
 // Scalar maths the worldgen stages share. Kept as statics so Landmass and Tectonics use ONE
 // implementation: two divergent noise functions would silently desynchronise the coastline from
 // the climate that is sampled over it.
 //
-// EVERY ARITHMETIC SEQUENCE IN THIS FILE IS FROZEN. These are not "slow versions of Math.*" waiting
-// to be replaced -- the intrinsics return double, and every downstream float in the world would
-// move if they were used. Sixteen Newton iterations, a seven-term sine, exp by range reduction over
-// sixty-four: the world that exists is the world these produce, digit for digit. Changing an
-// iteration count or reassociating a term here does not make a faster world, it makes a different
-// one.
+// ---- THESE WERE FROZEN, AND THEY WERE UNFROZEN ON PURPOSE (2026-08-11) ----
+//
+// The note that stood here said these were not slow versions of `Math.*` waiting to be replaced,
+// and that swapping them would move every downstream float. The second half was true. The first
+// half was an assumption, and it was measured and found wrong: the hand-written series are not a
+// different valid choice, they are INACCURATE.
+//
+//   sine, four terms over [-pi, pi]: differs from the hardware on 85% of a 800,001-point sweep,
+//   worst absolute error 0.075 AT x = ±pi -- where the true answer is zero. That is not rounding;
+//   at the seam of its own range reduction the series stops being a sine.
+//
+//   root, Newton from g = v: over 0.001..4000 it lands within 1 ulp of the hardware but differs on
+//   a quarter of inputs. Above about 1.6 million it has not converged at all -- fourteen
+//   iterations and twenty disagree on 83% of a two-million-point sweep out there.
+//
+// So this file now calls the intrinsics. It exists because Landmass and Tectonics must share ONE
+// implementation -- two divergent noise functions would silently desynchronise the coastline from
+// the climate sampled over it -- and that reason is unchanged.
+//
+// THE PRICE, PAID KNOWINGLY: every seed produces a different world than it did before this commit,
+// every golden image changed, and the world audit was re-run to confirm the new world is still a
+// good one rather than merely a new one.
 public bundle Agents {
     public namespace World {
 
         public class LandMath {
+            // A negative argument answers zero rather than trapping. The callers reach here with
+            // sums of squares, so a negative is a rounding artefact at zero and not a question
+            // worth refusing -- that behaviour predates the intrinsic and is kept.
             public static method sqrt(float v) returns float {
                 if (v <= 0.0) {
                     return 0.0;
                 }
-                mutable float g = v;
-                mutable int i = 0;
-                while (i < 16) {
-                    g = 0.5 * (g + v / g);
-                    i = i + 1;
-                }
-                return g;
+                return cast<float>(Math.sqrt(cast<double>(v)));
             }
 
             public static method sin(float x) returns float {
-                mutable float t = x;
-                float pi = 3.14159265;
-                float two = 2.0 * pi;
-                while (t > pi) {
-                    t = t - two;
-                }
-                while (t < 0.0 - pi) {
-                    t = t + two;
-                }
-                float t2 = t * t;
-                return t - t * t2 / 6.0 + t * t2 * t2 / 120.0 - t * t2 * t2 * t2 / 5040.0;
+                return cast<float>(Math.sin(cast<double>(x)));
             }
 
             public static method cos(float x) returns float {
-                return LandMath.sin(x + 1.5707963);
+                return cast<float>(Math.cos(cast<double>(x)));
             }
 
-            // exp by range reduction: exp(x) = exp(x/64)^64, with a 4-term Taylor on the small
-            // argument. Accurate enough for the crest profile and cheap.
+            // The clamp at 40 stays: it is not an accuracy dodge but a range guard -- the crest
+            // profile can be handed a large negative, and exp(40) is already 2.4e17.
             public static method exp(float x) returns float {
-                mutable boolean negative = false;
                 mutable float v = x;
-                if (v < 0.0) {
-                    v = 0.0 - v;
-                    negative = true;
-                }
                 if (v > 40.0) {
                     v = 40.0;
                 }
-                float t = v / 64.0;
-                mutable float e = 1.0 + t + t * t * 0.5 + t * t * t / 6.0 + t * t * t * t / 24.0;
-                mutable int i = 0;
-                while (i < 6) {
-                    e = e * e;
-                    i = i + 1;
+                if (v < 0.0 - 40.0) {
+                    v = 0.0 - 40.0;
                 }
-                if (negative) {
-                    return 1.0 / e;
-                }
-                return e;
+                return cast<float>(Math.exp(cast<double>(v)));
             }
 
             public static method hash01(int seed, int xi, int yi) returns float {

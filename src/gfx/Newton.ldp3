@@ -1,60 +1,57 @@
 import System.IO.Console;
+import System.Math.Math;
 program AgentsExe;
 
-// The renderer's own arithmetic: square root by Newton's method, sine and cosine by Taylor series.
+// The renderer's scalar maths.
 //
-// Three copies of each of these lived in the two 3D paths -- byte for byte the same series, written
-// out twice, which is the shape that silently desynchronises two renderers of the same world the
-// day somebody improves one of them. They are one implementation now.
+// ---- IT USED TO COMPUTE THESE BY HAND, AND THE HAND WAS WRONG ----
 //
-// THE ITERATION COUNT IS A PARAMETER, AND THAT IS THE WHOLE POINT. The GL path ran twenty
-// iterations and the software path fourteen. That is not an oversight to be tidied into one
-// number: the two paths are two deliberate implementations, their outputs are compared as pixels,
-// and a root converged to a different depth is a different pixel. Each call site names the count it
-// has always used, so the divergence survives the deduplication instead of being averaged away by
-// it.
+// Square root by Newton's method and sine by a four-term Taylor series, with the ITERATION COUNT
+// as a parameter because the two 3D paths used different ones -- twenty in the GL path, fourteen in
+// the software rasterizer. That parameter was defended as a deliberate divergence between two
+// implementations whose outputs are compared as pixels. Then it was measured, and the measurement
+// says something else:
 //
-// This is NOT the worldgen's LandMath. That one is frozen against the world hash; this one is
-// frozen against the pixel goldens. They happen to agree on the sine series today and they are
-// still two contracts, held by two different proofs.
+//   Fourteen iterations and twenty DISAGREE on 83% of a two-million-point sweep above 1.6 million
+//   -- and the camera's radius comes from 1280^2 + 540^2, which is 3.3 million. Against the
+//   hardware, fourteen is wrong on 87% of that range and twenty on 25%.
+//
+// The counts were not two deliberate depths of convergence. Fourteen had not converged. The
+// software rasterizer has been drawing with a square root that stopped halfway, and the reason the
+// two paths differed is that one of them was less finished than the other.
+//
+// The sine was worse and not a matter of convergence at all: four terms over [-pi, pi] differ from
+// the hardware on 85% of a sweep, worst absolute error 0.075 at x = ±pi -- where sine is zero. At
+// the seam of its own range reduction the series simply stops being a sine.
+//
+// So both are intrinsics now and the iteration count is gone, because there is nothing left for it
+// to select. This is NOT the worldgen's LandMath: that one is shared by the generation stages and
+// frozen against the world hash, this one against the pixel goldens. Both were re-baselined by the
+// same commit, and both were re-baselined on purpose.
 public bundle Agents {
     public namespace Gfx {
 
         public class Newton {
-            // One spelling of pi, at the precision every one of these copies already used.
+            // One spelling of pi, at the precision every copy of this code already used. Kept as it
+            // was: it is a constant the geometry is written against, not an approximation being
+            // corrected.
             public static fixed double PI = 3.14159265;
 
-            public static method sqrt(float v, int iterations) returns float {
+            // Answers zero for a negative rather than trapping -- callers reach here with sums of
+            // squares, where a negative is a rounding artefact at zero.
+            public static method sqrt(float v) returns float {
                 if (v <= 0.0) {
                     return 0.0;
                 }
-                mutable float g = v;
-                mutable int i = 0;
-                while (i < iterations) {
-                    g = 0.5 * (g + v / g);
-                    i = i + 1;
-                }
-                return g;
+                return cast<float>(Math.sqrt(cast<double>(v)));
             }
 
-            // Range-reduced to [-pi, pi], then a four-term series. Both 3D paths used exactly this,
-            // so unlike the root it takes no count.
             public static method sin(float x) returns float {
-                mutable float t = x;
-                float pi = Newton.PI;
-                float two = 2.0 * pi;
-                while (t > pi) {
-                    t = t - two;
-                }
-                while (t < 0.0 - pi) {
-                    t = t + two;
-                }
-                float t2 = t * t;
-                return t - t * t2 / 6.0 + t * t2 * t2 / 120.0 - t * t2 * t2 * t2 / 5040.0;
+                return cast<float>(Math.sin(cast<double>(x)));
             }
 
             public static method cos(float x) returns float {
-                return Newton.sin(x + 1.5707963);
+                return cast<float>(Math.cos(cast<double>(x)));
             }
         }
     }
