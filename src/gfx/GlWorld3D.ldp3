@@ -29,12 +29,7 @@ public bundle Agents {
 
         public class GlWorld3D implements Orbitable {
             private mutable Gl gl;
-            private mutable int prog;
-            private mutable int uProj;
-            private mutable int uView;
-            private mutable int uTime;
-            private mutable int uAlpha;
-            private mutable int uFlat;
+            private mutable WorldShader* shader;
             // What the frame costs, by part. The renderer keeps its own rather than sharing the
             // simulation's, because it has to work in the shot modes where there is no simulation
             // at all -- and because "the frame is slow" and "the tick is slow" are two questions.
@@ -165,7 +160,8 @@ public bundle Agents {
 
             public constructor GlWorld3D(Gl gl) {
                 this.gl = gl;
-                this.prog = Shader.fromSource(gl, GlWorld3D.vertSrc(), GlWorld3D.fragSrc());
+                this.shader = new WorldShader(gl, GlWorld3D.vertSrc(),
+                                              GlWorld3D.fragSrc()) on heap;
                 this.coarse = new MeshBuffer(gl) on heap;
                 this.detail = new MeshBuffer(gl) on heap;
                 this.hint = new MeshBuffer(gl) on heap;
@@ -195,11 +191,6 @@ public bundle Agents {
                 this.nodeArt = new NodeArt() on heap;
                 this.btally = new int[40]();
                 this.riverTiles = new RiverSet() on heap;
-                this.uProj = gl.getUniformLocation(this.prog, "uProj");
-                this.uView = gl.getUniformLocation(this.prog, "uView");
-                this.uTime = gl.getUniformLocation(this.prog, "uTime");
-                this.uAlpha = gl.getUniformLocation(this.prog, "uAlpha");
-                this.uFlat = gl.getUniformLocation(this.prog, "uFlat");
                 this.timeSec = 0.0;
                 // Everything the world supplies, before there is a world. `setup` fills the first
                 // five and nothing reads them until it has; `reBake` is the odd one out -- it was
@@ -232,6 +223,7 @@ public bundle Agents {
             }
 
             public destructor ~GlWorld3D() returns void {
+                delete this.shader;
                 delete this.coarse;
                 delete this.detail;
                 delete this.hint;
@@ -2059,12 +2051,7 @@ public bundle Agents {
                                   this.camera.groundHeight(), 0.0, 0.0, 1.0);
 
                 this.timeSec = this.timeSec + 0.016;
-                this.gl.useProgram(this.prog);
-                this.gl.uniformMatrix4fv(this.uProj, 1, cast<byte>(0), this.projM.ptr());
-                this.gl.uniformMatrix4fv(this.uView, 1, cast<byte>(0), this.viewM.ptr());
-                this.gl.uniform1f(this.uTime, this.timeSec);
-                this.gl.uniform1f(this.uAlpha, 1.0);
-                this.gl.uniform1f(this.uFlat, 0.0);
+                this.shader.use(this.projM, this.viewM, this.timeSec, 1.0, 0.0);
                 this.coarse.draw();
                 if (this.detailOn && this.haveDetail) {
                     this.detail.draw();
