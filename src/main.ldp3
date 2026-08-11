@@ -104,42 +104,49 @@ public bundle Agents {
                     // a SEED, so `gensiz` silently became seed 42 and opened the interactive
                     // window. Under `check.ps1`, which runs commands by name and waits for the
                     // process to exit, that meant waiting for a window nobody was going to close --
-                    // 73 seconds of CPU on the machine where it happened. Seeds are named now
-                    // (`game seed=12345`), so every word here is either a command or a mistake.
+                    // 73 seconds of CPU on the machine where it happened. Nothing is a seed on this
+                    // line now, so every word here is either a command or a mistake.
                     System.IO.Console.println($"agents.exe: '{args[0]}' is not a command.");
                     System.IO.Console.println("commands: game glworld worldmaps audit gensize");
                     System.IO.Console.println("          highshot cliffshot nodeshot forestshot");
                     System.IO.Console.println("          probe preview plates");
-                    System.IO.Console.println("no argument plays; `game` takes seed= gear= for= trace=");
+                    System.IO.Console.println("`game`, or no argument at all, plays. `game for=N` closes itself.");
                     return;
                 }
                 return;
             }
 
+            // The world every game is played on. One number, written once.
+            public static fixed int SEED = 42;
+
             // THE GAME. Everything else in this file exists to measure it.
             //
-            // Each option is here because a run had to be repeatable without a person in the room.
-            // `seed=` because the world a player sees was hardwired to 42, which is fine for one
-            // window and useless for the only test that counts -- the whole thing, renderer
-            // included, on ground it has never seen. `gear=` because a window launched to be
-            // watched for an hour cannot be asked to have somebody press a key in it, and pressing
-            // it in one of six windows only ever meant walking round to the other five. `for=`
-            // because a session that ends by itself is one anybody, or anything, can start.
-            // `trace=` because the counters answer "how often" and never "what is that ring of
-            // people actually doing".
+            // NOTHING ABOUT THE GAME IS CONFIGURED FROM OUT HERE. It had a seed, a starting gear
+            // and a trace path for a while, and all three were answers to "how do I run this
+            // without a person in the room" -- which is not a question the game should be shaped
+            // by. A control the player cannot reach does not belong on the game: the speed is the
+            // 1-6 keys and the space bar, where a player finds it, and the world is seed 42, which
+            // is what makes one run comparable to the last.
+            //
+            // `for=` is the exception and is not a setting: it closes the window when the time is
+            // up, so a session ends by itself. The implementation is developed against the real
+            // game rather than a probe, and this is what lets the real game be started by something
+            // that is not a hand.
+            //
+            // What the trace path measured is kept because it was real -- a mature world traced
+            // per-agent writes about a gigabyte a minute -- but nothing is simulated yet, so it
+            // comes back with whatever asks for it, on the simulation's terms rather than as a word
+            // on a command line.
             private static method game(string[] args) returns void {
                 Options cmd = new Options(args) on stack;
-                int seed = cmd.number("seed", 42);
-                Gear gear = Gear.onKey(cmd.number("gear", 1));
                 int seconds = cmd.number("for", 0);
-                String tracePath = cmd.text("trace", "");
                 String odd = cmd.stray();
                 if (odd.length() > 0) {
                     System.IO.Console.println($"agents.exe game: '{odd}' is not an option.");
-                    System.IO.Console.println("options: seed=N  gear=1..6  for=SECONDS  trace=PATH");
+                    System.IO.Console.println("options: for=SECONDS (close the window by itself)");
                     return;
                 }
-                Main.renderGlWorld(seed, gear, seconds, tracePath);
+                Main.renderGlWorld(Main.SEED, seconds);
                 return;
             }
 
@@ -236,13 +243,12 @@ public bundle Agents {
             // gimbal-locked between horizontal and top-down), wheel or +/- zoom, WASD pan, 1-6
             // gears, space pauses, ESC quits.
             //
-            // `seconds` closes the window by itself when it runs out, and 0 means never. IT IS NOT
-            // A TEST MODE: the same world, the same loop, the same report on the way out -- only
-            // the ESC is on a clock. Development is verified against the real game rather than
-            // against a probe, and that rule needs a way for the real game to end without a hand on
-            // the keyboard, or every check costs a person watching a window.
-            private static method renderGlWorld(int seed, Gear startGear, int seconds,
-                                                String tracePath) returns void {
+            // `seconds` closes the window when it runs out, and 0 means never. IT IS NOT A TEST
+            // MODE and it is not a setting of the game: the same world, the same loop, the same
+            // report on the way out, with the ESC on a clock. It exists because the implementation
+            // is developed against the real game rather than a probe, and a check that needs a
+            // person to close a window is a check nobody runs twice.
+            private static method renderGlWorld(int seed, int seconds) returns void {
                 int w = 2560;
                 int h = 1440;
                 System.IO.Console.println("agents.exe: generating the world...");
@@ -302,7 +308,7 @@ public bundle Agents {
                 mutable int wanderTick = 0;
                 // The gear the world is running at, the fraction of a tick carried over from the
                 // last frame, and how many ticks the machine could not keep up with.
-                mutable Gear gear = startGear;
+                mutable Gear gear = Gear.One;
                 mutable boolean paused = false;
                 mutable float owed = 0.0;
                 // THE WHOLE FRAME IS MEASURED, not the part the renderer happens to own. The meter
@@ -312,7 +318,7 @@ public bundle Agents {
                 // one `lap` and the next belongs to a named phase.
                 Meter* gauge = r.frameMeter();
                 // Started AFTER the world is built and the atlases are loaded, so `for=60` is sixty
-                // seconds of the game rather than sixty seconds minus however long generation took
+                // seconds of the GAME rather than sixty seconds minus however long generation took
                 // that day.
                 long stopAt = Time.millis() + cast<long>(seconds) * 1000;
                 while (win.isOpen()) {
