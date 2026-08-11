@@ -25,6 +25,7 @@ import Agents.Gfx.MeshAtlas;
 import Agents.Gfx.Raster3D;
 import Agents.Gfx.World3D;
 import Agents.Gfx.GlWorld3D;
+import Agents.App.Gear;
 
 // Entry point. Slice 4: generate a world and show it ISOMETRICALLY in a GL window -- pan with
 // WASD/arrows, zoom with the scroll wheel or +/-, ESC to quit. Running with any argument (or when no
@@ -118,13 +119,13 @@ public bundle Agents {
                 // be watched and audited for an hour cannot be asked to have somebody press a key
                 // in it -- and pressing that key in one of six windows only ever meant walking
                 // round to the other five.
-                mutable float pace = 1.0;
+                mutable Gear gear = Gear.One;
                 if (args.length() > 1) {
                     mutable Scanner ps = new Scanner(args[1]) on heap;
                     if (ps.hasNext()) {
                         int got = ps.nextInt();
                         if (got > 0) {
-                            pace = Main.paceOf(got);
+                            gear = Gear.onKey(got);
                         }
                     }
                     delete ps;
@@ -139,7 +140,7 @@ public bundle Agents {
                 if (args.length() > 2) {
                     tracePath = args[2];
                 }
-                Main.renderGlWorld(seed, pace, tracePath);
+                Main.renderGlWorld(seed, gear, tracePath);
                 return;
             }
 
@@ -283,45 +284,12 @@ public bundle Agents {
             // The interactive true-3D world: generate, bake into a VBO (LOD stride so the whole
             // 2560x1080 fits), then an inspection camera loop -- left-drag or arrows rotate/tilt (tilt
             // gimbal-locked between horizontal and top-down), wheel or +/- zoom, WASD pan, ESC quits.
-            // The six gears, by the number printed on the key that selects them. One argument that
-            // means the same thing as the key you would have pressed beats a second scale nobody
-            // can hold in their head next to the first.
-            private static method paceOf(int gear) returns float {
-                if (gear <= 1) {
-                    return 1.0;
-                }
-                if (gear == 2) {
-                    return 2.0;
-                }
-                if (gear == 3) {
-                    return 5.0;
-                }
-                if (gear == 4) {
-                    return 20.0;
-                }
-                if (gear == 5) {
-                    return 60.0;
-                }
-                return 300.0;
-            }
-
-            // The number on the key, back from the pace it selects. The argument and the key have
-            // to name the same thing, so the HUD can say which gear a run started in.
-            private static method gearOf(float pace) returns int {
-                if (pace >= 300.0) { return 6; }
-                if (pace >= 60.0) { return 5; }
-                if (pace >= 20.0) { return 4; }
-                if (pace >= 5.0) { return 3; }
-                if (pace >= 2.0) { return 2; }
-                return 1;
-            }
-
             // At most this many world ticks in one frame. Without it, gear 6 on a slow machine
             // spends the whole frame simulating and the window stops answering the keyboard --
             // including the key that would slow it back down.
             public static fixed int TICK_CAP = 64;
 
-            private static method renderGlWorld(int seed, float startPace, String tracePath) returns void {
+            private static method renderGlWorld(int seed, Gear startGear, String tracePath) returns void {
                 int w = 2560;
                 int h = 1440;
                 System.IO.Console.println("agents.exe: generating the world...");
@@ -381,8 +349,7 @@ public bundle Agents {
                 mutable int wanderTick = 0;
                 // The gear the world is running at, the fraction of a tick carried over from the
                 // last frame, and how many ticks the machine could not keep up with.
-                mutable float pace = startPace;
-                mutable int gear = Main.gearOf(pace);
+                mutable Gear gear = startGear;
                 mutable boolean paused = false;
                 mutable float owed = 0.0;
                 // THE WHOLE FRAME IS MEASURED, not the part the renderer happens to own. The meter
@@ -432,8 +399,7 @@ public bundle Agents {
                             // speed control, because the runs get labelled with a speed they
                             // never ran at.
                             if (ev.vk >= 0x31 && ev.vk <= 0x36) {          // 1..6: the gears
-                                gear = ev.vk - 0x30;
-                                pace = Main.paceOf(gear);
+                                gear = Gear.onKey(ev.vk - 0x30);
                                 paused = false;
                             }
                             if (ev.vk == 0x20) {                           // space: pause
@@ -468,7 +434,7 @@ public bundle Agents {
                     // keep up with has to say so, rather than quietly running slower than the
                     // number on the screen -- which is the same defect as the pace nobody read.
                     if (!paused) {
-                        owed = owed + pace;
+                        owed = owed + gear.pace();
                     }
                     // THE CLOCK STILL RUNS, AND IT DRIVES NOTHING YET.
                     //
@@ -496,7 +462,7 @@ public bundle Agents {
                         // THE GEAR IS ON THE SCREEN. A speed you cannot read off the window is a
                         // speed you cannot report a run at -- which is how three minutes of world
                         // got written down as "gear 6" when it ran at one tick a frame.
-                        mutable String at = $"x{gear}";
+                        mutable String at = $"x{gear.number()}";
                         if (paused) {
                             at = "PAUSED";
                         }
