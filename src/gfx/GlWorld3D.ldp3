@@ -78,6 +78,11 @@ public bundle Agents {
             private mutable int bkOx;
             private mutable int bkOy;
             private mutable int bkPhase;        // 0 = counting, 1 = emitting
+            // THE `d` PREFIX NAMES TWO THINGS, not one. The window's geometry (its size and origin,
+            // below) is one; these caches are the other -- per-cell decisions taken by the counting
+            // pass and read back by the emitting pass, which belong to the BAKE and not to the
+            // window. They move with the bake job when it becomes a type; grouping them by their
+            // shared letter would have put the two halves in one box and called it done.
             private mutable int[] dRiverC;      // detail bake scratch: river variant per cell, or -1
             // The roads. One atlas for all four surfaces, because their names already carry which
             // one they are -- four atlases would have been four fields, four lookups and four more
@@ -134,6 +139,16 @@ public bundle Agents {
             private mutable int detH;
             private mutable int detX0;
             private mutable int detY0;
+            // TWO BOOLEANS FOR A THREE-STATE, and the fourth combination is reachable. `detailOn`
+            // is what the LOD decided; `haveDetail` is whether a bake has finished. So: off;
+            // wanted-but-not-baked; up. And when the LOD switches off it clears only the first, so
+            // `!detailOn && haveDetail` -- a finished bake nobody draws -- exists too, which is why
+            // four sites test `!detailOn || !haveDetail` rather than one field.
+            //
+            // NOT collapsed into an enum here, deliberately. Doing it changes what happens across
+            // an LOD transition, and the goldens are static shots: the pixel gate would not see a
+            // mistake in it. That wants a test that drives the camera through the threshold first,
+            // and until there is one, changing this would be a guess with a green light on it.
             private mutable boolean haveDetail;
             private mutable boolean detailOn;
             // The widest detail window the renderer will build, in cells. It is BOTH the size cap
@@ -668,19 +683,12 @@ public bundle Agents {
                 float sidG = cast<float>(this.terr.cg[us]) / 255.0;
                 float sidB = cast<float>(this.terr.cb[us]) / 255.0;
                 mutable int p = w;
-                if (zOff > 0.5) {
-                    float x0 = wx - 1.0;
-                    float x1 = wx + 1.0;
-                    float y0 = wy - 1.0;
-                    float y1 = wy + 1.0;
-                    float zt = zOff + 0.05;
-                    float sr = sidR * shade;
-                    float sg = sidG * shade;
-                    float sb = sidB * shade;
-                    p = this.emitQuad(buf, p, x1, y0, 0.0, x1, y1, 0.0, x1, y1, zt, x1, y0, zt, 1.0, 0.0, 0.0, sr, sg, sb);
-                    p = this.emitQuad(buf, p, x0, y0, 0.0, x0, y0, zt, x0, y1, zt, x0, y1, 0.0, 0.0 - 1.0, 0.0, 0.0, sr, sg, sb);
-                    p = this.emitQuad(buf, p, x0, y1, 0.0, x0, y1, zt, x1, y1, zt, x1, y1, 0.0, 0.0, 1.0, 0.0, sr, sg, sb);
-                    p = this.emitQuad(buf, p, x0, y0, 0.0, x1, y0, 0.0, x1, y0, zt, x0, y0, zt, 0.0, 0.0 - 1.0, 0.0, sr, sg, sb);
+                if (this.hasSkirt(zOff)) {
+                    // A river tile is always exactly one cell wide, and its shade is applied to
+                    // colours that are already `float` -- see `emitSkirt` on why that is not routed
+                    // through `Rgb` the way the terrain emitter's is.
+                    p = this.emitSkirt(buf, p, wx, wy, 1.0, zOff,
+                                       sidR * shade, sidG * shade, sidB * shade);
                 }
                 mutable int t = 0;
                 while (t < tn) {
@@ -1150,6 +1158,48 @@ public bundle Agents {
                 return p;
             }
 
+            // The colour of the ground beneath something standing on a tile: the tile's own top
+            // colour, shaded as the tile is and darkened, because what a decoration casts onto is
+            // the cell it is standing on and not a grey.
+            //
+            // Three sites computed it. Two were the same five lines; the third spelled the same
+            // arithmetic out longhand -- `cast<float>(cr) / 255.0 * nshade * 0.55`, three times --
+            // which is operation for operation what the other two get through `Rgb`, in the same
+            // order and with the same single rounding at the end. Being able to SAY they are the
+            // same is what makes them one method; two of three agreeing is how the third drifts.
+            private method groundUnder(int ord, float shade) returns Rgb {
+                int ut = this.terr.triStart[ord] + 8;
+                return Rgb.fromBytes(this.terr.cr[ut], this.terr.cg[ut], this.terr.cb[ut])
+                       * shade * 0.55;
+            }
+
+            // The four side walls that fill 0..zOff under a tile whose base is lifted, so a raised
+            // plate does not read as a slab floating over a hole.
+            //
+            // TRANSCRIBED ONCE. The river emitter and the terrain emitter each carried their own
+            // copy of these four calls, character for character -- forty-eight coordinate arguments
+            // in an order nobody can proofread, twice. What differs between the two callers is the
+            // half-width (a river tile is always one cell; a terrain tile is scaled per LOD) and how
+            // the colour is arrived at, and those stay OUTSIDE: the river's shade is applied in
+            // single precision to floats that were already rounded, the terrain's goes through `Rgb`
+            // in double and rounds once. Those are different numbers and unifying them would be a
+            // silent change to output, so this takes the colour already computed and asks nothing
+            // about where it came from.
+            private method emitSkirt(address buf, int w, float wx, float wy, float half, float zOff,
+                                     float sr, float sg, float sb) returns int {
+                float x0 = wx - half;
+                float x1 = wx + half;
+                float y0 = wy - half;
+                float y1 = wy + half;
+                float zt = zOff + 0.05;
+                mutable int p = w;
+                p = this.emitQuad(buf, p, x1, y0, 0.0, x1, y1, 0.0, x1, y1, zt, x1, y0, zt, 1.0, 0.0, 0.0, sr, sg, sb);
+                p = this.emitQuad(buf, p, x0, y0, 0.0, x0, y0, zt, x0, y1, zt, x0, y1, 0.0, 0.0 - 1.0, 0.0, 0.0, sr, sg, sb);
+                p = this.emitQuad(buf, p, x0, y1, 0.0, x0, y1, zt, x1, y1, zt, x1, y1, 0.0, 0.0, 1.0, 0.0, sr, sg, sb);
+                p = this.emitQuad(buf, p, x0, y0, 0.0, x1, y0, 0.0, x1, y0, zt, x0, y0, zt, 0.0, 0.0 - 1.0, 0.0, sr, sg, sb);
+                return p;
+            }
+
             // Emit one terrain tile at world centre (wx,wy), its BASE raised to zOff (mountain stack;
             // 0 = flat ground). The mesh is scaled by `scale` in x/y only, so the plate heights match
             // across LODs. `rot` = 1 rotates the tile 90 degrees (river channels follow the flow).
@@ -1162,18 +1212,8 @@ public bundle Agents {
                 if (this.hasSkirt(zOff)) {
                     Rgb sc = Rgb.fromBytes(this.terr.cr[t0], this.terr.cg[t0],
                                            this.terr.cb[t0]) * shade;
-                    float sr = cast<float>(sc.r);
-                    float sg = cast<float>(sc.g);
-                    float sb = cast<float>(sc.b);
-                    float x0 = wx - scale;
-                    float x1 = wx + scale;
-                    float y0 = wy - scale;
-                    float y1 = wy + scale;
-                    float zt = zOff + 0.05;
-                    p = this.emitQuad(buf, p, x1, y0, 0.0, x1, y1, 0.0, x1, y1, zt, x1, y0, zt, 1.0, 0.0, 0.0, sr, sg, sb);
-                    p = this.emitQuad(buf, p, x0, y0, 0.0, x0, y0, zt, x0, y1, zt, x0, y1, 0.0, 0.0 - 1.0, 0.0, 0.0, sr, sg, sb);
-                    p = this.emitQuad(buf, p, x0, y1, 0.0, x0, y1, zt, x1, y1, zt, x1, y1, 0.0, 0.0, 1.0, 0.0, sr, sg, sb);
-                    p = this.emitQuad(buf, p, x0, y0, 0.0, x1, y0, 0.0, x1, y0, zt, x0, y0, zt, 0.0, 0.0 - 1.0, 0.0, sr, sg, sb);
+                    p = this.emitSkirt(buf, p, wx, wy, scale, zOff,
+                                       cast<float>(sc.r), cast<float>(sc.g), cast<float>(sc.b));
                 }
                 // THE SAME WALK THE COUNTING PASS TOOK. Whatever it was told would be drawn is what
                 // arrives here, in the same order -- see `keptTris`.
@@ -1389,15 +1429,11 @@ public bundle Agents {
                         w = this.emitTile(buf, w, ord, wx, wy, zOff, sc, true, false, shade);
                         if (this.coarseHint(bx, by, ord)) {
                             float topZ = this.terrainLook[ord].top + zOff;
-                            int ut = this.terr.triStart[ord] + 8;
-                            // The ground under a decoration: the cell's own top colour, darkened.
-                            Rgb under = Rgb.fromBytes(this.terr.cr[ut], this.terr.cg[ut],
-                                                      this.terr.cb[ut]) * shade * 0.55;
-                            float gr = cast<float>(under.r);
-                            float gg = cast<float>(under.g);
-                            float gb = cast<float>(under.b);
+                            Rgb under = this.groundUnder(ord, shade);
                             hw = this.emitMeshShadow(this.props, hbuf, hw, this.hintProp, wx, wy,
-                                                     topZ + 0.18, sc * 0.55, gr, gg, gb, false);
+                                                     topZ + 0.18, sc * 0.55, cast<float>(under.r),
+                                                     cast<float>(under.g), cast<float>(under.b),
+                                                     false);
                             hw = this.emitMesh(this.props, hbuf, hw, this.hintProp, wx, wy, topZ,
                                                sc * 0.55, shade);
                         }
@@ -1671,10 +1707,7 @@ public bundle Agents {
                         int p = this.dPropC[slot];
                         if (p >= 0) {
                             float topZ = this.terrainLook[ord].top + zOff;
-                            int ut = this.terr.triStart[ord] + 8;
-                            // The ground under a decoration: the cell's own top colour, darkened.
-                            Rgb under = Rgb.fromBytes(this.terr.cr[ut], this.terr.cg[ut],
-                                                      this.terr.cb[ut]) * shade * 0.55;
+                            Rgb under = this.groundUnder(ord, shade);
                             float gr = cast<float>(under.r);
                             float gg = cast<float>(under.g);
                             float gb = cast<float>(under.b);
@@ -1728,10 +1761,10 @@ public bundle Agents {
                                         + this.terrainLook[nord].lift + 0.8;
                             float nshade = this.shadeAt(cx2, cy2, 1, nlvl);
                             float topZ = this.terrainLook[nord].top + nzOff;
-                            int ut = this.terr.triStart[nord] + 8;
-                            float gr = cast<float>(this.terr.cr[ut]) / 255.0 * nshade * 0.55;
-                            float gg = cast<float>(this.terr.cg[ut]) / 255.0 * nshade * 0.55;
-                            float gb = cast<float>(this.terr.cb[ut]) / 255.0 * nshade * 0.55;
+                            Rgb under = this.groundUnder(nord, nshade);
+                            float gr = cast<float>(under.r);
+                            float gg = cast<float>(under.g);
+                            float gb = cast<float>(under.b);
                             MeshAtlas* at = this.nodeAtlasOf(nk);
                             int mord = this.nodeArt[nk].model;
                             float msc = this.nodeArt[nk].scale;
