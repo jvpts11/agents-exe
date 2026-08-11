@@ -1,0 +1,70 @@
+import System.IO.Console;
+program AgentsExe;
+
+// A colour, and the two things the bake does to one: scale it by a shade factor, and mix it with
+// another.
+//
+// Thirty places wrote the same three lines -- `cast<float>(atlas.cr[i]) / 255.0 * shade` and its
+// green and blue twins -- and the triples are where a colour bug hides, because two of the three
+// being right is enough to look almost correct. A shade applied to red and green but not blue is a
+// tint, and a tint reads as art.
+//
+// ---- WHY THE COMPONENTS ARE `double`, WHICH IS NOT AN OVERSIGHT ----
+//
+// `cast<float>(cr) / 255.0 * shade` computes in DOUBLE, because `255.0` is a double literal, and
+// truncates to float exactly once when it lands in a float. Storing the components as `float`
+// would truncate a second time -- once into the struct and once out of it -- and two roundings are
+// not one rounding. The struct holds what the expression holds. This is the same trap the world's
+// contour constants sprang, and it cost a red gate to learn the first time; it is written down
+// here so it costs nothing the second.
+//
+// ---- WHY ONE OPERATOR AND NOT THREE ----
+//
+// Operator overloading is the least-exercised feature in this language and it has produced a
+// defect on every implementation it has been given so far, so putting it here was deliberate: an
+// operator returning its own struct type, on a value struct living inside a render owner, in the
+// one path where every output pixel is compared against a golden.
+//
+// It carries `*` alone, because that is the only one with a customer. Two were surveyed and
+// refused:
+//
+//   `+`  -- nothing in the bake adds two colours. The only mix in this renderer is `mix()` inside
+//           the fragment shader's source string, which runs on the GPU and never touches a struct
+//           here. An operator with no caller is an unchecked claim.
+//
+//   `*=` -- there IS a site shaped exactly like it (`r = r * sh` and its two twins, in the river
+//           tile emitter), and it is NOT the same arithmetic. Those locals are `float` and are
+//           assigned from other floats, so the value is already rounded to single precision before
+//           the multiply; going through this struct would multiply in double and round once, at
+//           the end. One rounding is not two. The site keeps its own spelling and this struct does
+//           not pretend to cover it.
+public bundle Agents {
+    public namespace Gfx {
+
+        public struct Rgb {
+            public mutable double r;
+            public mutable double g;
+            public mutable double b;
+
+            public constructor Rgb(double r, double g, double b) {
+                this.r = r;
+                this.g = g;
+                this.b = b;
+            }
+
+            // A colour as the atlases store it: three bytes.
+            public static method fromBytes(int cr, int cg, int cb) returns Rgb {
+                return new Rgb(cast<double>(cr) / 255.0,
+                               cast<double>(cg) / 255.0,
+                               cast<double>(cb) / 255.0);
+            }
+
+            // Scale by a shade factor. Every component or none -- which is the whole reason this
+            // is one operation instead of three lines.
+            public operator * (double k) returns Rgb {
+                return new Rgb(this.r * k, this.g * k, this.b * k);
+            }
+
+        }
+    }
+}
