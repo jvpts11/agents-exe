@@ -774,17 +774,19 @@ public bundle Agents {
                                           float wy, float z, float scale, float gr, float gg,
                                           float gb, boolean perCell) returns int {
                 return this.emitMeshShadowTurned(a, buf, w, pord, wx, wy, z, scale, gr, gg, gb,
-                                                 perCell, 1.0, 0.0);
+                                                 perCell, Turn.none());
             }
 
             // The shadow of a body that is facing somewhere. A shadow that did not turn with its
             // caster would be the tell that gave the whole trick away.
             private method emitMeshShadowTurned(MeshAtlas* a, address buf, int w, int pord, float wx,
                                                 float wy, float z, float scale, float gr, float gg,
-                                                float gb, boolean perCell, float ca,
-                                                float sa) returns int {
+                                                float gb, boolean perCell, Turn turn) returns int {
                 int t0 = a.triStart[pord];
                 int tn = a.triCount[pord];
+                // Unpacked for the centroid sum alone -- see the note at the sum itself.
+                float ca = turn.ca;
+                float sa = turn.sa;
                 mutable int p = w;
                 mutable int t = 0;
                 while (t < tn) {
@@ -797,6 +799,13 @@ public bundle Agents {
                         float hz = a.pz[vi] * scale;
                         float lx = a.px[vi] * scale;
                         float ly = a.py[vi] * scale;
+                        // NOT `turn.x(lx, ly)`, and the reason is the association, not the taste.
+                        // This sum runs left to right: `((ax + lx*ca) - ly*sa) + ...`, and folding
+                        // the rotation into one term would compute `ax + (lx*ca - ly*sa)`, which is
+                        // a different number in single precision. It feeds a centroid that picks a
+                        // cell index, so a last-bit difference can land a shadow on the neighbouring
+                        // tile's height. The emitting pass below, where the rotation IS its own
+                        // term, uses the method.
                         ax = ax + lx * ca - ly * sa + wx - hz * 0.368;
                         ay = ay + lx * sa + ly * ca + wy - hz * 0.579;
                         k = k + 1;
@@ -822,8 +831,8 @@ public bundle Agents {
                             float lx = a.px[vi] * scale;
                             float ly = a.py[vi] * scale;
                             p = this.wr(buf, p,
-                                        lx * ca - ly * sa + wx - hz * 0.368,
-                                        lx * sa + ly * ca + wy - hz * 0.579,
+                                        turn.x(lx, ly) + wx - hz * 0.368,
+                                        turn.y(lx, ly) + wy - hz * 0.579,
                                         zt, 0.0, 0.0, 1.0, gr, gg, gb);
                             k = k + 1;
                         }
@@ -1281,7 +1290,7 @@ public bundle Agents {
 
             private method emitMesh(MeshAtlas* a, address buf, int w, int pord, float wx, float wy,
                                     float wz, float scale, float shade) returns int {
-                return this.emitTurned(a, buf, w, pord, wx, wy, wz, scale, shade, 1.0, 0.0);
+                return this.emitTurned(a, buf, w, pord, wx, wy, wz, scale, shade, Turn.none());
             }
 
             // THE SAME MESH, FACING SOMEWHERE.
@@ -1299,7 +1308,7 @@ public bundle Agents {
             // instances a frame that is not a rounding error.
             private method emitTurned(MeshAtlas* a, address buf, int w, int pord, float wx,
                                       float wy, float wz, float scale, float shade,
-                                      float ca, float sa) returns int {
+                                      Turn turn) returns int {
                 int t0 = a.triStart[pord];
                 int tn = a.triCount[pord];
                 mutable int p = w;
@@ -1320,9 +1329,9 @@ public bundle Agents {
                         // though they were still facing east.
                         float bx = a.nx[vi];
                         float by = a.ny[vi];
-                        p = this.wr(buf, p, lx * ca - ly * sa + wx, lx * sa + ly * ca + wy,
+                        p = this.wr(buf, p, turn.x(lx, ly) + wx, turn.y(lx, ly) + wy,
                                     a.pz[vi] * scale + wz,
-                                    bx * ca - by * sa, bx * sa + by * ca, a.nz[vi], r, g, b);
+                                    turn.x(bx, by), turn.y(bx, by), a.nz[vi], r, g, b);
                         k = k + 1;
                     }
                     t = t + 1;
