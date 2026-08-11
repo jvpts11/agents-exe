@@ -12,6 +12,7 @@ import Agents.World.LandMath;
 import Agents.World.Nodes;
 import Agents.Sim.Meter;
 import Agents.Sim.Phase;
+import Agents.Sim.Sim;
 import Agents.World.WorldAudit;
 import Agents.World.Landmass;
 import Agents.Gfx.Batch2D;
@@ -244,11 +245,6 @@ public bundle Agents {
                 return "";
             }
 
-            // At most this many world ticks in one frame. Without it, gear 6 on a slow machine
-            // spends the whole frame simulating and the window stops answering the keyboard --
-            // including the key that would slow it back down.
-            public static fixed int TICK_CAP = 64;
-
             // The interactive true-3D world: generate, bake into a VBO (LOD stride so the whole
             // 2560x1440 fits), then the camera loop -- left-drag or arrows rotate/tilt (tilt
             // gimbal-locked between horizontal and top-down), wheel or +/- zoom, WASD pan, 1-6
@@ -320,9 +316,11 @@ public bundle Agents {
                 Hud* text = new Hud(win.gl, 14) on heap;
                 mutable int lastX = win.cursorX();
                 mutable int lastY = win.cursorY();
-                mutable int wanderTick = 0;
-                // The gear the world is running at, the fraction of a tick carried over from the
-                // last frame, and how many ticks the machine could not keep up with.
+                // THE WORLD, AND WHAT ADVANCES IT. The tick used to be four loose locals in this
+                // method -- an accumulator, a ceiling, a counter and the loop over them -- which
+                // meant the first layer of the simulation would have had its pass written into a
+                // RENDERING method. `Sim` owns the tick now, and each layer adds a line to it.
+                Sim sim = new Sim() on stack;
                 mutable Gear gear = opensAt;
                 // SAY WHAT SPEED IT OPENED AT. The gear is on the HUD and in the title, which is
                 // no use to a run nobody is watching -- and a run whose speed is not written down
@@ -330,7 +328,6 @@ public bundle Agents {
                 // it advanced one tick a frame.
                 System.IO.Console.println($"agents.exe: opening at gear {gear.number()}.");
                 mutable boolean paused = false;
-                mutable float owed = 0.0;
                 // THE WHOLE FRAME IS MEASURED, not the part the renderer happens to own. The meter
                 // used to be opened and closed inside `render`, which left the input, the moving of
                 // half a million people, the HUD and the buffer swap outside it -- and those turned
@@ -420,24 +417,11 @@ public bundle Agents {
                     // Capped per frame, and the shortfall is counted. A gear the machine cannot
                     // keep up with has to say so, rather than quietly running slower than the
                     // number on the screen -- which is the same defect as the pace nobody read.
+                    // THE WORLD ADVANCES, AND IT DRIVES NOTHING YET. A paused world is simply one
+                    // that is not asked to advance -- which gear was chosen and whether the game
+                    // is paused are the window's business, and the `Sim` neither knows nor should.
                     if (!paused) {
-                        owed = owed + gear.pace();
-                    }
-                    // THE CLOCK STILL RUNS, AND IT DRIVES NOTHING YET.
-                    //
-                    // The gear, the accumulator and the shortfall count are kept because they are
-                    // about TIME, not about the model that was taken out: whatever the world is
-                    // asked to do next is asked to do it a whole number of times a second, and
-                    // that machinery took three attempts to get right. The tick advances; nothing
-                    // is subscribed to it. The first verb of the new agent subscribes here.
-                    mutable int ran = 0;
-                    while (owed >= 1.0 && ran < Main.TICK_CAP) {
-                        wanderTick = wanderTick + 1;
-                        owed = owed - 1.0;
-                        ran = ran + 1;
-                    }
-                    if (owed >= 1.0) {
-                        owed = 0.0;                      // do not let a backlog build up forever
+                        sim.advance(gear.pace());
                     }
                     gauge.lap(cast<int>(Phase.Tick));
                     r.render(cw, ch);
@@ -453,7 +437,7 @@ public bundle Agents {
                         if (paused) {
                             at = "PAUSED";
                         }
-                        win.setTitle($"agents.exe -- world  |  {gauge.fps()} fps  |  {at}  |  tick {wanderTick}  [1-6 speed | space pause | drag/arrows rotate | wheel zoom | WASD pan | P pixels | ESC]");
+                        win.setTitle($"agents.exe -- world  |  {gauge.fps()} fps  |  {at}  |  tick {sim.age()}  [1-6 speed | space pause | drag/arrows rotate | wheel zoom | WASD pan | P pixels | ESC]");
                     }
                     hud.begin(cw, ch, 0);
                     r.drawCompass(hud, cw, ch);
@@ -471,6 +455,13 @@ public bundle Agents {
                 // real load is, and a profile you have to remember to ask for is a profile nobody
                 // reads.
                 r.frameMeter().report("frame");
+                System.IO.Console.println($"world: {sim.age()} ticks");
+                // A SPEED THE MACHINE COULD NOT SUSTAIN HAS TO SAY SO. Silent, this is a run
+                // labelled x6 that went at some other rate, and every number taken off it is about
+                // a world that ran slower than its own report says.
+                if (sim.missed() > 0) {
+                    System.IO.Console.println($"world: {sim.missed()} ticks were owed and refused -- the machine could not keep up with the gear");
+                }
                 if (r.overruns() > 0) {
                     System.IO.Console.println($"renderer: {r.overruns()} vertex writes refused past the end of a buffer -- a counting pass and its emitting pass disagreed");
                 }

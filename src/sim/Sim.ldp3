@@ -1,0 +1,103 @@
+import System.IO.Console;
+program AgentsExe;
+
+// THE WORLD, AND THE THING THAT MAKES IT ADVANCE. It owns the layers and it owns the tick.
+//
+// It is small, and it is meant to stay small permanently: it holds the layers, it calls their
+// passes in order, and it contains no rule of the game. What belongs here is the ORDER the world
+// advances in and nothing else -- whether the animals move before the people, whether a city
+// decides before or after the person walking to it. That order is a fact about the whole world, so
+// it lives in one file where it can be read in ten seconds.
+//
+// WHY IT EXISTS AT ALL, which the name does not say. Until now the tick loop lived inside
+// `renderGlWorld`, in the middle of the window code, and nothing owned it. The first layer written
+// would have put its pass in the RENDER loop, the second would have followed it there, and within
+// a few slices the order the world advances in would be spread across a drawing method. That is
+// not a hypothetical: it is one of the causes of the fourteen-thousand-line class this project
+// deleted and is now rebuilding.
+//
+// THERE ARE NO LAYERS YET. `Wild`, `Population` and `Atlas` arrive one per slice, and each one
+// adds a line to `tick`. Being empty is the point: the empty tick is what the first real cost gets
+// measured against.
+public bundle Agents {
+    public namespace Sim {
+
+        public class Sim {
+            // How many times the world has advanced, ever. Not a frame count: frames are the
+            // window's business and this is the world's.
+            private mutable long ticked;
+            // The fraction of a tick carried over from the last call. THE WORLD ADVANCES A WHOLE
+            // NUMBER OF TIMES OR NOT AT ALL, so anything left over waits rather than being rounded
+            // away -- rounded down, a pace below one never advances anything; rounded up, every
+            // slow pace becomes one tick a call and the slow gears all run at the same speed.
+            private mutable float owed;
+            // Ticks that were owed and refused by the ceiling. See `missed`.
+            private mutable long behind;
+
+            // At most this many ticks in one call. Without it, a pace the machine cannot sustain
+            // spends the whole of the next frame simulating and the window stops answering the
+            // keyboard -- including the key that would slow it back down.
+            public static fixed int CEILING = 64;
+
+            public constructor Sim() {
+                ticked = 0;
+                owed = 0.0;
+                behind = 0;
+            }
+
+            // Advance the world by however many whole ticks `pace` has earned, and answer how many
+            // actually ran.
+            //
+            // `pace` is a NUMBER OF TICKS, not a gear and not a speed. The Sim does not know what a
+            // gear is and must not: which gear the player chose, and whether the game is paused,
+            // are things the window knows. A paused world is a window that does not call this.
+            public method advance(float pace) returns int {
+                owed = owed + pace;
+                mutable int ran = 0;
+                while (owed >= 1.0 && ran < Sim.CEILING) {
+                    tick();
+                    owed = owed - 1.0;
+                    ran = ran + 1;
+                }
+                // WHAT THE CEILING REFUSED IS COUNTED, and the backlog is dropped rather than
+                // carried -- a queue of ticks nobody can work off only ever grows, and a world
+                // running an hour behind is not the world anybody is watching.
+                //
+                // The counting is the part that was promised and missing. The comment on the old
+                // loop said "the shortfall is counted. A gear the machine cannot keep up with has
+                // to say so, rather than quietly running slower than the number on the screen" --
+                // and then dropped the backlog and counted nothing, which is the very defect that
+                // sentence names. A gear the machine cannot sustain looked exactly like one it
+                // could: the window says x6, the world goes at x1.3, and every number measured off
+                // that run carries a speed it never had.
+                if (owed >= 1.0) {
+                    behind = behind + cast<long>(owed);
+                    owed = 0.0;
+                }
+                return ran;
+            }
+
+            // One tick of the world: every layer's pass, in this order.
+            //
+            // EMPTY, AND SAYING SO. There is no layer to advance yet -- the fauna arrives in S1,
+            // the people in S2, the nations in S3 -- and each one adds its line here rather than
+            // finding somewhere of its own to run.
+            private method tick() returns void {
+                ticked = ticked + 1;
+                return;
+            }
+
+            // How old the world is, in ticks.
+            public method age() returns long {
+                return ticked;
+            }
+
+            // How many ticks the ceiling has refused over the whole run. Anything above zero means
+            // the world ran slower than the speed it was asked for, and any measurement taken from
+            // that run is about a world that went at a different rate than its label says.
+            public method missed() returns long {
+                return behind;
+            }
+        }
+    }
+}
