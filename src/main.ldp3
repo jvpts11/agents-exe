@@ -110,7 +110,7 @@ public bundle Agents {
                     System.IO.Console.println("commands: game glworld worldmaps audit gensize");
                     System.IO.Console.println("          highshot cliffshot nodeshot forestshot");
                     System.IO.Console.println("          probe preview plates");
-                    System.IO.Console.println("`game`, or no argument at all, plays. `game for=N` closes itself.");
+                    System.IO.Console.println("`game`, or no argument at all, plays; it takes gear= and for=.");
                     return;
                 }
                 return;
@@ -121,17 +121,23 @@ public bundle Agents {
 
             // THE GAME. Everything else in this file exists to measure it.
             //
-            // NOTHING ABOUT THE GAME IS CONFIGURED FROM OUT HERE. It had a seed, a starting gear
-            // and a trace path for a while, and all three were answers to "how do I run this
-            // without a person in the room" -- which is not a question the game should be shaped
-            // by. A control the player cannot reach does not belong on the game: the speed is the
-            // 1-6 keys and the space bar, where a player finds it, and the world is seed 42, which
-            // is what makes one run comparable to the last.
+            // THE WORLD IS NOT CONFIGURED FROM OUT HERE. Seed 42, always, because that is what
+            // makes one run comparable to the last; a seed on the command line was a way of running
+            // this without a person in the room, and that is not a question the game should be
+            // shaped by.
             //
-            // `for=` is the exception and is not a setting: it closes the window when the time is
-            // up, so a session ends by itself. The implementation is developed against the real
-            // game rather than a probe, and this is what lets the real game be started by something
-            // that is not a hand.
+            // NEITHER OPTION TAKES ANYTHING AWAY FROM THE PLAYER, and that is the line the two of
+            // them sit on. `gear=` sets the speed the window OPENS at; the 1-6 keys and the space
+            // bar keep working exactly as they did, so it moves where a session starts and not what
+            // the player may do. `for=` closes the window when the time is up, so a session ends by
+            // itself -- the implementation is developed against the real game rather than a probe,
+            // and this is what lets the real game be started by something that is not a hand.
+            //
+            // Both are absent by default, and absent means THE ORDINARY START rather than a value.
+            // `game gear=1` and `game` do the same thing today and are still not the same
+            // statement: if the ordinary start ever changes -- a remembered speed, opening paused
+            // -- the first keeps meaning gear one and the second keeps meaning whatever the game
+            // does. That is why `asked` exists instead of a default of -1.
             //
             // What the trace path measured is kept because it was real -- a mature world traced
             // per-agent writes about a gigabyte a minute -- but nothing is simulated yet, so it
@@ -140,13 +146,18 @@ public bundle Agents {
             private static method game(string[] args) returns void {
                 Options cmd = new Options(args) on stack;
                 int seconds = cmd.number("for", 0);
+                mutable Gear start = Gear.One;
+                if (cmd.asked("gear")) {
+                    start = Gear.onKey(cmd.number("gear", 1));
+                }
                 String odd = cmd.stray();
                 if (odd.length() > 0) {
                     System.IO.Console.println($"agents.exe game: '{odd}' is not an option.");
-                    System.IO.Console.println("options: for=SECONDS (close the window by itself)");
+                    System.IO.Console.println("options: gear=1..6 (the speed it OPENS at; the keys still work)");
+                    System.IO.Console.println("         for=SECONDS (close the window by itself)");
                     return;
                 }
-                Main.renderGlWorld(Main.SEED, seconds);
+                Main.renderGlWorld(Main.SEED, seconds, start);
                 return;
             }
 
@@ -248,7 +259,11 @@ public bundle Agents {
             // report on the way out, with the ESC on a clock. It exists because the implementation
             // is developed against the real game rather than a probe, and a check that needs a
             // person to close a window is a check nobody runs twice.
-            private static method renderGlWorld(int seed, int seconds) returns void {
+            //
+            // `opensAt` is where the speed STARTS. The gear is still the player's -- the 1-6 keys
+            // write the same variable this initializes -- so this moves the beginning of a session
+            // and takes nothing away from it.
+            private static method renderGlWorld(int seed, int seconds, Gear opensAt) returns void {
                 int w = 2560;
                 int h = 1440;
                 System.IO.Console.println("agents.exe: generating the world...");
@@ -308,7 +323,12 @@ public bundle Agents {
                 mutable int wanderTick = 0;
                 // The gear the world is running at, the fraction of a tick carried over from the
                 // last frame, and how many ticks the machine could not keep up with.
-                mutable Gear gear = Gear.One;
+                mutable Gear gear = opensAt;
+                // SAY WHAT SPEED IT OPENED AT. The gear is on the HUD and in the title, which is
+                // no use to a run nobody is watching -- and a run whose speed is not written down
+                // is how three minutes of this project's world once got recorded as gear 6 while
+                // it advanced one tick a frame.
+                System.IO.Console.println($"agents.exe: opening at gear {gear.number()}.");
                 mutable boolean paused = false;
                 mutable float owed = 0.0;
                 // THE WHOLE FRAME IS MEASURED, not the part the renderer happens to own. The meter
