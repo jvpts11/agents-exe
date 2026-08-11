@@ -1,0 +1,140 @@
+import System.IO.Console;
+import System.Errors.Option;
+program AgentsExe;
+
+// Walking a grid looking for somewhere to point a camera.
+//
+// Seven of these were written by hand, one per shot, and under the different questions they are
+// three shapes: the FIRST cell that satisfies something, the one NEAREST THE CENTRE that does, and
+// the one that SCORES highest. What varied between copies was not the shape but the bookkeeping
+// around it -- the spacing, the margin from the edge, the sentinel for "nothing", the early exit --
+// and every copy got to choose its own answer for each. `findRiver` answered -1 when it found
+// nothing and `findForest` answered the map centre, which is a real cell nobody can tell from a
+// forest found in the middle.
+//
+// ---- WHY A LAMBDA HERE AND NOWHERE ELSE SO FAR ----
+//
+// This is the cold path: a shot runs a scan once, before a window is even open, and the answer
+// picks where a camera stands. Passing the question as a function is what makes the walk shared,
+// and paying an indirect call per cell for it costs nothing anybody can measure here. That is the
+// bar this codebase holds a lambda to -- the per-frame and per-cell paths in the renderer and the
+// world keep their loops written out, for the same reason they keep their arrays bare.
+//
+// Every one of these searches is judged: each shot writes a PPM whose hash is a golden, so a
+// search that picks a different cell than it used to changes a picture and the gate says so.
+public bundle Agents {
+    public namespace App {
+
+        public class CellSearch {
+            // Nothing is further away than this, and every real distance is under it.
+            private static fixed int FURTHEST = 2000000000;
+
+            private mutable int wide;
+            private mutable int high;
+            // Cells between samples; the scans were never exhaustive. Called `spacing` and not
+            // `step` because `step` is a reserved word (it belongs to range syntax).
+            private mutable int spacing;
+            private mutable int margin;  // how far in from the edge to start and stop
+
+            public constructor CellSearch(int wide, int high) {
+                this.wide = wide;
+                this.high = high;
+                spacing = 1;
+                margin = 0;
+            }
+
+            // Sample every `n`th cell. The scans all did this -- a 2560x1440 world is 3.7 million
+            // cells and the answers wanted are regions, not pixels -- and each picked its own n.
+            public method sampling(int n) returns CellSearch* {
+                spacing = n;
+                return this;
+            }
+
+            // Stay this far in from the edge. A shot placed against the frame has half its view
+            // off the map.
+            public method inset(int cells) returns CellSearch* {
+                margin = cells;
+                return this;
+            }
+
+            // The first cell that answers yes, scanning top-down. `None` if none does.
+            //
+            // The answer is owned by the caller: `match` it and `delete` it. That is the price of
+            // saying "nothing" in the type instead of in one particular integer, and it is worth
+            // paying exactly here -- once per shot, where the alternative was every call site
+            // remembering which magic value this particular search used.
+            public method first(function<boolean, int, int> asks) returns Option<CellHit>* {
+                mutable int y = margin;
+                while (y < high - margin) {
+                    mutable int x = margin;
+                    while (x < wide - margin) {
+                        if (asks(x, y)) {
+                            return new Some<CellHit>(new CellHit(x, y)) on heap;
+                        }
+                        x = x + spacing;
+                    }
+                    y = y + spacing;
+                }
+                return new None<CellHit>() on heap;
+            }
+
+            // The one nearest the middle of the map that answers yes, by Manhattan distance.
+            // Ties go to the first one found, which is what the hand-written copies did.
+            public method nearestToCentre(function<boolean, int, int> asks) returns Option<CellHit>* {
+                mutable int bestX = 0 - 1;
+                mutable int bestY = 0;
+                mutable int bestD = CellSearch.FURTHEST;
+                mutable int y = margin;
+                while (y < high - margin) {
+                    mutable int x = margin;
+                    while (x < wide - margin) {
+                        if (asks(x, y)) {
+                            mutable int dx = x - wide / 2;
+                            if (dx < 0) { dx = 0 - dx; }
+                            mutable int dy = y - high / 2;
+                            if (dy < 0) { dy = 0 - dy; }
+                            int d = dx + dy;
+                            if (d < bestD) {
+                                bestD = d;
+                                bestX = x;
+                                bestY = y;
+                            }
+                        }
+                        x = x + spacing;
+                    }
+                    y = y + spacing;
+                }
+                if (bestX < 0) {
+                    return new None<CellHit>() on heap;
+                }
+                return new Some<CellHit>(new CellHit(bestX, bestY)) on heap;
+            }
+
+            // The highest-scoring cell. A score of zero or less is "not a candidate", so a search
+            // where nothing scores answers None rather than pointing at cell zero.
+            public method highestScoring(function<int, int, int> scores) returns Option<CellHit>* {
+                mutable int bestX = 0 - 1;
+                mutable int bestY = 0;
+                mutable int best = 0;
+                mutable int y = margin;
+                while (y < high - margin) {
+                    mutable int x = margin;
+                    while (x < wide - margin) {
+                        int s = scores(x, y);
+                        if (s > best) {
+                            best = s;
+                            bestX = x;
+                            bestY = y;
+                        }
+                        x = x + spacing;
+                    }
+                    y = y + spacing;
+                }
+                if (bestX < 0) {
+                    return new None<CellHit>() on heap;
+                }
+                return new Some<CellHit>(new CellHit(bestX, bestY)) on heap;
+            }
+        }
+    }
+}
