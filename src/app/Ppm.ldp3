@@ -1,0 +1,65 @@
+import System.IO.Console;
+import System.IO.File;
+import System.Text.StringBuilder;
+program AgentsExe;
+
+// A plain-text PPM being written, one pixel at a time.
+//
+// Five places wrote this format by hand -- the two byte-buffer writers, the biome map, the
+// software painter and the CPU rasterizer -- and the five differ only in where their pixels come
+// from: an array read forwards, the same array read bottom-up, a downsampled grid lookup, and a
+// supersampled average computed on the spot. None of that is the FORMAT, and the format is the
+// part that is easy to get subtly wrong: the header, the maximum value, a space after every
+// component including the last one on a row, and a newline that ends the row after that space.
+// Get the trailing space wrong in one of five copies and that one file differs from the others
+// byte for byte while looking identical on screen -- which matters here, because these files are
+// hashed and compared against goldens.
+//
+// Takes pixels rather than a buffer, so the caller keeps its own walk. A writer that insisted on
+// an array would have left the rasterizer out, and one copy left behind is the copy that drifts.
+public bundle Agents {
+    public namespace App {
+
+        public class Ppm {
+            private mutable StringBuilder* out;
+            private mutable int wide;
+            private mutable int taken;      // pixels pushed so far, to find the row ends
+
+            public constructor Ppm(int wide, int high) {
+                this.wide = wide;
+                taken = 0;
+                out = new StringBuilder() on heap;
+                out.append("P3\n");
+                out.appendInt(wide);
+                out.append(" ");
+                out.appendInt(high);
+                out.append("\n255\n");
+            }
+
+            public destructor ~Ppm() returns void {
+                delete out;
+            }
+
+            // One pixel, in the order the caller is walking. Components are written as given: a
+            // caller with bytes masks them itself, and a caller with floats has already clamped.
+            public method pixel(int r, int g, int b) returns void {
+                out.appendInt(r);
+                out.append(" ");
+                out.appendInt(g);
+                out.append(" ");
+                out.appendInt(b);
+                out.append(" ");
+                taken = taken + 1;
+                if (taken % wide == 0) {
+                    out.append("\n");
+                }
+                return;
+            }
+
+            public method save(String path) returns void {
+                File.writeAll(path, out.toString());
+                return;
+            }
+        }
+    }
+}

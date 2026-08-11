@@ -26,6 +26,7 @@ import Agents.Gfx.Raster3D;
 import Agents.Gfx.World3D;
 import Agents.Gfx.GlWorld3D;
 import Agents.App.Gear;
+import Agents.App.Ppm;
 
 // Entry point. Slice 4: generate a world and show it ISOMETRICALLY in a GL window -- pan with
 // WASD/arrows, zoom with the scroll wheel or +/-, ESC to quit. Running with any argument (or when no
@@ -1160,57 +1161,37 @@ public bundle Agents {
             }
 
             private static method writePpm(byte[] px, int w, int h, String path) returns void {
-                StringBuilder sb = new StringBuilder() on heap;
-                sb.append("P3\n");
-                sb.appendInt(w);
-                sb.append(" ");
-                sb.appendInt(h);
-                sb.append("\n255\n");
+                mutable Ppm* file = new Ppm(w, h) on heap;
                 mutable int i = 0;
                 int n = w * h;
                 while (i < n) {
-                    sb.appendInt(cast<int>(px[i * 3]) & 255);
-                    sb.append(" ");
-                    sb.appendInt(cast<int>(px[i * 3 + 1]) & 255);
-                    sb.append(" ");
-                    sb.appendInt(cast<int>(px[i * 3 + 2]) & 255);
-                    sb.append(" ");
-                    if ((i + 1) % w == 0) {
-                        sb.append("\n");
-                    }
+                    file.pixel(cast<int>(px[i * 3]) & 255, cast<int>(px[i * 3 + 1]) & 255,
+                               cast<int>(px[i * 3 + 2]) & 255);
                     i = i + 1;
                 }
-                File.writeAll(path, sb.toString());
-                delete sb;
+                file.save(path);
+                delete file;
                 return;
             }
 
+            // The same buffer read bottom-up, which is how a frame comes off the card: OpenGL's
+            // origin is the bottom-left and a PPM's is the top-left.
             private static method writePpmFlipped(byte[] px, int w, int h, String path) returns void {
-                StringBuilder sb = new StringBuilder() on heap;
-                sb.append("P3\n");
-                sb.appendInt(w);
-                sb.append(" ");
-                sb.appendInt(h);
-                sb.append("\n255\n");
+                mutable Ppm* file = new Ppm(w, h) on heap;
                 mutable int y = 0;
                 while (y < h) {
                     int srcRow = h - 1 - y;
                     mutable int x = 0;
                     while (x < w) {
                         int i = (srcRow * w + x) * 3;
-                        sb.appendInt(cast<int>(px[i]) & 255);
-                        sb.append(" ");
-                        sb.appendInt(cast<int>(px[i + 1]) & 255);
-                        sb.append(" ");
-                        sb.appendInt(cast<int>(px[i + 2]) & 255);
-                        sb.append(" ");
+                        file.pixel(cast<int>(px[i]) & 255, cast<int>(px[i + 1]) & 255,
+                                   cast<int>(px[i + 2]) & 255);
                         x = x + 1;
                     }
-                    sb.append("\n");
                     y = y + 1;
                 }
-                File.writeAll(path, sb.toString());
-                delete sb;
+                file.save(path);
+                delete file;
             }
 
             // Generate all four world modes and write a top-down biome-colour overview PNG of each --
@@ -1241,12 +1222,7 @@ public bundle Agents {
 
             // Downsample the biome grid to outW x outH and write it top-down as a PPM (biome palette).
             private static method writeBiomeMap(Grid* g, int w, int h, int outW, int outH, String path) returns void {
-                StringBuilder sb = new StringBuilder() on heap;
-                sb.append("P3\n");
-                sb.appendInt(outW);
-                sb.append(" ");
-                sb.appendInt(outH);
-                sb.append("\n255\n");
+                mutable Ppm* file = new Ppm(outW, outH) on heap;
                 mutable int oy = 0;
                 while (oy < outH) {
                     int sy = oy * h / outH;
@@ -1254,19 +1230,13 @@ public bundle Agents {
                     while (ox < outW) {
                         int sx = ox * w / outW;
                         int ord = g.biomeAt(sx, sy);
-                        sb.appendInt(Biomes.red(ord));
-                        sb.append(" ");
-                        sb.appendInt(Biomes.green(ord));
-                        sb.append(" ");
-                        sb.appendInt(Biomes.blue(ord));
-                        sb.append(" ");
+                        file.pixel(Biomes.red(ord), Biomes.green(ord), Biomes.blue(ord));
                         ox = ox + 1;
                     }
-                    sb.append("\n");
                     oy = oy + 1;
                 }
-                File.writeAll(path, sb.toString());
-                delete sb;
+                file.save(path);
+                delete file;
             }
 
             private static method worldStats(Grid* g, int w, int h) returns void {
