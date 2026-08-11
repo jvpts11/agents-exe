@@ -1,0 +1,154 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.World.Grid;
+import Agents.World.WorldGen;
+program AgentsExe;
+
+// The default world -- the one the game starts in -- gets the checks that are about the world being
+// COHERENT rather than about it being a good place to play: rivers that arrive somewhere, a
+// coastline that is not a drawn line, ice where ice belongs.
+public bundle Agents {
+    public namespace Checks {
+
+        public class DefaultWorld {
+            private static mutable Grid* world;
+            private static mutable int built = 0;
+
+            [BeforeAll]
+            public static method buildTheDefaultWorld() returns void {
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                DefaultWorld.world = gen.generate(WorldShape.WIDTH(), WorldShape.HEIGHT());
+                DefaultWorld.built = DefaultWorld.built + 1;
+                return;
+            }
+
+            [AfterAll]
+            public static method dropTheDefaultWorld() returns void {
+                delete DefaultWorld.world;
+                return;
+            }
+
+            [Tag(name: "world")]
+            [Test]
+            public static method the_fixture_is_built_once() returns void {
+                Test.checking("the expensive world is generated once for the whole class");
+                Test.assertEqual(DefaultWorld.built, 1);
+                return;
+            }
+
+            // A river that stops in the middle of a field is the defect that took four rewrites to
+            // find, and it is invisible in a screenshot. A river dying into a salt flat is a
+            // legitimate endorheic terminus, not a defect -- hence the biome test rather than a
+            // plain "did it reach water".
+            [Tag(name: "world")]
+            [Test]
+            public static method every_river_arrives_somewhere() returns void {
+                Grid* g = DefaultWorld.world;
+                int w = g.width();
+                int h = g.height();
+                mutable int cells = 0;
+                mutable int mouths = 0;
+                mutable int broken = 0;
+                mutable int noflow = 0;
+                mutable int y = 0;
+                while (y < h) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        if (g.hasRiver(x, y)) {
+                            cells = cells + 1;
+                            if (!g.hasFlow(x, y)) {
+                                noflow = noflow + 1;
+                            } else {
+                                int tx = x + g.flowDx(x, y);
+                                int ty = y + g.flowDy(x, y);
+                                if (tx < 0 || ty < 0 || tx >= w || ty >= h) {
+                                    broken = broken + 1;
+                                } else {
+                                    int tb = g.biomeAt(tx, ty);
+                                    if (tb <= 7 || tb == 38) {
+                                        mouths = mouths + 1;
+                                    } else {
+                                        if (!g.hasRiver(tx, ty)) {
+                                            broken = broken + 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                Test.checking("the world has a river network at all");
+                Test.assertAtLeast(cells, 5000);
+                Test.checking("rivers reach the sea or an endorheic basin");
+                Test.assertAtLeast(mouths, 50);
+                Test.checking("no river dies on dry land");
+                Test.assertEqual(broken, 0);
+                Test.checking("every river cell knows where it flows");
+                Test.assertEqual(noflow, 0);
+                return;
+            }
+
+            // The south-border trench: a defect that made one edge of the world a drawn line of deep
+            // water. It was fixed once; nothing stops it coming back, and nobody would notice from a
+            // top-down map, which is how it survived in the first place.
+            [Tag(name: "world")]
+            [Test]
+            public static method the_map_edge_is_not_a_drawn_line() returns void {
+                Grid* g = DefaultWorld.world;
+                int w = g.width();
+                int h = g.height();
+                mutable int bottomDeep = 0;
+                mutable int rowAbove = 0;
+                mutable int x = 0;
+                while (x < w) {
+                    if (g.elevAt(x, h - 1) < 2000) {
+                        bottomDeep = bottomDeep + 1;
+                    }
+                    if (g.elevAt(x, h - 64) < 2000) {
+                        rowAbove = rowAbove + 1;
+                    }
+                    x = x + 1;
+                }
+                // The edge may legitimately be mostly ocean; what it may NOT be is a cliff that the
+                // rest of the world does not share. If the bottom row is deep everywhere and the row
+                // 64 cells up is not, that is the trench again.
+                Test.checking("the bottom edge is not a trench the rest of the world lacks");
+                if (bottomDeep > w * 95 / 100) {
+                    Test.assertAtLeast(rowAbove, w * 60 / 100);
+                }
+                return;
+            }
+
+            // Ice belongs at the poles. A world with glacier in the middle latitudes means the
+            // temperature field is not being read where the biome is chosen.
+            [Tag(name: "world")]
+            [Test]
+            public static method ice_sits_at_the_poles() returns void {
+                Grid* g = DefaultWorld.world;
+                int w = g.width();
+                int h = g.height();
+                mutable int iceInTheBelt = 0;
+                mutable int y = h / 3;
+                while (y < h * 2 / 3) {
+                    mutable int x = 0;
+                    while (x < w) {
+                        int b = g.biomeAt(x, y);
+                        // IceCap (29) and Glacier (30). High mountains may legitimately be frozen,
+                        // so only count the ones that are not up a mountain.
+                        if ((b == 29 || b == 30) && g.elevAt(x, y) < 7000) {
+                            iceInTheBelt = iceInTheBelt + 1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                Test.checking("no lowland ice in the middle third of the world");
+                Test.assertAtMost(iceInTheBelt, w * h / 2000);
+                return;
+            }
+        }
+    }
+}

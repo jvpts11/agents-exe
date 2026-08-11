@@ -1,0 +1,79 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.World.Grid;
+import Agents.World.WorldGen;
+import Agents.World.WorldHash;
+import Agents.World.Rng;
+program AgentsExe;
+
+// WorldGen.acceptable rolls again from a seed derived from the one that failed, so a rejected world
+// is replaced rather than shipped. That the search FINDS something is tested in WorldShape, which
+// owns the worlds it would read; what is left here needs no fixture.
+public bundle Agents {
+    public namespace Checks {
+
+        public class WorldSearch {
+            // A search that is not deterministic is a lottery, and a seed stops meaning anything.
+            [Tag(name: "world")]
+            [Test]
+            public static method the_search_is_deterministic() returns void {
+                int seed = 42 + 6 * 7717;
+                Grid* a = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, 640, 360, 6, false);
+                Grid* b = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, 640, 360, 6, false);
+                mutable int differences = 0;
+                mutable int y = 0;
+                while (y < 360) {
+                    mutable int x = 0;
+                    while (x < 640) {
+                        if (a.biomeAt(x, y) != b.biomeAt(x, y)) {
+                            differences = differences + 1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                Test.checking("the same seed gives the same world, roll after roll");
+                Test.assertEqual(differences, 0);
+                delete a;
+                delete b;
+                return;
+            }
+
+            // The relayout's judge (design doc §2) must itself be deterministic before it can
+            // judge anything: same seed, same fingerprint, and never the empty accumulator.
+            [Tag(name: "world")]
+            [Test]
+            public static method the_fingerprint_is_deterministic_and_alive() returns void {
+                WorldGen a = new WorldGen(4242) on stack;
+                a.setWorld(0, 0.0 - 1.0);
+                Grid* ga = a.generate(640, 360);
+                WorldGen b = new WorldGen(4242) on stack;
+                b.setWorld(0, 0.0 - 1.0);
+                Grid* gb = b.generate(640, 360);
+                long ha = WorldHash.hashWorld(ga);
+                long hb = WorldHash.hashWorld(gb);
+                Test.checking("the same seed hashes to the same fingerprint");
+                Test.assertTrue(ha == hb);
+                Test.checking("the fingerprint is not the empty-accumulator value");
+                Test.assertTrue(ha != 0);
+                delete ga;
+                delete gb;
+                return;
+            }
+
+            // Rng.unit() must be the exact stream Rng2.unit() was: advance once, divide by the
+            // modulus -- bit-identical to nextFloat() by construction, proven here against next().
+            [Tag(name: "world")]
+            [Test]
+            public static method rng_unit_advances_the_same_stream_as_next() returns void {
+                Rng a = new Rng(12345) on stack;
+                Rng b = new Rng(12345) on stack;
+                float u = a.unit();
+                float expected = cast<float>(b.next()) / 2147483647.0;
+                Test.checking("unit() is next() divided by the modulus, on the same stream");
+                Test.assertTrue(u == expected);
+                return;
+            }
+        }
+    }
+}

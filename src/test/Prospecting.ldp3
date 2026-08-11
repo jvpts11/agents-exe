@@ -1,0 +1,68 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.World.Grid;
+import Agents.World.WorldGen;
+import Agents.World.NodeField;
+import Agents.World.Harvest;
+program AgentsExe;
+
+// Prospecting, on its own, on a small world -- so the mechanism is checked without waiting twenty
+// generations to see whether anybody happened to take up the trade.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Prospecting {
+            [Tag(name: "world")]
+            [Test]
+            public static method a_working_face_appears_only_after_the_ground_is_opened() returns void {
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Grid* g = gen.generate(640, 360);
+                NodeField* nf = g.surface();
+                // Both classes: a seam may be metal or it may be stone, and `openSeam` opens either
+                // -- counting only one of them is how the first version of this test read a hundred
+                // and fourteen where a hundred and sixty-eight had been opened.
+                int before = nf.totalOf(cast<int>(Harvest.Mine))
+                           + nf.totalOf(cast<int>(Harvest.Quarry));
+                // Open the whole world. Nothing else in the game does this -- a prospector opens a
+                // disc of eight cells at a time -- but it is the only way to ask the question
+                // "could this ever be worked" rather than "did somebody happen to walk there".
+                mutable int opened = 0;
+                mutable int y = 0;
+                while (y < 360) {
+                    mutable int x = 0;
+                    while (x < 640) {
+                        if (nf.openSeam(x, y) != 0) {
+                            opened = opened + 1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                int after = nf.totalOf(cast<int>(Harvest.Mine))
+                          + nf.totalOf(cast<int>(Harvest.Quarry));
+                Test.checking("the world was born with hidden working faces in it");
+                Test.assertAtLeast(opened, 1);
+                Test.checking("and none of them counted for anything until they were opened");
+                Test.assertEqual(after - before, opened);
+                // Opening the same ground twice must not conjure a second seam out of the first.
+                mutable int again = 0;
+                y = 0;
+                while (y < 360) {
+                    mutable int x = 0;
+                    while (x < 640) {
+                        if (nf.openSeam(x, y) != 0) {
+                            again = again + 1;
+                        }
+                        x = x + 1;
+                    }
+                    y = y + 1;
+                }
+                Test.checking("a seam already opened cannot be opened again");
+                Test.assertEqual(again, 0);
+                delete g;
+                return;
+            }
+        }
+    }
+}
