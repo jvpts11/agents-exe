@@ -125,27 +125,11 @@ public bundle Agents {
             // resource nodes, indexed by NodeKind ordinal. A kind's mesh lives in whichever atlas
             // Nodes.atlas says: the seven promoted tree species and the boulder are still props.
             private mutable NodeArt* nodeArt;
-            // detail window state (cell coords of the window origin)
-            private mutable int detW;
-            private mutable int detH;
-            private mutable int detX0;
-            private mutable int detY0;
-            // TWO BOOLEANS FOR A THREE-STATE, and the fourth combination is reachable. `detailOn`
-            // is what the LOD decided; `haveDetail` is whether a bake has finished. So: off;
-            // wanted-but-not-baked; up. And when the LOD switches off it clears only the first, so
-            // `!detailOn && haveDetail` -- a finished bake nobody draws -- exists too, which is why
-            // four sites test `!detailOn || !haveDetail` rather than one field.
-            //
-            // NOT collapsed into an enum here, deliberately. Doing it changes what happens across
-            // an LOD transition, and the goldens are static shots: the pixel gate would not see a
-            // mistake in it. That wants a test that drives the camera through the threshold first,
-            // and until there is one, changing this would be a guess with a green light on it.
-            private mutable boolean haveDetail;
-            private mutable boolean detailOn;
-            // The widest detail window the renderer will build, in cells. It is BOTH the size cap
-            // and the LOD threshold: detail is on exactly while the camera's ground footprint fits
-            // inside a window this big, which is what makes "detail is on" mean "all of it".
-            private mutable int detailCap;
+            // The rectangle drawn at full detail: its size, where it sits, whether the LOD wants it
+            // and whether a mesh for it is on the card. Its cap is BOTH the size limit and the LOD
+            // threshold -- detail is on exactly while the camera's ground footprint fits inside a
+            // window that big, which is what makes "detail is on" mean "all of it".
+            private mutable DetailWindow* window;
             // Decorative clutter drawn per tile. Ground cover is not one item per square either --
             // that is what made a meadow read as a grid -- but unlike the resource nodes it carries
             // no state, so the renderer scatters it from a hash and stores nothing.
@@ -203,13 +187,7 @@ public bundle Agents {
                 this.stepH = 0.0;
                 this.hintProp = 0 - 1;
                 this.reBake = false;
-                this.detW = 144;
-                this.detH = 144;
-                this.detX0 = 0;
-                this.detY0 = 0;
-                this.haveDetail = false;
-                this.detailOn = false;
-                this.detailCap = 384;
+                this.window = new DetailWindow(144, 384) on heap;
                 this.camera = new OrbitCamera() on heap;
                 this.post = new PostFx(gl) on heap;
             }
@@ -223,6 +201,7 @@ public bundle Agents {
             }
 
             public destructor ~GlWorld3D() returns void {
+                delete this.window;
                 delete this.shader;
                 delete this.coarse;
                 delete this.detail;
@@ -281,7 +260,7 @@ public bundle Agents {
                 float halfH = cast<float>(this.srcH);
                 this.camera.frame(halfW, halfH, 1.5,
                                   this.fsqrt(halfW * halfW + halfH * halfH) + stepH * 8.0 + 2.0);
-                this.haveDetail = false;
+                this.window.meshLost();
             }
 
             // Mountain-family stack level for a cell (0 = flat ground). Quantized from elevation so
@@ -1459,18 +1438,19 @@ public bundle Agents {
             // in. Until then the previous geometry stays on screen, so nothing pops and no
             // frame pays for more than its slice.
             private method beginBake(int ox, int oy) returns void {
-                int dn = this.detW * this.detH;
+                int dn = this.window.cells();
+                int rows = this.window.height();
                 if (this.dRiverC.length() != dn) {
                     delete this.dRiverC;
                     delete this.dPropC;
                     this.dRiverC = new int[dn]();
                     this.dPropC = new int[dn]();
                 }
-                if (this.dNodeA.length() != this.detH) {
+                if (this.dNodeA.length() != rows) {
                     delete this.dNodeA;
                     delete this.dNodeB;
-                    this.dNodeA = new int[this.detH]();
-                    this.dNodeB = new int[this.detH]();
+                    this.dNodeA = new int[rows]();
+                    this.dNodeB = new int[rows]();
                 }
                 this.bkTris = 0;
                 this.bkW = 0;
@@ -1495,11 +1475,13 @@ public bundle Agents {
             private method countRows(int stop) returns void {
                 int ox = this.bkOx;
                 int oy = this.bkOy;
+                // Read once, not per cell: this walk visits tens of thousands of them a slice.
+                int wide = this.window.width();
                 mutable int tris = this.bkTris;
                 mutable int y = this.bkRow;
                 while (y < stop) {
                     mutable int x = 0;
-                    while (x < this.detW) {
+                    while (x < wide) {
                         int gx = ox + x;
                         int gy = oy + y;
                         int ord = this.grid.biomeAt(gx, gy);
@@ -1507,7 +1489,7 @@ public bundle Agents {
                         // ord > 7: river tiles on any LAND cell including Beach/RockyShore -- most of
                         // a river's lower course crosses the coast band, and skipping it there cut
                         // every river short of the sea
-                        int slot = y * this.detW + x;
+                        int slot = y * wide + x;
                         if (ord > 7 && this.grid.hasRiver(gx, gy)) {
                             RiverPick pk = this.pickRiver(gx, gy);
                             // The cache stays one int wide over tens of thousands of cells; the
@@ -1544,7 +1526,7 @@ public bundle Agents {
                         a = a + 1;
                     }
                     mutable int b = a;
-                    while (b < e && nf.cellXAt(b) < ox + this.detW) {
+                    while (b < e && nf.cellXAt(b) < ox + wide) {
                         // AN EMPTY NODE IS NOT DRAWN -- BUT IT IS STILL LISTED.
                         //
                         // Forage and fishing RENEW, so harvesting them to nothing leaves the kind
@@ -1599,7 +1581,7 @@ public bundle Agents {
                 }
                 this.bkTris = tris;
                 this.bkRow = y;
-                if (y >= this.detH) {
+                if (y >= this.window.height()) {
                     this.bkBuf = Allocator.alloc(cast<long>(tris * 27 * 4 + 4));
                     this.bkPhase = 1;
                     this.bkRow = 0;
@@ -1617,14 +1599,16 @@ public bundle Agents {
                 if (!this.baking) {
                     return;
                 }
-                mutable int rows = 16384 / this.detW;
+                int wide = this.window.width();
+                int high = this.window.height();
+                mutable int rows = 16384 / wide;
                 if (rows < 1) {
                     rows = 1;
                 }
                 if (this.bkPhase == 0) {
                     mutable int cstop = this.bkRow + rows;
-                    if (cstop > this.detH) {
-                        cstop = this.detH;
+                    if (cstop > high) {
+                        cstop = high;
                     }
                     this.countRows(cstop);
                     return;
@@ -1639,9 +1623,9 @@ public bundle Agents {
                 mutable int w = this.bkW;
                 mutable int y = this.bkRow;
                 int stop = y + rows;
-                while (y < this.detH && y < stop) {
+                while (y < high && y < stop) {
                     mutable int x = 0;
-                    while (x < this.detW) {
+                    while (x < wide) {
                         int gx = ox + x;
                         int gy = oy + y;
                         int ord = this.grid.biomeAt(gx, gy);
@@ -1652,7 +1636,7 @@ public bundle Agents {
                         float wx = cast<float>(gx * 2 + 1);
                         float wy = cast<float>(gy * 2 + 1);
                         float shade = this.shadeAt(gx, gy, 1, lvl);
-                        int slot = y * this.detW + x;
+                        int slot = y * wide + x;
                         int cached = this.dRiverC[slot];
                         if (cached >= 0) {
                             RiverPick pk = RiverPick.unpack(cached);
@@ -1739,14 +1723,12 @@ public bundle Agents {
                 }
                 this.bkW = w;
                 this.bkRow = y;
-                if (y < this.detH) {
+                if (y < high) {
                     return;
                 }
                 this.detail.upload(buf, w, this.bkTris * 27);
                 Allocator.free(buf);
-                this.detX0 = ox;
-                this.detY0 = oy;
-                this.haveDetail = true;
+                this.window.meshArrived(ox, oy);
                 this.bakeSettled();
                 return;
             }
@@ -1759,31 +1741,31 @@ public bundle Agents {
             // renderer uses, so that "walks around obstacles" and "is drawn properly" mean the same
             // people -- two different definitions of near would show somebody clipping a cliff.
             public method detailX0() returns int {
-                if (!this.detailOn || !this.haveDetail) {
+                if (!this.window.showing()) {
                     return 0;
                 }
-                return this.detX0;
+                return this.window.originX();
             }
 
             public method detailY0() returns int {
-                if (!this.detailOn || !this.haveDetail) {
+                if (!this.window.showing()) {
                     return 0;
                 }
-                return this.detY0;
+                return this.window.originY();
             }
 
             public method detailX1() returns int {
-                if (!this.detailOn || !this.haveDetail) {
+                if (!this.window.showing()) {
                     return 0;
                 }
-                return this.detX0 + this.detW;
+                return this.window.originX() + this.window.width();
             }
 
             public method detailY1() returns int {
-                if (!this.detailOn || !this.haveDetail) {
+                if (!this.window.showing()) {
                     return 0;
                 }
-                return this.detY0 + this.detH;
+                return this.window.originY() + this.window.height();
             }
 
             // THE BODIES, AND SEPARATELY THE PEOPLE IN THEM.
@@ -1800,7 +1782,7 @@ public bundle Agents {
             // them against invented data is how a picture starts lying about the world behind it.
             // They come back as the systems that feed them do.
             public method refreshDetail() returns void {
-                if (!this.haveDetail) {
+                if (!this.window.hasMesh()) {
                     return;
                 }
                 if (this.baking) {
@@ -1808,7 +1790,7 @@ public bundle Agents {
                     return;
                 }
                 this.reBake = false;
-                this.beginBake(this.detX0, this.detY0);
+                this.beginBake(this.window.originX(), this.window.originY());
                 return;
             }
 
@@ -1852,7 +1834,7 @@ public bundle Agents {
                     this.stepBake();
                     guard = guard + 1;
                 }
-                System.IO.Console.println($"detail: {this.detW}x{this.detH} cells, {this.detail.vertexCount() / 3} terrain tris");
+                System.IO.Console.println($"detail: {this.window.width()}x{this.window.height()} cells, {this.detail.vertexCount() / 3} terrain tris");
                 return;
             }
 
@@ -1909,57 +1891,13 @@ public bundle Agents {
                     half = across;
                 }
                 int need = cast<int>(half) + 16;             // window half-extent in CELLS
-                // And the threshold is that need, not a fixed altitude. The old rule let detail
-                // switch on while the view still reached far past the window, so the screen came out
-                // as a detailed square with coarse blocks all around it -- detail was on, but not
-                // everywhere it was being looked at. Detail is on exactly when the whole footprint
-                // fits, so whenever it is on, everything on screen is at full detail.
-                if (this.detailOn) {
-                    if (need > this.detailCap * 5 / 4) {
-                        this.detailOn = false;
-                        return;
-                    }
-                } else {
-                    if (need > this.detailCap) {
-                        return;
-                    }
-                    this.detailOn = true;
+                // Everything from here down is the window's own arithmetic and lives on the window,
+                // where it can be tested: this method's job is the REACH, which is the only part
+                // that needs the camera.
+                if (!this.window.admits(need)) {
+                    return;
                 }
-                // THE WINDOW HAS TO COVER WHAT THE CAMERA CAN SEE, and how much that is depends on
-                // how high the camera is. Fixed at 144 cells it spanned 288 world units, while at
-                // any altitude where detail was still enabled the view reached far past that -- so
-                // the middle of the screen was real terrain and everything around it was coarse
-                // blocks. That reads as the LOD not switching at all, which is exactly what it
-                // looks like from the ground.
-                //
-                // The size is set by the SEPARATION between the camera's footprint and its target,
-                // since the window is centred between them and has to hold both: that separation is
-                // camDist * cos(elevation), in world units, and a cell is two of those. Altitude
-                // alone was the wrong measure -- a low camera zoomed far out has a small altitude
-                // and an enormous span.
-                //
-                // Quantised to 16 cells so drifting the camera does not rebake on every frame.
-                mutable int want = need;
-                if (want < 112) {
-                    want = 112;
-                }
-                if (want > this.detailCap) {
-                    want = this.detailCap;
-                }
-                want = want / 32 * 32;
-                // A resize costs a full rebake, so it needs a dead band of its own: quantising alone
-                // still fires on every step across a boundary, and a wheel zoom crosses several. The
-                // window only changes when the wanted size is a whole step away from the one in use.
-                mutable boolean resized = false;
-                mutable int gap = want - this.detW;
-                if (gap < 0) {
-                    gap = 0 - gap;
-                }
-                if (gap >= 32) {
-                    this.detW = want;
-                    this.detH = want;
-                    resized = true;
-                }
+                boolean resized = this.window.resizeFor(need);
                 // Centre the window MIDWAY between the camera's ground footprint and what it is
                 // aimed at, because both are on screen and both need to be real terrain.
                 //
@@ -1976,26 +1914,10 @@ public bundle Agents {
                 float egy = this.camera.ty() + this.camera.curDist() * ce * this.fcos(a);
                 float cxw = egx - this.fsin(a) * midD;
                 float cyw = egy - this.fcos(a) * midD;
-                mutable int tx = cast<int>(cxw / 2.0) - this.detW / 2;
-                mutable int ty = cast<int>(cyw / 2.0) - this.detH / 2;
-                if (tx < 0) { tx = 0; }
-                if (ty < 0) { ty = 0; }
-                if (tx > this.srcW - this.detW) { tx = this.srcW - this.detW; }
-                if (ty > this.srcH - this.detH) { ty = this.srcH - this.detH; }
-                if (this.haveDetail && !resized) {
-                    mutable int mx = tx - this.detX0;
-                    if (mx < 0) { mx = 0 - mx; }
-                    mutable int my = ty - this.detY0;
-                    if (my < 0) { my = 0 - my; }
-                    // A rebake no longer blocks a frame, so it can be triggered EARLY: back down to
-                    // a sixth of the window. The wide dead band was there to hide the hitch, and it
-                    // was also why the detail visibly lagged the camera -- the view had to drift a
-                    // third of the way out before anything happened.
-                    if (mx <= this.detW / 6 && my <= this.detH / 6) {
-                        return;
-                    }
+                if (!this.window.placeAt(cxw, cyw, this.srcW, this.srcH, resized)) {
+                    return;
                 }
-                this.beginBake(tx, ty);
+                this.beginBake(this.window.nextOriginX(), this.window.nextOriginY());
             }
 
             // ---- inspection camera: the six methods are forwarded to OrbitCamera by `delegate` ----
@@ -2006,7 +1928,7 @@ public bundle Agents {
             // how the loop's own costs went unmeasured for as long as they did.
             public method render(int fbW, int fbH) returns void {
                 this.ensureDetail();
-                if (this.baking && !this.haveDetail) {
+                if (this.baking && !this.window.hasMesh()) {
                     // nothing on screen to cover the wait: finish the first one outright
                     mutable int g0 = 0;
                     while (this.baking && g0 < 4096) {
@@ -2053,7 +1975,7 @@ public bundle Agents {
                 this.timeSec = this.timeSec + 0.016;
                 this.shader.use(this.projM, this.viewM, this.timeSec, 1.0, 0.0);
                 this.coarse.draw();
-                if (this.detailOn && this.haveDetail) {
+                if (this.window.showing()) {
                     this.detail.draw();
                 } else {
                     this.hint.draw();

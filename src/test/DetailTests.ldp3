@@ -1,0 +1,157 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.Gfx.DetailWindow;
+program AgentsExe;
+
+// The detail LOD, driven through its own threshold.
+//
+// This could not be tested at all until the decision stopped living inside a method that also bound
+// GL buffers. Everything it does is arithmetic over the window's own state -- how far the camera
+// can see, against how big a window this machine will bake -- and every one of these failures is
+// invisible in a screenshot, because a screenshot is a single altitude. The bugs it catches are the
+// ones the whole rebake machinery was built around: a threshold that toggles on the boundary costs
+// a full rebake per frame, and a dead band that is too eager does the same.
+//
+// One assertion per fact and one fact per test name, because the assertions carry no message: the
+// name of the test that went red has to be the whole report.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Detail {
+
+            // Coming on and going off must NOT use the same threshold. A camera parked exactly on
+            // one would flip the LOD every frame, and every flip is a full rebake of the window --
+            // the stutter the hysteresis exists to prevent. Stated as numbers: 385 cells of reach
+            // is refused from off, and accepted from on.
+            [Tag(name: "detail")]
+            [Test]
+            public static method the_threshold_is_not_the_same_in_both_directions() returns void {
+                DetailWindow w = new DetailWindow(144, 384) on stack;
+                Test.assertFalse(w.wants());
+                Test.assertFalse(w.admits(385));       // one past the cap, from off
+                Test.assertFalse(w.wants());
+                Test.assertTrue(w.admits(384));        // exactly the cap: in
+                Test.assertTrue(w.wants());
+                Test.assertTrue(w.admits(385));        // the SAME reach that was refused
+                Test.assertTrue(w.admits(480));        // 384 * 5 / 4, the far edge
+                Test.assertFalse(w.admits(481));       // and past it
+                Test.assertFalse(w.wants());
+                return;
+            }
+
+            // The two booleans are independent, and this is the case that proves it: a mesh that
+            // was baked stays valid when the LOD switches off, so dropping back below the threshold
+            // draws it again instead of paying for a rebake. A three-state enum could not hold this
+            // -- it would have to forget the mesh on the way out, and that is a hitch on every dip
+            // past the threshold.
+            [Tag(name: "detail")]
+            [Test]
+            public static method a_baked_mesh_survives_the_lod_switching_off() returns void {
+                DetailWindow w = new DetailWindow(144, 384) on stack;
+                Test.assertTrue(w.admits(200));
+                w.meshArrived(50, 60);
+                Test.assertTrue(w.showing());
+                Test.assertFalse(w.admits(999));       // far out: the LOD says no
+                Test.assertFalse(w.showing());         // so nothing is drawn
+                Test.assertTrue(w.hasMesh());          // but the mesh is still there
+                Test.assertEqual(w.originX(), 50);
+                Test.assertEqual(w.originY(), 60);
+                Test.assertTrue(w.admits(200));        // back under the threshold
+                Test.assertTrue(w.showing());          // the same mesh, no rebake
+                return;
+            }
+
+            // `showing` is the compound question four call sites asked by hand.
+            [Tag(name: "detail")]
+            [Test]
+            public static method nothing_is_shown_until_both_facts_hold() returns void {
+                DetailWindow w = new DetailWindow(144, 384) on stack;
+                Test.assertFalse(w.showing());
+                Test.assertTrue(w.admits(200));
+                Test.assertFalse(w.showing());         // wanted, not baked yet
+                w.meshArrived(0, 0);
+                Test.assertTrue(w.showing());
+                w.meshLost();
+                Test.assertFalse(w.showing());         // the world moved under it
+                return;
+            }
+
+            // A resize costs a full rebake, so quantising is not enough on its own: a wheel zoom
+            // crosses several step boundaries and would fire at each one.
+            [Tag(name: "detail")]
+            [Test]
+            public static method the_size_only_moves_a_whole_step_at_a_time() returns void {
+                DetailWindow w = new DetailWindow(144, 384) on stack;
+                Test.assertFalse(w.resizeFor(150));    // quantises to 128, 16 from 144
+                Test.assertEqual(w.width(), 144);
+                Test.assertFalse(w.resizeFor(160));    // quantises to 160, also 16 away
+                Test.assertEqual(w.width(), 144);
+                Test.assertTrue(w.resizeFor(192));     // a whole step out
+                Test.assertEqual(w.width(), 192);
+                Test.assertEqual(w.height(), 192);     // square, always
+                return;
+            }
+
+            // Never smaller than the floor, never larger than what this machine will bake.
+            //
+            // AND A QUIRK WORTH WRITING DOWN: the floor is 112 and the step is 32, which do not
+            // divide. The floor is applied first and then quantised DOWN, so the smallest window
+            // this can actually produce is 96 and not 112. That is what the code has always done --
+            // this test states it rather than corrects it, because correcting it would change the
+            // geometry of every close-up shot.
+            [Tag(name: "detail")]
+            [Test]
+            public static method the_size_is_held_between_its_two_limits() returns void {
+                DetailWindow w = new DetailWindow(144, 384) on stack;
+                Test.assertTrue(w.resizeFor(0));       // a camera on the ground still wants a window
+                Test.assertEqual(w.width(), 96);       // the floor of 112, quantised down
+                Test.assertTrue(w.resizeFor(100000));  // and an absurd reach is capped
+                Test.assertEqual(w.width(), 384);
+                return;
+            }
+
+            // The window is clamped INSIDE the world. Off the edge it would index cells that are
+            // not there, which is a bounds panic rather than a wrong picture.
+            [Tag(name: "detail")]
+            [Test]
+            public static method the_window_never_leaves_the_world() returns void {
+                DetailWindow w = new DetailWindow(144, 384) on stack;
+                Test.assertTrue(w.placeAt(0.0, 0.0, 1000, 1000, true));
+                Test.assertEqual(w.nextOriginX(), 0);
+                Test.assertEqual(w.nextOriginY(), 0);
+                Test.assertTrue(w.placeAt(100000.0, 100000.0, 1000, 1000, true));
+                Test.assertEqual(w.nextOriginX(), 856);    // 1000 - 144
+                Test.assertEqual(w.nextOriginY(), 856);
+                return;
+            }
+
+            // A rebake is triggered early -- a sixth of the window -- because it no longer blocks a
+            // frame. It was a third once, and that wide dead band is why the detail visibly lagged
+            // the camera. A cell is two world units, so a sixth of 144 cells is 48 units of drift.
+            [Tag(name: "detail")]
+            [Test]
+            public static method the_view_has_to_drift_a_sixth_before_it_rebakes() returns void {
+                DetailWindow w = new DetailWindow(144, 384) on stack;
+                Test.assertTrue(w.placeAt(500.0, 500.0, 1000, 1000, false));   // no mesh: always
+                w.meshArrived(w.nextOriginX(), w.nextOriginY());
+                Test.assertFalse(w.placeAt(500.0, 500.0, 1000, 1000, false));  // not moved at all
+                Test.assertFalse(w.placeAt(548.0, 500.0, 1000, 1000, false));  // 24 cells: inside
+                Test.assertTrue(w.placeAt(552.0, 500.0, 1000, 1000, false));   // 26 cells: outside
+                return;
+            }
+
+            // A resize skips the dead band entirely: the mesh on the card is the wrong SIZE, so how
+            // far the view has drifted does not come into it.
+            [Tag(name: "detail")]
+            [Test]
+            public static method a_resize_rebakes_however_little_the_view_moved() returns void {
+                DetailWindow w = new DetailWindow(144, 384) on stack;
+                Test.assertTrue(w.placeAt(500.0, 500.0, 1000, 1000, false));
+                w.meshArrived(w.nextOriginX(), w.nextOriginY());
+                Test.assertFalse(w.placeAt(500.0, 500.0, 1000, 1000, false));  // dead band holds
+                Test.assertTrue(w.placeAt(500.0, 500.0, 1000, 1000, true));    // unless resized
+                return;
+            }
+        }
+    }
+}

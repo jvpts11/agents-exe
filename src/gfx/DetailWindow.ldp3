@@ -1,0 +1,202 @@
+import System.IO.Console;
+program AgentsExe;
+
+// The rectangle of cells drawn at full detail, and the decision of where it goes.
+//
+// ---- THE TWO BOOLEANS ARE NOT A THREE-STATE, WHICH IS WORTH SAYING ----
+//
+// They read like one -- off, wanted, up -- and the fourth combination looks like a bug. It is not.
+// `wanted` is the LOD's answer and `baked` is whether a mesh is on the card, and they are
+// INDEPENDENT: a mesh that was baked stays valid when the camera rises past the threshold, so
+// dropping below it again and coming back draws the same geometry instead of paying for a rebake.
+// Collapsing the pair into three named states would have to either forget the mesh on the way out
+// -- a hitch on every dip past the threshold -- or keep a second flag anyway and have gained
+// nothing. So they stay two facts, named for the two questions they answer, and the compound
+// question they were asked four times in a row gets one name: `showing`.
+//
+// ---- WHY THE ARITHMETIC LIVES HERE ----
+//
+// It needs no GL: given how far the camera can see, it answers whether detail is on, how big the
+// window should be and where it sits. That is what makes it testable at all -- the decision used
+// to sit inside a method that also bound buffers, so the only judge of it was a screenshot, and a
+// screenshot is a single altitude. See `DetailTests`, which drives the threshold from both sides.
+public bundle Agents {
+    public namespace Gfx {
+
+        public class DetailWindow {
+            // The smallest window worth having, and the step it is quantised to. Drifting the
+            // camera must not rebake every frame, so the wanted size is rounded down to a step and
+            // only adopted when it is a whole step away from the one in use.
+            public static fixed int FLOOR = 112;
+            public static fixed int STEP = 32;
+
+            private mutable int wide;
+            private mutable int high;
+            private mutable int x0;         // origin of the mesh that is ON THE CARD
+            private mutable int y0;
+            private mutable int cap;        // the largest window this machine will bake
+            private mutable boolean wanted;  // the LOD's answer
+            private mutable boolean baked;   // is there a mesh on the card
+            private mutable int nextX;      // where the next bake should start
+            private mutable int nextY;
+
+            public constructor DetailWindow(int startSize, int cap) {
+                this.wide = startSize;
+                this.high = startSize;
+                this.x0 = 0;
+                this.y0 = 0;
+                this.cap = cap;
+                this.wanted = false;
+                this.baked = false;
+                this.nextX = 0;
+                this.nextY = 0;
+            }
+
+            public method width() returns int {
+                return this.wide;
+            }
+
+            public method height() returns int {
+                return this.high;
+            }
+
+            public method cells() returns int {
+                return this.wide * this.high;
+            }
+
+            public method originX() returns int {
+                return this.x0;
+            }
+
+            public method originY() returns int {
+                return this.y0;
+            }
+
+            public method nextOriginX() returns int {
+                return this.nextX;
+            }
+
+            public method nextOriginY() returns int {
+                return this.nextY;
+            }
+
+            public method wants() returns boolean {
+                return this.wanted;
+            }
+
+            public method hasMesh() returns boolean {
+                return this.baked;
+            }
+
+            // Is full detail actually on screen right now? Both facts have to hold, and four sites
+            // asked it as `!wanted || !baked` before it had a name.
+            public method showing() returns boolean {
+                if (!this.wanted) {
+                    return false;
+                }
+                return this.baked;
+            }
+
+            // A bake finished: this mesh, at this origin, is what is on the card now.
+            public method meshArrived(int ox, int oy) returns void {
+                this.x0 = ox;
+                this.y0 = oy;
+                this.baked = true;
+                return;
+            }
+
+            // The world changed under the mesh, so what is on the card no longer describes it.
+            public method meshLost() returns void {
+                this.baked = false;
+                return;
+            }
+
+            // WHETHER THE LOD ADMITS DETAIL AT ALL, with hysteresis.
+            //
+            // The threshold is the REACH -- how far the camera can see, in cells -- and not an
+            // altitude. The rule that keyed off altitude let detail switch on while the view still
+            // ran far past the window, so the screen came out as a detailed square with coarse
+            // blocks all around it: detail was on, but not everywhere it was being looked at. Detail
+            // is on exactly when the whole footprint fits, so whenever it is on, everything on
+            // screen is at full detail.
+            //
+            // Coming on and going off use different thresholds on purpose. One threshold means the
+            // camera sitting on it toggles the LOD every frame, and every toggle is a full rebake.
+            public method admits(int reach) returns boolean {
+                if (this.wanted) {
+                    if (reach > this.cap * 5 / 4) {
+                        // `baked` is deliberately NOT cleared here -- that is the whole point of
+                        // the pair. Clearing it (the shape a three-state enum would force) makes
+                        // `a_baked_mesh_survives_the_lod_switching_off` go red.
+                        this.wanted = false;
+                        return false;
+                    }
+                    return true;
+                }
+                if (reach > this.cap) {
+                    return false;
+                }
+                this.wanted = true;
+                return true;
+            }
+
+            // THE WINDOW HAS TO COVER WHAT THE CAMERA CAN SEE. Fixed at 144 cells it spanned 288
+            // world units, while at any altitude where detail was still enabled the view reached far
+            // past that -- so the middle of the screen was real terrain and everything around it was
+            // coarse blocks, which reads as the LOD not switching at all.
+            //
+            // A resize costs a full rebake, so it needs a dead band of its own: quantising alone
+            // still fires on every step across a boundary, and a wheel zoom crosses several.
+            public method resizeFor(int reach) returns boolean {
+                mutable int want = reach;
+                if (want < DetailWindow.FLOOR) {
+                    want = DetailWindow.FLOOR;
+                }
+                if (want > this.cap) {
+                    want = this.cap;
+                }
+                want = want / DetailWindow.STEP * DetailWindow.STEP;
+                mutable int gap = want - this.wide;
+                if (gap < 0) {
+                    gap = 0 - gap;
+                }
+                if (gap < DetailWindow.STEP) {
+                    return false;
+                }
+                this.wide = want;
+                this.high = want;
+                return true;
+            }
+
+            // Where the window should sit for a view centred on (centreX, centreY) in WORLD units,
+            // clamped so it stays inside a world of worldW x worldH cells. Answers whether that is
+            // far enough from the mesh on the card to be worth rebaking.
+            //
+            // A rebake no longer blocks a frame, so it is triggered EARLY: back down to a sixth of
+            // the window. The wide dead band was there to hide a hitch, and it was also why the
+            // detail visibly lagged the camera -- the view had to drift a third of the way out
+            // before anything happened.
+            public method placeAt(float centreX, float centreY, int worldW, int worldH,
+                                  boolean resized) returns boolean {
+                mutable int tx = cast<int>(centreX / 2.0) - this.wide / 2;
+                mutable int ty = cast<int>(centreY / 2.0) - this.high / 2;
+                if (tx < 0) { tx = 0; }
+                if (ty < 0) { ty = 0; }
+                if (tx > worldW - this.wide) { tx = worldW - this.wide; }
+                if (ty > worldH - this.high) { ty = worldH - this.high; }
+                this.nextX = tx;
+                this.nextY = ty;
+                if (this.baked && !resized) {
+                    mutable int mx = tx - this.x0;
+                    if (mx < 0) { mx = 0 - mx; }
+                    mutable int my = ty - this.y0;
+                    if (my < 0) { my = 0 - my; }
+                    if (mx <= this.wide / 6 && my <= this.high / 6) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+    }
+}
