@@ -129,19 +129,22 @@ public bundle Agents {
                 return Newton.cos(x);
             }
 
-            public method drawTri(float ax, float ay, float az, float bx, float by, float bz,
-                                  float ccx, float ccy, float ccz,
-                                  float nax, float nay, float naz, float nbx, float nby, float nbz,
-                                  float ncx, float ncy, float ncz, int r, int g, int b, int grp) returns void {
-                float qax = ax - this.tx;
-                float qay = ay - this.ty;
-                float qaz = az - this.tz;
-                float qbx = bx - this.tx;
-                float qby = by - this.ty;
-                float qbz = bz - this.tz;
-                float qcx = ccx - this.tx;
-                float qcy = ccy - this.ty;
-                float qcz = ccz - this.tz;
+            // One triangle: three corners, each with the normal it is shaded by, in one colour.
+            //
+            // These were twenty-two loose parameters -- eighteen of them floats of the same type in
+            // a row, where any two swapped compiles and draws and is simply wrong somewhere on the
+            // screen.
+            public method drawTri(Vec3 a, Vec3 b, Vec3 c, Vec3 na, Vec3 nb, Vec3 nc,
+                                  Rgb tint, int grp) returns void {
+                float qax = a.x - this.tx;
+                float qay = a.y - this.ty;
+                float qaz = a.z - this.tz;
+                float qbx = b.x - this.tx;
+                float qby = b.y - this.ty;
+                float qbz = b.z - this.tz;
+                float qcx = c.x - this.tx;
+                float qcy = c.y - this.ty;
+                float qcz = c.z - this.tz;
                 float sax = this.ox + this.scale * (qax * this.rx + qay * this.ry + qaz * this.rz);
                 float say = this.oy - this.scale * (qax * this.ux + qay * this.uy + qaz * this.uz);
                 float da = qax * this.cx + qay * this.cy + qaz * this.cz;
@@ -165,9 +168,9 @@ public bundle Agents {
                     return;
                 }
                 float inv = 1.0 / denom;
-                float br = cast<float>(r) / 255.0;
-                float bg = cast<float>(g) / 255.0;
-                float bb = cast<float>(b) / 255.0;
+                float br = cast<float>(tint.r);
+                float bg = cast<float>(tint.g);
+                float bb = cast<float>(tint.b);
                 mutable int py = miny;
                 while (py < maxy) {
                     float fy = cast<float>(py) + 0.5;
@@ -181,9 +184,9 @@ public bundle Agents {
                             float depth = wa * da + wb * db + wc * dc;
                             int idx = py * this.wpx + px;
                             if (depth > this.zb[idx]) {
-                                float nx = wa * nax + wb * nbx + wc * ncx;
-                                float ny = wa * nay + wb * nby + wc * ncy;
-                                float nz = wa * naz + wb * nbz + wc * ncz;
+                                float nx = wa * na.x + wb * nb.x + wc * nc.x;
+                                float ny = wa * na.y + wb * nb.y + wc * nc.y;
+                                float nz = wa * na.z + wb * nb.z + wc * nc.z;
                                 float nl = this.fsqrt(nx * nx + ny * ny + nz * nz) + 0.000000001;
                                 mutable float ndl = (nx * this.lx + ny * this.ly + nz * this.lz) / nl;
                                 if (ndl < 0.0) { ndl = 0.0; }
@@ -222,11 +225,31 @@ public bundle Agents {
                 return m;
             }
 
-            public method drawQuad(float ax, float ay, float az, float bx, float by, float bz,
-                                   float ccx, float ccy, float ccz, float dx, float dy, float dz,
-                                   float nx, float ny, float nz, int r, int g, int b, int grp) returns void {
-                this.drawTri(ax, ay, az, bx, by, bz, ccx, ccy, ccz, nx, ny, nz, nx, ny, nz, nx, ny, nz, r, g, b, grp);
-                this.drawTri(ax, ay, az, ccx, ccy, ccz, dx, dy, dz, nx, ny, nz, nx, ny, nz, nx, ny, nz, r, g, b, grp);
+            // A flat quad: four corners sharing one normal, cut into two triangles.
+            public method drawQuad(Vec3 a, Vec3 b, Vec3 c, Vec3 d, Vec3 n,
+                                   Rgb tint, int grp) returns void {
+                this.drawTri(a, b, c, n, n, n, tint, grp);
+                this.drawTri(a, c, d, n, n, n, tint, grp);
+            }
+
+            // The wall that fills 0..wz beneath a raised tile, so a lifted plate reads as a solid
+            // column instead of a slab over a hole. The GL renderer draws the same thing (see
+            // `GlWorld3D.emitSkirt`); this is the preview's copy of it, and it stands apart because
+            // it feeds a different pipeline -- flat quads with one normal each, against a vertex
+            // buffer -- and shares no code with it, only the shape.
+            private method drawSkirt(float wx, float wy, float wz, Rgb side, int grp) returns void {
+                float x0 = wx - 1.0;
+                float x1 = wx + 1.0;
+                float y0 = wy - 1.0;
+                float y1 = wy + 1.0;
+                this.drawQuad(new Vec3(x1, y0, 0.0), new Vec3(x1, y1, 0.0), new Vec3(x1, y1, wz),
+                              new Vec3(x1, y0, wz), new Vec3(1.0, 0.0, 0.0), side, grp);
+                this.drawQuad(new Vec3(x0, y0, 0.0), new Vec3(x0, y0, wz), new Vec3(x0, y1, wz),
+                              new Vec3(x0, y1, 0.0), new Vec3(0.0 - 1.0, 0.0, 0.0), side, grp);
+                this.drawQuad(new Vec3(x0, y1, 0.0), new Vec3(x0, y1, wz), new Vec3(x1, y1, wz),
+                              new Vec3(x1, y1, 0.0), new Vec3(0.0, 1.0, 0.0), side, grp);
+                this.drawQuad(new Vec3(x0, y0, 0.0), new Vec3(x1, y0, 0.0), new Vec3(x1, y0, wz),
+                              new Vec3(x0, y0, wz), new Vec3(0.0, 0.0 - 1.0, 0.0), side, grp);
             }
 
             // Draw biome `ord` at grid cell world-corner (wx,wy) raised to top height wz. A skirt fills
@@ -236,17 +259,8 @@ public bundle Agents {
                 int tn = a.triCount[ord];
                 int sideGrp = gbase + a.grp[t0];
                 if (wz > 0.02) {
-                    int sr = a.cr[t0];
-                    int sg = a.cg[t0];
-                    int sb = a.cb[t0];
-                    float x0 = wx - 1.0;
-                    float x1 = wx + 1.0;
-                    float y0 = wy - 1.0;
-                    float y1 = wy + 1.0;
-                    this.drawQuad(x1, y0, 0.0, x1, y1, 0.0, x1, y1, wz, x1, y0, wz, 1.0, 0.0, 0.0, sr, sg, sb, sideGrp);
-                    this.drawQuad(x0, y0, 0.0, x0, y0, wz, x0, y1, wz, x0, y1, 0.0, 0.0 - 1.0, 0.0, 0.0, sr, sg, sb, sideGrp);
-                    this.drawQuad(x0, y1, 0.0, x0, y1, wz, x1, y1, wz, x1, y1, 0.0, 0.0, 1.0, 0.0, sr, sg, sb, sideGrp);
-                    this.drawQuad(x0, y0, 0.0, x1, y0, 0.0, x1, y0, wz, x0, y0, wz, 0.0, 0.0 - 1.0, 0.0, sr, sg, sb, sideGrp);
+                    this.drawSkirt(wx, wy, wz,
+                                   Rgb.fromBytes(a.cr[t0], a.cg[t0], a.cb[t0]), sideGrp);
                 }
                 mutable int t = 0;
                 while (t < tn) {
@@ -255,12 +269,14 @@ public bundle Agents {
                     int v0 = vb;
                     int v1 = vb + 1;
                     int v2 = vb + 2;
-                    this.drawTri(a.px[v0] + wx, a.py[v0] + wy, a.pz[v0] + wz,
-                                 a.px[v1] + wx, a.py[v1] + wy, a.pz[v1] + wz,
-                                 a.px[v2] + wx, a.py[v2] + wy, a.pz[v2] + wz,
-                                 a.nx[v0], a.ny[v0], a.nz[v0], a.nx[v1], a.ny[v1], a.nz[v1],
-                                 a.nx[v2], a.ny[v2], a.nz[v2],
-                                 a.cr[tri], a.cg[tri], a.cb[tri], gbase + a.grp[tri]);
+                    this.drawTri(new Vec3(a.px[v0] + wx, a.py[v0] + wy, a.pz[v0] + wz),
+                                 new Vec3(a.px[v1] + wx, a.py[v1] + wy, a.pz[v1] + wz),
+                                 new Vec3(a.px[v2] + wx, a.py[v2] + wy, a.pz[v2] + wz),
+                                 new Vec3(a.nx[v0], a.ny[v0], a.nz[v0]),
+                                 new Vec3(a.nx[v1], a.ny[v1], a.nz[v1]),
+                                 new Vec3(a.nx[v2], a.ny[v2], a.nz[v2]),
+                                 Rgb.fromBytes(a.cr[tri], a.cg[tri], a.cb[tri]),
+                                 gbase + a.grp[tri]);
                     t = t + 1;
                 }
             }
