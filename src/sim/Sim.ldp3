@@ -1,5 +1,7 @@
 import System.IO.Console;
 import System.Time.Time;
+import Agents.World.Grid;
+import Agents.World.WorldGen;
 program AgentsExe;
 
 // THE WORLD, AND THE THING THAT MAKES IT ADVANCE. It owns the layers and it owns the tick.
@@ -24,6 +26,15 @@ public bundle Agents {
     public namespace Sim {
 
         public class Sim {
+            // THE GROUND EVERYTHING STANDS ON, and the first layer this owns. It was built inside
+            // `renderGlWorld` and handed to the renderer, which made the world a thing the DRAWING
+            // code happened to have -- so anything that wanted a world without a window had to
+            // build its own, by copying six arguments nobody could check.
+            private mutable Grid* ground;
+            // Whether `ground` has been built. A Sim with no world is a legal, useful state -- it
+            // is what the tick's own arithmetic is checked in -- so the destructor has to know
+            // whether there is anything to free.
+            private mutable boolean standing;
             // How many times the world has advanced, ever. Not a frame count: frames are the
             // window's business and this is the world's.
             private mutable long ticked;
@@ -53,10 +64,52 @@ public bundle Agents {
             // per second. The rebuild made it a count again.
             public static fixed int BUDGET_MS = 8;
 
+            // The size of the world a game is played on.
+            public static fixed int WIDTH = 2560;
+            public static fixed int HEIGHT = 1440;
+
+            // A Sim begins with nothing in it, and the ground is the first thing put in -- the same
+            // way `Wild`, `Population` and `Atlas` arrive, one per slice.
+            //
+            // IT IS NOT BUILT IN THE CONSTRUCTOR, and the reason is a test that could not be
+            // written. Making a world compulsory to have a Sim meant the tick's arithmetic -- a
+            // fraction carried, a budget spent, a shortfall counted -- could only be checked by
+            // generating terrain first, which is both slow and about something else entirely. A
+            // thing that must be built to exist is a thing that cannot be tested apart.
             public constructor Sim() {
+                standing = false;
                 ticked = 0;
                 owed = 0.0;
                 behind = 0;
+            }
+
+            public destructor ~Sim() returns void {
+                if (standing) {
+                    delete ground;
+                }
+                return;
+            }
+
+            // Generate the ground and take it over.
+            //
+            // THE SEARCH IS PART OF IT, not something each caller remembers. A world is SEARCHED
+            // for rather than merely rolled -- three seeds in twelve produce one the criteria
+            // reject, one continent and five scraps or fourteen islands -- and while that lived at
+            // the call site, every caller carried the same eight arguments and could quietly get
+            // one wrong. There is one way to make the world now.
+            //
+            // `loud` because the search prints a line per rejected roll, which a player waiting on
+            // a window wants and a test run does not.
+            public method buildWorld(int seed, int width, int height, boolean loud) returns void {
+                ground = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, width, height, 6, loud);
+                standing = true;
+                return;
+            }
+
+            // The ground, for whoever draws it or reads it. Borrowed, never owned by the caller:
+            // it dies with the Sim.
+            public method world() returns Grid* {
+                return ground;
             }
 
             // Advance the world by however many whole ticks `pace` has earned, spending at most
@@ -101,6 +154,25 @@ public bundle Agents {
                     owed = 0.0;
                 }
                 return ran;
+            }
+
+            // Advance exactly this many ticks, with no clock in the way.
+            //
+            // THIS IS WHAT LETS A WORLD BE TESTED AT ALL. `advance` is right for a frame -- a pace
+            // to keep and a budget to keep it in -- and wrong for everything else, because both
+            // make the result depend on how fast the machine happened to be. A test asks for five
+            // hundred ticks and must get five hundred, on any machine, every time.
+            //
+            // It is the SAME simulation the window drives, not a second one written to be easy to
+            // check: the same `tick`, the same layers, in the same order. The only thing missing is
+            // the window, and nothing about a world advancing needs one.
+            public method run(int ticks) returns void {
+                mutable int i = 0;
+                while (i < ticks) {
+                    tick();
+                    i = i + 1;
+                }
+                return;
             }
 
             // One tick of the world: every layer's pass, in this order.

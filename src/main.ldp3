@@ -263,25 +263,26 @@ public bundle Agents {
             // write the same variable this initializes -- so this moves the beginning of a session
             // and takes nothing away from it.
             private static method renderGlWorld(int seed, int seconds, Gear opensAt) returns void {
-                int w = 2560;
-                int h = 1440;
+                int w = Sim.WIDTH;
+                int h = Sim.HEIGHT;
                 System.IO.Console.println("agents.exe: generating the world...");
-                // The world a player gets is SEARCHED for, not merely rolled. WorldAudit's criteria
-                // are what makes a world worth playing, and three seeds in twelve produce one they
-                // reject -- one continent and five scraps, or fourteen islands. Six tries is ample:
-                // nine in twelve pass on the first roll.
-                Grid* g = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, w, h, 6, true);
+                // THE WORLD IS THE SIMULATION'S, NOT THE RENDERER'S. Building it here and handing
+                // it to the window made it a thing the DRAWING code happened to have, so anything
+                // that wanted a world without a window had to build its own -- eight arguments
+                // copied to a second place where nothing could check them. `Sim` owns the ground
+                // and searches for it, and the renderer borrows it.
+                Sim sim = new Sim() on stack;
+                sim.buildWorld(seed, w, h, true);
+                Grid* g = sim.world();
                 String root = Main.assetRoot();
                 if (root.length() == 0) {
                     System.IO.Console.println("assets/models not found next to the executable.");
-                    delete g;
                     return;
                 }
                 GlWindow* win = new GlWindow() on heap;
                 if (win.open("agents.exe -- world  [drag/arrows rotate | wheel zoom | WASD pan (Shift fast) | P pixel filter | ESC]", 1280, 720, 3, 3) == 0) {
                     System.IO.Console.println("no GL window available.");
                     delete win;
-                    delete g;
                     return;
                 }
                 win.setVSync(1);
@@ -319,11 +320,6 @@ public bundle Agents {
                 Hud* text = new Hud(win.gl, 14) on heap;
                 mutable int lastX = win.cursorX();
                 mutable int lastY = win.cursorY();
-                // THE WORLD, AND WHAT ADVANCES IT. The tick used to be four loose locals in this
-                // method -- an accumulator, a ceiling, a counter and the loop over them -- which
-                // meant the first layer of the simulation would have had its pass written into a
-                // RENDERING method. `Sim` owns the tick now, and each layer adds a line to it.
-                Sim sim = new Sim() on stack;
                 mutable Gear gear = opensAt;
                 // SAY WHAT SPEED IT OPENED AT. The gear is on the HUD and in the title, which is
                 // no use to a run nobody is watching -- and a run whose speed is not written down
@@ -475,7 +471,8 @@ public bundle Agents {
                 delete nodeMesh;
                 delete props;
                 delete terr;
-                delete g;
+                // No `delete g`: the ground is the Sim's, and the Sim is on the stack -- it goes
+                // when this method does, and takes the world with it.
                 delete win;
                 return;
             }
