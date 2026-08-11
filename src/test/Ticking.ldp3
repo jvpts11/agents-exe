@@ -20,8 +20,8 @@ public bundle Agents {
             [Test]
             public static method a_whole_pace_advances_the_world_once_per_call() returns void {
                 Sim s = new Sim() on stack;
-                Test.assertEqual(s.advance(1.0), 1);
-                Test.assertEqual(s.advance(1.0), 1);
+                Test.assertEqual(s.advance(1.0, Sim.BUDGET_MS), 1);
+                Test.assertEqual(s.advance(1.0, Sim.BUDGET_MS), 1);
                 Test.assertEqual(cast<int>(s.age()), 2);
                 return;
             }
@@ -33,36 +33,49 @@ public bundle Agents {
             [Test]
             public static method a_fraction_of_a_tick_is_carried_to_the_next_call() returns void {
                 Sim s = new Sim() on stack;
-                Test.assertEqual(s.advance(0.5), 0);
-                Test.assertEqual(s.advance(0.5), 1);
+                Test.assertEqual(s.advance(0.5, Sim.BUDGET_MS), 0);
+                Test.assertEqual(s.advance(0.5, Sim.BUDGET_MS), 1);
                 Test.assertEqual(cast<int>(s.age()), 1);
                 return;
             }
 
-            // The ceiling exists so a machine that cannot keep up still answers its keyboard --
-            // including the key that would slow it back down.
+            // THE CEILING IS TIME, AND ASKING FOR A LOT OF FREE WORK GETS ALL OF IT. This is the
+            // test that defect S0-5 fails: under a ceiling of 64 TICKS, gear 6's three hundred
+            // could never be run -- not "this machine cannot keep up" but arithmetic, on every
+            // machine, always. An empty tick costs nothing, so nothing is refused.
             [Tag(name: "sim")]
             [Test]
-            public static method one_call_never_runs_more_than_the_ceiling() returns void {
+            public static method a_pace_that_fits_in_the_budget_runs_whole() returns void {
                 Sim s = new Sim() on stack;
-                Test.assertEqual(s.advance(1000.0), Sim.CEILING);
+                Test.assertEqual(s.advance(300.0, Sim.BUDGET_MS), 300);
+                Test.assertEqual(cast<int>(s.missed()), 0);
                 return;
             }
 
-            // AND WHAT THE CEILING REFUSED IS COUNTED. This is the test that fails today: the
-            // comment above the loop promises "the shortfall is counted" and names the defect it
-            // repeats -- a speed on the screen the world never ran at -- and then the code drops
-            // the backlog with `owed = 0.0` and counts nothing.
+            // No budget still advances the world ONCE. A frame that advances it not at all is a
+            // frozen world, and a machine too slow for a single tick should crawl rather than stop.
+            [Tag(name: "sim")]
+            [Test]
+            public static method no_time_at_all_still_advances_the_world_once() returns void {
+                Sim s = new Sim() on stack;
+                Test.assertEqual(s.advance(50.0, 0), 1);
+                return;
+            }
+
+            // AND WHAT THE BUDGET REFUSED IS COUNTED. The comment on the old loop promised "the
+            // shortfall is counted" and named the defect it repeats -- a speed on the screen the
+            // world never ran at -- and then dropped the backlog with `owed = 0.0` and counted
+            // nothing.
             //
-            // Without it, a gear the machine cannot sustain looks identical to one it can: the
+            // Without it, a pace the machine cannot sustain looks identical to one it can: the
             // window says x6, the world goes at x1.3, and every number measured off that run is
             // labelled with a speed it never had.
             [Tag(name: "sim")]
             [Test]
-            public static method the_ticks_the_ceiling_refused_are_counted() returns void {
+            public static method the_ticks_the_budget_refused_are_counted() returns void {
                 Sim s = new Sim() on stack;
-                s.advance(1000.0);
-                Test.assertTrue(s.missed() > 0);
+                s.advance(50.0, 0);
+                Test.assertEqual(cast<int>(s.missed()), 49);
                 return;
             }
 
@@ -73,7 +86,7 @@ public bundle Agents {
             public static method a_world_that_keeps_up_never_reports_a_shortfall() returns void {
                 Sim s = new Sim() on stack;
                 for (int i in 0..100) {
-                    s.advance(2.0);
+                    s.advance(2.0, Sim.BUDGET_MS);
                 }
                 Test.assertEqual(cast<int>(s.age()), 200);
                 Test.assertEqual(cast<int>(s.missed()), 0);

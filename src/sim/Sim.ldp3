@@ -1,4 +1,5 @@
 import System.IO.Console;
+import System.Time.Time;
 program AgentsExe;
 
 // THE WORLD, AND THE THING THAT MAKES IT ADVANCE. It owns the layers and it owns the tick.
@@ -34,10 +35,23 @@ public bundle Agents {
             // Ticks that were owed and refused by the ceiling. See `missed`.
             private mutable long behind;
 
-            // At most this many ticks in one call. Without it, a pace the machine cannot sustain
-            // spends the whole of the next frame simulating and the window stops answering the
-            // keyboard -- including the key that would slow it back down.
-            public static fixed int CEILING = 64;
+            // How long a frame may spend advancing the world, in milliseconds. A frame at sixty a
+            // second is about seventeen; half of it to the simulation leaves the other half to draw
+            // in, and a world that wants more than that is a world going faster than it can be
+            // watched.
+            //
+            // A BUDGET OF TIME, NOT A COUNT OF TICKS, and the difference is the whole of defect
+            // S0-5. A ceiling of 64 ticks against gear 6's 300 meant the top gear could never be
+            // run -- not "this machine cannot keep up" but arithmetic, on every machine, forever:
+            // 41,920 ticks run and 154,580 refused in a ten-second measurement. A count cannot be
+            // right, because it is a quantity of WORK measured in the wrong unit: 64 empty ticks
+            // are free and 64 ticks of a full world are a third of a second.
+            //
+            // This project already learned it once. The old build hit "2 fps is not the renderer:
+            // the catch-up was 240 TICKS a frame, a count rather than an amount of work", and the
+            // fix was exactly this -- a slice of time -- which took 3 fps to 34 for the same world
+            // per second. The rebuild made it a count again.
+            public static fixed int BUDGET_MS = 8;
 
             public constructor Sim() {
                 ticked = 0;
@@ -45,21 +59,33 @@ public bundle Agents {
                 behind = 0;
             }
 
-            // Advance the world by however many whole ticks `pace` has earned, and answer how many
-            // actually ran.
+            // Advance the world by however many whole ticks `pace` has earned, spending at most
+            // `budgetMillis` doing it, and answer how many actually ran.
             //
             // `pace` is a NUMBER OF TICKS, not a gear and not a speed. The Sim does not know what a
             // gear is and must not: which gear the player chose, and whether the game is paused,
             // are things the window knows. A paused world is a window that does not call this.
-            public method advance(float pace) returns int {
+            //
+            // THE BUDGET IS THE CALLER'S, and that is not indecision. A frame has one to give and a
+            // headless run has none to spend, and neither is a fact about the world. It is also
+            // what makes the ceiling testable at all: an empty tick is free, so the only way to see
+            // the cut happen is to ask for no time.
+            public method advance(float pace, int budgetMillis) returns int {
                 owed = owed + pace;
+                long until = Time.millis() + cast<long>(budgetMillis);
                 mutable int ran = 0;
-                while (owed >= 1.0 && ran < Sim.CEILING) {
+                while (owed >= 1.0) {
                     tick();
                     owed = owed - 1.0;
                     ran = ran + 1;
+                    // Checked AFTER the tick, so a budget of zero still advances the world once.
+                    // A frame that advances it not at all is a frozen world, and a machine too slow
+                    // for one tick should crawl rather than stop.
+                    if (Time.millis() >= until) {
+                        break;
+                    }
                 }
-                // WHAT THE CEILING REFUSED IS COUNTED, and the backlog is dropped rather than
+                // WHAT THE BUDGET REFUSED IS COUNTED, and the backlog is dropped rather than
                 // carried -- a queue of ticks nobody can work off only ever grows, and a world
                 // running an hour behind is not the world anybody is watching.
                 //
@@ -92,7 +118,7 @@ public bundle Agents {
                 return ticked;
             }
 
-            // How many ticks the ceiling has refused over the whole run. Anything above zero means
+            // How many ticks the budget has refused over the whole run. Anything above zero means
             // the world ran slower than the speed it was asked for, and any measurement taken from
             // that run is about a world that went at a different rate than its label says.
             public method missed() returns long {
