@@ -1,0 +1,91 @@
+import System.IO.Console;
+program AgentsExe;
+
+// Every river tile the renderer can reach for, in one place, looked up three ways.
+//
+// The three ways are three genuinely different questions and that is why they stay three tables:
+//
+//   BY SHAPE      -- the sixteen named forms, the fallbacks that cover any connection set by
+//                    rotating an authored tile onto it.
+//   BY MASK       -- one authored tile per connection mask, so a junction gets exactly as many
+//                    arms as there are rivers meeting it, with no rotation and no fallback. This
+//                    is preferred wherever it exists, which is why it is asked first.
+//   BY DESCENT    -- the eight waterfalls, one per compass heading, for where the water pours over
+//                    a lip instead of flowing on flat.
+//
+// All three were loose fields and loops on the renderer: sixteen named ints, a 256-entry array
+// filled in place, and eight more lines naming compass points one at a time. Nothing said they
+// were the same subject.
+public bundle Agents {
+    public namespace Gfx {
+
+        public class RiverSet {
+            private mutable int[] byForm;   // RiverForm ordinal -> mesh ordinal
+            private mutable int[] byMask;   // connection mask (0..255) -> mesh ordinal, or -1
+            private mutable int[] byFall;   // mesh direction (0..7) -> waterfall ordinal, or -1
+
+            public constructor RiverSet() {
+                this.byForm = new int[1]();
+                this.byMask = new int[1]();
+                this.byFall = new int[1]();
+            }
+
+            public destructor ~RiverSet() returns void {
+                delete this.byForm;
+                delete this.byMask;
+                delete this.byFall;
+            }
+
+            // Read every tile out of the atlas. The shape table DERIVES its names from the enum --
+            // the constants are the mesh names, so there is no list here to fall out of step with
+            // the one in RiverForm.
+            public method load(MeshAtlas* rivers) returns void {
+                delete this.byForm;
+                this.byForm = new int[RiverForm.count()]();
+                for (RiverForm f in RiverForm.values()) {
+                    this.byForm[cast<int>(f)] = rivers.ordOf(f.name());
+                }
+                // One authored tile per connection mask.
+                delete this.byMask;
+                this.byMask = new int[256]();
+                mutable int mask = 0;
+                while (mask < 256) {
+                    StringBuilder cn = new StringBuilder() on heap;
+                    cn.append("Conn");
+                    cn.appendInt(mask);
+                    this.byMask[mask] = rivers.ordOf(cn.toString());
+                    delete cn;
+                    mask = mask + 1;
+                }
+                // The eight headings, in the mesh-direction order the picker indexes by.
+                delete this.byFall;
+                this.byFall = new int[8]();
+                this.byFall[0] = rivers.ordOf("FallN");
+                this.byFall[1] = rivers.ordOf("FallNE");
+                this.byFall[2] = rivers.ordOf("FallE");
+                this.byFall[3] = rivers.ordOf("FallSE");
+                this.byFall[4] = rivers.ordOf("FallS");
+                this.byFall[5] = rivers.ordOf("FallSW");
+                this.byFall[6] = rivers.ordOf("FallW");
+                this.byFall[7] = rivers.ordOf("FallNW");
+                return;
+            }
+
+            // The mesh for a named shape. A table keyed by an enum IS index-shaped, so it is
+            // spelled as an index: `set[RiverForm.Straight]`.
+            public operator [] (RiverForm f) returns int {
+                return this.byForm[cast<int>(f)];
+            }
+
+            // The authored tile for an exact connection mask, or -1 where none was drawn.
+            public method forMask(int mask) returns int {
+                return this.byMask[mask];
+            }
+
+            // The waterfall for a heading, or -1.
+            public method forDescent(int dir) returns int {
+                return this.byFall[dir];
+            }
+        }
+    }
+}

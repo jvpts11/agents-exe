@@ -1,0 +1,44 @@
+import System.IO.Console;
+program AgentsExe;
+
+// Which river tile to draw on a cell, and how far to turn it.
+//
+// The picker answered `variant * 4 + rot` -- one int carrying two facts -- and two places
+// downstream took it apart again with `/ 4` and `% 4`. That packing is not wrong; it is what makes
+// the per-cell cache one int wide instead of two, over a window of tens of thousands of cells.
+// What was wrong is that it leaked: the packing was performed in one file and undone in another,
+// so three places had to agree about an encoding none of them named.
+//
+// A struct is what the picker ANSWERS; the packing is what the CACHE stores. Both survive, and
+// each has one place: `packed()` here and `unpack()` here, so the encoding is stated once and the
+// cache stays exactly as wide as it was.
+public bundle Agents {
+    public namespace Gfx {
+
+        public struct RiverPick {
+            // The mesh ordinal in the river atlas. Not a RiverForm: a tile can also come from the
+            // per-connection-mask table or the waterfall set, which are authored tiles outside the
+            // sixteen named shapes.
+            public mutable int mesh;
+            // Quarter turns, 0..3.
+            public mutable int rot;
+
+            public constructor RiverPick(int mesh, int rot) {
+                this.mesh = mesh;
+                this.rot = rot;
+            }
+
+            // What the cache stores: one int, the way it always did.
+            public method packed() returns int {
+                return this.mesh * 4 + this.rot;
+            }
+
+            // And back out of it. These two are the only places the encoding is written, which is
+            // the whole reason the struct exists -- the multiply used to live in one file and the
+            // divide in another.
+            public static method unpack(int packed) returns RiverPick {
+                return new RiverPick(packed / 4, packed % 4);
+            }
+        }
+    }
+}

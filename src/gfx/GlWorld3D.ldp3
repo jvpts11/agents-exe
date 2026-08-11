@@ -57,23 +57,9 @@ public bundle Agents {
             private mutable MeshAtlas* nodes;
             private mutable MeshAtlas* rivers;
             private mutable float[] riverTop;   // per-river-variant top-plate height
-            // river variant ordinals in the rivers atlas
-            private mutable int rvStraight;
-            private mutable int rvDiagonal;
-            private mutable int rvBend;
-            private mutable int rvCorner;
-            private mutable int rvT;
-            private mutable int rvCross;
-            private mutable int rvFork;
-            private mutable int rvSource;
-            private mutable int rvSrcDiag;
-            private mutable int rvDelta;
-            private mutable int rvB45a;
-            private mutable int rvB45b;
-            private mutable int rvB135a;
-            private mutable int rvB135b;
-            private mutable int rvCDiag;
-            private mutable int rvStar;
+            // Every river tile, looked up three ways: by shape, by exact connection mask, and by
+            // the heading water descends in.
+            private mutable RiverSet* riverTiles;
             // a detail bake in flight, spread over frames
             private mutable boolean baking;
             private mutable address bkBuf;
@@ -127,8 +113,6 @@ public bundle Agents {
             private mutable int dNodeN;         // how many are cached
             private mutable int dNodeCur;       // emitting cursor into dNodeK
             private mutable int[] btally;       // per-biome cell count inside one coarse block
-            private mutable int[] connOrd;      // connection mask -> tile ordinal
-            private mutable int[] fallOrd;      // outflow direction -> waterfall tile ordinal
             private mutable int srcW;
             private mutable int srcH;
             private mutable int stride;
@@ -225,8 +209,7 @@ public bundle Agents {
                 this.nInProps = new boolean[1]();
                 this.nScale = new float[1]();
                 this.btally = new int[40]();
-                this.connOrd = new int[1]();
-                this.fallOrd = new int[1]();
+                this.riverTiles = new RiverSet() on heap;
                 this.uProj = gl.getUniformLocation(this.prog, "uProj");
                 this.uView = gl.getUniformLocation(this.prog, "uView");
                 this.uTime = gl.getUniformLocation(this.prog, "uTime");
@@ -278,8 +261,7 @@ public bundle Agents {
                 delete this.nInProps;
                 delete this.nScale;
                 delete this.btally;
-                delete this.connOrd;
-                delete this.fallOrd;
+                delete this.riverTiles;
             }
 
             // A BUFFER IS ONLY UPLOADED IF IT WAS FILLED EXACTLY.
@@ -371,45 +353,7 @@ public bundle Agents {
                     this.riverTop[rm] = rivers.pz[vi];
                     rm = rm + 1;
                 }
-                this.rvStraight = rivers.ordOf("Straight");
-                this.rvDiagonal = rivers.ordOf("Diagonal");
-                this.rvBend = rivers.ordOf("BendDiag");
-                this.rvCorner = rivers.ordOf("Corner90");
-                this.rvT = rivers.ordOf("TJunction");
-                this.rvCross = rivers.ordOf("Crossing");
-                this.rvFork = rivers.ordOf("Fork");
-                this.rvSource = rivers.ordOf("Source");
-                this.rvSrcDiag = rivers.ordOf("SourceDiag");
-                this.rvDelta = rivers.ordOf("Delta");
-                this.rvB45a = rivers.ordOf("Bend45A");
-                this.rvB45b = rivers.ordOf("Bend45B");
-                this.rvB135a = rivers.ordOf("Bend135A");
-                this.rvB135b = rivers.ordOf("Bend135B");
-                this.rvCDiag = rivers.ordOf("CornerDiag");
-                this.rvStar = rivers.ordOf("Star");
-                // One authored tile per connection mask: a junction gets exactly as many arms as
-                // there are rivers meeting it, with no rotation table and no fallback.
-                delete this.connOrd;
-                this.connOrd = new int[256]();
-                mutable int cmask = 0;
-                while (cmask < 256) {
-                    StringBuilder cn = new StringBuilder() on heap;
-                    cn.append("Conn");
-                    cn.appendInt(cmask);
-                    this.connOrd[cmask] = rivers.ordOf(cn.toString());
-                    delete cn;
-                    cmask = cmask + 1;
-                }
-                delete this.fallOrd;
-                this.fallOrd = new int[8]();
-                this.fallOrd[0] = rivers.ordOf("FallN");
-                this.fallOrd[1] = rivers.ordOf("FallNE");
-                this.fallOrd[2] = rivers.ordOf("FallE");
-                this.fallOrd[3] = rivers.ordOf("FallSE");
-                this.fallOrd[4] = rivers.ordOf("FallS");
-                this.fallOrd[5] = rivers.ordOf("FallSW");
-                this.fallOrd[6] = rivers.ordOf("FallW");
-                this.fallOrd[7] = rivers.ordOf("FallNW");
+                this.riverTiles.load(rivers);
                 this.initScatter();
                 this.initNodes();
                 this.bakeCoarse();
@@ -687,7 +631,7 @@ public bundle Agents {
             // Choose (variant, rot) packed as variant*4+rot for a river cell. With the 45/135-degree
             // bends, the diagonal corner and the Star junction, every possible connection set maps to
             // an AUTHORED tile -- 2-connection coverage is exact and complete.
-            private method pickRiver(int gx, int gy) returns int {
+            private method pickRiver(int gx, int gy) returns RiverPick {
                 mutable int conn = this.riverConn(gx, gy);
                 int n = this.bitCount(conn);
                 mutable boolean mouth = false;
@@ -699,7 +643,7 @@ public bundle Agents {
                     }
                 }
                 if (n == 0) {
-                    return this.rvSource * 4;
+                    return new RiverPick(this.riverTiles[RiverForm.Source], 0);
                 }
                 if (n == 1) {
                     int d = this.firstDir(conn);
@@ -707,18 +651,18 @@ public bundle Agents {
                         // Delta: the fan (mesh S) faces the water; rotate S(4) onto d.
                         mutable int kd = (d + 4) / 2;
                         if (kd >= 4) { kd = kd - 4; }
-                        return this.rvDelta * 4 + kd;
+                        return new RiverPick(this.riverTiles[RiverForm.Delta], kd);
                     }
-                    if (d % 2 == 1 && this.rvSrcDiag >= 0) {
+                    if (d % 2 == 1 && this.riverTiles[RiverForm.SourceDiag] >= 0) {
                         // diagonal outflow: the authored DIAGONAL spring (opening NE) -- rounding
                         // to a cardinal left the spring visibly detached from its river
-                        return this.rvSrcDiag * 4 + (d - 1) / 2;
+                        return new RiverPick(this.riverTiles[RiverForm.SourceDiag], (d - 1) / 2);
                     }
                     mutable int k = d / 2;
                     if (d % 2 == 1) {
                         k = ((d + 1) / 2) % 4;                   // diagonal end: nearest quarter turn
                     }
-                    return this.rvSource * 4 + k;
+                    return new RiverPick(this.riverTiles[RiverForm.Source], k);
                 }
                 // A drop: the cell the water leaves for sits a stack level lower, so it pours over
                 // the lip instead of flowing on flat. Nothing marked a descent before, and a river
@@ -733,46 +677,49 @@ public bundle Agents {
                         int thereL = this.stackLvl(this.grid.biomeAt(nx2, ny2), nx2, ny2);
                         if (thereL < hereL && !mouth) {
                             int fd = this.meshDir(fdx, fdy);
-                            if (fd >= 0 && this.fallOrd[fd] >= 0) {
-                                return this.fallOrd[fd] * 4;
+                            if (fd >= 0 && this.riverTiles.forDescent(fd) >= 0) {
+                                return new RiverPick(this.riverTiles.forDescent(fd), 0);
                             }
                         }
                     }
                 }
-                if (n >= 2 && this.connOrd[conn] >= 0) {
-                    return this.connOrd[conn] * 4;
+                // The exact-mask tile is preferred wherever one was authored: it needs no rotation
+                // and has exactly as many arms as there are rivers meeting the cell.
+                if (n >= 2 && this.riverTiles.forMask(conn) >= 0) {
+                    return new RiverPick(this.riverTiles.forMask(conn), 0);
                 }
                 if (n == 2) {
                     mutable int k = this.matchRot(1 | 16, conn);              // Straight {N,S}
-                    if (k >= 0) { return this.rvStraight * 4 + k; }
+                    if (k >= 0) { return new RiverPick(this.riverTiles[RiverForm.Straight], k); }
                     k = this.matchRot(2 | 32, conn);                          // Diagonal {NE,SW}
-                    if (k >= 0) { return this.rvDiagonal * 4 + k; }
+                    if (k >= 0) { return new RiverPick(this.riverTiles[RiverForm.Diagonal], k); }
                     k = this.matchRot(16 | 4, conn);                          // Corner {S,E}
-                    if (k >= 0) { return this.rvCorner * 4 + k; }
+                    if (k >= 0) { return new RiverPick(this.riverTiles[RiverForm.Corner90], k); }
                     k = this.matchRot(1 | 2, conn);                           // Bend45A {N,NE}
-                    if (k >= 0) { return this.rvB45a * 4 + k; }
+                    if (k >= 0) { return new RiverPick(this.riverTiles[RiverForm.Bend45A], k); }
                     k = this.matchRot(2 | 4, conn);                           // Bend45B {NE,E}
-                    if (k >= 0) { return this.rvB45b * 4 + k; }
+                    if (k >= 0) { return new RiverPick(this.riverTiles[RiverForm.Bend45B], k); }
                     k = this.matchRot(1 | 8, conn);                           // Bend135A {N,SE}
-                    if (k >= 0) { return this.rvB135a * 4 + k; }
+                    if (k >= 0) { return new RiverPick(this.riverTiles[RiverForm.Bend135A], k); }
                     k = this.matchRot(2 | 16, conn);                          // Bend135B {NE,S}
-                    if (k >= 0) { return this.rvB135b * 4 + k; }
+                    if (k >= 0) { return new RiverPick(this.riverTiles[RiverForm.Bend135B], k); }
                     k = this.matchRot(2 | 8, conn);                           // CornerDiag {NE,SE}
-                    if (k >= 0) { return this.rvCDiag * 4 + k; }
-                    return this.rvStar * 4;
+                    if (k >= 0) { return new RiverPick(this.riverTiles[RiverForm.CornerDiag], k); }
+                    return new RiverPick(this.riverTiles[RiverForm.Star], 0);
                 }
                 if (n == 3) {
                     mutable int k = this.matchRot(64 | 4 | 1, conn);          // T {W,E,N}
-                    if (k >= 0) { return this.rvT * 4 + k; }
+                    if (k >= 0) { return new RiverPick(this.riverTiles[RiverForm.TJunction], k); }
                     k = this.matchRot(16 | 2 | 128, conn);                    // Fork {S,NE,NW}
-                    if (k >= 0) { return this.rvFork * 4 + k; }
-                    return this.rvStar * 4;                                   // odd junction: star pool
+                    if (k >= 0) { return new RiverPick(this.riverTiles[RiverForm.Fork], k); }
+                    // odd junction: star pool
+                    return new RiverPick(this.riverTiles[RiverForm.Star], 0);
                 }
                 mutable int kx = this.matchRot(1 | 4 | 16 | 64, conn);        // Crossing {N,E,S,W}
                 if (kx >= 0) {
-                    return this.rvCross * 4 + kx;
+                    return new RiverPick(this.riverTiles[RiverForm.Crossing], kx);
                 }
-                return this.rvStar * 4;
+                return new RiverPick(this.riverTiles[RiverForm.Star], 0);
             }
 
             // A water quad from (x0,y0,z0) to (x1,y1,z1) -- each end at its own height, so the
@@ -1658,9 +1605,11 @@ public bundle Agents {
                         // every river short of the sea
                         int slot = y * this.detW + x;
                         if (ord > 7 && this.grid.hasRiver(gx, gy)) {
-                            int pk = this.pickRiver(gx, gy);
-                            this.dRiverC[slot] = pk;
-                            tris = tris + this.countRTile(pk / 4, lvl);
+                            RiverPick pk = this.pickRiver(gx, gy);
+                            // The cache stays one int wide over tens of thousands of cells; the
+                            // struct is what the picker answers.
+                            this.dRiverC[slot] = pk.packed();
+                            tris = tris + this.countRTile(pk.mesh, lvl);
                         } else {
                             this.dRiverC[slot] = 0 - 1;
                             // The `+ 8` that stood here was the skirt, added unconditionally. It was
@@ -1800,9 +1749,10 @@ public bundle Agents {
                         float wy = cast<float>(gy * 2 + 1);
                         float shade = this.shadeAt(gx, gy, 1, lvl);
                         int slot = y * this.detW + x;
-                        int pk = this.dRiverC[slot];
-                        if (pk >= 0) {
-                            w = this.emitRTile(buf, w, pk / 4, pk % 4, ord, wx, wy, zOff, shade);
+                        int cached = this.dRiverC[slot];
+                        if (cached >= 0) {
+                            RiverPick pk = RiverPick.unpack(cached);
+                            w = this.emitRTile(buf, w, pk.mesh, pk.rot, ord, wx, wy, zOff, shade);
                         } else {
                             w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false,
                                               this.thinDecor(ord, gx, gy), shade);
