@@ -51,30 +51,34 @@ public bundle Agents {
             // Every river tile, looked up three ways: by shape, by exact connection mask, and by
             // the heading water descends in.
             private mutable RiverSet* riverTiles;
-            // a detail bake in flight, spread over frames
-            private mutable boolean baking;
-            private mutable address bkBuf;
+            // THE DETAIL BAKE IN FLIGHT, spread over frames: which half it is in, how far through,
+            // and everything the counting pass has to tell the emitting one. Sixteen fields told
+            // apart by two prefixes until they had a type.
+            //
+            // Why the handover exists at all: the bake is sliced, so the world keeps running
+            // between the pass that sizes the buffer and the pass that fills it. `NodeField.regrow`
+            // runs EVERY TICK and rewrites a node's kind in place -- a felled tree comes back, bare
+            // ground seeds -- so a stump counted as nothing could be a tree by the time it was
+            // drawn, writing triangles into a buffer sized without them. That is a heap overrun,
+            // and it landed as "double free of a heap block" somewhere else entirely, minutes
+            // later, in a run that looked nothing like the cause. It read as a rare one-off while
+            // the world was only ever watched at life speed; at the top gear it took down two
+            // windows in six inside a minute.
+            //
+            // The bake is a photograph. It has to develop the picture it took.
+            private mutable BakeJob* job;
             // How many floats the buffer being filled right now can hold, and how many writes have
             // been refused for running past it. `wrOver` should be zero for the life of a run; it
             // is reported on the way out, so a disagreement between a counting pass and its
             // emitting pass shows up as a number instead of as a heap panic in an unrelated place.
+            //
+            // These two stay on the renderer rather than moving to the job, and the reason is that
+            // `wr` reads the cap once per VERTEX -- roughly a million times a slice. Reaching it
+            // through the job would be a second pointer hop on the hottest line in the file, and
+            // the cap is not the job's anyway: the coarse and hint bakes set it for their own
+            // buffers too.
             private mutable int wrCap;
             private mutable int wrOver;
-            private mutable int bkTris;
-            private mutable int bkW;
-            private mutable int bkRow;
-            // A refresh asked for while a bake was still running. Held rather than dropped, and
-            // rather than restarting the pass in flight -- see refreshDetail.
-            private mutable boolean reBake;
-            private mutable int bkOx;
-            private mutable int bkOy;
-            private mutable int bkPhase;        // 0 = counting, 1 = emitting
-            // THE `d` PREFIX NAMES TWO THINGS, not one. The window's geometry (its size and origin,
-            // below) is one; these caches are the other -- per-cell decisions taken by the counting
-            // pass and read back by the emitting pass, which belong to the BAKE and not to the
-            // window. They move with the bake job when it becomes a type; grouping them by their
-            // shared letter would have put the two halves in one box and called it done.
-            private mutable int[] dRiverC;      // detail bake scratch: river variant per cell, or -1
             // The roads. One atlas for all four surfaces, because their names already carry which
             // one they are -- four atlases would have been four fields, four lookups and four more
             // parameters through `setup` for nothing.
@@ -84,30 +88,6 @@ public bundle Agents {
             // What people carry and what marks a leader.
             // What moves goods. Drawn where the simulation actually has one: a cart under a carter
             // who is hauling, a hull at a quay that can put to sea.
-            private mutable int[] dPropC;       // detail bake scratch: prop ordinal per cell, or -1
-            private mutable int[] dNodeA;       // detail bake scratch: first node instance of each row
-            private mutable int[] dNodeB;       // detail bake scratch: one past the last
-            // WHAT EACH OF THOSE NODES WAS WHEN IT WAS COUNTED.
-            //
-            // The detail bake sizes its buffer in one pass and fills it in another, and the two are
-            // many frames apart -- that is the whole point of slicing it. Everything else the two
-            // passes disagree about is already cached between them: the river tile, the way tile,
-            // the clutter. The node instances were not; the emitting pass went back and asked the
-            // world what kind each one was.
-            //
-            // The world answers differently, because `NodeField.regrow` runs EVERY TICK and rewrites
-            // a node's kind in place -- a felled tree comes back, bare ground seeds. So a stump that
-            // was counted as nothing could be a tree by the time it was drawn, and it would write
-            // triangles into a buffer sized without them. That is a heap overrun, and it landed as
-            // "double free of a heap block" somewhere else entirely, minutes later, in a run that
-            // looked nothing like the cause. It read as a rare one-off for as long as the world was
-            // only ever watched at life speed, where almost nothing regrows between two frames; at
-            // the top gear it took down two windows in six inside a minute.
-            //
-            // The bake is a photograph. It has to develop the picture it took.
-            private mutable int[] dNodeK;       // kind per visited instance, in visit order
-            private mutable int dNodeN;         // how many are cached
-            private mutable int dNodeCur;       // emitting cursor into dNodeK
             private mutable int[] btally;       // per-biome cell count inside one coarse block
             private mutable int srcW;
             private mutable int srcH;
@@ -155,38 +135,21 @@ public bundle Agents {
                 this.terrainLook = new TerrainLooks() on heap;
                 this.riverTop = new float[1]();
                 this.scatter = new ScatterRules() on heap;
-                this.baking = false;
-                this.bkBuf = cast<address>(0);
+                this.job = new BakeJob() on heap;
                 this.wrCap = 0;
                 this.wrOver = 0;
-                this.bkTris = 0;
-                this.bkW = 0;
-                this.bkRow = 0;
-                this.bkOx = 0;
-                this.bkOy = 0;
-                this.bkPhase = 0;
-                this.dRiverC = new int[1]();
-                this.dPropC = new int[1]();
-                this.dNodeA = new int[1]();
-                this.dNodeB = new int[1]();
-                this.dNodeK = new int[1]();
-                this.dNodeN = 0;
-                this.dNodeCur = 0;
                 this.nodeArt = new NodeArt() on heap;
                 this.btally = new int[40]();
                 this.riverTiles = new RiverSet() on heap;
                 this.timeSec = 0.0;
-                // Everything the world supplies, before there is a world. `setup` fills the first
-                // five and nothing reads them until it has; `reBake` is the odd one out -- it was
-                // only ever assigned inside the bake, so its first read was of whatever the
-                // allocator had left there. hintProp starts at the -1 that means "no such model",
-                // which is the answer that suppresses the hint layer.
+                // Everything the world supplies, before there is a world. `setup` fills these and
+                // nothing reads them until it has. hintProp starts at the -1 that means "no such
+                // model", which is the answer that suppresses the hint layer.
                 this.srcW = 0;
                 this.srcH = 0;
                 this.stride = 1;
                 this.stepH = 0.0;
                 this.hintProp = 0 - 1;
-                this.reBake = false;
                 this.window = new DetailWindow(144, 384) on heap;
                 this.camera = new OrbitCamera() on heap;
                 this.post = new PostFx(gl) on heap;
@@ -215,11 +178,7 @@ public bundle Agents {
                 delete this.terrainLook;
                 delete this.riverTop;
                 delete this.scatter;
-                delete this.dRiverC;
-                delete this.dPropC;
-                delete this.dNodeA;
-                delete this.dNodeB;
-                delete this.dNodeK;
+                delete this.job;
                 delete this.nodeArt;
                 delete this.btally;
                 delete this.riverTiles;
@@ -1438,47 +1397,24 @@ public bundle Agents {
             // in. Until then the previous geometry stays on screen, so nothing pops and no
             // frame pays for more than its slice.
             private method beginBake(int ox, int oy) returns void {
-                int dn = this.window.cells();
-                int rows = this.window.height();
-                if (this.dRiverC.length() != dn) {
-                    delete this.dRiverC;
-                    delete this.dPropC;
-                    this.dRiverC = new int[dn]();
-                    this.dPropC = new int[dn]();
-                }
-                if (this.dNodeA.length() != rows) {
-                    delete this.dNodeA;
-                    delete this.dNodeB;
-                    this.dNodeA = new int[rows]();
-                    this.dNodeB = new int[rows]();
-                }
-                this.bkTris = 0;
-                this.bkW = 0;
-                this.bkRow = 0;
-                this.dNodeN = 0;
-                this.dNodeCur = 0;
-                this.bkOx = ox;
-                this.bkOy = oy;
-                this.bkPhase = 0;
-                this.baking = true;
+                this.job.begin(ox, oy, this.window.cells(), this.window.height());
                 return;
             }
 
-            // Phase 0, sliced: size the buffer, and cache the two costly per-cell answers for the
-            // emitting phase to read back -- pickRiver alone costs eight neighbour lookups plus each
-            // neighbour's flow direction.
-            //
+            // The counting half, sliced: size the buffer, and cache the two costly per-cell answers
+            // for the emitting half to read back -- pickRiver alone costs eight neighbour lookups
+            // plus each neighbour's flow direction.
             // This pass used to run whole in beginBake, and that is the hitch felt at the moment the
             // LOD switches on: it walks the window exactly as the emitting pass does, so leaving it
             // unsliced left half the bake blocking a single frame, and it grew with the window along
             // with everything else.
             private method countRows(int stop) returns void {
-                int ox = this.bkOx;
-                int oy = this.bkOy;
+                int ox = this.job.originX();
+                int oy = this.job.originY();
                 // Read once, not per cell: this walk visits tens of thousands of them a slice.
                 int wide = this.window.width();
-                mutable int tris = this.bkTris;
-                mutable int y = this.bkRow;
+                mutable int tris = this.job.triangles();
+                mutable int y = this.job.rowReached();
                 while (y < stop) {
                     mutable int x = 0;
                     while (x < wide) {
@@ -1494,10 +1430,10 @@ public bundle Agents {
                             RiverPick pk = this.pickRiver(gx, gy);
                             // The cache stays one int wide over tens of thousands of cells; the
                             // struct is what the picker answers.
-                            this.dRiverC[slot] = pk.packed();
+                            this.job.rememberRiver(slot, pk.packed());
                             tris = tris + this.countRTile(pk.mesh, lvl);
                         } else {
-                            this.dRiverC[slot] = 0 - 1;
+                            this.job.rememberRiver(slot, 0 - 1);
                             // The `+ 8` that stood here was the skirt, added unconditionally. It was
                             // RIGHT, and right by coincidence: the detail lift carries a fixed 0.8
                             // that clears the skirt threshold whatever the cell's level, so the two
@@ -1511,7 +1447,7 @@ public bundle Agents {
                         // Decorative clutter only: the resource nodes are instances with their own
                         // positions and are counted per ROW, below.
                         int p = this.detailPropAt(gx, gy, ord);
-                        this.dPropC[slot] = p;
+                        this.job.rememberProp(slot, p);
                         if (p >= 0) {
                             tris = tris + this.props.triCount[p] * 2 * GlWorld3D.CLUTTER;
                         }
@@ -1552,21 +1488,8 @@ public bundle Agents {
                         if (nf.qtyAt(b) <= 0) {
                             nk = 0;
                         }
-                        // Remembered, not looked up again later. See dNodeK.
-                        if (this.dNodeN >= this.dNodeK.length()) {
-                            mutable int grow = this.dNodeK.length() * 2;
-                            if (grow < 1024) {
-                                grow = 1024;
-                            }
-                            mutable int[] bigger = new int[grow]();
-                            for (int q in 0..this.dNodeN) {
-                                bigger[q] = this.dNodeK[q];
-                            }
-                            delete this.dNodeK;
-                            this.dNodeK = bigger;
-                        }
-                        this.dNodeK[this.dNodeN] = nk;
-                        this.dNodeN = this.dNodeN + 1;
+                        // Remembered, not looked up again later -- see BakeJob.
+                        this.job.rememberNode(nk);
                         if (nk != 0 && this.nodeArt[nk].drawable()) {
                             tris = tris + this.nodeTris(nk);
                             if (Nodes.castsShadow(nk)) {
@@ -1575,17 +1498,15 @@ public bundle Agents {
                         }
                         b = b + 1;
                     }
-                    this.dNodeA[y] = a;
-                    this.dNodeB[y] = b;
+                    this.job.rememberRowNodes(y, a, b);
                     y = y + 1;
                 }
-                this.bkTris = tris;
-                this.bkRow = y;
+                this.job.counted(tris, y);
                 if (y >= this.window.height()) {
-                    this.bkBuf = Allocator.alloc(cast<long>(tris * 27 * 4 + 4));
-                    this.bkPhase = 1;
-                    this.bkRow = 0;
-                    this.bkW = 0;
+                    // The `+ 4` is slack past the exact size, so a write that the guard lets through
+                    // at the very end has somewhere to land rather than the next block's header.
+                    this.job.startEmitting(
+                        Allocator.alloc(cast<long>(this.job.floatsCounted() * 4 + 4)));
                 }
                 return;
             }
@@ -1596,7 +1517,7 @@ public bundle Agents {
             // exactly where there was the most of it to do. A cell budget makes the per-frame cost
             // the same at any zoom, and simply takes more frames when there is more to build.
             private method stepBake() returns void {
-                if (!this.baking) {
+                if (!this.job.isRunning()) {
                     return;
                 }
                 int wide = this.window.width();
@@ -1605,23 +1526,23 @@ public bundle Agents {
                 if (rows < 1) {
                     rows = 1;
                 }
-                if (this.bkPhase == 0) {
-                    mutable int cstop = this.bkRow + rows;
+                if (this.job.phase() == BakePhase.Counting) {
+                    mutable int cstop = this.job.rowReached() + rows;
                     if (cstop > high) {
                         cstop = high;
                     }
                     this.countRows(cstop);
                     return;
                 }
-                address buf = this.bkBuf;
+                address buf = this.job.buffer();
                 // Re-declared on every slice, because the other bakes run between them and each one
                 // sets this for its own buffer. This is the pass the guard exists for: the buffer
                 // was sized frames ago and the world has not stopped since.
-                this.wrCap = this.bkTris * 27;
-                int ox = this.bkOx;
-                int oy = this.bkOy;
-                mutable int w = this.bkW;
-                mutable int y = this.bkRow;
+                this.wrCap = this.job.floatsCounted();
+                int ox = this.job.originX();
+                int oy = this.job.originY();
+                mutable int w = this.job.written();
+                mutable int y = this.job.rowReached();
                 int stop = y + rows;
                 while (y < high && y < stop) {
                     mutable int x = 0;
@@ -1637,7 +1558,7 @@ public bundle Agents {
                         float wy = cast<float>(gy * 2 + 1);
                         float shade = this.shadeAt(gx, gy, 1, lvl);
                         int slot = y * wide + x;
-                        int cached = this.dRiverC[slot];
+                        int cached = this.job.riverAt(slot);
                         if (cached >= 0) {
                             RiverPick pk = RiverPick.unpack(cached);
                             w = this.emitRTile(buf, w, pk.mesh, pk.rot, ord, wx, wy, zOff, shade);
@@ -1645,7 +1566,7 @@ public bundle Agents {
                             w = this.emitTile(buf, w, ord, wx, wy, zOff, 1.0, false,
                                               this.thinDecor(ord, gx, gy), shade);
                         }
-                        int p = this.dPropC[slot];
+                        int p = this.job.propAt(slot);
                         if (p >= 0) {
                             float topZ = this.terrainLook[ord].top + zOff;
                             Rgb under = this.groundUnder(ord, shade);
@@ -1676,23 +1597,14 @@ public bundle Agents {
                     }
                     // The resource nodes of this row, each at the position the world gave it.
                     NodeField* nf = this.grid.surface();
-                    mutable int ni = this.dNodeA[y];
-                    int nEnd = this.dNodeB[y];
+                    mutable int ni = this.job.rowFirstNode(y);
+                    int nEnd = this.job.rowLastNode(y);
                     while (ni < nEnd) {
                         // The kind this node had WHEN THE BUFFER WAS SIZED, not the kind it has
                         // now: the world has been running the whole time this bake has been going
                         // in, and asking it again is how a tree that grew back in the meantime
-                        // wrote triangles nobody had counted. See dNodeK.
-                        // ONE STEP PER NODE, IN OR OUT OF RANGE. The advance used to sit inside
-                        // the bounds test, so a cursor that ran past the end simply stopped
-                        // counting -- and `dNodeCur == dNodeN` then read true however far the two
-                        // passes had drifted apart. A cursor that lies about its own position
-                        // cannot be the thing that checks the alignment.
-                        mutable int nk = 0;
-                        if (this.dNodeCur < this.dNodeN) {
-                            nk = this.dNodeK[this.dNodeCur];
-                        }
-                        this.dNodeCur = this.dNodeCur + 1;
+                        // wrote triangles nobody had counted. See BakeJob.
+                        int nk = this.job.takeNodeKind();
                         if (nk != 0 && this.nodeArt[nk].drawable()) {
                             int cx2 = nf.cellXAt(ni);
                             int cy2 = nf.cellYAt(ni);
@@ -1721,12 +1633,11 @@ public bundle Agents {
                     }
                     y = y + 1;
                 }
-                this.bkW = w;
-                this.bkRow = y;
+                this.job.emitted(w, y);
                 if (y < high) {
                     return;
                 }
-                this.detail.upload(buf, w, this.bkTris * 27);
+                this.detail.upload(buf, w, this.job.floatsCounted());
                 Allocator.free(buf);
                 this.window.meshArrived(ox, oy);
                 this.bakeSettled();
@@ -1785,11 +1696,20 @@ public bundle Agents {
                 if (!this.window.hasMesh()) {
                     return;
                 }
-                if (this.baking) {
-                    this.reBake = true;              // finish this pass; a later frame starts it
+                if (this.job.isRunning()) {
+                    // Finish this pass; a later frame starts the next.
+                    //
+                    // A `reBake` flag stood here to remember that a refresh had been asked for
+                    // while one was running. It had three writes and NO READS -- nothing anywhere
+                    // consulted it -- so the request it claimed to hold was dropped either way, and
+                    // the behaviour is the same without it. It is gone rather than dressed up.
+                    //
+                    // FOR WHOEVER WIRES THE SIMULATION BACK IN: if the world tells the renderer
+                    // about changes on an EVENT rather than every tick, then a change arriving
+                    // during a bake really is lost here, and that is when a held request becomes a
+                    // fact somebody reads instead of a field somebody writes.
                     return;
                 }
-                this.reBake = false;
                 this.beginBake(this.window.originX(), this.window.originY());
                 return;
             }
@@ -1815,9 +1735,9 @@ public bundle Agents {
             // the right shape for that: it is not a value being wrong, it is two passes disagreeing,
             // and the disagreement has no other visible face.
             private method bakeSettled() returns void
-                requires this.dNodeCur == this.dNodeN
+                requires this.job.everyNodeWasRead()
             {
-                this.baking = false;
+                this.job.done();
                 return;
             }
 
@@ -1830,7 +1750,7 @@ public bundle Agents {
             public method flushDetail() returns void {
                 this.ensureDetail();
                 mutable int guard = 0;
-                while (this.baking && guard < 4096) {
+                while (this.job.isRunning() && guard < 4096) {
                     this.stepBake();
                     guard = guard + 1;
                 }
@@ -1852,7 +1772,7 @@ public bundle Agents {
             private method ensureDetail() returns void {
                 // One bake at a time: the window's size and origin must hold still for the whole of
                 // it, and the scratch it reads is sized to that window.
-                if (this.baking) {
+                if (this.job.isRunning()) {
                     return;
                 }
                 float pi = 3.14159265;
@@ -1928,10 +1848,10 @@ public bundle Agents {
             // how the loop's own costs went unmeasured for as long as they did.
             public method render(int fbW, int fbH) returns void {
                 this.ensureDetail();
-                if (this.baking && !this.window.hasMesh()) {
+                if (this.job.isRunning() && !this.window.hasMesh()) {
                     // nothing on screen to cover the wait: finish the first one outright
                     mutable int g0 = 0;
-                    while (this.baking && g0 < 4096) {
+                    while (this.job.isRunning() && g0 < 4096) {
                         this.stepBake();
                         g0 = g0 + 1;
                     }

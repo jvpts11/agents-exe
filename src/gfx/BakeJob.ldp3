@@ -1,0 +1,257 @@
+import System.IO.Console;
+import System.Memory.Allocator;
+
+program AgentsExe;
+
+// A detail-window bake in progress: which half it is in, how far through, what the counting pass
+// found, and everything that pass has to tell the emitting one.
+//
+// Nine fields with a `bk` prefix and seven with a `d`, and the prefix was the only thing saying
+// they belonged together. They are one subject with a shape: two passes over the same rectangle,
+// separated by MANY FRAMES because the work is sliced, with a buffer allocated between them.
+//
+// ---- WHY THE HANDOVER IS THE POINT ----
+//
+// The window is baked in slices so no single frame pays for the whole thing, which means the world
+// keeps running between the pass that counts and the pass that writes. Every question the second
+// pass would ask the world again is a question that may now have a different answer -- and a
+// different answer means writing triangles nobody counted, straight past the end of the buffer.
+// So the first pass does not just count: it REMEMBERS, and the second one reads back rather than
+// asks. That is what `rememberRiver`/`riverAt`, `rememberProp`/`propAt` and `rememberNode`/
+// `takeNodeKind` are, and it is why they are here rather than scattered as caches on the renderer.
+//
+// The node list is read back BY POSITION, one entry per node the emitting pass walks, so a node
+// one pass lists and the other skips shifts every node after it: a scene that reshuffles itself
+// whenever the camera moves. `everyNodeWasRead` is what catches that, and it can only be asked
+// because both cursors live in the same object.
+public bundle Agents {
+    public namespace Gfx {
+
+        public class BakeJob {
+            // What the node list grows to on its first overflow. Below this it would reallocate
+            // several times in the first window.
+            public static fixed int FIRST_GROWTH = 1024;
+
+            private mutable boolean running;
+            private mutable BakePhase half;
+            private mutable int row;         // how far down the window this half has walked
+            private mutable int tris;        // what the counting pass found
+            private mutable int cursor;      // floats the emitting pass has written
+            private mutable address buf;     // allocated between the halves, freed after the upload
+            private mutable int ox;          // the window origin THIS bake is for, which is not
+            private mutable int oy;          // the origin of the mesh currently on the card
+
+            // Filled by the counting pass, read back by the emitting one.
+            private mutable int[] riverCache;   // packed RiverPick per cell, or -1
+            private mutable int[] propCache;    // prop ordinal per cell, or -1
+            private mutable int[] rowFirst;     // first node instance of each row
+            private mutable int[] rowLast;      // one past the last
+            private mutable int[] nodeKinds;    // kind per visited instance, in visit order
+            private mutable int nodesListed;
+            private mutable int nodesRead;
+
+            public constructor BakeJob() {
+                this.running = false;
+                this.half = BakePhase.Counting;
+                this.row = 0;
+                this.tris = 0;
+                this.cursor = 0;
+                this.buf = cast<address>(0);
+                this.ox = 0;
+                this.oy = 0;
+                this.riverCache = new int[1]();
+                this.propCache = new int[1]();
+                this.rowFirst = new int[1]();
+                this.rowLast = new int[1]();
+                this.nodeKinds = new int[1]();
+                this.nodesListed = 0;
+                this.nodesRead = 0;
+            }
+
+            public destructor ~BakeJob() returns void {
+                delete this.riverCache;
+                delete this.propCache;
+                delete this.rowFirst;
+                delete this.rowLast;
+                delete this.nodeKinds;
+            }
+
+            // ---- the run ----------------------------------------------------------------------
+
+            // Start over on the window at (ox, oy), sizing the caches to it.
+            public method begin(int ox, int oy, int cells, int rows) returns void {
+                if (this.riverCache.length() != cells) {
+                    delete this.riverCache;
+                    delete this.propCache;
+                    this.riverCache = new int[cells]();
+                    this.propCache = new int[cells]();
+                }
+                if (this.rowFirst.length() != rows) {
+                    delete this.rowFirst;
+                    delete this.rowLast;
+                    this.rowFirst = new int[rows]();
+                    this.rowLast = new int[rows]();
+                }
+                this.ox = ox;
+                this.oy = oy;
+                this.tris = 0;
+                this.cursor = 0;
+                this.row = 0;
+                this.nodesListed = 0;
+                this.nodesRead = 0;
+                this.half = BakePhase.Counting;
+                this.running = true;
+                return;
+            }
+
+            public method isRunning() returns boolean {
+                return this.running;
+            }
+
+            public method phase() returns BakePhase {
+                return this.half;
+            }
+
+            public method originX() returns int {
+                return this.ox;
+            }
+
+            public method originY() returns int {
+                return this.oy;
+            }
+
+            public method rowReached() returns int {
+                return this.row;
+            }
+
+            public method triangles() returns int {
+                return this.tris;
+            }
+
+            // How many floats the buffer holds if it was filled exactly. Nine per vertex, three
+            // vertices per triangle -- derived here so no caller multiplies by 27 again.
+            public method floatsCounted() returns int {
+                return this.tris * 27;
+            }
+
+            public method written() returns int {
+                return this.cursor;
+            }
+
+            public method buffer() returns address {
+                return this.buf;
+            }
+
+            // A slice of the counting pass is done: this many triangles, walked to this row.
+            public method counted(int tris, int row) returns void {
+                this.tris = tris;
+                this.row = row;
+                return;
+            }
+
+            // Counting reached the bottom. Take the buffer and start writing.
+            public method startEmitting(address buf) returns void {
+                this.buf = buf;
+                this.half = BakePhase.Emitting;
+                this.row = 0;
+                this.cursor = 0;
+                return;
+            }
+
+            // A slice of the emitting pass is done.
+            public method emitted(int written, int row) returns void {
+                this.cursor = written;
+                this.row = row;
+                return;
+            }
+
+            // THE TWO PASSES MUST HAVE WALKED THE SAME NODES. Nothing in either loop makes that
+            // correspondence hold, and when it silently stopped holding, the symptom was a scene
+            // that reshuffled itself whenever the camera moved -- not a value being wrong, two
+            // passes disagreeing, which has no other visible face.
+            public method everyNodeWasRead() returns boolean {
+                return this.nodesRead == this.nodesListed;
+            }
+
+            public method done() returns void {
+                this.running = false;
+                this.buf = cast<address>(0);
+                return;
+            }
+
+            // ---- what one pass tells the other ------------------------------------------------
+
+            public method rememberRiver(int slot, int packed) returns void {
+                this.riverCache[slot] = packed;
+                return;
+            }
+
+            public method riverAt(int slot) returns int {
+                return this.riverCache[slot];
+            }
+
+            public method rememberProp(int slot, int ord) returns void {
+                this.propCache[slot] = ord;
+                return;
+            }
+
+            public method propAt(int slot) returns int {
+                return this.propCache[slot];
+            }
+
+            public method rememberRowNodes(int row, int first, int last) returns void {
+                this.rowFirst[row] = first;
+                this.rowLast[row] = last;
+                return;
+            }
+
+            public method rowFirstNode(int row) returns int {
+                return this.rowFirst[row];
+            }
+
+            public method rowLastNode(int row) returns int {
+                return this.rowLast[row];
+            }
+
+            // ONE ENTRY PER NODE, ALWAYS, including the ones that will not be drawn.
+            //
+            // Forage and fishing renew, so harvesting them to nothing leaves the kind in place with
+            // a quantity of zero. Listing such a node as Nothing rather than skipping it is the
+            // whole of that fix: this list is read back by POSITION, so a node one pass declines to
+            // list is a node the other still walks, and from there every node draws the model of the
+            // one after it. Measured on a world nobody had touched: 1817 nodes in the window against
+            // 1813 listed, and the four missing shifted everything behind them.
+            public method rememberNode(int kind) returns void {
+                if (this.nodesListed >= this.nodeKinds.length()) {
+                    mutable int grow = this.nodeKinds.length() * 2;
+                    if (grow < BakeJob.FIRST_GROWTH) {
+                        grow = BakeJob.FIRST_GROWTH;
+                    }
+                    mutable int[] bigger = new int[grow]();
+                    for (int q in 0..this.nodesListed) {
+                        bigger[q] = this.nodeKinds[q];
+                    }
+                    delete this.nodeKinds;
+                    this.nodeKinds = bigger;
+                }
+                this.nodeKinds[this.nodesListed] = kind;
+                this.nodesListed = this.nodesListed + 1;
+                return;
+            }
+
+            // The next kind in visit order, and ONE STEP PER NODE whether it is in range or not.
+            // The advance used to sit inside the bounds test, so a cursor that ran past the end
+            // simply stopped counting -- and the alignment check then read true however far the two
+            // passes had drifted apart. A cursor that lies about its own position cannot be the
+            // thing that checks the alignment.
+            public method takeNodeKind() returns int {
+                mutable int kind = 0;
+                if (this.nodesRead < this.nodesListed) {
+                    kind = this.nodeKinds[this.nodesRead];
+                }
+                this.nodesRead = this.nodesRead + 1;
+                return kind;
+            }
+        }
+    }
+}
