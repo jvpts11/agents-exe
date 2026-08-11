@@ -1,4 +1,5 @@
 import System.IO.Console;
+import System.Time.Time;
 import System.Memory.Units.megabytes;
 import Agents.World.Grid;
 import Agents.World.Biome;
@@ -24,6 +25,40 @@ public bundle Agents {
     public namespace World {
 
         public class WorldGen {
+            // HOW LONG EACH STAGE TOOK, in milliseconds, for the last world generated.
+            //
+            // "A world costs about three seconds" is not a number anybody can act on, and the
+            // instinct to guess which stage owns it has been wrong here before -- twice, per the
+            // Meter's own header. Nine slots, in pipeline order: the two relief passes, climate,
+            // hydrology, the distance rebuild, the classifier, and the three content passes.
+            //
+            // Static because it describes the LAST generation rather than any one generator, and
+            // because reading it must not require holding the object that produced it: `gensize`
+            // prints the table after the world it asked for has been built and dropped.
+            // Filled by `onClassLoad` and NOT by an initializer at the declaration. Writing
+            // `= new long[9]()` there compiles, runs, and leaves the array with length ZERO -- no
+            // error at the declaration, and the failure arrives later and elsewhere as a bounds
+            // panic inside `generate`. Every other static table in this program is filled the same
+            // way, which is why nothing had met it before. Recorded in the compiler ledger.
+            public static mutable long[] stageMs;
+            public static fixed int STAGES = 9;
+
+            onClassLoad {
+                WorldGen.stageMs = new long[WorldGen.STAGES]();
+            }
+
+            public static method stageName(int i) returns String {
+                if (i == 0) { return "landmass"; }
+                if (i == 1) { return "tectonics"; }
+                if (i == 2) { return "climate"; }
+                if (i == 3) { return "hydrology"; }
+                if (i == 4) { return "distance"; }
+                if (i == 5) { return "classifier"; }
+                if (i == 6) { return "flora"; }
+                if (i == 7) { return "groundcover"; }
+                return "deposits";
+            }
+
             private mutable int seed;
             private mutable int octaves;
             private mutable int baseCells;
@@ -132,7 +167,9 @@ public bundle Agents {
                 relief[0] = new Landmass(seed) on heap;
                 relief[1] = new Tectonics(seed) on heap;
                 for (int r in 0..relief.length()) {
+                    long t0 = Time.millis();
                     relief[r].apply(wf);
+                    WorldGen.stageMs[r] = Time.millis() - t0;
                 }
                 mutable int ci = 0;
                 while (ci < n) {
@@ -154,21 +191,29 @@ public bundle Agents {
                 // scratch, and each depends on what the one before it wrote: the hydrology needs
                 // the climate because permanent ice is not a channel, and the classification needs
                 // both because what a cell IS depends on how high, how warm and how wet it is.
+                long tClim = Time.millis();
                 Climate* climate = new Climate(seed, octaves, baseCells) on heap;
                 climate.apply(g, scratch);
                 delete climate;
+                WorldGen.stageMs[2] = Time.millis() - tClim;
+                long tHyd = Time.millis();
                 Hydrology* hydrology = new Hydrology() on heap;
                 hydrology.apply(g, scratch);
                 delete hydrology;
+                WorldGen.stageMs[3] = Time.millis() - tHyd;
                 // The hydrology overwrote the water plane as its visited flag -- see Scratch's
                 // header, where that reuse is written down -- so rebuild the distance the
                 // classifier needs. Twenty-four rings rather than the climate's thirty-two,
                 // because what the classifier asks of it is nearer: a coast band of two, and a
                 // volcanic-arc gate of twenty-four.
+                long tDist = Time.millis();
                 scratch.distanceToWater(24);
+                WorldGen.stageMs[4] = Time.millis() - tDist;
+                long tCls = Time.millis();
                 Classifier* classifier = new Classifier(seed) on heap;
                 classifier.apply(g, scratch);
                 delete classifier;
+                WorldGen.stageMs[5] = Time.millis() - tCls;
 
                 // Content passes: the terrain is settled, and what LIVES on it goes in now.
                 //
@@ -181,7 +226,9 @@ public bundle Agents {
                 content[1] = new Groundcover(seed) on heap;
                 content[2] = new Deposits(seed) on heap;
                 for (int c in 0..content.length()) {
+                    long t0 = Time.millis();
                     content[c].apply(g, wf);
+                    WorldGen.stageMs[6 + c] = Time.millis() - t0;
                 }
                 // Every pass appended in whatever order suited it; sort the surface nodes into cell
                 // order once, now that they are all in, so the renderer can walk a row of them in
