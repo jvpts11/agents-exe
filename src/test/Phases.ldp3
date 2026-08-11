@@ -1,0 +1,65 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.Sim.Meter;
+import Agents.Sim.Phase;
+program AgentsExe;
+
+// THE METER'S NAMES, WHICH ARE THE ONLY THING A PROFILE IS READ THROUGH.
+//
+// A phase with no name of its own is not a cosmetic fault. The report is a list of what to look at
+// next, sorted by cost, and two rows sharing a name means the reader attributes one phase's time to
+// another and optimizes the wrong pass. It is the same failure as a profile that covers part of the
+// loop -- the biggest number in it looks like the biggest number there is.
+//
+// It was a sixteen-branch `if` cascade with a fall-through default, so a constant added to `Phase`
+// silently reported as the last one (ledger S0-2). Nobody would notice: the row appears, it has a
+// name, and the name is wrong.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Phases {
+
+            // Every phase names itself, and no two name the same thing. This is what the cascade
+            // could not promise: it promised only that the branches WRITTEN so far were right.
+            [Tag(name: "app")]
+            [Test]
+            public static method every_phase_reports_a_name_of_its_own() returns void {
+                Meter m = new Meter() on stack;
+                for (int p in 0..Phase.count()) {
+                    String mine = m.nameOf(p);
+                    Test.assertTrue(mine.length() > 0);
+                    for (int q in 0..Phase.count()) {
+                        if (q != p) {
+                            Test.assertFalse(mine.equals(m.nameOf(q)));
+                        }
+                    }
+                }
+                return;
+            }
+
+            // And the name IS the constant, lower-cased -- derived, never written twice. A rename
+            // in the enum is a rename in the report, and there is no second place to forget.
+            [Tag(name: "app")]
+            [Test]
+            public static method a_phase_is_reported_under_its_own_identifier() returns void {
+                Meter m = new Meter() on stack;
+                for (int p in 0..Phase.count()) {
+                    Test.assertTrue(m.nameOf(p).equals(Phase.values()[p].name().toLower()));
+                }
+                return;
+            }
+
+            // Out of range answers something rather than reading past the end. `worst()` returns -1
+            // on an untouched meter and `worstName` guards it, but the guard belongs where the
+            // lookup is, not at one of its callers.
+            [Tag(name: "app")]
+            [Test]
+            public static method a_phase_that_does_not_exist_is_not_read_off_the_end() returns void {
+                Meter m = new Meter() on stack;
+                Test.assertTrue(m.nameOf(0 - 1).length() > 0);
+                Test.assertTrue(m.nameOf(Phase.count()).length() > 0);
+                return;
+            }
+        }
+    }
+}

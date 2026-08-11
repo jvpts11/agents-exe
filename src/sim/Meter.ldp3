@@ -12,6 +12,15 @@ import System.Time.Time;
 // So the clock is stamped at each phase boundary and the shares are printed. One nanosecond read
 // per boundary, seven boundaries a tick: a million reads across a full sweep, about thirty
 // milliseconds of the three hundred and fifty seconds it measures.
+//
+// THE SECOND CLOCK IS GONE, with the simulation it was counting. `tick()`, `tps()`, `tickCount()`,
+// `frameCount()` and `millisOf()` counted a world advancing, and nothing has advanced since the old
+// simulation was deleted -- so the report announced *"measured over 0 ticks"* every run and the HUD
+// had a rate that was always zero. A number that cannot be anything but zero is worse than a
+// missing number: it reads as a measurement.
+//
+// The tick rate comes back when there is a tick, with whatever the new simulation needs measured,
+// which is the same rule the phases follow.
 program AgentsExe;
 
 public bundle Agents {
@@ -20,31 +29,35 @@ public bundle Agents {
         public class Meter {
             private mutable long[] ns;
             private mutable long[] hits;
+            // Each phase's name in the report, derived from the constant once. NOT computed per
+            // call: `worstName` runs from the HUD every frame, so `name().toLower()` there would be
+            // two String allocations a hundred and forty times a second for an answer that cannot
+            // change.
+            private mutable String[] names;
             private mutable long mark;
-            private mutable long ticks;
             private mutable long frames;
             private mutable long since;      // when the last per-second window opened
-            private mutable int winTicks;
             private mutable int winFrames;
-            private mutable int lastTps;
             private mutable int lastFps;
 
             public constructor Meter() {
                 ns = new long[Phase.count()]();
                 hits = new long[Phase.count()]();
+                names = new String[Phase.count()]();
+                for (int p in 0..Phase.count()) {
+                    names[p] = Phase.values()[p].name().toLower();
+                }
                 mark = Time.nanos();
-                ticks = 0;
                 frames = 0;
                 since = Time.nanos();
-                winTicks = 0;
                 winFrames = 0;
-                lastTps = 0;
                 lastFps = 0;
             }
 
             public destructor ~Meter() returns void {
                 delete ns;
                 delete hits;
+                delete names;
             }
 
             // Start a stretch. Call once before the first `lap` of a group.
@@ -59,12 +72,6 @@ public bundle Agents {
                 ns[phase] = ns[phase] + (now - mark);
                 hits[phase] = hits[phase] + 1;
                 mark = now;
-                return;
-            }
-
-            public method tick() returns void {
-                ticks = ticks + 1;
-                winTicks = winTicks + 1;
                 return;
             }
 
@@ -85,31 +92,13 @@ public bundle Agents {
                 // Against the REAL elapsed span rather than assuming it was a second: a frame that
                 // took four hundred milliseconds would otherwise be reported as a rate it never had.
                 lastFps = cast<int>(cast<long>(winFrames) * 1000000000 / span);
-                lastTps = cast<int>(cast<long>(winTicks) * 1000000000 / span);
                 winFrames = 0;
-                winTicks = 0;
                 since = now;
                 return true;
             }
 
             public method fps() returns int {
                 return lastFps;
-            }
-
-            public method tps() returns int {
-                return lastTps;
-            }
-
-            public method tickCount() returns long {
-                return ticks;
-            }
-
-            public method frameCount() returns long {
-                return frames;
-            }
-
-            public method millisOf(int phase) returns long {
-                return ns[phase] / 1000000;
             }
 
             private method worst() returns int {
@@ -133,9 +122,7 @@ public bundle Agents {
                 if (p < 0) {
                     return "-";
                 }
-                // `this.` is load-bearing here: `label` is a reserved word (it names a loop label),
-                // so the bare call is read as the keyword and fails to parse.
-                return this.label(p);
+                return nameOf(p);
             }
 
             public method worstShare() returns int {
@@ -153,53 +140,23 @@ public bundle Agents {
                 return cast<int>(ns[p] * 1000 / total);
             }
 
-            private method label(int p) returns String {
-                if (p == cast<int>(Phase.Terrain)) {
-                    return "terrain";
+            // What a phase is called in the report. Derived from the constant, so a phase added to
+            // `Phase` is named the moment it is declared and there is nothing to keep in step.
+            //
+            // This was a sixteen-branch `if` cascade ending in a bare `return "settling"`, which
+            // meant any constant the cascade did not know reported under the LAST phase's name --
+            // a row that appears, carries a name, and blames another pass. Nine of those sixteen
+            // branches were also naming phases nothing had lapped since the old simulation was
+            // deleted.
+            //
+            // Out of range answers rather than reading past the end: `worst()` returns -1 on a
+            // meter nothing has touched, and the guard belongs at the lookup instead of at
+            // whichever caller remembers it.
+            public method nameOf(int phase) returns String {
+                if (phase < 0 || phase >= Phase.count()) {
+                    return "-";
                 }
-                if (p == cast<int>(Phase.People)) {
-                    return "people";
-                }
-                if (p == cast<int>(Phase.Fauna)) {
-                    return "fauna";
-                }
-                if (p == cast<int>(Phase.Town)) {
-                    return "town";
-                }
-                if (p == cast<int>(Phase.Borders)) {
-                    return "borders";
-                }
-                if (p == cast<int>(Phase.Draw)) {
-                    return "draw";
-                }
-                if (p == cast<int>(Phase.Input)) {
-                    return "input";
-                }
-                if (p == cast<int>(Phase.Moving)) {
-                    return "moving";
-                }
-                if (p == cast<int>(Phase.Post)) {
-                    return "post";
-                }
-                if (p == cast<int>(Phase.Hud)) {
-                    return "hud";
-                }
-                if (p == cast<int>(Phase.Swap)) {
-                    return "swap";
-                }
-                if (p == cast<int>(Phase.Teaching)) {
-                    return "teaching";
-                }
-                if (p == cast<int>(Phase.Ordering)) {
-                    return "ordering";
-                }
-                if (p == cast<int>(Phase.Sending)) {
-                    return "sending";
-                }
-                if (p == cast<int>(Phase.Building)) {
-                    return "building";
-                }
-                return "settling";
+                return names[phase];
             }
 
             // Everything measured, worst first, with each phase's share of the measured total. The
@@ -215,7 +172,7 @@ public bundle Agents {
                 }
                 mutable int shown = 0;
                 mutable long floor = 0 - 1;
-                System.IO.Console.println($"{what}: {total / 1000000} ms measured over {ticks} ticks, {frames} frames");
+                System.IO.Console.println($"{what}: {total / 1000000} ms measured over {frames} frames");
                 while (shown < Phase.count()) {
                     mutable int best = 0 - 1;
                     mutable long bestNs = 0 - 1;
@@ -241,7 +198,7 @@ public bundle Agents {
                     if (hits[best] > 0) {
                         per = bestNs / hits[best] / 1000;      // microseconds a call
                     }
-                    System.IO.Console.println($"  {this.label(best)}:{bestNs / 1000000} ms ({share}/1000) | {per} us a call over {hits[best]} calls");
+                    System.IO.Console.println($"  {nameOf(best)}:{bestNs / 1000000} ms ({share}/1000) | {per} us a call over {hits[best]} calls");
                 }
                 return;
             }
