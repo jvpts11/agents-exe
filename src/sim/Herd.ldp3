@@ -4,6 +4,7 @@ import Agents.Sim.HerdMood;
 import Agents.Sim.BeastId;
 import Agents.Sim.HerdId;
 import Agents.Sim.Wild;
+import Agents.Sim.Prowl;
 import Agents.World.Species;
 program AgentsExe;
 
@@ -45,6 +46,12 @@ public bundle Agents {
                 doing = HerdMood.Drifting;
                 towardX = x;
                 towardY = y;
+                // A pack begins fed. A world whose predators are all starving on the first tick is a
+                // world that starts by dying, and nothing about that is the model.
+                larder = Prowl.FULL_LARDER;
+                chased = 0;
+                hungry = 0;
+                blown = false;
                 // Not yet in the world's herd array; `beMine` says where.
                 mine = 0 - 1;
                 // THE APPLIED FIELD IS THE OWNER'S TO MAKE. A transformer has no constructor, so it
@@ -130,6 +137,81 @@ public bundle Agents {
 
             public method towardsY() returns float {
                 return towardY;
+            }
+
+            // ---- what a pack has eaten ------------------------------------------------------------
+            //
+            // HUNGER IS THE PACK'S AND NOT THE ANIMAL'S, and that is a decision about where state
+            // lives rather than a shortcut. A `Beast` is twenty bytes and has no room for a larder;
+            // more to the point, wolves that make a kill share it, so a pack that has eaten is one
+            // fact and not six. The herd carries the thinking, and this is thinking.
+            //
+            // Meaningless on a grazer, which eats what the ground gives it -- the block's carrying
+            // capacity stands in for a grazer's food, exactly as the fauna spec says.
+            private mutable int larder;
+            // How many decisions this hunt has lasted. A CHASE GETS ITS BOUND AT THE MOMENT IT IS
+            // WRITTEN, not after a run spent watching animals spin: the previous build's #402 was an
+            // unbounded search that nobody had bounded.
+            private mutable int chased;
+            // And how long it has been empty. A pack starves SLOWLY.
+            private mutable int hungry;
+
+            public method meals() returns int {
+                return larder;
+            }
+
+            public method eat(int meals) returns void {
+                larder = larder + meals;
+                if (larder > 0) {
+                    hungry = 0;
+                }
+                return;
+            }
+
+            public method goHungry(int mouths) returns int {
+                larder = larder - mouths;
+                if (larder <= 0) {
+                    hungry = hungry + 1;
+                }
+                return hungry;
+            }
+
+            public method fedAgain() returns void {
+                hungry = 0;
+                return;
+            }
+
+            public method hunting() returns int {
+                return chased;
+            }
+
+            public method chaseOn() returns int {
+                chased = chased + 1;
+                return chased;
+            }
+
+            public method giveUp() returns void {
+                chased = 0;
+                return;
+            }
+
+            // WHETHER THE GROUP AS A WHOLE HAS RUN ITSELF OUT. Set from the walk that already visits
+            // every member of a fleeing herd, so it costs a comparison rather than a second pass.
+            //
+            // Without it a fleeing herd's CENTRE runs at full burst forever while only its animals
+            // tire, so the group outruns any walking pack for as long as it likes and the only
+            // animal a predator can ever take is a straggler. That is not the contest the fauna spec
+            // asks for -- the beast tires and the hunter keeps coming -- it is the contest with one
+            // side's stamina left out.
+            private mutable boolean blown;
+
+            public method isBlown() returns boolean {
+                return blown;
+            }
+
+            public method setBlown(boolean b) returns void {
+                blown = b;
+                return;
             }
         }
     }

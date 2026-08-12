@@ -335,6 +335,121 @@ public bundle Agents {
                 return;
             }
 
+            // ---- the hunt ---------------------------------------------------------------------------
+            //
+            // Ground a wolf AND a reindeer both live on. The pasture above is Prairie, which is a
+            // grassland: a wolf standing on it is a wolf that cannot take a step, because the
+            // habitat rule refuses every move. Taiga is the cold band, where both belong.
+            private static method taiga() returns Grid* {
+                mutable Grid* g = new Grid(Herding.SIDE, Herding.SIDE) on heap;
+                for (int y in 0..Herding.SIDE) {
+                    for (int x in 0..Herding.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.Taiga));
+                    }
+                }
+                return g;
+            }
+
+            // A KILL FEEDS THE PACK AND TAKES ONE ANIMAL OUT OF THE WORLD. Individuals, never herds,
+            // and permanently -- which is the whole point of the slice: a population that can be
+            // wiped out.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method a_pack_kills_and_the_world_is_one_animal_lighter() returns void {
+                mutable Grid* g = Herding.taiga();
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(37) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                Herd* pack = w.gather(Species.Wolf, 40.5, 40.5, 5.0);
+                for (int i in 0..6) {
+                    pack.admit(w.bear(Species.Wolf, 40.5, 40.5));
+                }
+                Herd* deer = w.gather(Species.Reindeer, 41.0, 40.5, 6.0);
+                for (int i in 0..8) {
+                    deer.admit(w.bear(Species.Reindeer, 41.0, 40.5));
+                }
+                int wasAlive = w.count();
+                int wasFed = pack.meals();
+                // Long enough for the pack to work through its larder and go looking: it starts
+                // full at 400, six mouths eat six a second, and it hunts below 300.
+                for (int t in 0..3000) {
+                    Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                }
+                Test.assertTrue(w.kills() > 0);
+                Test.assertTrue(w.count() < wasAlive);
+                Test.assertTrue(w.howMany(Species.Reindeer) < 8);
+                // AND EATING IS WHAT A KILL IS FOR. A pack that hunts without being fed by it starves
+                // beside a pile of carcasses.
+                Test.assertTrue(pack.meals() > wasFed);
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+
+            // A PREDATOR WITH NOTHING TO CATCH STARVES, and its pack shrinks. That is the loop that
+            // keeps predator and prey in some relation without anybody writing an equation for it --
+            // and, three slices from now, it is how over-hunting by people reaches the wolves.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method a_pack_with_nothing_to_catch_starves() returns void {
+                mutable Grid* g = Herding.taiga();
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(41) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                Herd* pack = w.gather(Species.Wolf, 40.5, 40.5, 5.0);
+                for (int i in 0..6) {
+                    pack.admit(w.bear(Species.Wolf, 40.5, 40.5));
+                }
+                // Empty ground, no prey anywhere: 400 of larder against six mouths a second is 67
+                // seconds, and then 45 more before it costs the pack one of its own.
+                for (int t in 0..7200) {
+                    Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                }
+                Test.assertTrue(w.starvations() > 0);
+                Test.assertTrue(w.howMany(Species.Wolf) < 6);
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+
+            // AND THE LAST ONE IS THE LAST ONE. When a species is gone it is gone for good -- no
+            // respawn, no hidden reserve, no quiet re-seed -- and the world says so, with what did
+            // it, on the tick it happens rather than in a total at the end.
+            //
+            // It also proves the herd that emptied is not left standing: a roster with nobody in it,
+            // walked and thought for every tick forever, is the leak that predators guarantee.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method the_last_of_a_species_is_gone_for_good() returns void {
+                mutable Grid* g = Herding.taiga();
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(43) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                Herd* pack = w.gather(Species.Wolf, 40.5, 40.5, 5.0);
+                for (int i in 0..6) {
+                    pack.admit(w.bear(Species.Wolf, 40.5, 40.5));
+                }
+                Herd* deer = w.gather(Species.Reindeer, 41.0, 40.5, 6.0);
+                deer.admit(w.bear(Species.Reindeer, 41.0, 40.5));
+                Test.assertEqual(w.herdsAlive(), 2);
+                for (int t in 0..3000) {
+                    Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                }
+                Test.assertEqual(w.howMany(Species.Reindeer), 0);
+                Test.assertEqual(w.speciesLost(), 1);
+                // The reindeer's herd went with the last reindeer.
+                Test.assertEqual(w.herdsAlive(), 1);
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+
             // A HERD OVER ITS SPECIES' NUMBER SPLITS, AND THE DAUGHTER LEAVES. Nothing in S1 makes a
             // herd grow yet -- breeding is S1.8 -- so this is the only place the path runs. A branch
             // that is written and never taken until three slices later is a branch that is wrong when

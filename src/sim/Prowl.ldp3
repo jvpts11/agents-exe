@@ -1,0 +1,197 @@
+import System.IO.Console;
+import Agents.Sim.Wild;
+import Agents.Sim.Herd;
+import Agents.Sim.HerdMood;
+import Agents.Sim.BeastState;
+import Agents.Sim.BeastId;
+import Agents.Sim.Nearby;
+import Agents.Sim.Chronicle;
+import Agents.World.Grid;
+import Agents.World.Species;
+import Agents.World.Beasts;
+import Agents.World.LandMath;
+program AgentsExe;
+
+// WHAT A PACK DOES: hunt when it is hungry, eat when it catches, and starve when it does not.
+//
+// THERE IS NO CHASE ROUTINE HERE, AND THAT IS THE POINT. The fauna spec asks for a contest of
+// stamina rather than a race, because a deer is faster than a wolf and always will be -- so a race
+// would mean hunting never works, and a quarry that did not flee would not be hunting. What is
+// written is two rules that were written apart:
+//
+//   * a frightened animal runs at two and a half times its walk and SPENDS STAMINA (S1.5), and the
+//     one that runs out manages under half pace and falls behind its herd;
+//   * a hunting pack WALKS, at its ordinary pace, and never tires.
+//
+// The deer outruns the wolf and then blows, the wolf keeps coming, and the animal that fell behind
+// is the animal that gets caught. Nobody wrote "the slowest one dies"; it is what those two rules
+// do when they are put in the same world. That is persistence hunting, and it is why `PACE` and
+// `SHY` are numbers in the table rather than decoration.
+//
+// EVERY LOOP IN HERE IS BOUNDED IN THE LINE THAT WRITES IT. The build this one replaces had a hunt
+// (#402) that searched until it found something, which on a continent with no deer left is a search
+// that does not end -- and the run where that was discovered was spent watching agents spin.
+public bundle Agents {
+    public namespace Sim {
+
+        public class Prowl {
+            // One unit of meat feeds one animal for this many decisions -- a decision being a second
+            // of world time at gear one. A deer carries thirty units, so it feeds a pack of six for
+            // a hundred seconds against a deer's own three hundred of life: a pack needs about three
+            // deer in the time one deer lives, which is a predator population an order below its
+            // prey's, arrived at from the table rather than chosen.
+            public static fixed int MEALS_A_HEAD = 20;
+            // What a pack is born with: enough that a world does not open with every predator in it
+            // already starving.
+            public static fixed int FULL_LARDER = 400;
+            // Below this the pack goes looking. Not zero -- an animal that hunts only once it is
+            // already starving is an animal that starves.
+            public static fixed int HUNGRY_AT = 300;
+            // How far a pack will start a hunt from, in cells. Inside the nine blocks the index
+            // answers over, because a pack that sets out after something it cannot see is a pack
+            // walking to a place its quarry left.
+            public static fixed float HUNT_REACH = 20.0;
+            // And how close it has to get to take one.
+            public static fixed float CATCH_AT = 1.6;
+            // The bound: decisions -- seconds of world time -- before a pack gives up. A minute and
+            // a half of chasing one animal is a chase that is not going to end well.
+            public static fixed int CHASE_LIMIT = 90;
+            // How long a pack goes with an empty larder before it loses one of its own. SLOWLY, as
+            // the fauna spec says: the loop that keeps predator and prey in some relation without
+            // anybody writing an equation for it.
+            public static fixed int STARVE_AFTER = 45;
+
+            // One decision of a predator herd. Called from the fauna's decision pass, which is once
+            // a second per herd -- so everything counted in here is counted in seconds.
+            public static method decide(Herd* pack, Wild* wild, Grid* g, long at, Chronicle* log)
+                    returns void {
+                // IT EATS FIRST. What the pack has consumed since its last decision is charged
+                // before it decides anything, so a pack that is about to starve does so on the tick
+                // it ran out and not on the one after it caught something.
+                int mouths = pack.count();
+                if (mouths < 1) {
+                    return;
+                }
+                int empty = pack.goHungry(mouths);
+                if (empty >= Prowl.STARVE_AFTER) {
+                    Prowl.starve(pack, wild, at, log);
+                    return;
+                }
+                if (pack.meals() > Prowl.HUNGRY_AT) {
+                    // Fed. It grazes -- which for a wolf means milling about with its pack, and is
+                    // the same drift every other herd does.
+                    if (cast<int>(pack.mood()) == cast<int>(HerdMood.Hunting)) {
+                        Prowl.callOff(pack, wild);
+                    }
+                    return;
+                }
+                Prowl.hunt(pack, wild, g, at, log);
+                return;
+            }
+
+            // LOOK, AIM, AND IF IT IS CLOSE ENOUGH, TAKE IT.
+            //
+            // The quarry is found again on every decision rather than remembered, and that is not
+            // laziness: a death moves the last animal into the dead one's slot, so a remembered
+            // `BeastId` is a number that can come to mean a different animal between two ticks. The
+            // pack walks toward a PLACE between decisions, which cannot go stale.
+            private static method hunt(Herd* pack, Wild* wild, Grid* g, long at, Chronicle* log)
+                    returns void {
+                int quarry = Nearby.prey(wild, pack.x(), pack.y(), Prowl.HUNT_REACH);
+                if (quarry == Nearby.NONE) {
+                    // Nothing within reach. It does not go looking further -- that is the unbounded
+                    // search this project has paid for -- it goes hungry, and hunger is what moves
+                    // it eventually.
+                    Prowl.callOff(pack, wild);
+                    return;
+                }
+                float gap = LandMath.sqrt(Nearby.howFar());
+                if (gap <= Prowl.CATCH_AT) {
+                    Prowl.kill(pack, wild, cast<BeastId>(quarry), at, log);
+                    return;
+                }
+                if (pack.chaseOn() > Prowl.CHASE_LIMIT) {
+                    // THE HUNTER TIRES FIRST, and the failure is counted. A chase with no end is
+                    // the one thing this was written not to be.
+                    wild.noteChaseLost();
+                    Prowl.callOff(pack, wild);
+                    return;
+                }
+                pack.aimAt(wild.xOf(cast<BeastId>(quarry)), wild.yOf(cast<BeastId>(quarry)));
+                if (cast<int>(pack.mood()) != cast<int>(HerdMood.Hunting)) {
+                    pack.setMood(HerdMood.Hunting);
+                    Prowl.markAll(pack, wild, BeastState.Stalking);
+                }
+                return;
+            }
+
+            // A KILL FEEDS THE PACK AND TAKES ONE ANIMAL OUT OF THE WORLD -- individuals, never
+            // herds, and permanently.
+            private static method kill(Herd* pack, Wild* wild, BeastId quarry, long at,
+                                       Chronicle* log) returns void {
+                int sp = cast<int>(wild.speciesOf(quarry));
+                pack.eat(Beasts.meat(sp) * Prowl.MEALS_A_HEAD);
+                pack.giveUp();
+                pack.setMood(HerdMood.Drifting);
+                pack.aimAt(pack.x(), pack.y());
+                Prowl.markAll(pack, wild, BeastState.Feeding);
+                // The world loses one, and the census -- which is what extinction is read from --
+                // is kept by the burial rather than swept for afterwards.
+                wild.eaten(quarry, at, log);
+                return;
+            }
+
+            // NOTHING CAUGHT FOR LONG ENOUGH, AND THE PACK LOSES ONE OF ITS OWN. This is the loop
+            // that keeps predator and prey in some relation without anybody writing an equation for
+            // it -- and it is also how over-hunting by people, three slices from now, reaches the
+            // wolves.
+            //
+            // The oldest goes. Not a draw: a pack that loses a random member is a pack whose deaths
+            // are noise, and the oldest is the one a reader can predict, which is what makes the
+            // behaviour legible when it is watched rather than counted.
+            private static method starve(Herd* pack, Wild* wild, long at, Chronicle* log)
+                    returns void {
+                mutable int link = pack.firstMember();
+                mutable int oldest = 0 - 1;
+                mutable int years = 0 - 1;
+                while (link >= 0) {
+                    BeastId b = pack.memberAt(link);
+                    int age = wild.ageOf(b);
+                    if (age > years) {
+                        years = age;
+                        oldest = cast<int>(b);
+                    }
+                    link = pack.afterMember(link);
+                }
+                if (oldest < 0) {
+                    return;
+                }
+                pack.setMood(HerdMood.Starving);
+                Prowl.markAll(pack, wild, BeastState.Starving);
+                pack.fedAgain();
+                wild.starved(cast<BeastId>(oldest), at, log);
+                return;
+            }
+
+            // Back to milling about with the pack.
+            private static method callOff(Herd* pack, Wild* wild) returns void {
+                pack.giveUp();
+                if (cast<int>(pack.mood()) != cast<int>(HerdMood.Drifting)) {
+                    pack.setMood(HerdMood.Drifting);
+                    pack.aimAt(pack.x(), pack.y());
+                    Prowl.markAll(pack, wild, BeastState.Grazing);
+                }
+                return;
+            }
+
+            private static method markAll(Herd* h, Wild* wild, BeastState s) returns void {
+                mutable int link = h.firstMember();
+                while (link >= 0) {
+                    wild.setStateOf(h.memberAt(link), s);
+                    link = h.afterMember(link);
+                }
+                return;
+            }
+        }
+    }
+}

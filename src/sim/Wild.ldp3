@@ -6,7 +6,10 @@ import Agents.Sim.HerdId;
 import Agents.Sim.BeastState;
 import Agents.Sim.HerdMood;
 import Agents.Sim.BlockChain;
+import Agents.Sim.Vanished;
+import Agents.Sim.Chronicle;
 import Agents.World.Species;
+import Agents.World.Beasts;
 program AgentsExe;
 
 // EVERY ANIMAL IN THE WORLD, and the herds that think for them.
@@ -55,6 +58,12 @@ public bundle Agents {
                 blocks = new BlockChain(width, height, room) on heap;
                 walked = 0.0;
                 bolted = 0;
+                causes = new int[Species.count()]();
+                gone = new boolean[Species.count()]();
+                killed = 0;
+                famished = 0;
+                chasesLost = 0;
+                lost = 0;
             }
 
             public destructor ~Wild() returns void {
@@ -65,6 +74,8 @@ public bundle Agents {
                 delete beasts;
                 delete census;
                 delete blocks;
+                delete causes;
+                delete gone;
                 return;
             }
 
@@ -153,6 +164,12 @@ public bundle Agents {
                     }
                 }
                 alive = alive - 1;
+                // AND A HERD THAT HAS LOST ITS LAST ANIMAL IS NOT A HERD. Left standing it would be
+                // walked, thought for and counted every tick forever -- and with predators in the
+                // world, herds empty. Done last, so nothing above is reading an index this moves.
+                if (own >= 0 && own < herdCount && herds[own].count() == 0) {
+                    disbandHerd(own);
+                }
                 return;
             }
 
@@ -250,6 +267,90 @@ public bundle Agents {
 
             public method herdAt(int at) returns Herd* {
                 return herds[at];
+            }
+
+            // A HERD WITH NOBODY IN IT GOES, and the last herd moves into its slot -- the same
+            // swap-remove the animals get, with the same obligation: every animal of the herd that
+            // MOVED is pointing at the index it used to be at, and has to be told. Forgetting that
+            // is a roster full of animals that believe they belong to somebody else.
+            private method disbandHerd(int at) returns void {
+                delete herds[at];
+                int last = herdCount - 1;
+                if (at != last) {
+                    herds[at] = herds[last];
+                    herds[at].beMine(at);
+                    mutable int link = herds[at].firstMember();
+                    while (link >= 0) {
+                        beasts[cast<int>(herds[at].memberAt(link))].herd = cast<HerdId>(at);
+                        link = herds[at].afterMember(link);
+                    }
+                }
+                herdCount = herdCount - 1;
+                return;
+            }
+
+            // ---- dying -----------------------------------------------------------------------------
+            //
+            // TWO WAYS TO DIE AND ONE PLACE THAT RECORDS THEM. The burial itself is `bury`, which is
+            // about slots and rosters; these are about what it MEANT, which is what the world says
+            // out loud and what extinction is read from.
+            private mutable int[] causes;     // per species: the Vanished ordinal of its last death
+            private mutable boolean[] gone;   // per species: already announced, so it is said once
+            private mutable long killed;
+            private mutable long famished;
+            private mutable long chasesLost;
+            private mutable int lost;         // species gone from the world
+
+            public method eaten(BeastId who, long at, Chronicle* log) returns void {
+                killed = killed + 1;
+                takeAway(who, Vanished.EatenOut, at, log);
+                return;
+            }
+
+            public method starved(BeastId who, long at, Chronicle* log) returns void {
+                famished = famished + 1;
+                takeAway(who, Vanished.Starved, at, log);
+                return;
+            }
+
+            public method noteChaseLost() returns void {
+                chasesLost = chasesLost + 1;
+                return;
+            }
+
+            public method kills() returns long {
+                return killed;
+            }
+
+            public method starvations() returns long {
+                return famished;
+            }
+
+            public method chasesGivenUp() returns long {
+                return chasesLost;
+            }
+
+            public method speciesLost() returns int {
+                return lost;
+            }
+
+            // The death, and then the question that only a death can raise.
+            private method takeAway(BeastId who, Vanished how, long at, Chronicle* log)
+                    returns void {
+                int sp = cast<int>(beasts[cast<int>(who)].species);
+                causes[sp] = cast<int>(how);
+                bury(who);
+                // WHEN THE LAST ONE IS GONE IT IS GONE FOR GOOD -- no respawn, no hidden reserve, no
+                // quiet re-seed. This is the one line in the fauna that is permanent, and it is said
+                // where it happens rather than counted up at the end: a species ending is exactly
+                // the kind of thing a chronicle is for.
+                if (census[sp] == 0 && !gone[sp]) {
+                    gone[sp] = true;
+                    lost = lost + 1;
+                    log.note(at, "fauna",
+                             $"{Beasts.name(sp)} is gone from the world -- {Vanished.values()[causes[sp]].name()}");
+                }
+                return;
             }
 
             // ---- what the fauna has been doing ---------------------------------------------------
