@@ -29,6 +29,22 @@ public bundle Agents {
             // How many herds to try to place per thousand cells of land. Low: a world is mostly
             // empty of any one species, and crowding is what breeding is for.
             public static fixed int HERDS_PER_1000 = 1;
+            // How many herds a species needs before it can be said to have been SOWN at all. Three:
+            // one can be unlucky, two can be unlucky together, and three that are spread out is a
+            // population with somewhere to fall back to.
+            public static fixed int FOUNDING_HERDS = 3;
+            // AND HOW MANY HEAD, WHICH IS THE ONE THAT BINDS. Three herds is the right shape and the
+            // wrong quantity for anything that runs in twos: three crocodile herds is six animals,
+            // and a species with six animals in a continent is a curiosity rather than a population.
+            // It also has to be enough to be somebody's FOOD -- the crocodile lives in the wetlands
+            // and eats boar, and twenty-three boar scattered over a continent is a diet no hunting
+            // rule can rescue.
+            public static fixed int FOUNDING_HEAD = 60;
+            // How coarsely the founding pass sweeps the map looking for that ground, in cells. One
+            // sample per block: fourteen thousand for the whole world, and it cannot miss anything
+            // bigger than a block. BOUNDED BY THE MAP ITSELF -- a species whose ground this world
+            // does not have runs out of map, rather than searching for a marsh nobody generated.
+            public static fixed int SWEEP = 16;
 
             // Sow the world. Answers how many animals were placed.
             public static method sow(Wild* wild, Grid* g, int seed, Chronicle* log) returns int {
@@ -53,38 +69,40 @@ public bundle Agents {
                     if (cast<int>(s) == cast<int>(Species.NoBeast)) {
                         continue;
                     }
-                    int want = Beasts.herd(cast<int>(s));
-                    if (want < 1) {
-                        continue;
-                    }
-                    float range = 4.0 + cast<float>(want) * 0.5;
-                    Herd* herd = wild.gather(s, cast<float>(gx) + 0.5, cast<float>(gy) + 0.5, range);
-                    herds = herds + 1;
-                    mutable int made = 0;
-                    while (made < want) {
-                        // Inside the herd's range, and only on ground the species lives on -- an
-                        // animal standing in the sea on the first tick is a defect the invariant
-                        // would catch, and it is cheaper never to make it.
-                        float ox = (rng.unit() - 0.5) * range * 2.0;
-                        float oy = (rng.unit() - 0.5) * range * 2.0;
-                        int bx = gx + cast<int>(ox);
-                        int by = gy + cast<int>(oy);
-                        if (bx < 0 || by < 0 || bx >= w || by >= h) {
-                            made = made + 1;
-                            continue;
-                        }
-                        if (!Beasts.livesIn(cast<int>(s), g.biomeAt(bx, by))) {
-                            made = made + 1;
-                            continue;
-                        }
-                        BeastId b = wild.bear(s, cast<float>(bx) + 0.5, cast<float>(by) + 0.5);
-                        herd.admit(b);
-                        placed = placed + 1;
-                        made = made + 1;
+                    if (Seeding.plantHerd(wild, g, s, gx, gy, rng)) {
+                        herds = herds + 1;
                     }
                 }
+                // AND THEN A FLOOR, because a species sown by chance alone is sown by how much of
+                // this world happens to be its ground -- and the ground is not shared out evenly.
+                // Measured on seed 42: seals 3350, reindeer 1801, and then boar 23, rabbit 17,
+                // CROCODILE 16. Sixteen animals in eight herds is not a founding population, it is a
+                // rounding error, and it ends the way a rounding error does: the crocodiles died out
+                // in every arc, and no amount of fixing HOW they hunt was going to save a species
+                // that had never been sown.
+                //
+                // The cause is the band, not the draw. A shore is a thin strip that runs around
+                // every coast and only seals live on it, so every shore roll is a seal; wetland and
+                // temperate forest are rare in most worlds, and everything confined to them is rare
+                // with them. So each species gets asked for outright, three herds' worth, on ground
+                // it lives on -- BOUNDED, and a species whose ground this world does not have stays
+                // absent, which is the right answer for mammoths in a world with no tundra.
+                mutable int founded = 0;
+                mutable int sp = 1;
+                while (sp < Species.count()) {
+                    mutable int floor = Beasts.herd(sp) * Seeding.FOUNDING_HERDS;
+                    if (floor < Seeding.FOUNDING_HEAD) {
+                        floor = Seeding.FOUNDING_HEAD;
+                    }
+                    if (wild.howMany(cast<Species>(sp)) < floor) {
+                        founded = founded + Seeding.foundOn(wild, g, cast<Species>(sp), floor, rng);
+                    }
+                    sp = sp + 1;
+                }
+                herds = herds + founded;
+                placed = wild.count();
                 delete rng;
-                log.note(0, "fauna", $"sowed {placed} animals in {herds} herds");
+                log.note(0, "fauna", $"sowed {placed} animals in {herds} herds ({founded} herds placed to found a species the draw had missed)");
                 // And what of each, so a world that comes up empty of something says WHICH rather
                 // than being noticed six tasks later.
                 mutable int k = 1;
@@ -96,6 +114,96 @@ public bundle Agents {
                     k = k + 1;
                 }
                 return placed;
+            }
+
+            // FIND GROUND FOR A SPECIES THE DRAW MISSED, and put herds on it until it has enough.
+            // Answers how many herds were placed.
+            //
+            // A SWEEP AND NOT A DART. The first version threw four thousand random darts at the map
+            // and asked whether each landed on ground the species lives on -- which works for a
+            // biome that covers a tenth of a continent and does not work at all for one that covers
+            // half a per cent. Measured: the wetlands got five herds out of four thousand throws,
+            // and the crocodiles ended the sowing at twenty-five where sixty was asked for. A rare
+            // biome is exactly the case this pass exists for, so it must not be the case it is worst
+            // at.
+            //
+            // Every sixteenth cell, from a random corner so two worlds do not land identically. That
+            // is fourteen thousand samples for the whole map, bounded by the map itself, and it
+            // cannot miss a marsh that is bigger than a block.
+            private static method foundOn(Wild* wild, Grid* g, Species s, int floor, Rng* rng)
+                    returns int {
+                int sp = cast<int>(s);
+                int w = g.width();
+                int h = g.height();
+                mutable int made = 0;
+                mutable int y = rng.nextInt(Seeding.SWEEP);
+                while (y < h) {
+                    mutable int x = rng.nextInt(Seeding.SWEEP);
+                    while (x < w) {
+                        if (wild.howMany(s) >= floor) {
+                            return made;
+                        }
+                        if (Beasts.livesIn(sp, g.biomeAt(x, y)) &&
+                            Seeding.plantHerd(wild, g, s, x, y, rng)) {
+                            made = made + 1;
+                        }
+                        x = x + Seeding.SWEEP;
+                    }
+                    y = y + Seeding.SWEEP;
+                }
+                // Swept the whole map and still short: this world does not have enough of that
+                // ground. A world with no tundra has no mammoths, and that is an answer.
+                return made;
+            }
+
+            // ONE HERD, HERE, WITH ITS ANIMALS SCATTERED INSIDE ITS RANGE. Answers whether it took.
+            //
+            // Shared by both passes on purpose: the random sowing and the founding floor place a
+            // herd in exactly the same way, so a species that had to be asked for outright is not
+            // sown differently from one the draw happened to find.
+            private static method plantHerd(Wild* wild, Grid* g, Species s, int gx, int gy, Rng* rng)
+                    returns boolean {
+                int want = Beasts.herd(cast<int>(s));
+                if (want < 1) {
+                    return false;
+                }
+                int w = g.width();
+                int h = g.height();
+                float range = 4.0 + cast<float>(want) * 0.5;
+                Herd* herd = wild.gather(s, cast<float>(gx) + 0.5, cast<float>(gy) + 0.5, range);
+                mutable int made = 0;
+                while (made < want) {
+                    made = made + 1;
+                    // Inside the herd's range, and only on ground the species lives on -- an animal
+                    // standing in the sea on the first tick is a defect the invariant would catch,
+                    // and it is cheaper never to make it.
+                    float ox = (rng.unit() - 0.5) * range * 2.0;
+                    float oy = (rng.unit() - 0.5) * range * 2.0;
+                    int bx = gx + cast<int>(ox);
+                    int by = gy + cast<int>(oy);
+                    if (bx < 0 || by < 0 || bx >= w || by >= h) {
+                        continue;
+                    }
+                    if (!Beasts.livesIn(cast<int>(s), g.biomeAt(bx, by))) {
+                        continue;
+                    }
+                    BeastId b = wild.bear(s, cast<float>(bx) + 0.5, cast<float>(by) + 0.5);
+                    herd.admit(b);
+                    // A WORLD DOES NOT BEGIN WITH EVERY ANIMAL NEWBORN. Sown at nought, every animal
+                    // of a species reaches `LIFE` on the same tick and the whole founding population
+                    // dies at once -- which is not a die-off, it is a calendar. It was measured: the
+                    // crocodiles ended at world-second 460 and a crocodile lives 460 seconds; the
+                    // sheep at 240, and a sheep lives 240. Anything that had not bred enough by its
+                    // own lifespan was wiped by arithmetic.
+                    //
+                    // Spread over four fifths of a life, so the world starts with young and old and
+                    // nothing at death's door on the first tick.
+                    int span = cast<int>(Beasts.life(cast<int>(s)));
+                    if (span > 1) {
+                        wild.growTo(b, rng.nextInt(span * 4 / 5));
+                    }
+                }
+                return true;
             }
 
             // A species that lives on this ground, or NoBeast. Walks the table from a random start

@@ -54,6 +54,15 @@ public bundle Agents {
             public static fixed float HUNT_REACH = 20.0;
             // And how close it has to get to take one.
             public static fixed float CATCH_AT = 1.6;
+            // How close something has to come to an AMBUSHER. Much wider than the catch, because it
+            // is the whole of its hunting: it never closes any of this distance itself. Eight cells
+            // is its stretch of bank.
+            public static fixed float STRIKE_AT = 8.0;
+            // AND AN AMBUSHER BURNS WHAT IT HAS FOUR TIMES SLOWER. That is the animal, not a dial: a
+            // predator that lies still for days is not spending what one that walks the country
+            // spends, and it is the other half of why waiting works at all. Without it the crocodile
+            // starves between the rare meals its own strategy is built around -- measured, twice.
+            public static fixed int PATIENT_BURN = 4;
             // The bound: decisions -- seconds of world time -- before a pack gives up. A minute and
             // a half of chasing one animal is a chase that is not going to end well.
             public static fixed int CHASE_LIMIT = 90;
@@ -65,6 +74,17 @@ public bundle Agents {
             // same as a grazer's -- what makes predators scarce is that a full larder is rare, not a
             // slower rate.
             public static fixed int CUBS_OVER_REPLACEMENT = 2;
+            // How much food in hand counts as WELL FED, per animal, in seconds of world time.
+            //
+            // ONE GOOD KILL HAS TO CLEAR IT FOR A WHOLE PACK, and that is what sets the number. A
+            // typical prey animal carries thirty of meat, which is six hundred here, so six wolves
+            // sharing one reindeer are holding a hundred seconds a head. At three minutes a head --
+            // where this started -- a pack of six needed 1080 and a reindeer gave 680, so wolves
+            // could only breed by killing twice in quick succession, and a two-hour arc took them
+            // from 473 to 87 while the bears, who run one to a herd and clear any threshold with any
+            // kill, went from 75 to 999. Proportional was right; the constant was set for the
+            // solitary case and read as starvation for the social one.
+            public static fixed int WELL_FED_SECONDS = 60;
 
             // One decision of a predator herd. Called from the fauna's decision pass, which is once
             // a second per herd -- so everything counted in here is counted in seconds.
@@ -77,7 +97,13 @@ public bundle Agents {
                 if (mouths < 1) {
                     return;
                 }
-                int empty = pack.goHungry(mouths);
+                // An ambusher is charged one decision in four -- see PATIENT_BURN. Everything else
+                // below is the same for both kinds of hunter.
+                boolean waits = Beasts.ambushes(cast<int>(pack.species()));
+                mutable int empty = 0;
+                if (!waits || at % cast<long>(Prowl.PATIENT_BURN) == 0) {
+                    empty = pack.goHungry(mouths);
+                }
                 if (empty >= Prowl.STARVE_AFTER) {
                     Prowl.starve(pack, wild, at, log);
                     return;
@@ -103,6 +129,16 @@ public bundle Agents {
             // pack walks toward a PLACE between decisions, which cannot go stale.
             private static method hunt(Herd* pack, Wild* wild, Grid* g, long at, Chronicle* log)
                     returns void {
+                // AN AMBUSHER LOOKS ONLY AS FAR AS IT CAN STRIKE, and never sets out. Everything
+                // below -- aiming, walking, the chase and its bound -- is about closing a distance,
+                // and closing a distance is precisely what this kind of hunter does not do.
+                if (Beasts.ambushes(cast<int>(pack.species()))) {
+                    int close = Nearby.prey(wild, pack.x(), pack.y(), Prowl.STRIKE_AT);
+                    if (close != Nearby.NONE) {
+                        Prowl.kill(pack, wild, cast<BeastId>(close), at, log);
+                    }
+                    return;
+                }
                 int quarry = Nearby.prey(wild, pack.x(), pack.y(), Prowl.HUNT_REACH);
                 if (quarry == Nearby.NONE) {
                     // Nothing within reach. It does not go looking further -- that is the unbounded
@@ -195,7 +231,17 @@ public bundle Agents {
             // went from ten thousand to forty-three. Breeding had been written into the grazer's
             // branch of the decision and packs never reach it.
             private static method mayBreed(Herd* pack, Wild* wild, Rng* rng) returns void {
-                if (pack.meals() < Prowl.FULL_LARDER) {
+                // WELL FED IS RELATIVE TO HOW MANY MOUTHS THERE ARE, and it was an absolute number
+                // until a two-hour arc showed what that costs. A larder is spent at one a decision
+                // PER HEAD, so a fixed threshold asks a bear -- which runs one to a herd -- to hold
+                // the same four hundred that keeps six wolves for sixty-seven seconds. The bear
+                // drops below it a second after every kill and is only ever briefly eligible, so it
+                // grew old without breeding and the species ended: announced as `DiedOut`, which was
+                // the right answer to the wrong question.
+                //
+                // Read as time instead and it is one rule for both: a pack breeds when it is
+                // holding more than three minutes of food for the animals it actually has.
+                if (pack.meals() < pack.count() * Prowl.WELL_FED_SECONDS) {
                     return;
                 }
                 int span = cast<int>(Beasts.life(cast<int>(pack.species())));

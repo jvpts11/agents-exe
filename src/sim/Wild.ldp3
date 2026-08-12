@@ -184,6 +184,8 @@ public bundle Agents {
                 beasts[at].herd = cast<HerdId>(Wild.NO_HERD);
                 beasts[at].stamina = cast<short>(1000);
                 beasts[at].age = cast<short>(0);
+                // Born at nought. A world being SOWN ages its animals afterwards -- see
+                // `Seeding.sow` and `growTo` for why that is not the same thing as a birth.
                 beasts[at].species = cast<uint>(cast<int>(s));
                 beasts[at].state = cast<uint>(cast<int>(BeastState.Grazing));
                 alive = alive + 1;
@@ -289,6 +291,17 @@ public bundle Agents {
 
             public method ageOf(BeastId who) returns int {
                 return cast<int>(beasts[cast<int>(who)].age);
+            }
+
+            // START AN ANIMAL PART-WAY THROUGH ITS LIFE. Only the sowing uses this, and it is the
+            // difference between a world and a cohort: every animal born at nought dies at exactly
+            // `LIFE`, all of them, on the same tick. Measured before it was fixed — the crocodiles
+            // went at world-minute 7.7, which is 460 seconds, which is a crocodile's lifespan to the
+            // second, and the sheep went at 240 for the same reason. A species that had not bred
+            // enough by then was wiped by the calendar rather than by anything in the world.
+            public method growTo(BeastId who, int years) returns void {
+                beasts[cast<int>(who)].age = cast<short>(years);
+                return;
             }
 
             public method growOlder(BeastId who) returns void {
@@ -484,6 +497,28 @@ public bundle Agents {
 
             public method speciesLost() returns int {
                 return lost;
+            }
+
+            // WHAT LIVES IN THE WORLD AT THE END, species by species. A total says a world has
+            // seventeen thousand animals in it; it cannot say that one of them is down to nine and
+            // going. An arc that ends with a species at single figures and an arc that ends with
+            // every species healthy are different worlds with the same number, and the difference is
+            // the whole of what this slice is for.
+            //
+            // Said as a list rather than kept as one: it is asked once, at the end of a run.
+            public method census(Chronicle* log, long at) returns void {
+                mutable int k = 1;
+                while (k < Species.count()) {
+                    int n = census[k];
+                    if (n > 0) {
+                        log.note(at, "fauna", $"  {Beasts.name(k)}: {n}");
+                    } else if (gone[k]) {
+                        log.note(at, "fauna",
+                                 $"  {Beasts.name(k)}: gone -- {Vanished.values()[causes[k]].said()}");
+                    }
+                    k = k + 1;
+                }
+                return;
             }
 
             // The death, and then the question that only a death can raise.

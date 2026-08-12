@@ -1,71 +1,85 @@
 # agents.exe
 
-**A faithful re-implementation, in [LDP3](https://github.com/jvpts11/LDP3), of the generative-agents
-civilisation sandbox *agents.exe*.**
+**A god-game built from nothing, in [LDP3](https://github.com/jvpts11/LDP3): a world that is
+generated, populated and then left to get on with it, while somebody watches.**
 
-The original agents.exe is João Victor Pereira Tavares's undergraduate project — a Unity game where a
-world of deterministic worker agents is led by a handful of *protagonists* whose strategy comes from a
-fine-tuned small language model, with a deterministic **Mock heuristic** as the fallback. This project
-rebuilds that game in LDP3 — with **no engine underneath it**: the world simulation, the isometric
-renderer, the agents, the economy, the nations and the UI are all built from scratch in the language,
-partly as a stress-test that exercises LDP3 end to end. There is no LLM here; the Mock heuristic *is*
-the strategic AI.
+Everything here is written in LDP3 — the worldgen, the 3D renderer, the simulation — with **no engine
+underneath it**. The only thing borrowed is OpenGL itself, through a sibling library that is also
+LDP3. That is half the point: the game is the language's stress test, and every hole it walks into
+gets fixed *in the compiler* rather than worked around in the game.
 
-It is built in phases against a reverse-engineering of the original's source. See
-[`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) for the plan and the faithful game model, and
-[`docs/reference/`](docs/reference/) for the code-grounded specs of each subsystem.
+> **Status: the ground and the fauna are alive.** A world of 2560×1440 cells is generated — plates,
+> coastlines, climate, rivers, biomes, forests, ore bodies — and about fifteen thousand animals live
+> on it: they graze, keep to their herds, cross ridges to new pasture, run from predators, hunt,
+> starve, breed, grow old, and go extinct for good. **The people are next**, and after them the
+> nations, work, war, and the player's powers.
 
-> **Status: playable.** The full core is in — isometric world, agents, economy, the strategic layer
-> (Mock heuristic, war, conquest, succession), a Windows-95 HUD with a reflection-driven inspector, an
-> interactive real-time shell, Worldbox god-powers, and nation territory. Ongoing polish: the menu
-> flow and camera/rendering are being brought closer to the original.
+## What is actually running
 
-## The game, in one paragraph
+**The ground** is searched for rather than rolled: a world is generated, measured against criteria
+(one continent, not fourteen islands), and rejected if it fails. Tectonic plates give the relief,
+climate follows the relief, rivers follow the climate, biomes follow both, and forests and ore bodies
+follow the biomes.
 
-A **480×480 tile** world — six elevation biomes from a warped-Perlin / continent-mask heightmap —
-simulated on a plain 2D grid but **rendered isometrically** (2:1 diamond tiles, depth-sorted, with
-Mountain/Snow cliffs). Four nations, each led by a protagonist, grow populations of workers who forage,
-farm, chop, mine, build, haul and fight under a behaviour FSM, tracking hunger, thirst and energy.
-Every ~45 seconds each leader makes one strategic decision through the Mock heuristic — declare war,
-seek peace, forge an alliance, raise an army, focus a resource, prioritise a building — and the realm
-turns it into orders. Armies march and besiege; a broken realm is conquered and its survivors defect;
-when a leader dies an heir takes the throne, sometimes with a new temperament. A Gold trade economy runs
-alongside. The player watches in a Windows-95 UI, controls time, and clicks any worker or nation to
-inspect it.
+**The fauna** is seventeen species on a table of real numbers — how fast, how shy, how long they
+live, how many run together, what ground they can live on. Nothing above it is scripted:
+
+- a **herd thinks and a beast follows**, which is a few thousand decisions and fifteen thousand moves
+  rather than fifteen thousand decisions;
+- **flight** is one comparison against `SHY`, and running costs stamina;
+- **the hunt has no chase routine at all** — prey flees in bursts and blows, a pack walks and does
+  not tire, and the animal that falls behind is the animal that gets caught;
+- **a species can end**, permanently, and the world says which of five things did it.
+
+**The window is where it is judged.** There is no headless mode and no smoke test standing in for a
+run: development is verified by playing `AgentsExe game`, watching it, and reading what it says on
+the way out — how many ticks it ran, what each stretch of the frame cost, how many animals are alive,
+how far they walked, how many were drawn.
 
 ## Build & run
 
 Needs the LDP3 toolchain (the sibling `../LDP3` dev build) and the sibling `../ldp3-opengl` library.
-Asset and save paths resolve relative to the executable, so it runs from any location.
+Asset paths resolve relative to the executable, so it runs from any location.
 
 ```
 ldp3 build
-build-output/AgentsExe.exe
+build-output/AgentsExe.exe game
 ```
+
+`game` — or no argument at all — plays. It takes two options and no more, because a game is not
+configured from a command line:
+
+| option | what it does |
+|---|---|
+| `gear=N` | open at speed N (1..6). Left out, it opens at the ordinary speed and the player drives |
+| `for=S` | stop after S seconds. For anything that is not a hand: a gate, a measurement, a run left going |
+
+The seed is 42 and stays 42: one world, so that two runs are the same world.
 
 ## Controls
 
 | Input | Action |
 |-------|--------|
-| **Enter** / click **New Game** | start a game (seed 42) |
-| **WASD** / arrows | pan the camera |
-| **scroll** / PgUp / PgDn | zoom |
-| **Space** | pause / resume |
-| **1 / 2 / 3** | speed 1× / 2× / 4× |
-| **click** | select a worker or nation → inspector |
-| **F5 / F9** | save / load (slot 1, seed-based) |
-| **Esc** | main menu |
-| **B / K** | conjure a worker / smite one, at the cursor |
-| **G / Q / L** | drought / earthquake / flood (Worldbox god-powers) |
+| **drag** / arrows | rotate the camera |
+| **scroll** | zoom |
+| **WASD** (Shift for fast) | pan |
+| **1**…**6** | speed: real time up to three hundred ticks a frame |
+| **P** | pixel filter on/off |
+| **Ctrl-C** | end the run and report, rather than being killed mid-frame |
+| **Esc** | quit |
 
 ## Layout
 
-- `src/world/` — grid, worldgen (noise), biomes, camera, flow-field pathfinding, resource seeding
-- `src/people/` — nations and workers
-- `src/economy/` — buildings, building types, stockpiles
-- `src/sim/` — the Realm: the simulation container and its tick
-- `src/strategy/` — the Mock heuristic, intents, personalities
-- `src/gfx/` — the Batch2D quad batcher and the isometric renderers (world, territory, buildings, agents)
-- `src/ui/` — the Windows-95 draw kit, HUD, font, reflection inspector
-- `src/app/` — the interactive shell (Game), save/load, path resolution
-- `assets/` — the sprite atlas (packed from the original's art)
+- `src/world/` — the grid and its layers, and `worldgen/`: plates, climate, rivers, biomes, flora, ore
+- `src/sim/` — the world's tick: `Sim` owns the order things happen in; `Wild`, `Herd`, `Beast`, the
+  block index, the fauna's rules, and the chronicle that says what happened in each tick
+- `src/gfx/` — the 3D renderer: two-level LOD, instanced meshes, cel shading, the frame meter
+- `src/app/` — the window, the options, the interrupt
+- `src/test/` — the suite that runs inside the program
+- `assets/models/` — the meshes, three flat tones each
+
+## How it is built
+
+One slice at a time, and **a slice is not done until it is drawn**. Every slice ends with the real
+game running, a gate that fails on behaviour rather than on matching output text, and a ledger line
+for every hole found on the way — including the ones that turned out to be the compiler's.

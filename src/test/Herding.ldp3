@@ -8,6 +8,7 @@ import Agents.Sim.BeastId;
 import Agents.Sim.BlockChain;
 import Agents.Sim.Chronicle;
 import Agents.Sim.Grazing;
+import Agents.Sim.Prowl;
 import Agents.World.Grid;
 import Agents.World.Biome;
 import Agents.World.Species;
@@ -371,8 +372,12 @@ public bundle Agents {
                 for (int i in 0..8) {
                     deer.admit(w.bear(Species.Reindeer, 41.0, 40.5));
                 }
-                // Long enough for the pack to work through its larder and go looking: it starts full
-                // at 400, six mouths eat six a second, and it hunts below 300.
+                // THE PACK IS ALREADY HUNGRY, said outright instead of waited for. Left to work
+                // through its own larder it needs seventeen seconds, and by then the reindeer have
+                // heard it and are half a map away -- so the test would be measuring whether a full
+                // pack can catch a herd with a head start, which is a different question and not
+                // this one. What is under test is: a hungry pack, prey beside it, does it kill.
+                pack.goHungry(Prowl.FULL_LARDER);
                 //
                 // WHAT IS WATCHED IS THE LARDER RISING, not the world's headcount falling: animals
                 // breed, so a world can be one kill lighter and two calves heavier in the same
@@ -386,9 +391,53 @@ public bundle Agents {
                 }
                 Test.assertTrue(w.kills() > 0);
                 // AND EATING IS WHAT A KILL IS FOR. A pack that hunts without being fed by it
-                // starves beside a pile of carcasses -- so the larder has to go ABOVE the four
-                // hundred it was born with, which only a kill can do.
-                Test.assertTrue(fullest > 400);
+                // starves beside a pile of carcasses -- so the larder, emptied at the start, has to
+                // come back up, and only a kill can do that.
+                Test.assertTrue(fullest > 0);
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+
+            // AN AMBUSHER TAKES WHAT COMES TO IT AND NEVER SETS OUT. The crocodile is the slowest
+            // animal in the table, so as a pursuit predator it could only catch prey that was
+            // already blown, and it went extinct in every arc long enough to notice. Waiting makes
+            // its slowness the point instead of the problem.
+            //
+            // What is checked is both halves: it kills what walks into its stretch of water, and it
+            // is still standing where it started -- a hunter that CHASES would have moved.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method an_ambusher_waits_and_takes_what_comes() returns void {
+                mutable Grid* g = new Grid(Herding.SIDE, Herding.SIDE) on heap;
+                for (int y in 0..Herding.SIDE) {
+                    for (int x in 0..Herding.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.Marsh));
+                    }
+                }
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(47) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                Herd* croc = w.gather(Species.Crocodile, 40.5, 40.5, 4.0);
+                croc.admit(w.bear(Species.Crocodile, 40.5, 40.5));
+                croc.admit(w.bear(Species.Crocodile, 40.7, 40.5));
+                croc.goHungry(Prowl.FULL_LARDER);
+                float satAt = croc.x();
+                // Boar, which the table puts in the wetlands for exactly this reason: without them
+                // the marsh has a predator and nothing at all to hunt.
+                Herd* boar = w.gather(Species.Boar, 43.0, 40.5, 5.0);
+                for (int i in 0..5) {
+                    boar.admit(w.bear(Species.Boar, 43.0, 40.5));
+                }
+                for (int t in 0..2000) {
+                    Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                }
+                Test.assertTrue(w.kills() > 0);
+                // It never went anywhere to do it.
+                Test.assertTrue(croc.x() - satAt < 2.0 && satAt - croc.x() < 2.0);
+                Test.assertTrue(cast<int>(croc.mood()) != cast<int>(HerdMood.Hunting));
                 delete log;
                 delete rng;
                 delete w;
