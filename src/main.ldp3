@@ -21,6 +21,7 @@ import Agents.Gfx.MeshAtlas;
 import Agents.Gfx.GlWorld3D;
 import Agents.App.Options;
 import Agents.App.Gear;
+import Agents.App.Halt;
 import Agents.App.Ppm;
 import Agents.App.CellSearch;
 import Agents.App.CellHit;
@@ -332,6 +333,14 @@ public bundle Agents {
                 // half a million people, the HUD and the buffer swap outside it -- and those turned
                 // out to be most of the frame. The clock now opens here and every stretch between
                 // one `lap` and the next belongs to a named phase.
+                // BEING ASKED TO STOP IS A WAY OF STOPPING, not a way of dying. Ctrl-C used to kill
+                // the process where it stood, which threw away the frame meter's report and the
+                // world's own account -- both printed on the way out -- so a three-hour arc
+                // interrupted at the console lost its entire measurement.
+                Halt* halt = new Halt() on heap;
+                if (!halt.listenForCtrlC()) {
+                    System.IO.Console.println("agents.exe: could not listen for Ctrl-C; it will kill the run outright.");
+                }
                 Meter* gauge = r.frameMeter();
                 // Started AFTER the world is built and the atlases are loaded, so `for=60` is sixty
                 // seconds of the GAME rather than sixty seconds minus however long generation took
@@ -345,6 +354,14 @@ public bundle Agents {
                     }
                     if (seconds > 0 && Time.millis() >= stopAt) {
                         System.IO.Console.println($"agents.exe: {seconds} seconds are up.");
+                        break;
+                    }
+                    // READ HERE, WHERE LEAVING IS SAFE. The handler that sets this did nothing but
+                    // set it -- it may not allocate or block, because the code it interrupted may
+                    // be inside the allocator -- so the deciding happens at a point of the loop's
+                    // own choosing, and the exit is the same one ESC takes.
+                    if (halt.wanted()) {
+                        System.IO.Console.println("agents.exe: asked to stop.");
                         break;
                     }
                     int mx = win.cursorX();
@@ -453,6 +470,10 @@ public bundle Agents {
                 // What the run cost, by part, printed on the way out: the live window is where the
                 // real load is, and a profile you have to remember to ask for is a profile nobody
                 // reads.
+                // Hand Ctrl-C back before the reporting starts: from here on the run is shutting
+                // down, and a second one should end the process the ordinary way rather than be
+                // swallowed by a flag nobody is reading any more.
+                halt.stopListening();
                 // WHAT THE ARC WAS, said by the two things that watched it: the frame, and the
                 // world. This is the whole verdict on a run -- the game is played in this window
                 // from the beginning of a world to the end of it, and then it says what became of
@@ -471,6 +492,7 @@ public bundle Agents {
                 delete terr;
                 // No `delete g`: the ground is the Sim's, and the Sim is on the stack -- it goes
                 // when this method does, and takes the world with it.
+                delete halt;
                 delete win;
                 return;
             }

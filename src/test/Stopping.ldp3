@@ -1,0 +1,70 @@
+import System.IO.Console;
+import System.Test.Test;
+import System.Os.Signals;
+import Agents.App.Halt;
+program AgentsExe;
+
+// BEING ASKED TO STOP, and answering rather than dying.
+//
+// Ctrl-C used to kill the run where it stood. The frame meter's report and the world's own account
+// are both printed on the way OUT of the loop, so a three-hour arc interrupted at the console threw
+// away its entire measurement -- and long arcs on the real game are how this project audits
+// anything.
+//
+// These check the two halves the window cannot show: that the handler is installed and that it
+// actually fires. The third half -- the loop reading the flag and leaving by the same path ESC
+// takes -- is one line in `renderGlWorld` and is watched in the window.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Stopping {
+
+            // A handler nobody installed is a handler that never fires, and the failure is silent:
+            // the program simply dies on Ctrl-C exactly as it did before.
+            [Tag(name: "app")]
+            [Test]
+            public static method the_stop_request_is_listened_for() returns void {
+                Halt* h = new Halt() on heap;
+                Test.assertTrue(h.listenForCtrlC());
+                Test.assertFalse(h.wanted());
+                h.stopListening();
+                delete h;
+                return;
+            }
+
+            // AND IT FIRES. The signal is sent for real -- a program can signal itself, which is
+            // also how a supervisor's request reaches the same shutdown path an operator's Ctrl-C
+            // takes -- and the flag the handler sets is read afterwards.
+            //
+            // The handler does nothing but set that flag, and that is the shape rather than a
+            // shortcut: an interrupt may not allocate or block, because the code it interrupted may
+            // be standing inside the allocator or holding the lock a body three calls down would
+            // take.
+            [Tag(name: "app")]
+            [Test]
+            public static method a_real_signal_sets_the_flag_the_loop_reads() returns void {
+                Halt* h = new Halt() on heap;
+                Test.assertTrue(h.listenForCtrlC());
+                Signals.sendToSelf(Signals.INTERRUPT);
+                Test.assertTrue(h.wanted());
+                h.stopListening();
+                delete h;
+                return;
+            }
+
+            // NOT TESTED HERE, AND SAYING SO RATHER THAN PRETENDING: that handing the signal back
+            // restores the runtime's own behaviour.
+            //
+            // The obvious check is to hand it back and raise SIGINT again -- and the default
+            // behaviour of SIGINT is to END THE PROCESS, so a passing test would take the suite
+            // down with it. The first version of this file had a third test here that called
+            // `stopListening` and then asserted `something || true`, which is green forever and
+            // means nothing. A test that cannot fail is worse than a missing one: it reports
+            // coverage that does not exist.
+            //
+            // What covers it instead: `stopListening` is one call to the same library method the
+            // two tests above exercise, with a null handler, and the standard library's own
+            // `signals_answer` sample checks that call's return.
+        }
+    }
+}

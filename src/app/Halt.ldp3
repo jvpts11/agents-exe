@@ -1,0 +1,66 @@
+import System.IO.Console;
+import System.Os.Signals;
+program AgentsExe;
+
+// SOMEBODY OUTSIDE THE PROGRAM ASKING IT TO STOP.
+//
+// Ctrl-C, or the console window closing, enters this program at a moment it did not choose, on top
+// of whatever was running. That is what `interrupt` means -- the keyword says nothing about
+// architectures -- and on a hosted system it arrives as a signal.
+//
+// WHAT IT COSTS TODAY, BEFORE ANY SAVING EXISTS. The frame meter and the world's own account are
+// printed on the way OUT of the loop, so a session interrupted after three hours discards its
+// entire measurement. This project's audits are long arcs on the real game; an arc that cannot be
+// stopped without throwing away its own numbers is an arc that gets stopped anyway.
+//
+// THE HANDLER SETS A FLAG AND NOTHING ELSE, and that is the shape rather than a shortcut. An
+// interrupt may not allocate or block: the code it interrupted may be standing inside the
+// allocator, or holding the very lock a body three calls down would take. So the loop reads the
+// flag at the end of a frame and leaves by the same path ESC takes -- the report, the teardown and
+// one day the save all happen where they already happen. Linux calls this `need_resched`, and
+// LDP3's own design note arrived at it after measuring that the alternative does not survive the
+// optimizer.
+//
+// `volatile` because this field is shared with something that can preempt the program, which is the
+// third rule of the keyword: state an interrupt reaches must say so, in one of the two ways the
+// language already has. It is not ceremony -- without it the compiler is entitled to keep the value
+// in a register across the loop and never see the change.
+public bundle Agents {
+    public namespace App {
+
+        public class Halt {
+            private volatile mutable boolean asked;
+
+            public constructor Halt() {
+                asked = false;
+            }
+
+            // Entered by the operating system, not by this program. Nameless and one per class:
+            // one device, one handler.
+            public interrupt(int sig) returns void {
+                asked = true;
+            }
+
+            // Ask to be told. Answers false if the runtime refused the signal, so a caller is never
+            // left believing in a handler that cannot fire.
+            // `this.` is load-bearing: binding an interrupt to an object is a member access with no
+            // parentheses, and it needs a receiver to name whose handler is being installed.
+            public method listenForCtrlC() returns boolean {
+                return Signals.answer(Signals.INTERRUPT, this.interrupt);
+            }
+
+            // Has somebody asked us to stop? Read at the end of a frame, where leaving is safe.
+            public method wanted() returns boolean {
+                return asked;
+            }
+
+            // Hand the signal back to the runtime. After this, a second Ctrl-C ends the process the
+            // ordinary way -- which is what should happen once the program has already been asked
+            // once and is busy shutting down.
+            public method stopListening() returns void {
+                Signals.giveBack(Signals.INTERRUPT);
+                return;
+            }
+        }
+    }
+}
