@@ -48,6 +48,17 @@ public bundle Agents {
             private mutable long behind;
             // What the world says it is doing, as it does it. Every layer writes here.
             private mutable Chronicle* log;
+            // Nanoseconds spent advancing, ever. THE FLOOR EVERY LATER COST IS READ AGAINST: an
+            // empty tick has a price, and knowing it is what makes "the fauna costs 40 ns a beast"
+            // a number instead of an impression.
+            //
+            // Free to collect, which is why it is here rather than approximated later: `advance`
+            // already reads the clock twice a frame for the budget, and this reads it twice more.
+            // Reading it per TICK would cost more than the tick does.
+            private mutable long spent;
+            // How many times `advance` was called -- the divisor that makes `spent` readable. See
+            // `report`: without it, the same empty tick reads 178 ns at gear 1 and 2 ns at gear 6.
+            private mutable long advances;
 
             // How long a frame may spend advancing the world, in milliseconds. A frame at sixty a
             // second is about seventeen; half of it to the simulation leaves the other half to draw
@@ -84,6 +95,8 @@ public bundle Agents {
                 ticked = 0;
                 owed = 0.0;
                 behind = 0;
+                spent = 0;
+                advances = 0;
                 log = new Chronicle() on heap;
             }
 
@@ -134,6 +147,7 @@ public bundle Agents {
             // what makes the ceiling testable at all: an empty tick is free, so the only way to see
             // the cut happen is to ask for no time.
             public method advance(float pace, int budgetMillis) returns int {
+                long began = Time.nanos();
                 owed = owed + pace;
                 long until = Time.millis() + cast<long>(budgetMillis);
                 mutable int ran = 0;
@@ -171,6 +185,8 @@ public bundle Agents {
                              $"ran out of frame with {lost} ticks still owed");
                     owed = 0.0;
                 }
+                spent = spent + (Time.nanos() - began);
+                advances = advances + 1;
                 return ran;
             }
 
@@ -185,11 +201,38 @@ public bundle Agents {
             // being deleted along with the claim they used to make: **counts may sit beside the
             // record; they may not stand in for it.**
             public method report() returns void {
-                System.IO.Console.println($"world: {ticked} ticks");
+                // WHAT A TICK COSTS, which is the floor every later layer is read against. Measured
+                // INSIDE the real frame, with the renderer competing for the same machine -- the
+                // only place the number is the one that will actually be met.
+                //
+                // TICKS PER CALL IS PRINTED BESIDE IT BECAUSE THE FIRST NUMBER LIES WITHOUT IT.
+                // What is timed is a whole `advance`, and an advance reads the clock three times
+                // whatever it does. At gear 1 that overhead is charged to ONE tick and the empty
+                // tick appears to cost 178 ns; at gear 6 it is spread over three hundred and the
+                // same empty tick reads 2 ns. Neither number is wrong and only the second is about
+                // the tick -- so the reader is given the divisor rather than a footnote.
+                mutable long each = 0;
+                if (ticked > 0) {
+                    each = spent / ticked;
+                }
+                mutable long perCall = 0;
+                if (advances > 0) {
+                    perCall = ticked / advances;
+                }
+                System.IO.Console.println($"world: {ticked} ticks, {each} ns each over {advances} advances ({perCall} a call)");
                 if (behind > 0) {
                     System.IO.Console.println($"world: {behind} ticks owed and refused in total -- see the [tick] lines above for when");
                 }
                 return;
+            }
+
+            // Nanoseconds a tick has cost on average, for whoever wants the number rather than the
+            // sentence. Zero before the world has ticked at all.
+            public method nanosPerTick() returns long {
+                if (ticked == 0) {
+                    return 0;
+                }
+                return spent / ticked;
             }
 
             // One tick of the world: every layer's pass, in this order.
