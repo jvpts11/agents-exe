@@ -1,0 +1,139 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.Sim.Beast;
+import Agents.Sim.BeastState;
+import Agents.Sim.HerdMood;
+import Agents.Sim.Wild;
+import Agents.Sim.Herd;
+import Agents.Sim.BeastId;
+import Agents.World.Species;
+program AgentsExe;
+
+// THE FAUNA'S OWN ARITHMETIC -- the part a window cannot show, which is what this suite is for.
+// Everything about how it LOOKS is judged by running the game.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Fauna {
+
+            // THE BUDGET, WHICH IS THE WHOLE OF S1.1. Twenty bytes, so three animals fit in a
+            // sixty-four byte cache line -- the tick walks the array in order, and what it costs is
+            // decided by how many animals arrive per line fetched.
+            //
+            // Held by the build through `implements ThreeToALine`, and checked here as well, because
+            // a budget nobody reads back is a comment.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method a_beast_stays_three_to_a_cache_line() returns void {
+                Test.assertEqual(Beast.sizeof(), 20);
+                return;
+            }
+
+            // Eight states, because the tick needs exactly eight and the field holds exactly eight.
+            // The count is checked rather than assumed: `state : 3` is UNSIGNED precisely so 0..7
+            // fit, and the first draft of the layout said `int`, where three bits hold -4..3.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method there_are_eight_states_and_five_moods() returns void {
+                Test.assertEqual(BeastState.count(), 8);
+                Test.assertEqual(HerdMood.count(), 5);
+                return;
+            }
+
+            // EVERY STATE SURVIVES THE ROUND TRIP. This is the test the signed-bit-field bug would
+            // have failed: writing `Feeding` (6) into a signed three-bit field stores -2, and reads
+            // back as a state nobody named.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method every_state_reads_back_as_itself() returns void {
+                Wild* w = new Wild() on heap;
+                BeastId b = w.bear(Species.Deer, 10.0, 20.0);
+                for (int s in 0..BeastState.count()) {
+                    BeastState want = cast<BeastState>(s);
+                    w.setStateOf(b, want);
+                    Test.assertEqual(cast<int>(w.stateOf(b)), s);
+                }
+                delete w;
+                return;
+            }
+
+            // And every species, for the same reason: eighteen of them against five unsigned bits.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method every_species_reads_back_as_itself() returns void {
+                Wild* w = new Wild() on heap;
+                for (int s in 0..Species.count()) {
+                    Species want = cast<Species>(s);
+                    BeastId b = w.bear(want, 1.0, 1.0);
+                    Test.assertEqual(cast<int>(w.speciesOf(b)), s);
+                }
+                delete w;
+                return;
+            }
+
+            // THE ROSTER KEEPS BOTH ENDS TRUE, which is what the transformer exists for. A beast
+            // that says it is in a herd must be in that herd's roster, and vice versa -- the
+            // half-linked state is the one that reads as a rendering fault later.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method joining_a_herd_writes_both_ends() returns void {
+                Wild* w = new Wild() on heap;
+                Herd* h = w.gather(Species.Deer, 50.0, 50.0, 8.0);
+                BeastId b = w.bear(Species.Deer, 51.0, 50.0);
+                Test.assertEqual(w.herdOf(b), Wild.NO_HERD);
+                h.admit(b);
+                Test.assertEqual(h.count(), 1);
+                Test.assertEqual(w.herdOf(b), cast<int>(h.id()));
+                h.release(b);
+                Test.assertEqual(h.count(), 0);
+                Test.assertEqual(w.herdOf(b), Wild.NO_HERD);
+                delete w;
+                return;
+            }
+
+            // A DEATH MOVES THE LAST ANIMAL INTO THE DEAD ONE'S SLOT, so its id changes -- and the
+            // roster that held it has to follow. If it does not, the roster points at a stranger,
+            // and nothing says so until something behaves oddly three arcs later.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method a_death_keeps_the_surviving_rosters_true() returns void {
+                Wild* w = new Wild() on heap;
+                Herd* h = w.gather(Species.Deer, 0.0, 0.0, 5.0);
+                BeastId first = w.bear(Species.Deer, 1.0, 1.0);
+                BeastId second = w.bear(Species.Deer, 2.0, 2.0);
+                h.admit(first);
+                h.admit(second);
+                // The first dies; the second moves into slot 0.
+                h.release(first);
+                w.bury(first);
+                Test.assertEqual(w.count(), 1);
+                Test.assertEqual(h.count(), 1);
+                // Whatever id the survivor now has, the two ends agree about it.
+                int link = h.firstMember();
+                BeastId still = h.memberAt(link);
+                Test.assertEqual(w.herdOf(still), cast<int>(h.id()));
+                delete w;
+                return;
+            }
+
+            // The census is kept as they are born and die, never swept -- and it is the number
+            // extinction is read from, so it has to be right after a death as well as after a birth.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method the_census_counts_what_is_alive() returns void {
+                Wild* w = new Wild() on heap;
+                Test.assertEqual(w.howMany(Species.Wolf), 0);
+                BeastId a = w.bear(Species.Wolf, 1.0, 1.0);
+                w.bear(Species.Wolf, 2.0, 2.0);
+                w.bear(Species.Deer, 3.0, 3.0);
+                Test.assertEqual(w.howMany(Species.Wolf), 2);
+                Test.assertEqual(w.howMany(Species.Deer), 1);
+                w.bury(a);
+                Test.assertEqual(w.howMany(Species.Wolf), 1);
+                Test.assertEqual(w.count(), 2);
+                delete w;
+                return;
+            }
+        }
+    }
+}

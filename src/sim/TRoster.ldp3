@@ -1,0 +1,94 @@
+import Agents.Sim.Chain;
+import Agents.Sim.BeastId;
+program AgentsExe;
+
+// WHAT AN OWNER GAINS BY KEEPING A ROSTER: the list, and the code that keeps both ends of it true.
+//
+// FIVE PLACES IN THIS GAME ARE THE SAME RELATION. A member points at its owner and the owner holds a
+// list of its members: an agent's home city and the city's residents, an agent's house and the
+// house's dwellers, a soldier's army and the army's roster, an agent's workplace and the building's
+// posts -- and, first of all of them, a beast's herd and the herd's members. Four are named in the
+// layouts. The fifth is this one, and no document counted it (ledger S0-8), though it lands three
+// slices before any of the others.
+//
+// They fail the same way: HALF-LINKED. The beast says it is in herd 12 and herd 12's roster does not
+// have it, or the roster has an animal that died. Neither is visible as an error -- it reads as a
+// rendering fault, or as behaviour nobody can explain, which is the most expensive kind of bug this
+// project has met.
+//
+// WHY THIS IS A TRANSFORMER AND NOT A GENERIC, which the building layout first drafted:
+// `join(Owner, Member)` has to write a PRIVATE field on both sides. A monomorphized generic may only
+// call what its parameter promises, and a type parameter promises nothing -- so the generic either
+// forces both types to publish setters (handing the outside world a way to half-link them, which is
+// the failure it exists to prevent) or does not compile. A transformer's field is APPLIED: it lands
+// inside the owner, private, and the bodies run there.
+//
+// It also gives the relation a NAME. `Membership<Building, Agent>` cannot tell a post from a bed,
+// because a building has two relations with an agent; `Building applies THouser, TEmployer` can.
+//
+// `explicit`, so it may never be transported by another transformer and a grep for `applies TRoster`
+// finds every owner. For anything that puts a field and a release obligation inside your type, that
+// should be the norm.
+public bundle Agents {
+    public namespace Sim {
+
+        public explicit transformer TRoster {
+            // THE APPLIED FIELD -- this is what an interface cannot give you, and the whole reason
+            // the feature exists. Every applying object gets its own; the transformer is a mould for
+            // state, not an owner of it.
+            //
+            // A POINTER, AND THE OWNER MAKES IT. The transformer has no constructor -- it is never
+            // instantiated -- so it cannot fill this itself, and the compiler says so at every type
+            // that applies it: "constructor of 'Herd' never assigns field 'roll'". That is the
+            // applied field carrying its obligations, working exactly as designed: the owner
+            // creates it, and the owner releases it, which is the same definite-assignment and
+            // definite-release pair an ordinary field has.
+            protected mutable Chain<BeastId>* roll;
+
+            // Take one in, writing BOTH ends. Written once, here, for every owner there will ever
+            // be.
+            public procedure admit(BeastId who) returns void {
+                roll.add(who);
+                bindBack(who);
+                return;
+            }
+
+            // And let one go, clearing both.
+            public procedure release(BeastId who) returns void {
+                roll.remove(who);
+                unbindBack(who);
+                return;
+            }
+
+            public procedure count() returns int {
+                return roll.size();
+            }
+
+            // Walk the roster without handing out the links.
+            public procedure firstMember() returns int {
+                return roll.head();
+            }
+
+            public procedure afterMember(int link) returns int {
+                return roll.next(link);
+            }
+
+            public procedure memberAt(int link) returns BeastId {
+                return roll.at(link);
+            }
+
+            // Give the whole roster back to the pool. An owner that dies calls this; forgetting it
+            // is a leak that grows with every death.
+            public procedure disband() returns void {
+                roll.clear();
+                return;
+            }
+
+            // THE SOCKETS: the two lines that differ between owners, and nothing else does.
+            // Whoever applies this says how the member points back, and the compiler will not let
+            // them forget -- a missing one is an error on the `applies` line naming what is absent.
+            protected procedure bindBack(BeastId who) returns void;
+            protected procedure unbindBack(BeastId who) returns void;
+        }
+    }
+}

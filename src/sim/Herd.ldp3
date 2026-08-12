@@ -1,0 +1,136 @@
+import Agents.Sim.TRoster;
+import Agents.Sim.Chain;
+import Agents.Sim.HerdMood;
+import Agents.Sim.BeastId;
+import Agents.Sim.HerdId;
+import Agents.Sim.Wild;
+import Agents.World.Species;
+program AgentsExe;
+
+// THE THING THAT THINKS. A herd has identity, a lifecycle -- it splits, it dies -- and one decision
+// a tick; a beast has a position and a jitter.
+//
+// One to two thousand decisions and fifteen thousand moves, instead of fifteen thousand decisions.
+// That is the same trade as the block index and the sliced bake, and it is why this is a class while
+// `Beast` is a value struct: what has a lifecycle gets an object, what is only data does not.
+//
+// A bear is a herd of one. No special case; the table says `HERD = 1` for it and everything below
+// works unchanged.
+//
+// `applies TRoster` is where the members live -- see that file for why a generic could not do this.
+// The two sockets below are the only lines a herd has to write about membership, and they are
+// exactly the ones that differ between one owner and another.
+public bundle Agents {
+    public namespace Sim {
+
+        public class Herd applies TRoster {
+            private mutable Species what;
+            private mutable float centreX;
+            private mutable float centreY;
+            private mutable float range;
+            private mutable HerdMood doing;
+            // Where the herd is going when it is MovingOn. Meaningless in any other mood, which is
+            // what the mood is for.
+            private mutable float towardX;
+            private mutable float towardY;
+            // The world this herd's animals live in, so the sockets can reach them. Borrowed.
+            private mutable Wild* home;
+
+            public constructor Herd(Wild* home, Species what, float x, float y, float range) {
+                this.home = home;
+                this.what = what;
+                centreX = x;
+                centreY = y;
+                this.range = range;
+                doing = HerdMood.Drifting;
+                towardX = x;
+                towardY = y;
+                // Not yet in the world's herd array; `beMine` says where.
+                mine = 0 - 1;
+                // THE APPLIED FIELD IS THE OWNER'S TO MAKE. A transformer has no constructor, so it
+                // cannot fill this -- and the compiler refuses the class until this line exists,
+                // which is the applied field carrying its obligations rather than trusting anyone.
+                roll = new Chain<BeastId>() on heap;
+            }
+
+            public destructor ~Herd() returns void {
+                // The roster's links go back to the shared pool, and then the roster itself goes.
+                // Forgetting either is a leak that grows with every herd that dies -- which, in a
+                // world with predators, is all of them eventually.
+                disband();
+                delete roll;
+                return;
+            }
+
+            // THE SOCKETS. A beast points back with its `herd` field, and this is the only place
+            // that is written -- so the two ends cannot disagree without this line being wrong.
+            protected procedure bindBack(BeastId who) returns void {
+                home.setHerdOf(who, id());
+                return;
+            }
+
+            protected procedure unbindBack(BeastId who) returns void {
+                home.setHerdOf(who, cast<HerdId>(Wild.NO_HERD));
+                return;
+            }
+
+            // Which herd this is, as its index in the world's herd array. Set once when the world
+            // takes it.
+            private mutable int mine;
+
+            public method beMine(int at) returns void {
+                mine = at;
+                return;
+            }
+
+            public method id() returns HerdId {
+                return cast<HerdId>(mine);
+            }
+
+            public method species() returns Species {
+                return what;
+            }
+
+            public method mood() returns HerdMood {
+                return doing;
+            }
+
+            public method setMood(HerdMood m) returns void {
+                doing = m;
+                return;
+            }
+
+            public method x() returns float {
+                return centreX;
+            }
+
+            public method y() returns float {
+                return centreY;
+            }
+
+            public method reach() returns float {
+                return range;
+            }
+
+            public method moveCentre(float nx, float ny) returns void {
+                centreX = nx;
+                centreY = ny;
+                return;
+            }
+
+            public method aimAt(float tx, float ty) returns void {
+                towardX = tx;
+                towardY = ty;
+                return;
+            }
+
+            public method towardsX() returns float {
+                return towardX;
+            }
+
+            public method towardsY() returns float {
+                return towardY;
+            }
+        }
+    }
+}

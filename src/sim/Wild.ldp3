@@ -1,0 +1,218 @@
+import System.IO.Console;
+import Agents.Sim.Beast;
+import Agents.Sim.Herd;
+import Agents.Sim.BeastId;
+import Agents.Sim.HerdId;
+import Agents.Sim.BeastState;
+import Agents.World.Species;
+program AgentsExe;
+
+// EVERY ANIMAL IN THE WORLD, and the herds that think for them.
+//
+// The beasts are ONE ARRAY of value structs -- no allocation per animal, ever, which is the
+// constraint the whole layout is built on. The herds are objects, because a herd has a lifecycle.
+//
+// DEATH IS A SWAP-REMOVE, and that is the one thing a reader has to hold in their head: the last
+// animal takes the dead one's slot, so its `BeastId` CHANGES. Anything holding an id across a death
+// is wrong unless it is told, which is why the roster is maintained through the transformer rather
+// than by hand, and why the census is kept as they are born and die rather than swept.
+public bundle Agents {
+    public namespace Sim {
+
+        public class Wild {
+            public static fixed int NO_HERD = 0 - 1;
+
+            private mutable Beast[] beasts;
+            private mutable int alive;
+            private mutable int room;
+
+            private mutable Herd*[] herds;
+            private mutable int herdCount;
+            private mutable int herdRoom;
+
+            // How many of each species are alive. NEVER SWEPT: sweeping fifteen thousand animals to
+            // count eighteen numbers is the pattern this project has paid for twice. It is kept as
+            // they are born and die, which also makes it the number extinction is read from.
+            private mutable int[] census;
+
+            public constructor Wild() {
+                room = 1024;
+                beasts = new Beast[room]();
+                alive = 0;
+                herdRoom = 64;
+                herds = new Herd*[herdRoom]();
+                herdCount = 0;
+                census = new int[Species.count()]();
+            }
+
+            public destructor ~Wild() returns void {
+                for (int i in 0..herdCount) {
+                    delete herds[i];
+                }
+                delete herds;
+                delete beasts;
+                delete census;
+                return;
+            }
+
+            public method count() returns int {
+                return alive;
+            }
+
+            public method herdsAlive() returns int {
+                return herdCount;
+            }
+
+            public method howMany(Species s) returns int {
+                return census[cast<int>(s)];
+            }
+
+            // ---- beasts -------------------------------------------------------------------------
+
+            private method growBeasts() returns void {
+                int bigger = room * 2;
+                mutable Beast[] next = new Beast[bigger]();
+                for (int i in 0..alive) {
+                    next[i] = beasts[i];
+                }
+                delete beasts;
+                beasts = next;
+                room = bigger;
+                return;
+            }
+
+            // Put one animal into the world, unattached to any herd, and answer where it went.
+            public method bear(Species s, float x, float y) returns BeastId {
+                if (alive >= room) {
+                    growBeasts();
+                }
+                int at = alive;
+                beasts[at].x = x;
+                beasts[at].y = y;
+                beasts[at].herd = cast<HerdId>(Wild.NO_HERD);
+                beasts[at].stamina = cast<short>(1000);
+                beasts[at].age = cast<short>(0);
+                beasts[at].species = cast<uint>(cast<int>(s));
+                beasts[at].state = cast<uint>(cast<int>(BeastState.Grazing));
+                alive = alive + 1;
+                census[cast<int>(s)] = census[cast<int>(s)] + 1;
+                return cast<BeastId>(at);
+            }
+
+            // Take one out. THE LAST ANIMAL MOVES INTO ITS SLOT, so whatever herd holds the last
+            // animal has to be told its id changed -- done here rather than left to callers, because
+            // a caller that forgets produces a roster pointing at a stranger.
+            public method bury(BeastId who) returns void {
+                int at = cast<int>(who);
+                if (at < 0 || at >= alive) {
+                    return;
+                }
+                census[cast<int>(beasts[at].species)] = census[cast<int>(beasts[at].species)] - 1;
+                int last = alive - 1;
+                if (at != last) {
+                    // The mover's herd keeps the same animal under a new id.
+                    int movedHerd = cast<int>(beasts[last].herd);
+                    beasts[at] = beasts[last];
+                    if (movedHerd >= 0 && movedHerd < herdCount) {
+                        herds[movedHerd].release(cast<BeastId>(last));
+                        herds[movedHerd].admit(cast<BeastId>(at));
+                    }
+                }
+                alive = alive - 1;
+                return;
+            }
+
+            public method xOf(BeastId who) returns float {
+                return beasts[cast<int>(who)].x;
+            }
+
+            public method yOf(BeastId who) returns float {
+                return beasts[cast<int>(who)].y;
+            }
+
+            public method placeAt(BeastId who, float x, float y) returns void {
+                beasts[cast<int>(who)].x = x;
+                beasts[cast<int>(who)].y = y;
+                return;
+            }
+
+            public method speciesOf(BeastId who) returns Species {
+                return cast<Species>(cast<int>(beasts[cast<int>(who)].species));
+            }
+
+            public method stateOf(BeastId who) returns BeastState {
+                return cast<BeastState>(cast<int>(beasts[cast<int>(who)].state));
+            }
+
+            public method setStateOf(BeastId who, BeastState s) returns void {
+                beasts[cast<int>(who)].state = cast<uint>(cast<int>(s));
+                return;
+            }
+
+            public method staminaOf(BeastId who) returns int {
+                return cast<int>(beasts[cast<int>(who)].stamina);
+            }
+
+            public method setStaminaOf(BeastId who, int s) returns void {
+                mutable int keep = s;
+                if (keep < 0) {
+                    keep = 0;
+                }
+                if (keep > 1000) {
+                    keep = 1000;
+                }
+                beasts[cast<int>(who)].stamina = cast<short>(keep);
+                return;
+            }
+
+            public method ageOf(BeastId who) returns int {
+                return cast<int>(beasts[cast<int>(who)].age);
+            }
+
+            public method growOlder(BeastId who) returns void {
+                beasts[cast<int>(who)].age = cast<short>(cast<int>(beasts[cast<int>(who)].age) + 1);
+                return;
+            }
+
+            public method herdOf(BeastId who) returns int {
+                return cast<int>(beasts[cast<int>(who)].herd);
+            }
+
+            // Written ONLY by the roster transformer's sockets, so the two ends of the relation
+            // cannot drift apart in some third place.
+            public method setHerdOf(BeastId who, HerdId h) returns void {
+                beasts[cast<int>(who)].herd = h;
+                return;
+            }
+
+            // ---- herds --------------------------------------------------------------------------
+
+            private method growHerds() returns void {
+                int bigger = herdRoom * 2;
+                mutable Herd*[] next = new Herd*[bigger]();
+                for (int i in 0..herdCount) {
+                    next[i] = herds[i];
+                }
+                delete herds;
+                herds = next;
+                herdRoom = bigger;
+                return;
+            }
+
+            public method gather(Species s, float x, float y, float range) returns Herd* {
+                if (herdCount >= herdRoom) {
+                    growHerds();
+                }
+                Herd* h = new Herd(this, s, x, y, range) on heap;
+                h.beMine(herdCount);
+                herds[herdCount] = h;
+                herdCount = herdCount + 1;
+                return h;
+            }
+
+            public method herdAt(int at) returns Herd* {
+                return herds[at];
+            }
+        }
+    }
+}

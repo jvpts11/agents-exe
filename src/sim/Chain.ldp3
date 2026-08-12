@@ -1,0 +1,170 @@
+program AgentsExe;
+
+// A LIST WITH NO ALLOCATOR OF ITS OWN.
+//
+// This is the one thing carried over from the data-oriented draft, and the measurement is why:
+// half a million object-agents weighed 2,383 MB, of which the scalar fields were forty. The other
+// two thousand three hundred were `ArrayList` headers, doubling slack, and ONE ALLOCATION PER LIST
+// -- eleven per person, five and a half million of them, most nearly empty. The thing that could
+// not be afforded was never the object. It was giving every owner its own allocator for the parts
+// whose length nobody can predict.
+//
+// So a chain is a HEAD, and the links live in a pool every chain of the same T shares. An owner with
+// nothing costs one integer; an owner with a great deal costs the pool, not itself.
+//
+// THE POOL IS STATIC, which is what "the world's one pool" means when it is written down. Every
+// `Chain<BeastId>` in the program draws links from the same two arrays -- so a thousand herds are one
+// allocator, not a thousand. Monomorphization gives each T its own, which is right: a chain of
+// beast ids and a chain of memories have nothing to share but the shape.
+//
+// FREED LINKS GO ON A FREE LIST rather than being forgotten. A world that kills and breeds for six
+// hours would otherwise grow the pool to the high-water mark of everything that has ever lived.
+public bundle Agents {
+    public namespace Sim {
+
+        public class Chain<T> {
+            // The links: value and next, as columns. `next` is an index into these same arrays, and
+            // -1 ends a chain.
+            private static mutable T[] held;
+            private static mutable int[] after;
+            private static mutable int used;      // how many links have ever been handed out
+            private static mutable int spare;     // head of the free list, or -1
+            private static mutable int room;
+
+            // This chain's first link, or -1 when it is empty.
+            private mutable int first;
+            private mutable int many;
+
+            public constructor Chain() {
+                first = 0 - 1;
+                many = 0;
+            }
+
+            // Grow the shared pool. Doubling, because a pool that grows by a constant turns a
+            // population that doubles into a copy per birth.
+            private static method grow() returns void {
+                if (Chain.room == 0) {
+                    Chain.room = 256;
+                    Chain.held = new T[Chain.room]();
+                    Chain.after = new int[Chain.room]();
+                    Chain.used = 0;
+                    Chain.spare = 0 - 1;
+                    return;
+                }
+                int bigger = Chain.room * 2;
+                mutable T[] held2 = new T[bigger]();
+                mutable int[] after2 = new int[bigger]();
+                for (int i in 0..Chain.used) {
+                    held2[i] = Chain.held[i];
+                    after2[i] = Chain.after[i];
+                }
+                delete Chain.held;
+                delete Chain.after;
+                Chain.held = held2;
+                Chain.after = after2;
+                Chain.room = bigger;
+                return;
+            }
+
+            private static method take() returns int {
+                // THE POOL IS MADE BEFORE THE FREE LIST IS BELIEVED. A static `int` starts at ZERO,
+                // not at -1, so an empty free list looks like "link 0 is free" until `grow` has run
+                // -- and following it reads an array that does not exist yet. Asking for room first
+                // is the whole fix, and it costs one comparison on a path that already has two.
+                if (Chain.room == 0) {
+                    Chain.grow();
+                }
+                if (Chain.spare >= 0) {
+                    int at = Chain.spare;
+                    Chain.spare = Chain.after[at];
+                    return at;
+                }
+                if (Chain.used >= Chain.room) {
+                    Chain.grow();
+                }
+                int at = Chain.used;
+                Chain.used = Chain.used + 1;
+                return at;
+            }
+
+            // Put one at the front. The front because nothing here cares about order and the front
+            // is the only end reachable without a walk.
+            public method add(T item) returns void {
+                int at = Chain.take();
+                Chain.held[at] = item;
+                Chain.after[at] = first;
+                first = at;
+                many = many + 1;
+                return;
+            }
+
+            // Take one out, and say whether it was there. The link goes back on the free list.
+            public method remove(T item) returns boolean {
+                mutable int at = first;
+                mutable int prev = 0 - 1;
+                while (at >= 0) {
+                    if (Chain.held[at] == item) {
+                        if (prev < 0) {
+                            first = Chain.after[at];
+                        } else {
+                            Chain.after[prev] = Chain.after[at];
+                        }
+                        Chain.after[at] = Chain.spare;
+                        Chain.spare = at;
+                        many = many - 1;
+                        return true;
+                    }
+                    prev = at;
+                    at = Chain.after[at];
+                }
+                return false;
+            }
+
+            public method has(T item) returns boolean {
+                mutable int at = first;
+                while (at >= 0) {
+                    if (Chain.held[at] == item) {
+                        return true;
+                    }
+                    at = Chain.after[at];
+                }
+                return false;
+            }
+
+            // How many are in it. Kept rather than counted: the census asks constantly and a walk
+            // per ask is the shape this whole file exists to avoid.
+            public method size() returns int {
+                return many;
+            }
+
+            // Walking it without exposing the links. `head()` then `next(at)`, with -1 for the end:
+            // an index is not an allocation, and a generator here would be one object per walk.
+            public method head() returns int {
+                return first;
+            }
+
+            public method next(int at) returns int {
+                return Chain.after[at];
+            }
+
+            public method at(int link) returns T {
+                return Chain.held[link];
+            }
+
+            // Give every link back. A herd that dies returns its roster to the pool rather than
+            // leaving it to the high-water mark.
+            public method clear() returns void {
+                mutable int at = first;
+                while (at >= 0) {
+                    int nxt = Chain.after[at];
+                    Chain.after[at] = Chain.spare;
+                    Chain.spare = at;
+                    at = nxt;
+                }
+                first = 0 - 1;
+                many = 0;
+                return;
+            }
+        }
+    }
+}
