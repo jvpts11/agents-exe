@@ -1,0 +1,123 @@
+import System.IO.Console;
+program AgentsExe;
+
+// A BOUNDED QUANTITY THAT CANNOT LEAVE ITS BOUNDS.
+//
+// Health, energy, hunger, sanity and an army's morale are the same thing five times: a number with a
+// floor and a ceiling that must never pass either. Written as plain ints, every site that changes
+// one has to remember the clamp -- and the build this one replaces is the proof, where `spend()` was
+// four lines of which three were `if (e < 0) { e = 0; }`. **A clamp written at every site is a clamp
+// missing from one of them.**
+//
+// So the saturation lives HERE, once, and the no-UB principle is kept by construction rather than by
+// memory: `body.energy -= 1` in the tick, `body.energy.empty()` for "must sleep",
+// `body.energy < 350` for "should rest", and none of those can produce a number outside the bounds.
+//
+// IT IS ALSO AIMED AT THE COMPILER, deliberately. Operator overloading is the least-exercised
+// feature in this language, and every time it has been used a bug came out of it: an operator
+// returning its own struct crashed codegen (#262), a value struct in `++` was shallow-copied, a
+// conversion operator mis-stored (#265). This hits all three shapes on purpose -- it returns its own
+// struct type, it is a value struct that lives inside another value struct inside a class, and it
+// carries compound assignment. If any of that is still broken, it surfaces in the first slice of the
+// people rather than in a run six weeks from now.
+public bundle Agents {
+    public namespace People {
+
+        public struct Gauge {
+            // The three are private and there is no setter: the only ways in are the constructor and
+            // the operators below, which is what makes "cannot leave its bounds" a property of the
+            // type rather than a habit of its callers.
+            private mutable int amount;
+            private mutable int low;
+            private mutable int high;
+
+            // Starts wherever it is told, clamped -- because a caller that builds one out of range
+            // has already made the mistake this type exists to prevent, and starting it wrong would
+            // let the first read be the only lie.
+            public constructor Gauge(int at, int low, int high) {
+                this.low = low;
+                this.high = high;
+                amount = at;
+                if (amount < low) {
+                    amount = low;
+                }
+                if (amount > high) {
+                    amount = high;
+                }
+            }
+
+            public method value() returns int {
+                return amount;
+            }
+
+            public method floor() returns int {
+                return low;
+            }
+
+            public method ceiling() returns int {
+                return high;
+            }
+
+            // ---- moving it ------------------------------------------------------------------------
+
+            public operator + (int by) returns Gauge {
+                return new Gauge(amount + by, low, high);
+            }
+
+            public operator - (int by) returns Gauge {
+                return new Gauge(amount - by, low, high);
+            }
+
+            public operator += (int by) returns void {
+                amount = amount + by;
+                if (amount > high) {
+                    amount = high;
+                }
+                return;
+            }
+
+            public operator -= (int by) returns void {
+                amount = amount - by;
+                if (amount < low) {
+                    amount = low;
+                }
+                return;
+            }
+
+            // ---- asking about it ------------------------------------------------------------------
+
+            public operator < (int than) returns boolean {
+                return amount < than;
+            }
+
+            public operator > (int than) returns boolean {
+                return amount > than;
+            }
+
+            public operator == (int to) returns boolean {
+                return amount == to;
+            }
+
+            // At the floor: out of energy, dead, starving.
+            public method empty() returns boolean {
+                return amount <= low;
+            }
+
+            // At the ceiling: rested, whole, full.
+            public method full() returns boolean {
+                return amount >= high;
+            }
+
+            // Where it stands between its bounds, 0..1 -- what a bar on screen is drawn from, and
+            // what a rule reads when it wants "half" rather than a number that depends on which
+            // gauge it happens to be.
+            public method share() returns float {
+                int span = high - low;
+                if (span <= 0) {
+                    return 0.0;
+                }
+                return cast<float>(amount - low) / cast<float>(span);
+            }
+        }
+    }
+}

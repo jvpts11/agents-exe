@@ -1,0 +1,55 @@
+import System.IO.Console;
+program AgentsExe;
+
+// THE NATIONS AND THE LANGUAGES AN AGENT HOLDS -- the eighth part, and it exists because neither had
+// anywhere to live.
+//
+// The model gives an agent MANY nationalities and MANY languages. Without a home for them,
+// cross-national marriage was specified in detail and unimplementable, and the nation spec's
+// language drift produced languages nothing could hold. (Audit B4, a BLOCKER, and B5.)
+//
+// BITMASKS, because the question asked of both is "does it hold this one" and the answer is a shift
+// and an and. Sixty-four nations and sixty-four languages in eight bytes each, and inheritance is an
+// OR of two of them: a child of two nations holds both, which is exactly what the model says
+// happens and what a single id could never express.
+//
+// HOW A LANGUAGE IS ACQUIRED (decided 2026-08-13, audit A8): both parents' at birth -- the OR above
+// -- and the city's own after a year of belonging to it. Not taught and not chosen; lived. An agent
+// that moves to another nation is a foreigner for a year and then is not.
+public bundle Agents {
+    public namespace People {
+
+        public struct Belonging {
+            public mutable long nationalities;   // one bit per nation in the world's table
+            public mutable long languages;       // one bit per language in the world's table
+
+            // Holding one is a shift and an and, which is the whole reason for the shape.
+            public method holdsNation(int which) returns boolean {
+                return ((nationalities >> which) & cast<long>(1)) != 0;
+            }
+
+            public method speaks(int which) returns boolean {
+                return ((languages >> which) & cast<long>(1)) != 0;
+            }
+
+            public method takeNation(int which) returns void {
+                nationalities = nationalities | (cast<long>(1) << which);
+            }
+
+            // Learning one is idempotent on purpose: the rule that runs it asks once a year and
+            // must not care whether it has already happened.
+            public method learn(int which) returns void {
+                languages = languages | (cast<long>(1) << which);
+            }
+
+            // What a birth does, and the only place two of these ever meet: a child holds
+            // everything both of its parents hold.
+            public static method inherited(Belonging mother, Belonging father) returns Belonging {
+                mutable Belonging child = new Belonging();
+                child.nationalities = mother.nationalities | father.nationalities;
+                child.languages = mother.languages | father.languages;
+                return child;
+            }
+        }
+    }
+}

@@ -1,0 +1,123 @@
+import System.IO.Console;
+import System.Test.Test;
+import System.Memory.Raw;
+import Agents.People.Gauge;
+program AgentsExe;
+
+// THE ONE THING A GAUGE PROMISES: it cannot leave its bounds, whichever door you come in by. Every
+// door is checked here, because the promise is only worth the door nobody tested.
+//
+// It is also the compiler check the layout asks for. Operator overloading is the least-exercised
+// feature in this language and has produced a bug every time it has been used -- an operator
+// returning its own struct, a value struct copied shallowly by compound assignment, a conversion
+// mis-stored. A gauge does all three, so if any of it is broken it is broken here rather than in a
+// world six weeks old.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Gauges {
+
+            [Tag(name: "people")]
+            [Test]
+            public static method a_gauge_starts_where_it_is_told() returns void {
+                Gauge g = new Gauge(350, 0, 1000);
+                Test.assertEqual(g.value(), 350);
+                Test.assertEqual(g.floor(), 0);
+                Test.assertEqual(g.ceiling(), 1000);
+                return;
+            }
+
+            // A CALLER THAT BUILDS ONE OUT OF RANGE HAS ALREADY MADE THE MISTAKE. Clamping at
+            // construction is what stops the very first read from being the lie.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_gauge_cannot_be_born_outside_itself() returns void {
+                Gauge over = new Gauge(4000, 0, 1000);
+                Gauge under = new Gauge(0 - 50, 0, 100);
+                Test.assertEqual(over.value(), 1000);
+                Test.assertEqual(under.value(), 0);
+                return;
+            }
+
+            // `+` and `-` RETURN A NEW GAUGE -- the shape that crashed codegen once (#262): an
+            // operator whose return type is its own struct.
+            [Tag(name: "people")]
+            [Test]
+            public static method adding_and_subtracting_answer_a_gauge() returns void {
+                Gauge g = new Gauge(500, 0, 1000);
+                Gauge up = g + 200;
+                Gauge down = g - 200;
+                Test.assertEqual(up.value(), 700);
+                Test.assertEqual(down.value(), 300);
+                // And the one they came from did not move.
+                Test.assertEqual(g.value(), 500);
+                return;
+            }
+
+            [Tag(name: "people")]
+            [Test]
+            public static method neither_can_pass_a_bound() returns void {
+                Gauge nearly = new Gauge(950, 0, 1000);
+                Test.assertEqual((nearly + 500).value(), 1000);
+                Gauge low = new Gauge(30, 0, 1000);
+                Test.assertEqual((low - 500).value(), 0);
+                return;
+            }
+
+            // COMPOUND ASSIGNMENT ON A VALUE STRUCT -- the shape that was once copied shallowly, so
+            // the change went to a copy and the original never moved.
+            [Tag(name: "people")]
+            [Test]
+            public static method compound_assignment_moves_the_gauge_itself() returns void {
+                mutable Gauge energy = new Gauge(1000, 0, 1000);
+                energy -= 300;
+                Test.assertEqual(energy.value(), 700);
+                energy -= 1000;
+                Test.assertEqual(energy.value(), 0);
+                Test.assertTrue(energy.empty());
+                energy += 250;
+                Test.assertEqual(energy.value(), 250);
+                energy += 100000;
+                Test.assertEqual(energy.value(), 1000);
+                Test.assertTrue(energy.full());
+                return;
+            }
+
+            // What the tick actually writes: `energy < 350` for "should rest", `empty()` for "must
+            // sleep". Comparison against a bare int, not against another gauge.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_gauge_compares_against_a_number() returns void {
+                Gauge energy = new Gauge(340, 0, 1000);
+                Test.assertTrue(energy < 350);
+                Test.assertTrue(!(energy > 350));
+                Test.assertTrue(new Gauge(20, 0, 100) == 20);
+                return;
+            }
+
+            // The share is what a bar is drawn from, and what a rule reads when it wants "half"
+            // rather than a number that depends on which gauge it happens to be.
+            [Tag(name: "people")]
+            [Test]
+            public static method the_share_is_where_it_stands_between_its_bounds() returns void {
+                Gauge half = new Gauge(500, 0, 1000);
+                Test.assertTrue(half.share() > 0.49 && half.share() < 0.51);
+                Gauge fed = new Gauge(20, 0, 100);
+                Test.assertTrue(fed.share() > 0.19 && fed.share() < 0.21);
+                // A gauge with no span answers zero rather than dividing by it.
+                Test.assertTrue(new Gauge(5, 5, 5).share() == 0.0);
+                return;
+            }
+
+            // A VALUE STRUCT INSIDE A VALUE STRUCT INSIDE A CLASS is the third shape the layout aims
+            // at the compiler, and this is the smallest version of it: a gauge is three ints and
+            // nothing else, so anything else in its size is a pointer that should not be there.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_gauge_is_three_ints_and_no_pointer() returns void {
+                Test.assertEqual(Raw.sizeof(Gauge), 12);
+                return;
+            }
+        }
+    }
+}

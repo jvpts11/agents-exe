@@ -1,0 +1,202 @@
+import System.IO.Console;
+import System.Test.Test;
+import System.Memory.Raw;
+import Agents.People.Identity;
+import Agents.People.Temperament;
+import Agents.People.Body;
+import Agents.People.Belonging;
+import Agents.People.Mind;
+import Agents.People.Inventory;
+import Agents.People.Armour;
+import Agents.People.Whereabouts;
+import Agents.People.Gauge;
+import Agents.People.Sex;
+import Agents.People.Orientation;
+import Agents.People.Mood;
+program AgentsExe;
+
+// THE PARTS AN AGENT IS COMPOSED OF -- the arithmetic of them, which is what a window cannot show.
+// How a person LOOKS and behaves is judged by running the game; that every part is a value that
+// lives inside the agent, and that the rules written on those values hold, is judged here.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Person {
+
+            // COMPOSITION WITH NO ALLOCATION PER PART. Every one of these is a value struct, so it
+            // lives INSIDE the agent -- no pointer chase to read a part, and no eight allocations
+            // per person born. If any of them ever became a class, its size here would be a
+            // pointer's and this is where that shows up.
+            [Tag(name: "people")]
+            [Test]
+            public static method every_part_is_a_value_and_lives_inside_the_agent() returns void {
+                // Five bytes of axes, and no padding to a word: they are read as a group.
+                Test.assertEqual(Raw.sizeof(Temperament), 5);
+                // Two bitmasks, and nothing else.
+                Test.assertEqual(Raw.sizeof(Belonging), 16);
+                // Five slots of item index.
+                Test.assertEqual(Raw.sizeof(Armour), 20);
+                // A gauge is three ints and no pointer, and a mind is a gauge, a mood and a mask --
+                // both measured, both right, and both proof that a nested value struct lives inside
+                // rather than being pointed at.
+                Test.assertEqual(Raw.sizeof(Gauge), 12);
+                Test.assertEqual(Raw.sizeof(Mind), 24);
+                Test.assertEqual(Raw.sizeof(Identity), 32);
+                // `Body` IS NOT MEASURED HERE, and that is a finding rather than an omission:
+                // `Raw.sizeof` under-reports a struct with more than ONE nested value struct. A body
+                // holds three gauges, three ints and a byte -- forty-nine bytes of fields -- and
+                // measures 40. The fields themselves are all correct (the pregnancy check below
+                // writes and reads them), so there are two notions of the layout and the size reads
+                // the wrong one. Ledger S2-1: it matters because a layout's byte budget is enforced
+                // with exactly this call, so a budget could pass while being broken.
+                return;
+            }
+
+            // FIXED AT BIRTH AND NEVER WRITTEN AGAIN -- that is the line `Identity` is drawn on, and
+            // the reason the tick never touches it. Here it is only read back, which is the point.
+            [Tag(name: "people")]
+            [Test]
+            public static method an_identity_is_numbers_into_the_world_s_tables() returns void {
+                mutable Identity who = new Identity();
+                who.givenName = 12;
+                who.familyName = 3;
+                who.culture = 1;
+                who.religion = 2;
+                who.sex = Sex.Female;
+                who.orientation = Orientation.Straight;
+                // 200 IS THE POINT OF THIS LINE. The layout wrote these axes as `byte`, which is
+                // signed, so 200 read back as -56 and the boldest agent in the world became the
+                // most timid. They are `ubyte` now -- the same trap the fauna's `int state : 3`
+                // fell into, in a document whose every other number had been measured.
+                who.nature.boldness = cast<ubyte>(200);
+                who.nature.ambition = cast<ubyte>(30);
+                Test.assertEqual(who.givenName, 12);
+                Test.assertEqual(cast<int>(who.sex), cast<int>(Sex.Female));
+                // The nested value struct is part of the identity, not a reference to one: writing
+                // through it wrote HERE.
+                Test.assertEqual(cast<int>(who.nature.boldness), 200);
+                Test.assertEqual(cast<int>(who.nature.ambition), 30);
+                return;
+            }
+
+            // WHO MAY COURT WHOM, asked once in the one place. A total match over the orientation
+            // with no `default`, so a fifth would be reported rather than swallowed.
+            [Tag(name: "people")]
+            [Test]
+            public static method orientation_answers_who_may_be_courted() returns void {
+                Test.assertTrue(Orientation.Straight.courts(Sex.Female, Sex.Male));
+                Test.assertTrue(!Orientation.Straight.courts(Sex.Male, Sex.Male));
+                Test.assertTrue(Orientation.Gay.courts(Sex.Male, Sex.Male));
+                Test.assertTrue(!Orientation.Gay.courts(Sex.Female, Sex.Male));
+                Test.assertTrue(Orientation.Bisexual.courts(Sex.Female, Sex.Male));
+                Test.assertTrue(Orientation.Bisexual.courts(Sex.Female, Sex.Female));
+                Test.assertTrue(!Orientation.Asexual.courts(Sex.Female, Sex.Male));
+                return;
+            }
+
+            // A CHILD OF TWO NATIONS HOLDS BOTH, which a single id could never express and which the
+            // model specifies in detail. It is an OR of two bitmasks, and that is the whole of
+            // inheritance here.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_child_holds_what_both_parents_held() returns void {
+                mutable Belonging mother = new Belonging();
+                mother.takeNation(2);
+                mother.learn(0);
+                mutable Belonging father = new Belonging();
+                father.takeNation(5);
+                father.learn(1);
+                Belonging child = Belonging.inherited(mother, father);
+                Test.assertTrue(child.holdsNation(2) && child.holdsNation(5));
+                Test.assertTrue(child.speaks(0) && child.speaks(1));
+                Test.assertTrue(!child.holdsNation(3));
+                // And learning is idempotent: the rule that runs it asks once a year and must not
+                // care whether it has already happened.
+                mutable Belonging grown = child;
+                grown.learn(1);
+                grown.learn(1);
+                Test.assertTrue(grown.speaks(1));
+                return;
+            }
+
+            // PREGNANCY IS NOT A BIT. A bit says WHETHER; a pregnancy has a term and an outcome, so
+            // it is the tick it began and how many are coming -- and it is in `Body`, not in the
+            // catalogue of mental conditions where an earlier draft put it.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_pregnancy_carries_its_term_and_its_outcome() returns void {
+                mutable Body body = new Body();
+                body.carrying = Body.NOT_CARRYING;
+                body.expecting = cast<byte>(0);
+                Test.assertEqual(body.carrying, 0 - 1);
+                body.carrying = 4200;
+                body.expecting = cast<byte>(3);
+                Test.assertEqual(body.carrying, 4200);
+                Test.assertEqual(cast<int>(body.expecting), 3);
+                // And the conditions are a different catalogue on a different part.
+                mutable Mind mind = new Mind();
+                mind.take(4);
+                Test.assertTrue(mind.has(4));
+                Test.assertTrue(!mind.has(5));
+                return;
+            }
+
+            // A GAUGE INSIDE A VALUE STRUCT still saturates -- the third shape the layout aims at
+            // the compiler, and the one that would be silent if it broke: a body whose energy went
+            // negative would just be a fast agent nobody could explain.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_body_s_gauges_saturate_where_they_live() returns void {
+                mutable Body body = new Body();
+                body.energy = new Gauge(1000, 0, 1000);
+                body.fed = new Gauge(100, 0, 100);
+                body.energy -= 5000;
+                body.fed -= 90;
+                Test.assertEqual(body.energy.value(), 0);
+                Test.assertTrue(body.energy.empty());
+                Test.assertEqual(body.fed.value(), 10);
+                Test.assertTrue(body.fed < 20);
+                return;
+            }
+
+            // PUTTING A LOAD DOWN LEAVES BOTH HALVES SAYING THE SAME THING. "The kind is cleared and
+            // the count is not" is the shape of bug that survives for weeks, because every reader
+            // that checks one and not the other still works.
+            [Tag(name: "people")]
+            [Test]
+            public static method dropping_a_load_clears_the_kind_and_the_count() returns void {
+                mutable Inventory kit = new Inventory();
+                kit.carrying = 7;
+                kit.howMany = 12;
+                Test.assertTrue(!kit.emptyHanded());
+                kit.dropAll();
+                Test.assertTrue(kit.emptyHanded());
+                Test.assertEqual(kit.howMany, 0);
+                Test.assertEqual(kit.carrying, Inventory.EMPTY_HANDED);
+                return;
+            }
+
+            // WHERE IT IS AND WHAT IT BELONGS TO ARE TWO QUESTIONS. The position moves every tick;
+            // the city changes a handful of times in a life.
+            [Tag(name: "people")]
+            [Test]
+            public static method whereabouts_holds_a_place_and_a_belonging() returns void {
+                mutable Whereabouts w = new Whereabouts();
+                // `vec2(x, y)` and not `new vec2(...)`: it is a value of the language, two floats in
+                // a register, not an object. Written whole rather than a lane at a time -- lane
+                // WRITE is not in the language yet, and a position is replaced rather than edited.
+                w.position = vec2(40.5, 12.25);
+                w.facing = vec2(1.0, 0.0);
+                w.homeCity = cast<CityId>(Whereabouts.NOWHERE);
+                w.workplace = cast<BuildingId>(Whereabouts.NOWHERE);
+                Test.assertTrue(w.homeless());
+                Test.assertTrue(w.jobless());
+                w.homeCity = cast<CityId>(3);
+                Test.assertTrue(!w.homeless());
+                Test.assertEqual(cast<int>(w.homeCity), 3);
+                Test.assertTrue(w.position.x > 40.4 && w.position.x < 40.6);
+                return;
+            }
+        }
+    }
+}
