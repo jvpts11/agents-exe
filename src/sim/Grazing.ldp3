@@ -1,4 +1,5 @@
 import System.IO.Console;
+import System.Time.Time;
 import Agents.Sim.Wild;
 import Agents.Sim.Herd;
 import Agents.Sim.HerdMood;
@@ -98,6 +99,10 @@ public bundle Agents {
             // and the two rows below it are where the budget starts refusing -- SAYING SO each time,
             // which is what makes those two rows a measurement rather than a surprise.
             public static fixed int STIR_EVERY = 15;
+            // How much faster than bare replacement a herd breeds when the ground has room for it.
+            // Two: a population that has been cut into recovers, and one at its ceiling is stopped by
+            // the ceiling rather than by the rate.
+            public static fixed int BREED_OVER_REPLACEMENT = 2;
             // How far the daughter of a split looks for ground of her own, in blocks. BOUNDED IN THE
             // LINE THAT WRITES IT: the previous build's agents span against walls because a search
             // with no bound was written once and then trusted everywhere.
@@ -121,20 +126,50 @@ public bundle Agents {
             //
             // THREE PASSES, AND EACH ONE TOUCHES ONLY WHAT IT HAS TO. Walking every animal for
             // everything is what made the tick cost thirty times what it needed to.
+            // WHAT EACH PASS COSTS, in nanoseconds over the whole run. Four clock reads a tick
+            // against a tick of sixty thousand is a quarter of one per thousand, and it is the
+            // difference between knowing which pass is expensive and guessing.
+            //
+            // IT WAS ADDED BECAUSE FOUR GUESSES IN A ROW WERE WRONG. The herd walk, the neighbourhood
+            // count, the order of the breeding test and the biome read were each argued for from
+            // first principles, each fixed, and each worth between nothing and five per cent. A
+            // meter that covers the loop is the only thing that can say where the time goes -- which
+            // is the same lesson the frame meter learned one level up, written on its own file.
+            private static mutable long walkNs;
+            private static mutable long thinkNs;
+            private static mutable long stirNs;
+            private static mutable long ageNs;
+
+            public static method report() returns void {
+                long all = Grazing.walkNs + Grazing.thinkNs + Grazing.stirNs + Grazing.ageNs;
+                if (all == 0) {
+                    return;
+                }
+                System.IO.Console.println($"fauna tick: {all / 1000000} ms total -- walking {Grazing.walkNs * 100 / all}%, deciding {Grazing.thinkNs * 100 / all}%, stirring {Grazing.stirNs * 100 / all}%, ageing {Grazing.ageNs * 100 / all}%");
+                return;
+            }
+
             public static method tick(Wild* wild, Grid* g, long at, Rng* rng, Chronicle* log)
                     returns void {
-                // Which fifteenth of the world's animals -- and of its herds -- comes up this tick.
+                // Which fifteenth of the world's animals comes up this tick.
                 int phase = cast<int>(at % cast<long>(Grazing.STIR_EVERY));
-                // Read ONCE: a split appends a herd, and a herd born this tick has already been
-                // placed where it belongs and must not also be thought for in the tick that made it.
-                int n = wild.herdsAlive();
+                mutable long mark = Time.nanos();
 
                 // ONE: the herds that are travelling walk, every tick, and their animals with them.
-                // Crossing to another pasture and running from a wolf are the same motion at two
-                // speeds -- and both are motion a player watches, which is why neither is sliced.
+                // Crossing to another pasture, running from a wolf and closing on a quarry are the
+                // same motion at three speeds -- and all three are motion a player watches, which is
+                // why none of them is sliced.
+                //
+                // ONLY THE ONES THAT ARE GOING SOMEWHERE, through the world's list of them. Asking
+                // every herd its mood was fifteen nanoseconds a herd for the answer "no", which at
+                // nine thousand herds was most of the tick.
+                //
+                // THE INDEX IS NOT ADVANCED WHEN A HERD ARRIVES, for the same reason the ageing walk
+                // does not: settling takes it out of the list, and the last mover has just been
+                // swapped into the slot being looked at.
                 mutable int i = 0;
-                while (i < n) {
-                    Herd* h = wild.herdAt(i);
+                while (i < wild.travellers()) {
+                    Herd* h = wild.travellerAt(i);
                     int doing = cast<int>(h.mood());
                     if (doing == cast<int>(HerdMood.MovingOn)) {
                         Grazing.carryOn(h, wild, 1.0);
@@ -158,8 +193,13 @@ public bundle Agents {
                         Grazing.stepCentre(h, wild, 1.0);
                         Grazing.walkWith(h, wild, g, 1.0, false);
                     }
-                    i = i + 1;
+                    if (h.spot() == i) {
+                        i = i + 1;
+                    }
                 }
+                mutable long now = Time.nanos();
+                Grazing.walkNs = Grazing.walkNs + (now - mark);
+                mark = now;
 
                 // TWO: a sixtieth of the herds decide something -- so every herd decides once a
                 // second. A herd reconsidering sixty times a second is sixty times the thinking for
@@ -174,14 +214,21 @@ public bundle Agents {
                     Grazing.thinkFor(wild.herdAt(k), wild, g, at, rng, log);
                     k = k + Grazing.DECIDE_EVERY;
                 }
+                now = Time.nanos();
+                Grazing.thinkNs = Grazing.thinkNs + (now - mark);
+                mark = now;
 
                 // THREE: a fifteenth of the animals take their step.
                 Grazing.stirGrazers(wild, g, phase, at);
+                now = Time.nanos();
+                Grazing.stirNs = Grazing.stirNs + (now - mark);
+                mark = now;
 
                 // And once a second, everything alive gets a second older. A full walk, but one tick
                 // in sixty -- and it is two reads and an add per animal, with the array in order.
                 if (at % cast<long>(Grazing.TICKS_A_SECOND) == 0) {
-                    Grazing.ageEveryone(wild);
+                    Grazing.ageEveryone(wild, at, log);
+                    Grazing.ageNs = Grazing.ageNs + (Time.nanos() - mark);
                 }
                 return;
             }
@@ -192,11 +239,18 @@ public bundle Agents {
             // walking, which the first pass of the tick does every tick rather than every fifteenth.
             private static method thinkFor(Herd* h, Wild* wild, Grid* g, long at, Rng* rng,
                                            Chronicle* log) returns void {
+                // OUTGROWING ITSELF IS ABOUT SIZE AND NOT ABOUT DIET, so it is asked of every herd
+                // before anything else is. A pack of wolves that has bred past the number wolves run
+                // in splits by the same rule and for the same reason a herd of deer does.
+                if (Grazing.maySplit(h, wild, g, at, log)) {
+                    return;
+                }
                 // A PACK THINKS ABOUT SOMETHING ELSE ENTIRELY, and it thinks about it in its own
                 // file. What is below is what a grazer's day is made of; hunger, hunting and
-                // starving are not variations on it.
+                // starving are not variations on it, and a predator's breeding is limited by what it
+                // can CATCH rather than by the ground -- so that lives there too.
                 if (Beasts.isPredator(cast<int>(h.species()))) {
-                    Prowl.decide(h, wild, g, at, log);
+                    Prowl.decide(h, wild, g, at, rng, log);
                     return;
                 }
                 match (h.mood()) {
@@ -206,12 +260,11 @@ public bundle Agents {
                         if (Grazing.takeFright(h, wild)) {
                             return;
                         }
-                        // Then splitting, because a herd too big to feed itself should leave before
-                        // it wanders further, and then the draw for moving on.
-                        if (!Grazing.maySplit(h, wild, g, at, log)) {
-                            if (rng.nextInt(Grazing.MOVE_ON_IN) == 0) {
-                                Grazing.setOut(h, wild, g, rng);
-                            }
+                        // Then breeding, if the ground it stands on has room, and then the draw for
+                        // moving on.
+                        Grazing.mayBreed(h, wild, g, rng);
+                        if (rng.nextInt(Grazing.MOVE_ON_IN) == 0) {
+                            Grazing.setOut(h, wild, g, rng);
                         }
                     }
                     case MovingOn {
@@ -365,9 +418,10 @@ public bundle Agents {
                 return false;
             }
 
-            // Cells a tick, from the species' cells a second.
+            // Cells a tick, baked into the table rather than divided out of cells-a-second on every
+            // animal the tick moves.
             private static method paceOf(Herd* h) returns float {
-                return Beasts.pace(cast<int>(h.species())) / cast<float>(Grazing.TICKS_A_SECOND);
+                return Beasts.paceATick(cast<int>(h.species()));
             }
 
             // THE ANIMALS OF A HERD THAT IS CROSSING GROUND, every tick, through the herd's own
@@ -482,10 +536,14 @@ public bundle Agents {
                     // something nobody can see; a hash of two numbers already in hand is not. And it
                     // has to include the TICK: hashed from the slot alone, every animal walks in one
                     // fixed direction forever and the herd ends up as a ring around its own edge.
+                    // MASKS AND NOT REMAINDERS. `% 21` is an integer division, and two of them per
+                    // animal in the pass that costs forty per cent of the tick is two divisions in
+                    // the hottest loop in the game. Sixteen directions off four bits read exactly
+                    // the same on screen as twenty-one do.
                     mutable int k = slot * 374761393 + spun;
                     k = k ^ (k >> 13);
-                    float wx = cast<float>((k & 32767) % 21 - 10) * 0.1;
-                    float wy = cast<float>(((k >> 15) & 32767) % 21 - 10) * 0.1;
+                    float wx = cast<float>((k & 15) - 8) * 0.125;
+                    float wy = cast<float>(((k >> 8) & 15) - 8) * 0.125;
                     Grazing.tryStep(wild, g, b, bx + wx * hop, by + wy * hop);
                 }
                 return;
@@ -501,23 +559,40 @@ public bundle Agents {
                 if (gx < 0 || gy < 0 || gx >= g.width() || gy >= g.height()) {
                     return;
                 }
-                if (cast<int>(wild.stateOf(b)) != cast<int>(BeastState.Migrating)) {
-                    if (!Beasts.livesIn(cast<int>(wild.speciesOf(b)), g.biomeAt(gx, gy))) {
-                        return;
+                // GROUND IT HAS NOT LEFT CANNOT HAVE CHANGED. A step is a fiftieth of a cell, so
+                // nineteen steps in twenty end in the cell they started in -- and asking the biome
+                // map about them is a scattered read of three and a half megabytes for an answer
+                // that was true a tick ago. The index already knows which cell each animal is in.
+                if (!wild.inCell(b, gx, gy)) {
+                    if (cast<int>(wild.stateOf(b)) != cast<int>(BeastState.Migrating)) {
+                        if (!Beasts.livesIn(cast<int>(wild.speciesOf(b)), g.biomeAt(gx, gy))) {
+                            return;
+                        }
                     }
                 }
                 wild.placeAt(b, nx, ny);
                 return;
             }
 
-            // EVERYTHING ALIVE GETS A SECOND OLDER. One walk of the array in order, one tick in
-            // sixty: age is counted in seconds, because `age` is a short and a mammoth's six hundred
-            // seconds fit in one where thirty-six thousand ticks do not.
-            private static method ageEveryone(Wild* wild) returns void {
-                int n = wild.count();
+            // EVERYTHING ALIVE GETS A SECOND OLDER, AND WHAT HAS RUN OUT OF THEM DIES. One walk of
+            // the array in order, one tick in sixty: age is counted in seconds, because `age` is a
+            // short and a mammoth's six hundred seconds fit in one where thirty-six thousand ticks
+            // do not.
+            //
+            // THE SLOT IS NOT ADVANCED WHEN ONE DIES, and that is not an optimization -- a death is
+            // a swap-remove, so the LAST animal has just been moved into the slot being looked at,
+            // and stepping past it would skip an animal for every one that died. The count is
+            // re-read for the same reason.
+            private static method ageEveryone(Wild* wild, long at, Chronicle* log) returns void {
                 mutable int i = 0;
-                while (i < n) {
-                    wild.growOlder(cast<BeastId>(i));
+                while (i < wild.count()) {
+                    BeastId b = cast<BeastId>(i);
+                    wild.growOlder(b);
+                    int span = cast<int>(Beasts.life(cast<int>(wild.speciesOf(b))));
+                    if (wild.ageOf(b) >= span) {
+                        wild.diedOfAge(b, at, log);
+                        continue;
+                    }
                     i = i + 1;
                 }
                 return;
@@ -529,6 +604,53 @@ public bundle Agents {
                     wild.setStateOf(h.memberAt(link), s);
                     link = h.afterMember(link);
                 }
+                return;
+            }
+
+            // ---- breeding -------------------------------------------------------------------------
+            //
+            // A HERD BELOW THE CARRYING CAPACITY OF THE GROUND IT STANDS ON BREEDS. Not below its own
+            // number -- below the BLOCK's, which is the first of the three steps of the full-block
+            // rule: *breeding asks the block, not the herd*. A herd asking only itself would let
+            // every deer in the world stand in one meadow and each herd call itself small.
+            //
+            // THE RATE IS THE SPECIES' OWN LIFESPAN, and nothing is tuned by hand. An animal that
+            // lives `LIFE` seconds must be replaced once in `LIFE` seconds for the population to
+            // stand still, so a herd of `count` needs `count / LIFE` births a second to hold. Twice
+            // that is the rate here: a population under pressure recovers, one at its ceiling is
+            // stopped by the ceiling and not by the rate. A number derived from the table cannot
+            // drift out of step with the table.
+            private static method mayBreed(Herd* h, Wild* wild, Grid* g, Rng* rng) returns void {
+                int sp = cast<int>(h.species());
+                int gx = cast<int>(h.x());
+                int gy = cast<int>(h.y());
+                if (gx < 0 || gy < 0 || gx >= g.width() || gy >= g.height()) {
+                    return;
+                }
+                // THE DRAW COMES BEFORE THE COUNT, and the order is worth thirty times the cost of
+                // this method. Both have to hold, so either order gives the same births -- but
+                // counting the neighbourhood means walking nine chains and reading a species off
+                // every animal in them, while the draw is one multiply. A birth comes up about once
+                // in thirty decisions, so asking the ground first meant paying the expensive
+                // question twenty-nine times to be told about a birth that was not going to happen.
+                int span = cast<int>(Beasts.life(sp));
+                if (span < 1) {
+                    return;
+                }
+                if (rng.nextInt(span) >= h.count() * Grazing.BREED_OVER_REPLACEMENT) {
+                    return;
+                }
+                int block = wild.blockAt(h.x(), h.y());
+                if (wild.headAround(block, h.species()) >= Beasts.roomFor(sp, g.biomeAt(gx, gy))) {
+                    // FULL. No birth, no line in the record, and nothing wrong: a full continent is
+                    // a full continent.
+                    return;
+                }
+                // Born beside its herd, on ground its herd is standing on -- so a calf is never born
+                // into the sea by a herd grazing along a shoreline.
+                BeastId calf = wild.bear(h.species(), h.x(), h.y());
+                h.admit(calf);
+                wild.noteBirth();
                 return;
             }
 
@@ -551,8 +673,8 @@ public bundle Agents {
                 // Somewhere to go, first: a split with nowhere to put the daughter is a split that
                 // must not happen. The herd stays over its number and breeding is what stops --
                 // spec 2026-08-08-fauna-design, the third step of the full-block rule.
-                int home = wild.standing().grid().ofCellClamped(cast<int>(h.x()), cast<int>(h.y()));
-                int room = Grazing.roomNearby(wild, g, sp, home);
+                int home = wild.blockAt(h.x(), h.y());
+                int room = Grazing.roomNearby(wild, g, h.species(), home);
                 if (room < 0) {
                     return false;
                 }
@@ -584,10 +706,16 @@ public bundle Agents {
                 return true;
             }
 
-            // The nearest block, other than this one, whose ground the species can live on. Searched
-            // in rings outward and STOPPED AT A FIXED DISTANCE: a daughter that cannot find ground
+            // The nearest block, other than this one, whose ground the species can live on AND which
+            // is under its carrying capacity -- the second step of the full-block rule. Searched in
+            // rings outward and STOPPED AT A FIXED DISTANCE: a daughter that cannot find ground
             // within six blocks does not walk to the other side of the world looking for it.
-            private static method roomNearby(Wild* wild, Grid* g, int sp, int home) returns int {
+            //
+            // If there is none, the split does not happen (step three), the herd stays at its size,
+            // and the population sits at the ceiling. That is not an error and nothing is logged: a
+            // full continent is a full continent.
+            private static method roomNearby(Wild* wild, Grid* g, Species s, int home) returns int {
+                int sp = cast<int>(s);
                 BlockChain* chain = wild.standing();
                 BlockGrid* lat = chain.grid();
                 int bx = lat.colOf(home);
@@ -602,7 +730,8 @@ public bundle Agents {
                             boolean edge = dx == 0 - ring || dx == ring || dy == 0 - ring || dy == ring;
                             if (edge && lat.holds(bx + dx, by + dy)) {
                                 int b = lat.at(bx + dx, by + dy);
-                                if (Grazing.livableBlock(lat, g, sp, b)) {
+                                if (Grazing.livableBlock(lat, g, sp, b) &&
+                                    wild.headAround(b, s) < Grazing.roomOf(lat, g, sp, b)) {
                                     return b;
                                 }
                             }
@@ -627,6 +756,17 @@ public bundle Agents {
                     return false;
                 }
                 return Beasts.livesIn(sp, g.biomeAt(cx, cy));
+            }
+
+            // And how many head of this species that block will keep, read off its middle by the
+            // same rule.
+            private static method roomOf(BlockGrid* lat, Grid* g, int sp, int b) returns int {
+                int cx = lat.originX(b) + 8;
+                int cy = lat.originY(b) + 8;
+                if (cx >= g.width() || cy >= g.height()) {
+                    return 0;
+                }
+                return Beasts.roomFor(sp, g.biomeAt(cx, cy));
             }
         }
     }

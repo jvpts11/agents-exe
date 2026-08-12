@@ -179,7 +179,10 @@ public bundle Agents {
                     counted = counted + 1;
                     link = h.afterMember(link);
                 }
-                Test.assertEqual(counted, 10);
+                // At LEAST the ten that started: two thousand ticks is over half a minute of world
+                // time and a herd on good ground breeds. What is being checked is that every animal
+                // in the herd is WITH the herd, whatever their number.
+                Test.assertTrue(counted >= 10);
                 delete log;
                 delete rng;
                 delete w;
@@ -355,7 +358,7 @@ public bundle Agents {
             // wiped out.
             [Tag(name: "fauna")]
             [Test]
-            public static method a_pack_kills_and_the_world_is_one_animal_lighter() returns void {
+            public static method a_pack_kills_and_a_kill_feeds_it() returns void {
                 mutable Grid* g = Herding.taiga();
                 Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
                 mutable Rng* rng = new Rng(37) on heap;
@@ -368,19 +371,24 @@ public bundle Agents {
                 for (int i in 0..8) {
                     deer.admit(w.bear(Species.Reindeer, 41.0, 40.5));
                 }
-                int wasAlive = w.count();
-                int wasFed = pack.meals();
-                // Long enough for the pack to work through its larder and go looking: it starts
-                // full at 400, six mouths eat six a second, and it hunts below 300.
+                // Long enough for the pack to work through its larder and go looking: it starts full
+                // at 400, six mouths eat six a second, and it hunts below 300.
+                //
+                // WHAT IS WATCHED IS THE LARDER RISING, not the world's headcount falling: animals
+                // breed, so a world can be one kill lighter and two calves heavier in the same
+                // minute, and a test that reads the total would be reading the wrong number.
+                mutable int fullest = 0;
                 for (int t in 0..3000) {
                     Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                    if (pack.meals() > fullest) {
+                        fullest = pack.meals();
+                    }
                 }
                 Test.assertTrue(w.kills() > 0);
-                Test.assertTrue(w.count() < wasAlive);
-                Test.assertTrue(w.howMany(Species.Reindeer) < 8);
-                // AND EATING IS WHAT A KILL IS FOR. A pack that hunts without being fed by it starves
-                // beside a pile of carcasses.
-                Test.assertTrue(pack.meals() > wasFed);
+                // AND EATING IS WHAT A KILL IS FOR. A pack that hunts without being fed by it
+                // starves beside a pile of carcasses -- so the larder has to go ABOVE the four
+                // hundred it was born with, which only a kill can do.
+                Test.assertTrue(fullest > 400);
                 delete log;
                 delete rng;
                 delete w;
@@ -441,12 +449,39 @@ public bundle Agents {
                 }
                 Test.assertEqual(w.howMany(Species.Reindeer), 0);
                 Test.assertEqual(w.speciesLost(), 1);
-                // The reindeer's herd went with the last reindeer.
-                Test.assertEqual(w.herdsAlive(), 1);
                 delete log;
                 delete rng;
                 delete w;
                 delete g;
+                return;
+            }
+
+            // A HERD THAT HAS LOST ITS LAST ANIMAL IS NOT LEFT STANDING -- walked, thought for and
+            // counted every tick forever, holding a roster of nobody. Harmless while nothing died;
+            // predators make it certain, so it is checked directly rather than as a side effect of
+            // an arc that has to go a particular way.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method an_emptied_herd_is_disbanded() returns void {
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                Herd* one = w.gather(Species.Reindeer, 20.5, 20.5, 5.0);
+                Herd* two = w.gather(Species.Reindeer, 60.5, 60.5, 5.0);
+                BeastId only = w.bear(Species.Reindeer, 20.5, 20.5);
+                two.admit(w.bear(Species.Reindeer, 60.5, 60.5));
+                Test.assertEqual(w.herdsAlive(), 2);
+                one.admit(only);
+                w.eaten(only, 1, log);
+                Test.assertEqual(w.herdsAlive(), 1);
+                // AND THE SURVIVING HERD KNOWS ITS NEW NUMBER, both ends of it: the last herd was
+                // moved into the freed slot, so its animals have to be pointing at where it is now
+                // rather than at where it was.
+                Herd* left = w.herdAt(0);
+                int link = left.firstMember();
+                Test.assertEqual(w.herdOf(left.memberAt(link)), cast<int>(left.id()));
+                Test.assertEqual(cast<int>(left.id()), 0);
+                delete log;
+                delete w;
                 return;
             }
 

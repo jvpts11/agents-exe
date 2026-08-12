@@ -10,6 +10,7 @@ import Agents.World.Grid;
 import Agents.World.Species;
 import Agents.World.Beasts;
 import Agents.World.LandMath;
+import Agents.World.Rng;
 program AgentsExe;
 
 // WHAT A PACK DOES: hunt when it is hungry, eat when it catches, and starve when it does not.
@@ -60,11 +61,15 @@ public bundle Agents {
             // the fauna spec says: the loop that keeps predator and prey in some relation without
             // anybody writing an equation for it.
             public static fixed int STARVE_AFTER = 45;
+            // How much faster than bare replacement a pack breeds when its larder is full. Two, the
+            // same as a grazer's -- what makes predators scarce is that a full larder is rare, not a
+            // slower rate.
+            public static fixed int CUBS_OVER_REPLACEMENT = 2;
 
             // One decision of a predator herd. Called from the fauna's decision pass, which is once
             // a second per herd -- so everything counted in here is counted in seconds.
-            public static method decide(Herd* pack, Wild* wild, Grid* g, long at, Chronicle* log)
-                    returns void {
+            public static method decide(Herd* pack, Wild* wild, Grid* g, long at, Rng* rng,
+                                        Chronicle* log) returns void {
                 // IT EATS FIRST. What the pack has consumed since its last decision is charged
                 // before it decides anything, so a pack that is about to starve does so on the tick
                 // it ran out and not on the one after it caught something.
@@ -83,6 +88,7 @@ public bundle Agents {
                     if (cast<int>(pack.mood()) == cast<int>(HerdMood.Hunting)) {
                         Prowl.callOff(pack, wild);
                     }
+                    Prowl.mayBreed(pack, wild, rng);
                     return;
                 }
                 Prowl.hunt(pack, wild, g, at, log);
@@ -170,6 +176,38 @@ public bundle Agents {
                 Prowl.markAll(pack, wild, BeastState.Starving);
                 pack.fedAgain();
                 wild.starved(cast<BeastId>(oldest), at, log);
+                return;
+            }
+
+            // A WELL-FED PACK HAS CUBS, and a hungry one does not. That is the whole of a predator's
+            // limit: the fauna spec is explicit that predators are limited by WHAT THEY CAN CATCH,
+            // which is real and needs no ceiling of its own -- so a pack asks its larder where a
+            // grazer asks the ground.
+            //
+            // The rate is the same arithmetic as a grazer's and for the same reason: an animal that
+            // lives `LIFE` seconds must be replaced once in `LIFE` seconds to hold, and twice that
+            // lets a population that has been cut into recover. A number derived from the table
+            // cannot drift out of step with the table.
+            //
+            // WITHOUT THIS, EVERY PREDATOR IN THE WORLD DIED OF OLD AGE. The first world with
+            // breeding in it lost the wolves at world-minute four, the lions at five, the bears at
+            // six and the crocodiles at seven -- announced, correctly, as `DiedOut` -- while the deer
+            // went from ten thousand to forty-three. Breeding had been written into the grazer's
+            // branch of the decision and packs never reach it.
+            private static method mayBreed(Herd* pack, Wild* wild, Rng* rng) returns void {
+                if (pack.meals() < Prowl.FULL_LARDER) {
+                    return;
+                }
+                int span = cast<int>(Beasts.life(cast<int>(pack.species())));
+                if (span < 1) {
+                    return;
+                }
+                if (rng.nextInt(span) >= pack.count() * Prowl.CUBS_OVER_REPLACEMENT) {
+                    return;
+                }
+                BeastId cub = wild.bear(pack.species(), pack.x(), pack.y());
+                pack.admit(cub);
+                wild.noteBirth();
                 return;
             }
 

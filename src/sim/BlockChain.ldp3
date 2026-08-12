@@ -40,9 +40,18 @@ public bundle Agents {
             // makes moving cheap -- the common case is "the block did not change" and it costs one
             // comparison.
             private mutable int[] within;
+            // AND WHICH CELL, which is a finer version of the same idea and pays for something else
+            // entirely. An animal drifts a fiftieth of a cell a step, so it is in the cell it was in
+            // on nineteen steps out of twenty -- and if the cell has not changed, the ground under
+            // it has not changed either, so the habitat question needs neither a read of the biome
+            // map nor the answer. That map is three and a half megabytes and the reads are scattered,
+            // which makes it the most expensive line in the tick when it is asked for nothing.
+            private mutable int[] cell;
+            private mutable int wide;
             private mutable int room;
 
             public constructor BlockChain(int width, int height, int slots) {
+                wide = width;
                 lattice = new BlockGrid(width, height) on heap;
                 first = new int[lattice.count()]();
                 for (int b in 0..lattice.count()) {
@@ -55,6 +64,7 @@ public bundle Agents {
                 then = new int[room]();
                 prior = new int[room]();
                 within = new int[room]();
+                cell = new int[room]();
                 clearSlots(0, room);
             }
 
@@ -64,6 +74,7 @@ public bundle Agents {
                 delete then;
                 delete prior;
                 delete within;
+                delete cell;
                 return;
             }
 
@@ -72,6 +83,7 @@ public bundle Agents {
                     then[i] = BlockChain.NONE;
                     prior[i] = BlockChain.NONE;
                     within[i] = BlockChain.NONE;
+                    cell[i] = BlockChain.NONE;
                 }
                 return;
             }
@@ -96,17 +108,21 @@ public bundle Agents {
                 mutable int[] t = new int[slots]();
                 mutable int[] p = new int[slots]();
                 mutable int[] w = new int[slots]();
+                mutable int[] c = new int[slots]();
                 for (int i in 0..room) {
                     t[i] = then[i];
                     p[i] = prior[i];
                     w[i] = within[i];
+                    c[i] = cell[i];
                 }
                 delete then;
                 delete prior;
                 delete within;
+                delete cell;
                 then = t;
                 prior = p;
                 within = w;
+                cell = c;
                 int was = room;
                 room = slots;
                 clearSlots(was, room);
@@ -115,7 +131,22 @@ public bundle Agents {
 
             // Put a slot at a place, or move it there. The common call is the one that does nothing:
             // an animal that drifted a tenth of a cell is in the block it was already in.
+            // Whether a slot is already standing in this cell. One read and one compare, and it is
+            // what lets the tick skip the habitat question -- and the biome map read behind it --
+            // for the nineteen steps in twenty that do not leave the cell they started in.
+            public method atCell(int slot, int cx, int cy) returns boolean {
+                return cell[slot] == cy * wide + cx;
+            }
+
             public method put(int slot, int cx, int cy) returns void {
+                int here = cy * wide + cx;
+                // THE CELL IS CHECKED BEFORE THE BLOCK, because it is the finer of the two: a slot
+                // that has not left its cell cannot have left its block, and this way the common
+                // call costs one compare instead of a division and a clamp.
+                if (cell[slot] == here) {
+                    return;
+                }
+                cell[slot] = here;
                 int b = lattice.ofCellClamped(cx, cy);
                 if (within[slot] == b) {
                     return;
@@ -151,6 +182,7 @@ public bundle Agents {
                 then[slot] = BlockChain.NONE;
                 prior[slot] = BlockChain.NONE;
                 within[slot] = BlockChain.NONE;
+                cell[slot] = BlockChain.NONE;
                 return;
             }
 

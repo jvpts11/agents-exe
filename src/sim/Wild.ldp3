@@ -54,6 +54,8 @@ public bundle Agents {
                 herdRoom = 64;
                 herds = new Herd*[herdRoom]();
                 herdCount = 0;
+                movers = new int[herdRoom]();
+                moving = 0;
                 census = new int[Species.count()]();
                 blocks = new BlockChain(width, height, room) on heap;
                 walked = 0.0;
@@ -62,6 +64,8 @@ public bundle Agents {
                 gone = new boolean[Species.count()]();
                 killed = 0;
                 famished = 0;
+                aged = 0;
+                born = 0;
                 chasesLost = 0;
                 lost = 0;
             }
@@ -71,6 +75,7 @@ public bundle Agents {
                     delete herds[i];
                 }
                 delete herds;
+                delete movers;
                 delete beasts;
                 delete census;
                 delete blocks;
@@ -87,6 +92,62 @@ public bundle Agents {
             // itself. Borrowed: it dies with the Wild.
             public method standing() returns BlockChain* {
                 return blocks;
+            }
+
+            // HOW MANY OF ONE SPECIES STAND IN ONE BLOCK -- what breeding asks before it allows a
+            // birth, and what a splitting herd's daughter asks of the ground she is thinking of
+            // walking to.
+            //
+            // WALKED, NOT KEPT. A kept table would be one number per block per species: fourteen
+            // thousand blocks by eighteen species is a quarter of a million counters to maintain on
+            // every birth, death and border crossing, for a question asked a few hundred times a
+            // second. The chain in a block holds a handful of animals, and walking it is cheaper
+            // than the writes the table would cost.
+            public method headIn(int block, Species s) returns int {
+                int want = cast<int>(s);
+                mutable int n = 0;
+                mutable int slot = blocks.firstIn(block);
+                while (slot != BlockChain.NONE) {
+                    if (cast<int>(beasts[slot].species) == want) {
+                        n = n + 1;
+                    }
+                    slot = blocks.after(slot);
+                }
+                return n;
+            }
+
+            // The block a place falls in, so a caller can ask the two questions above without
+            // reaching through to the lattice itself.
+            public method blockAt(float x, float y) returns int {
+                return blocks.grid().ofCellClamped(cast<int>(x), cast<int>(y));
+            }
+
+            // THE SAME COUNT OVER THE BLOCK AND THE EIGHT AROUND IT, which is the one breeding
+            // actually asks -- and the difference is the density of the whole world.
+            //
+            // A block is sixteen cells and a herd's range is four to twelve, so a herd grazes over
+            // more ground than the block its centre happens to sit in. Counting one block lets every
+            // block on the continent hold a full herd, and the continent fills: measured, that is
+            // forty-eight thousand animals, a tick of 168 microseconds, and a top gear running at a
+            // sixth of the speed printed on it. Counting the neighbourhood is the same rule at the
+            // scale the animals actually use, and it is what makes the world sparse enough to run.
+            public method headAround(int block, Species s) returns int {
+                BlockGrid* lat = blocks.grid();
+                int bx = lat.colOf(block);
+                int by = lat.rowOf(block);
+                mutable int n = 0;
+                mutable int dy = 0 - 1;
+                while (dy <= 1) {
+                    mutable int dx = 0 - 1;
+                    while (dx <= 1) {
+                        if (lat.holds(bx + dx, by + dy)) {
+                            n = n + headIn(lat.at(bx + dx, by + dy), s);
+                        }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                return n;
             }
 
             public method herdsAlive() returns int {
@@ -181,8 +242,14 @@ public bundle Agents {
                 return beasts[cast<int>(who)].y;
             }
 
+            // Whether an animal is already standing in this cell -- asked before the ground under it
+            // is looked up, because ground it has not left cannot have changed.
+            public method inCell(BeastId who, int cx, int cy) returns boolean {
+                return blocks.atCell(cast<int>(who), cx, cy);
+            }
+
             // THE ONLY WAY AN ANIMAL MOVES, so the index cannot be left behind. Cheap when the
-            // animal stayed in its block, which is nearly every call.
+            // animal stayed in its cell, which is nearly every call.
             public method placeAt(BeastId who, float x, float y) returns void {
                 int at = cast<int>(who);
                 beasts[at].x = x;
@@ -269,16 +336,77 @@ public bundle Agents {
                 return herds[at];
             }
 
+            // ---- the herds that are going somewhere ------------------------------------------------
+            //
+            // THE FOUR HUNDRED OUT OF NINE THOUSAND. A herd that is crossing ground, running, or
+            // hunting has to have its animals walked every tick; one that is standing about does
+            // not. Finding them by asking every herd its mood costs fifteen nanoseconds a herd --
+            // nine thousand scattered objects dereferenced for the answer "no" -- which measured as
+            // most of a hundred-and-nineteen-microsecond tick.
+            //
+            // So the list is kept, and it can only stay true because `Herd.setMood` is the one place
+            // a mood changes. Same shape as the block index one level up: do not walk everything to
+            // find the few.
+            private mutable int[] movers;
+            private mutable int moving;
+
+            public method travellers() returns int {
+                return moving;
+            }
+
+            public method travellerAt(int i) returns Herd* {
+                return herds[movers[i]];
+            }
+
+            public method nowTravelling(Herd* h) returns void {
+                if (h.spot() >= 0) {
+                    return;
+                }
+                if (moving >= movers.length()) {
+                    mutable int[] next = new int[movers.length() * 2]();
+                    for (int i in 0..moving) {
+                        next[i] = movers[i];
+                    }
+                    delete movers;
+                    movers = next;
+                }
+                movers[moving] = cast<int>(h.id());
+                h.setSpot(moving);
+                moving = moving + 1;
+                return;
+            }
+
+            public method nowStill(Herd* h) returns void {
+                int s = h.spot();
+                if (s < 0) {
+                    return;
+                }
+                int last = moving - 1;
+                if (s != last) {
+                    movers[s] = movers[last];
+                    herds[movers[s]].setSpot(s);
+                }
+                moving = moving - 1;
+                h.setSpot(0 - 1);
+                return;
+            }
+
             // A HERD WITH NOBODY IN IT GOES, and the last herd moves into its slot -- the same
             // swap-remove the animals get, with the same obligation: every animal of the herd that
             // MOVED is pointing at the index it used to be at, and has to be told. Forgetting that
             // is a roster full of animals that believe they belong to somebody else.
             private method disbandHerd(int at) returns void {
+                // Out of the movers list first, while it still knows where it is in it.
+                nowStill(herds[at]);
                 delete herds[at];
                 int last = herdCount - 1;
                 if (at != last) {
                     herds[at] = herds[last];
                     herds[at].beMine(at);
+                    // The list of movers holds HERD INDICES, and this herd's just changed.
+                    if (herds[at].spot() >= 0) {
+                        movers[herds[at].spot()] = at;
+                    }
                     mutable int link = herds[at].firstMember();
                     while (link >= 0) {
                         beasts[cast<int>(herds[at].memberAt(link))].herd = cast<HerdId>(at);
@@ -298,6 +426,8 @@ public bundle Agents {
             private mutable boolean[] gone;   // per species: already announced, so it is said once
             private mutable long killed;
             private mutable long famished;
+            private mutable long aged;
+            private mutable long born;
             private mutable long chasesLost;
             private mutable int lost;         // species gone from the world
 
@@ -310,6 +440,28 @@ public bundle Agents {
             public method starved(BeastId who, long at, Chronicle* log) returns void {
                 famished = famished + 1;
                 takeAway(who, Vanished.Starved, at, log);
+                return;
+            }
+
+            // OF AGE, which is the death that needs nothing to have gone wrong. A species that ends
+            // this way ended because nothing was born, not because anything took it -- which is why
+            // it has a cause of its own and does not borrow one of the others.
+            public method diedOfAge(BeastId who, long at, Chronicle* log) returns void {
+                aged = aged + 1;
+                takeAway(who, Vanished.DiedOut, at, log);
+                return;
+            }
+
+            public method births() returns long {
+                return born;
+            }
+
+            public method deathsOfAge() returns long {
+                return aged;
+            }
+
+            public method noteBirth() returns void {
+                born = born + 1;
                 return;
             }
 

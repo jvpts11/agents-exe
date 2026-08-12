@@ -16,9 +16,34 @@ public bundle Agents {
             private static mutable int[] MEAT;
             private static mutable int[] HIDE;
             private static mutable float[] PACE;    // cells a second
+            private static mutable float[] STEP;    // the same, as cells a TICK: PACE / 60
             private static mutable float[] LIFE;    // seconds
             private static mutable float[] SHY;     // cells at which it runs from a person
             private static mutable int[] BAND;      // HabitatBand ordinal, tested by `livesIn`
+            // HOW MANY HEAD OF ONE SPECIES THIS GROUND WILL KEEP -- the carrying capacity, per
+            // biome, and the only thing that limits a grazer.
+            //
+            // PER BIOME BUT COUNTED PER PLACE, which is the point of it. A biome is scattered across
+            // a continent, so one number for the whole of it would let every deer in the world stand
+            // in one meadow and still be "under capacity". The unit here is a NEIGHBOURHOOD -- a
+            // block and the eight around it, forty-eight cells square -- because a herd ranges over
+            // four to twelve cells and does not stay in the one block its centre happens to sit in.
+            //
+            // THE NUMBERS ARE MEASURED, NOT CHOSEN, and they were measured on the real game: at one
+            // block's worth the continent filled to forty-eight thousand animals and gear 6 ran at a
+            // sixth of the speed printed on it; at a ninth of these numbers the world fell to three
+            // and a half thousand and lost five species in ten world-minutes. These land it between,
+            // which is what the machine runs at its top gear and what a player sees as a world with
+            // things living in it. (Fauna spec §9: density is measured against the frame.)
+            //
+            // And the numbers are the ground's, not the animal's: a stretch of prairie keeps three
+            // dozen of anything that can live on prairie, and a stretch of hot desert keeps six.
+            // What the ANIMAL contributes is whether it can be there at all, which is `LIVES`.
+            //
+            // Zero for everything not named -- open water, the ice cap, bare rock -- where the
+            // habitat mask already says nothing lives.
+            private static mutable int[] ROOM;
+
             // The same fact as BAND, as one bit per biome. `livesIn` is asked twice per animal per
             // tick -- fifteen thousand animals at twenty ticks is six hundred thousand questions a
             // second -- and answering it by walking a band's list of comparisons is most of why an
@@ -33,10 +58,12 @@ public bundle Agents {
                 Beasts.MEAT = new int[n]();
                 Beasts.HIDE = new int[n]();
                 Beasts.PACE = new float[n]();
+                Beasts.STEP = new float[n]();
                 Beasts.LIFE = new float[n]();
                 Beasts.SHY = new float[n]();
                 Beasts.BAND = new int[n]();
                 Beasts.LIVES = new long[n]();
+                Beasts.ROOM = new int[Biome.count()]();
 
                 // The band->biome rules, as data: one row per membership, stated once. NoBand
                 // holds nothing, which is how NoBeast lives nowhere.
@@ -72,6 +99,37 @@ public bundle Agents {
                 Beasts.bandRow(bandMask, HabitatBand.Shore, Biome.Beach);
                 Beasts.bandRow(bandMask, HabitatBand.Shore, Biome.RockyShore);
                 Beasts.bandRow(bandMask, HabitatBand.Shore, Biome.SeaIce);
+
+                // What each of those blocks will keep. One row per biome anything lives on, in the
+                // same order as the bands above so the two lists can be read against each other.
+                Beasts.roomRow(Biome.DeciduousForest, 27);
+                Beasts.roomRow(Biome.LaurelForest, 24);
+                Beasts.roomRow(Biome.TemperateRainforest, 27);
+                Beasts.roomRow(Biome.MedShrubland, 18);
+                Beasts.roomRow(Biome.Prairie, 36);
+                Beasts.roomRow(Biome.Hills, 18);
+                Beasts.roomRow(Biome.Steppe, 21);
+                Beasts.roomRow(Biome.WarmGrassland, 36);
+                Beasts.roomRow(Biome.Savanna, 30);
+                Beasts.roomRow(Biome.Taiga, 18);
+                Beasts.roomRow(Biome.Tundra, 12);
+                Beasts.roomRow(Biome.Snowfield, 6);
+                Beasts.roomRow(Biome.ColdDesert, 6);
+                Beasts.roomRow(Biome.Mountain, 9);
+                Beasts.roomRow(Biome.AlpineMeadow, 15);
+                Beasts.roomRow(Biome.HotDesert, 6);
+                Beasts.roomRow(Biome.ThornScrub, 9);
+                Beasts.roomRow(Biome.Badlands, 6);
+                Beasts.roomRow(Biome.Oasis, 18);
+                Beasts.roomRow(Biome.TropicalRainforest, 24);
+                Beasts.roomRow(Biome.TropSeasonalForest, 24);
+                Beasts.roomRow(Biome.Mangrove, 15);
+                Beasts.roomRow(Biome.Marsh, 18);
+                Beasts.roomRow(Biome.Swamp, 15);
+                Beasts.roomRow(Biome.Bog, 9);
+                Beasts.roomRow(Biome.Beach, 12);
+                Beasts.roomRow(Biome.RockyShore, 9);
+                Beasts.roomRow(Biome.SeaIce, 6);
 
                 // species, diet, herd, meat, hide, pace, life, shyness, band
                 Beasts.put(Species.Deer, Diet.Browser, 8, 30, 8, 2.2, 300.0, 14.0,
@@ -116,10 +174,58 @@ public bundle Agents {
                     Beasts.LIVES[sp] = bandMask[Beasts.BAND[sp]];
                 }
                 delete bandMask;
+
+                // AND THE ONES THAT DO NOT FIT A BAND. A band is a species' home and most species
+                // want no more than that; these two rows exist because a band could not express
+                // something true.
+                //
+                // The wetlands had no prey in them at all -- every grazer and browser in the table
+                // belongs to a temperate, grassland, cold, mountain, desert or shore band -- so the
+                // crocodile, whose band IS the wetland, was a predator in a world with nothing to
+                // hunt. It starved and died out in the first arc that had breeding in it, which is
+                // correct behaviour for a species that was placed where it cannot eat.
+                //
+                // Boar go into marshes and swamps, which is a fact about boar rather than a repair:
+                // the wild boar is a wetland animal wherever it lives. It is the whole of the fix,
+                // and it is one row per biome so the next reader can see exactly what was added and
+                // to whom.
+                Beasts.alsoIn(Species.Boar, Biome.Marsh);
+                Beasts.alsoIn(Species.Boar, Biome.Swamp);
+                Beasts.alsoIn(Species.Boar, Biome.Mangrove);
             }
 
             private static method bandRow(long[] mask, HabitatBand band, Biome biome) returns void {
                 mask[cast<int>(band)] = mask[cast<int>(band)] | (cast<long>(1) << cast<int>(biome));
+            }
+
+            private static method roomRow(Biome biome, int head) returns void {
+                Beasts.ROOM[cast<int>(biome)] = head;
+            }
+
+            // One biome a species lives in beyond its band. Applied after the bands are baked, so it
+            // adds and never takes away.
+            private static method alsoIn(Species s, Biome biome) returns void {
+                int ord = cast<int>(s);
+                Beasts.LIVES[ord] = Beasts.LIVES[ord] | (cast<long>(1) << cast<int>(biome));
+            }
+
+            // How many head of ONE species a block of this ground will keep. Breeding asks this of
+            // the block an animal would be born in -- the block, not the herd, which is what stops
+            // every deer in the world standing in one meadow.
+            //
+            // AND NEVER FEWER THAN ONE HERD OF THAT SPECIES, which is not a fudge: `HERD` says how
+            // many of them run together, so ground that cannot hold one herd is ground the species
+            // cannot be on at all -- and `LIVES` has already said it can. With the raw number, a
+            // seal (nine to a herd) on a beach (four to a block) was over capacity the day it was
+            // born, never bred once, and the species died of old age in its own habitat. It did:
+            // seals, bears and crocodiles all went in one arc, announced as `DiedOut`, and the
+            // announcement was right about the cause and the cause was this line missing.
+            public static method roomFor(int ord, int biome) returns int {
+                int ground = Beasts.ROOM[biome];
+                if (ground < Beasts.HERD[ord]) {
+                    return Beasts.HERD[ord];
+                }
+                return ground;
             }
 
             private static method put(Species s, Diet diet, int herd, int meat, int hide,
@@ -130,6 +236,8 @@ public bundle Agents {
                 Beasts.MEAT[ord] = meat;
                 Beasts.HIDE[ord] = hide;
                 Beasts.PACE[ord] = pace;
+                // Sixty ticks to a second at gear one; the tick works in ticks.
+                Beasts.STEP[ord] = pace / 60.0;
                 Beasts.LIFE[ord] = life;
                 Beasts.SHY[ord] = shy;
                 Beasts.BAND[ord] = cast<int>(band);
@@ -166,6 +274,13 @@ public bundle Agents {
 
             public static method pace(int ord) returns float {
                 return Beasts.PACE[ord];
+            }
+
+            // The same pace as cells per TICK, baked once. The tick asked for it as a division --
+            // cells a second over sixty -- for every animal it moved, which is a float divide in the
+            // hottest loop in the game for a number that never changes.
+            public static method paceATick(int ord) returns float {
+                return Beasts.STEP[ord];
             }
 
             public static method life(int ord) returns float {
