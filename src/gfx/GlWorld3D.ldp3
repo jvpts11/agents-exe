@@ -52,6 +52,43 @@ public bundle Agents {
             private mutable MeshAtlas* beastArt;
             private mutable Wild* herds;
             private mutable int drawnBeasts;
+            // WHERE AN ANIMAL IS DRAWN, AND WHICH WAY IT IS POINTED -- the renderer's own, per slot,
+            // and nowhere near the twenty bytes a `Beast` is allowed.
+            //
+            // Two things were wrong when somebody opened the window and watched, which is the only
+            // way either could have been found:
+            //
+            //  * AT GEAR ONE THE ANIMALS TELEPORTED. A grazing animal takes a step every fifteenth
+            //    tick -- that is what makes the tick affordable, and it is what grazing looks like
+            //    up close -- but fifteen ticks at gear one is fifteen FRAMES, so a quarter of a
+            //    second passes and then the animal is somewhere else. The world is right; what was
+            //    missing is that a frame drew the truth instead of what an eye would have seen.
+            //  * AND EVERY ONE OF THEM FACED SOUTH. `emitMesh` draws at the rotation the mesh was
+            //    authored in, and nothing ever passed a turn. The note on `emitTurned` records this
+            //    exact defect being caught for the people and the buildings, by eye, and the fauna
+            //    walked straight back into it.
+            //
+            // One pair of arrays answers both: the drawn position CHASES the true one, and the
+            // direction it is chasing in is the way the animal is facing. A gap too big to be a step
+            // -- a migration, a slot reused by a death, three hundred ticks in one frame at gear
+            // six -- is snapped rather than glided, so nothing ever slides across the map.
+            private mutable float[] drawX;
+            private mutable float[] drawY;
+            private mutable float[] faceX;
+            private mutable float[] faceY;
+            private mutable int drawnRoom;
+            // Of the animals drawn in the last frame, how many were pointed somewhere of their own.
+            private mutable int turnedBeasts;
+            // WHICH OF THE THREE THINGS THE CHASE DID, counted over the whole run. Somebody watched
+            // the window and said the animals still teleport, and there are three ways that can be
+            // true -- every frame snapping (the chase never runs), every frame standing (the drawn
+            // position is already there and the jump is the WORLD's), or gliding so fast that a
+            // glide is a jump. They want different fixes, and guessing between them is what this
+            // session has already done five times.
+            private mutable long snapped;
+            private mutable long glided;
+            private mutable long stood;
+            private mutable float gapSum;
             // world + sources
             private mutable Grid* grid;
             private mutable MeshAtlas* terr;
@@ -141,6 +178,19 @@ public bundle Agents {
                 detail = new MeshBuffer(gl) on heap;
                 hint = new MeshBuffer(gl) on heap;
                 fauna = new MeshBuffer(gl) on heap;
+                // Where each animal is DRAWN and which way it points. Grown to fit the population;
+                // a slot nobody has drawn yet is snapped on its first frame, so the contents before
+                // that never matter.
+                drawnRoom = 1024;
+                turnedBeasts = 0;
+                snapped = 0;
+                glided = 0;
+                stood = 0;
+                gapSum = 0.0;
+                drawX = new float[drawnRoom]();
+                drawY = new float[drawnRoom]();
+                faceX = new float[drawnRoom]();
+                faceY = new float[drawnRoom]();
                 drawnBeasts = 0;
                 gauge = new Meter() on heap;
                 projM = new GlMat4() on heap;
@@ -183,6 +233,10 @@ public bundle Agents {
                 delete detail;
                 delete hint;
                 delete fauna;
+                delete drawX;
+                delete drawY;
+                delete faceX;
+                delete faceY;
                 delete post;
                 delete camera;
                 projM.dispose();
@@ -1409,12 +1463,117 @@ public bundle Agents {
                 return drawnBeasts;
             }
 
+            // How many of those were pointed somewhere of their own rather than at the compass point
+            // their mesh was authored facing. "They all face south" took a person opening the window
+            // and watching to find, twice -- once for the people and the buildings, once for the
+            // fauna. This is the same thing as a number.
+            public method beastsFacing() returns int {
+                return turnedBeasts;
+            }
+
+            // What the chase actually did, over the whole run. See the fields for why three numbers
+            // and not one.
+            public method beastChaseReport() returns String {
+                long all = snapped + glided + stood;
+                if (all == 0) {
+                    return "fauna draw: nothing was drawn";
+                }
+                mutable int mean = 0;
+                if (glided > 0) {
+                    mean = cast<int>(gapSum * 1000.0 / cast<float>(glided));
+                }
+                return $"fauna draw: {snapped * 100 / all}% snapped, {glided * 100 / all}% glided, {stood * 100 / all}% already there -- a glide covers {mean} thousandths of a cell";
+            }
+
             // THROUGH THE BLOCK INDEX, AND THAT IS THE POINT OF THE INDEX. This walked all ten
             // thousand animals every frame to find the twenty-nine standing inside the window, which
             // is a cost that grows with the world's population and not with what is on the screen.
             // The window is a handful of blocks; the chains in them hold exactly the candidates.
+            // Further than this between two frames and the animal did not WALK there: a herd
+            // crossing a ridge, three hundred ticks in one frame at gear six, or a slot a death has
+            // handed to a different animal. The facing is kept rather than pointed along a jump that
+            // never happened.
+            private static fixed float BEAST_SNAP = 2.0;
+            // Below this it has not really moved, and its facing is kept rather than recomputed from
+            // rounding noise -- which is what would make a standing animal spin.
+            private static fixed float BEAST_TURNED = 0.0000004;
+
+            // WHICH WAY AN ANIMAL IS FACING: where it is now, against where it was when this frame's
+            // predecessor drew it.
+            //
+            // IT DRAWS THE TRUE POSITION, and an earlier version of this did not. When an animal
+            // stepped once every fifteenth tick, the drawn position CHASED the real one to turn the
+            // step into a glide -- and that was the wrong repair, because the animal was not moving:
+            // it was appearing somewhere else four times a second, and no amount of smoothing in the
+            // renderer makes a thing that jumps into a thing that walks. The movement was fixed
+            // where movement lives. What is left here is the part that was always the renderer's:
+            // a mesh has to be pointed somewhere, and the way it came is the way it is looking.
+            private method followBeast(int slot, float px, float py) returns Turn {
+                if (slot >= drawnRoom) {
+                    growDrawn(slot + 1);
+                }
+                float dx = px - drawX[slot];
+                float dy = py - drawY[slot];
+                float gap = dx * dx + dy * dy;
+                drawX[slot] = px;
+                drawY[slot] = py;
+                if (gap > GlWorld3D.BEAST_SNAP * GlWorld3D.BEAST_SNAP) {
+                    snapped = snapped + 1;
+                } else if (gap > GlWorld3D.BEAST_TURNED) {
+                    glided = glided + 1;
+                    gapSum = gapSum + Newton.sqrt(gap);
+                    float span = Newton.sqrt(gap);
+                    faceX[slot] = dx / span;
+                    faceY[slot] = dy / span;
+                } else {
+                    stood = stood + 1;
+                }
+                // A cosine and a sine is what a `Turn` is, and a unit direction vector already is
+                // one -- so nothing here calls a trigonometric function. An animal that has never
+                // moved keeps the zero it was born with, which `Turn` reads as no rotation at all.
+                if (faceX[slot] == 0.0 && faceY[slot] == 0.0) {
+                    return Turn.none();
+                }
+                // COUNTED, because "they all face south" is a thing a person had to notice by
+                // looking, and a number that says how many are pointed somewhere of their own is a
+                // thing the gate can notice instead.
+                turnedBeasts = turnedBeasts + 1;
+                return new Turn(faceX[slot], faceY[slot]);
+            }
+
+            private method growDrawn(int want) returns void {
+                mutable int bigger = drawnRoom;
+                while (bigger < want) {
+                    bigger = bigger * 2;
+                }
+                mutable float[] nx = new float[bigger]();
+                mutable float[] ny = new float[bigger]();
+                mutable float[] fx = new float[bigger]();
+                mutable float[] fy = new float[bigger]();
+                for (int i in 0..drawnRoom) {
+                    nx[i] = drawX[i];
+                    ny[i] = drawY[i];
+                    fx[i] = faceX[i];
+                    fy[i] = faceY[i];
+                }
+                delete drawX;
+                delete drawY;
+                delete faceX;
+                delete faceY;
+                drawX = nx;
+                drawY = ny;
+                faceX = fx;
+                faceY = fy;
+                drawnRoom = bigger;
+                return;
+            }
+
             private method bakeFauna() returns void {
                 drawnBeasts = 0;
+                // Reset beside the count it is compared against, or the two are measured over
+                // different spans and the pair reads as nonsense -- "75,842 of 43", which is what
+                // the first version of this line printed.
+                turnedBeasts = 0;
                 if (herds == null || beastArt == null || !window.showing()) {
                     fauna.upload(cast<address>(0), 0, 0);
                     return;
@@ -1482,8 +1641,12 @@ public bundle Agents {
                                 int sp = cast<int>(herds.speciesOf(b));
                                 int ord = beastArt.ordOf(Beasts.name(sp));
                                 if (ord >= 0) {
-                                    int gx = cast<int>(px);
-                                    int gy = cast<int>(py);
+                                    // Where the eye should see it, and which way it is pointed.
+                                    Turn turn = followBeast(slot, px, py);
+                                    float sx = drawX[slot];
+                                    float sy = drawY[slot];
+                                    int gx = cast<int>(sx);
+                                    int gy = cast<int>(sy);
                                     int cell = grid.biomeAt(gx, gy);
                                     int lvl = stackLvl(cell, gx, gy);
                                     // STANDING ON THE GROUND THAT IS ACTUALLY DRAWN, by the same
@@ -1494,8 +1657,8 @@ public bundle Agents {
                                     // is the first thing anybody notices.
                                     float zOff = cast<float>(lvl) * stepH + terrainLook[cell].lift + 0.8;
                                     float topZ = terrainLook[cell].top + zOff;
-                                    wv = emitMesh(beastArt, buf, wv, ord, px * 2.0, py * 2.0, topZ,
-                                                  1.0, shadeAt(gx, gy, 1, lvl));
+                                    wv = emitTurned(beastArt, buf, wv, ord, sx * 2.0, sy * 2.0, topZ,
+                                                    1.0, shadeAt(gx, gy, 1, lvl), turn);
                                     drawnBeasts = drawnBeasts + 1;
                                 }
                             }
