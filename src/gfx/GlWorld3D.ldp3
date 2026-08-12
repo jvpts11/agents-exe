@@ -1409,6 +1409,10 @@ public bundle Agents {
                 return drawnBeasts;
             }
 
+            // THROUGH THE BLOCK INDEX, AND THAT IS THE POINT OF THE INDEX. This walked all ten
+            // thousand animals every frame to find the twenty-nine standing inside the window, which
+            // is a cost that grows with the world's population and not with what is on the screen.
+            // The window is a handful of blocks; the chains in them hold exactly the candidates.
             private method bakeFauna() returns void {
                 drawnBeasts = 0;
                 if (herds == null || beastArt == null || !window.showing()) {
@@ -1419,24 +1423,44 @@ public bundle Agents {
                 int y0 = window.originY();
                 int x1 = x0 + window.width();
                 int y1 = y0 + window.height();
+                BlockChain* chain = herds.standing();
+                BlockGrid* lat = chain.grid();
+                // The blocks the window touches, from the corners and through the ONE place block
+                // arithmetic is written -- a second division by sixteen here is a second chance to
+                // disagree with the lattice the animals were filed under. A block straddles the
+                // window's edge, so an animal inside the corner blocks is still tested against the
+                // edge itself, which the two comparisons below do.
+                int nw = lat.ofCellClamped(x0, y0);
+                int se = lat.ofCellClamped(x1 - 1, y1 - 1);
+                int bx0 = lat.colOf(nw);
+                int by0 = lat.rowOf(nw);
+                int bx1 = lat.colOf(se);
+                int by1 = lat.rowOf(se);
                 // Count first, then emit -- the same two-pass shape the terrain bake uses, and for
                 // the same reason: a buffer sized by a guess is a buffer that either wastes or
                 // overruns, and the overrun is the one that corrupts the frame.
                 mutable int tris = 0;
-                mutable int i = 0;
-                int n = herds.count();
-                while (i < n) {
-                    BeastId b = cast<BeastId>(i);
-                    float bx = herds.xOf(b);
-                    float by = herds.yOf(b);
-                    if (bx >= cast<float>(x0) && bx < cast<float>(x1) &&
-                        by >= cast<float>(y0) && by < cast<float>(y1)) {
-                        int ord = beastArt.ordOf(Beasts.name(cast<int>(herds.speciesOf(b))));
-                        if (ord >= 0) {
-                            tris = tris + beastArt.triCount[ord];
+                mutable int by = by0;
+                while (by <= by1) {
+                    mutable int bx = bx0;
+                    while (bx <= bx1) {
+                        mutable int slot = chain.firstIn(lat.at(bx, by));
+                        while (slot != BlockChain.NONE) {
+                            BeastId b = cast<BeastId>(slot);
+                            float px = herds.xOf(b);
+                            float py = herds.yOf(b);
+                            if (px >= cast<float>(x0) && px < cast<float>(x1) &&
+                                py >= cast<float>(y0) && py < cast<float>(y1)) {
+                                int ord = beastArt.ordOf(Beasts.name(cast<int>(herds.speciesOf(b))));
+                                if (ord >= 0) {
+                                    tris = tris + beastArt.triCount[ord];
+                                }
+                            }
+                            slot = chain.after(slot);
                         }
+                        bx = bx + 1;
                     }
-                    i = i + 1;
+                    by = by + 1;
                 }
                 if (tris == 0) {
                     fauna.upload(cast<address>(0), 0, 0);
@@ -1444,33 +1468,42 @@ public bundle Agents {
                 }
                 address buf = Allocator.alloc(cast<long>(tris * 27 * 4 + 4));
                 mutable int wv = 0;
-                i = 0;
-                while (i < n) {
-                    BeastId b = cast<BeastId>(i);
-                    float bx = herds.xOf(b);
-                    float by = herds.yOf(b);
-                    if (bx >= cast<float>(x0) && bx < cast<float>(x1) &&
-                        by >= cast<float>(y0) && by < cast<float>(y1)) {
-                        int sp = cast<int>(herds.speciesOf(b));
-                        int ord = beastArt.ordOf(Beasts.name(sp));
-                        if (ord >= 0) {
-                            int gx = cast<int>(bx);
-                            int gy = cast<int>(by);
-                            int cell = grid.biomeAt(gx, gy);
-                            int lvl = stackLvl(cell, gx, gy);
-                            // STANDING ON THE GROUND THAT IS ACTUALLY DRAWN, by the same expression
-                            // the detail pass uses for its own props rather than a constant that
-                            // happens to look right. Two expressions agreeing by accident is how
-                            // the skirt defect arrived in this very file, and an animal floating
-                            // over a hill or sunk into it is the first thing anybody notices.
-                            float zOff = cast<float>(lvl) * stepH + terrainLook[cell].lift + 0.8;
-                            float topZ = terrainLook[cell].top + zOff;
-                            wv = emitMesh(beastArt, buf, wv, ord, bx * 2.0, by * 2.0, topZ,
-                                          1.0, shadeAt(gx, gy, 1, lvl));
-                            drawnBeasts = drawnBeasts + 1;
+                by = by0;
+                while (by <= by1) {
+                    mutable int bx = bx0;
+                    while (bx <= bx1) {
+                        mutable int slot = chain.firstIn(lat.at(bx, by));
+                        while (slot != BlockChain.NONE) {
+                            BeastId b = cast<BeastId>(slot);
+                            float px = herds.xOf(b);
+                            float py = herds.yOf(b);
+                            if (px >= cast<float>(x0) && px < cast<float>(x1) &&
+                                py >= cast<float>(y0) && py < cast<float>(y1)) {
+                                int sp = cast<int>(herds.speciesOf(b));
+                                int ord = beastArt.ordOf(Beasts.name(sp));
+                                if (ord >= 0) {
+                                    int gx = cast<int>(px);
+                                    int gy = cast<int>(py);
+                                    int cell = grid.biomeAt(gx, gy);
+                                    int lvl = stackLvl(cell, gx, gy);
+                                    // STANDING ON THE GROUND THAT IS ACTUALLY DRAWN, by the same
+                                    // expression the detail pass uses for its own props rather than
+                                    // a constant that happens to look right. Two expressions
+                                    // agreeing by accident is how the skirt defect arrived in this
+                                    // very file, and an animal floating over a hill or sunk into it
+                                    // is the first thing anybody notices.
+                                    float zOff = cast<float>(lvl) * stepH + terrainLook[cell].lift + 0.8;
+                                    float topZ = terrainLook[cell].top + zOff;
+                                    wv = emitMesh(beastArt, buf, wv, ord, px * 2.0, py * 2.0, topZ,
+                                                  1.0, shadeAt(gx, gy, 1, lvl));
+                                    drawnBeasts = drawnBeasts + 1;
+                                }
+                            }
+                            slot = chain.after(slot);
                         }
+                        bx = bx + 1;
                     }
-                    i = i + 1;
+                    by = by + 1;
                 }
                 fauna.upload(buf, wv, tris * 27);
                 Allocator.free(buf);

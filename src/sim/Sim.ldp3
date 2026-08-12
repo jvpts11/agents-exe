@@ -2,7 +2,11 @@ import System.IO.Console;
 import System.Time.Time;
 import Agents.World.Grid;
 import Agents.World.WorldGen;
+import Agents.World.Rng;
 import Agents.Sim.Chronicle;
+import Agents.Sim.Wild;
+import Agents.Sim.Grazing;
+import Agents.Sim.Seeding;
 program AgentsExe;
 
 // THE WORLD, AND THE THING THAT MAKES IT ADVANCE. It owns the layers and it owns the tick.
@@ -50,7 +54,22 @@ public bundle Agents {
             private mutable Chronicle* log;
             // THE FIRST LIVING LAYER. Nothing was subscribed to the tick until this; `Population`
             // and `Atlas` arrive the same way, each adding one line to `tick`.
+            //
+            // IT ARRIVES WITH THE GROUND AND NOT BEFORE IT. The animals stand on the world and their
+            // block index is cut to its size, so a Wild without a world would be a Wild that has to
+            // be told its extent afterwards -- a two-step construction, and the second step is the
+            // one somebody forgets. `standing` guards both.
             private mutable Wild* beasts;
+            // THE WORLD'S OWN DRAW, seeded from the world's seed. Every decision the layers make
+            // comes from here, so the same seed replays the same world -- a herd that chose its
+            // pasture from a clock would make two runs of "seed 42" different worlds with one name.
+            private mutable Rng* dice;
+            // The world this Sim is: the number it was rolled from and how big it is. Held because
+            // the layers are cut to them and because `buildWorld` should not be told again what it
+            // was already told.
+            private mutable int seed;
+            private mutable int wide;
+            private mutable int tall;
             // Nanoseconds spent advancing, ever. THE FLOOR EVERY LATER COST IS READ AGAINST: an
             // empty tick has a price, and knowing it is what makes "the fauna costs 40 ns a beast"
             // a number instead of an impression.
@@ -85,15 +104,20 @@ public bundle Agents {
             public static fixed int WIDTH = 2560;
             public static fixed int HEIGHT = 1440;
 
-            // A Sim begins with nothing in it, and the ground is the first thing put in -- the same
-            // way `Wild`, `Population` and `Atlas` arrive, one per slice.
+            // A SIM IS A SEED AND AN EXTENT, from the moment it exists. Everything cheap is built
+            // here -- the animals, the draw, the record -- and only the TERRAIN waits for
+            // `buildWorld`, because generating it takes seconds and a check of the tick's own
+            // arithmetic should not have to pay for a coastline.
             //
-            // IT IS NOT BUILT IN THE CONSTRUCTOR, and the reason is a test that could not be
-            // written. Making a world compulsory to have a Sim meant the tick's arithmetic -- a
-            // fraction carried, a budget spent, a shortfall counted -- could only be checked by
-            // generating terrain first, which is both slow and about something else entirely. A
-            // thing that must be built to exist is a thing that cannot be tested apart.
-            public constructor Sim() {
+            // It used to take nothing and be told the seed and the size later, and that was wrong in
+            // a way the compiler pointed out: a Wild is cut to the size of the ground it stands on,
+            // so a Sim that does not yet know its size cannot have one, and the field had to be
+            // absent -- which is a two-step construction, and the second step is the one somebody
+            // forgets. Nothing here is optional now except the ground itself.
+            public constructor Sim(int seed, int width, int height) {
+                this.seed = seed;
+                this.wide = width;
+                this.tall = height;
                 standing = false;
                 ticked = 0;
                 owed = 0.0;
@@ -101,7 +125,12 @@ public bundle Agents {
                 spent = 0;
                 advances = 0;
                 log = new Chronicle() on heap;
-                beasts = new Wild() on heap;
+                beasts = new Wild(width, height) on heap;
+                // A DIFFERENT STREAM FROM THE TERRAIN'S. The world is generated once and ticked
+                // forever; one stream shared would make the first animal's decision depend on how
+                // many rolls the coastline happened to take, so a change to the generator would
+                // silently move every herd in every world.
+                dice = new Rng(seed ^ 0x5EED) on heap;
             }
 
             // The animals. Borrowed: they die with the Sim.
@@ -114,6 +143,7 @@ public bundle Agents {
                     delete ground;
                 }
                 delete beasts;
+                delete dice;
                 delete log;
                 return;
             }
@@ -133,9 +163,14 @@ public bundle Agents {
             //
             // `loud` because the search prints a line per rejected roll, which a player waiting on
             // a window wants and a test run does not.
-            public method buildWorld(int seed, int width, int height, boolean loud) returns void {
-                ground = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, width, height, 6, loud);
+            //
+            // AND IT SOWS THE WORLD IT MADE. Making the ground and putting the animals on it were
+            // two calls at the call site, in that order, and the order mattered -- which is a thing
+            // to get wrong for no gain. A world arrives with what lives in it.
+            public method buildWorld(boolean loud) returns void {
+                ground = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, wide, tall, 6, loud);
                 standing = true;
+                Seeding.sow(beasts, ground, seed, log);
                 return;
             }
 
@@ -156,10 +191,22 @@ public bundle Agents {
             // headless run has none to spend, and neither is a fact about the world. It is also
             // what makes the ceiling testable at all: an empty tick is free, so the only way to see
             // the cut happen is to ask for no time.
+            // THE DEADLINE IS IN NANOSECONDS, AND IT USED TO BE IN MILLISECONDS, WHICH DID NOT WORK.
+            // `Time.millis()` is wall-clock, off `GetSystemTimeAsFileTime`, and on Windows that
+            // advances in steps of about fifteen milliseconds. An eight-millisecond ceiling read
+            // with a fifteen-millisecond ruler is not a ceiling: the first measured world spent
+            // 14.1 ms a frame under an 8 ms budget -- 76% over, invisibly, because every reading
+            // inside one system tick says the same number. `Time.nanos()` is
+            // QueryPerformanceCounter, it was ALREADY being read here for the cost, and using it
+            // for both means one clock read instead of two.
+            //
+            // This is the same shape as the defect the budget itself was made to fix (ledger S0-5):
+            // a limit that cannot be enforced by the instrument that reads it, reporting compliance
+            // it never had.
             public method advance(float pace, int budgetMillis) returns int {
                 long began = Time.nanos();
                 owed = owed + pace;
-                long until = Time.millis() + cast<long>(budgetMillis);
+                long until = began + cast<long>(budgetMillis) * 1000000;
                 mutable int ran = 0;
                 while (owed >= 1.0) {
                     tick();
@@ -168,7 +215,7 @@ public bundle Agents {
                     // Checked AFTER the tick, so a budget of zero still advances the world once.
                     // A frame that advances it not at all is a frozen world, and a machine too slow
                     // for one tick should crawl rather than stop.
-                    if (Time.millis() >= until) {
+                    if (Time.nanos() >= until) {
                         break;
                     }
                 }
@@ -247,11 +294,18 @@ public bundle Agents {
 
             // One tick of the world: every layer's pass, in this order.
             //
-            // EMPTY, AND SAYING SO. There is no layer to advance yet -- the fauna arrives in S1,
-            // the people in S2, the nations in S3 -- and each one adds its line here rather than
-            // finding somewhere of its own to run.
+            // THE FAUNA IS THE FIRST LINE IN IT. The people arrive in S2 and the nations in S3, each
+            // adding one line here rather than finding somewhere of its own to run -- which is the
+            // whole reason this method exists rather than the loop inside the window.
+            //
+            // A WORLD THAT IS NOT STANDING STILL TICKS. That is not a guard bolted on: a Sim with no
+            // ground is a legal state, it is what the tick's own arithmetic is checked in, and its
+            // ticks have to keep counting for that check to mean anything.
             private method tick() returns void {
                 ticked = ticked + 1;
+                if (standing) {
+                    Grazing.tick(beasts, ground, ticked, dice, log);
+                }
                 return;
             }
 

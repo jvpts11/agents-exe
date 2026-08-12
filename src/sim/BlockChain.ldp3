@@ -1,0 +1,187 @@
+import System.IO.Console;
+import Agents.World.BlockGrid;
+program AgentsExe;
+
+// WHO STANDS WHERE, as one chain per block of ground.
+//
+// THE QUESTION IT ANSWERS IS "WHO IS NEAR", and everything in this game that is not a straight line
+// through an array asks it: what the camera can see (so the bake walks nine blocks instead of ten
+// thousand animals), what a deer can be frightened by, what a wolf can eat, whether a block has room
+// for another mouth. Asked by walking the population instead, each of those is O(n) per asker, which
+// is O(n^2) per tick -- the shape that killed the previous build twice.
+//
+// A SLOT, NOT AN ANIMAL. This holds integers, and it is deliberately ignorant of what they mean:
+// `Wild` gives them meaning as `BeastId`, and in S2 `Population` gives the same class's integers
+// meaning as agents. That is what the layout means by "the block chain, same shape as the crowd's" --
+// not a shape copied twice, the same class used twice.
+//
+// THE LATTICE IS `BlockGrid`, and it is not a second block grid. `Grid` labels landmasses per block
+// and `NodeField` keeps its work map on the same lattice; a third division of the world into blocks
+// would answer the same question in a different unit, plausibly, and one of the answers would be
+// wrong in a way nothing could notice.
+//
+// DOUBLY LINKED, and the back-pointer is what makes it worth having. An animal moves every tick and
+// changes block rarely; leaving a block has to cost one write and not a walk of everyone in it, or
+// the index costs more than the sweep it replaces.
+public bundle Agents {
+    public namespace Sim {
+
+        public class BlockChain {
+            // Nobody: the end of a chain, the block of a slot that is not in the world.
+            public static fixed int NONE = 0 - 1;
+
+            private mutable BlockGrid* lattice;
+            // Per block: the first slot standing in it, or NONE.
+            private mutable int[] first;
+            // Per slot: the next and previous slot in the same block, or NONE.
+            private mutable int[] then;
+            private mutable int[] prior;
+            // Per slot: which block it is in, or NONE if it is not indexed at all. This is what
+            // makes moving cheap -- the common case is "the block did not change" and it costs one
+            // comparison.
+            private mutable int[] within;
+            private mutable int room;
+
+            public constructor BlockChain(int width, int height, int slots) {
+                lattice = new BlockGrid(width, height) on heap;
+                first = new int[lattice.count()]();
+                for (int b in 0..lattice.count()) {
+                    first[b] = BlockChain.NONE;
+                }
+                room = slots;
+                if (room < 1) {
+                    room = 1;
+                }
+                then = new int[room]();
+                prior = new int[room]();
+                within = new int[room]();
+                clearSlots(0, room);
+            }
+
+            public destructor ~BlockChain() returns void {
+                delete lattice;
+                delete first;
+                delete then;
+                delete prior;
+                delete within;
+                return;
+            }
+
+            private method clearSlots(int from, int upTo) returns void {
+                for (int i in from..upTo) {
+                    then[i] = BlockChain.NONE;
+                    prior[i] = BlockChain.NONE;
+                    within[i] = BlockChain.NONE;
+                }
+                return;
+            }
+
+            // The lattice, for callers that need block-to-cell arithmetic -- the bake turns the
+            // camera's window into a range of blocks with it. Borrowed: it dies with the chain.
+            public method grid() returns BlockGrid* {
+                return lattice;
+            }
+
+            public method blocks() returns int {
+                return lattice.count();
+            }
+
+            // Make space for a bigger population. THE LINKS SURVIVE UNTOUCHED, because they are
+            // slot numbers and slots do not move when the array grows -- which is the reason this
+            // index is by slot rather than by pointer.
+            public method roomFor(int slots) returns void {
+                if (slots <= room) {
+                    return;
+                }
+                mutable int[] t = new int[slots]();
+                mutable int[] p = new int[slots]();
+                mutable int[] w = new int[slots]();
+                for (int i in 0..room) {
+                    t[i] = then[i];
+                    p[i] = prior[i];
+                    w[i] = within[i];
+                }
+                delete then;
+                delete prior;
+                delete within;
+                then = t;
+                prior = p;
+                within = w;
+                int was = room;
+                room = slots;
+                clearSlots(was, room);
+                return;
+            }
+
+            // Put a slot at a place, or move it there. The common call is the one that does nothing:
+            // an animal that drifted a tenth of a cell is in the block it was already in.
+            public method put(int slot, int cx, int cy) returns void {
+                int b = lattice.ofCellClamped(cx, cy);
+                if (within[slot] == b) {
+                    return;
+                }
+                take(slot);
+                then[slot] = first[b];
+                prior[slot] = BlockChain.NONE;
+                if (first[b] != BlockChain.NONE) {
+                    prior[first[b]] = slot;
+                }
+                first[b] = slot;
+                within[slot] = b;
+                return;
+            }
+
+            // Take a slot out of the world. Safe on a slot that is not in it, because the two
+            // callers that matter -- death, and moving -- both want that.
+            public method take(int slot) returns void {
+                int b = within[slot];
+                if (b == BlockChain.NONE) {
+                    return;
+                }
+                int back = prior[slot];
+                int ahead = then[slot];
+                if (back != BlockChain.NONE) {
+                    then[back] = ahead;
+                } else {
+                    first[b] = ahead;
+                }
+                if (ahead != BlockChain.NONE) {
+                    prior[ahead] = back;
+                }
+                then[slot] = BlockChain.NONE;
+                prior[slot] = BlockChain.NONE;
+                within[slot] = BlockChain.NONE;
+                return;
+            }
+
+            // The first slot in a block, or NONE. Walk on with `after`.
+            public method firstIn(int block) returns int {
+                if (block < 0 || block >= lattice.count()) {
+                    return BlockChain.NONE;
+                }
+                return first[block];
+            }
+
+            public method after(int slot) returns int {
+                return then[slot];
+            }
+
+            public method blockOf(int slot) returns int {
+                return within[slot];
+            }
+
+            // How many stand in a block. WALKS THE CHAIN, and it is here for the tests and for the
+            // occasional question rather than for the tick: a per-block count kept up to date is
+            // what S1.7's carrying capacity needs, and it will be kept then rather than guessed now.
+            public method countIn(int block) returns int {
+                mutable int n = 0;
+                mutable int s = firstIn(block);
+                while (s != BlockChain.NONE) {
+                    n = n + 1;
+                    s = then[s];
+                }
+                return n;
+            }
+        }
+    }
+}

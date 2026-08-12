@@ -1,0 +1,437 @@
+import System.IO.Console;
+import Agents.Sim.Wild;
+import Agents.Sim.Herd;
+import Agents.Sim.HerdMood;
+import Agents.Sim.BeastState;
+import Agents.Sim.BeastId;
+import Agents.Sim.BlockChain;
+import Agents.Sim.Chronicle;
+import Agents.World.Grid;
+import Agents.World.BlockGrid;
+import Agents.World.Species;
+import Agents.World.Beasts;
+import Agents.World.LandMath;
+import Agents.World.Rng;
+program AgentsExe;
+
+// THE FAUNA'S TICK: what every herd decides, and what its animals do about it.
+//
+// THE HERD THINKS AND THE BEAST FOLLOWS. Fifteen hundred decisions and ten thousand moves, instead
+// of ten thousand decisions -- the same trade as the block index and the sliced bake, and the reason
+// `Herd` is a class while `Beast` is twenty bytes of value.
+//
+// A HERD THAT MOVES ON CROSSES GROUND IT DOES NOT LIVE ON, which is the whole reason `Migrating` has
+// a name: the habitat rule holds in every state but that one, and that one is bounded by the journey.
+// A rule with a quiet exception is worse than no rule.
+//
+// NOTHING HERE IS CHRONICLED, AND THAT IS A DECISION RATHER THAN AN OVERSIGHT. The chronicle is what
+// the world has to TELL you because you cannot see it; a herd drifting and a herd crossing a ridge
+// are things you WATCH, and they are drawn in this same task. Fifteen hundred herds writing a line
+// each time they change pasture is a hundred lines a second at gear one -- a record nobody reads,
+// costing frame time, drowning the lines that do matter. What gets a line is what the window cannot
+// show: a species gone (S1.9), a herd wiped out, a world that fell behind. A split gets one because
+// it is rare and because a new herd is a new thing in the world, not a movement of an old one.
+public bundle Agents {
+    public namespace Sim {
+
+        public class Grazing {
+            // The chance, per DECISION, of a herd deciding to move on: one in this many. A herd
+            // decides four times a second (see STIR_EVERY), so at gear one this is a change of
+            // pasture about every four minutes -- a herd that moved every few seconds would read as
+            // panic rather than as grazing.
+            public static fixed int MOVE_ON_IN = 1000;
+            // How far it goes when it does, in cells.
+            public static fixed float JOURNEY = 24.0;
+            // How many ticks make a second of world time -- gear one is real time, one tick a frame,
+            // sixty frames a second. Age is counted in SECONDS and not in ticks, because `age` is a
+            // short: a mammoth lives six hundred seconds, and six hundred fits where thirty-six
+            // thousand does not.
+            public static fixed int TICKS_A_SECOND = 60;
+            // HOW OFTEN A GRAZING ANIMAL TAKES A STEP, in ticks. Four times a second at gear one.
+            //
+            // THIS IS THE SHAPE OF THE WHOLE TICK, and it was measured into existence. Moving every
+            // animal every tick cost 17 ns each -- 181 microseconds a tick with ten thousand of them
+            // -- which the top two gears cannot pay for: gear six asks three hundred ticks a frame,
+            // so the frame's whole budget bought forty-four of them and two hundred and fifty-six
+            // were refused, every frame.
+            //
+            // A grazing animal does not glide. It stands, crops, takes a step, stands again -- so a
+            // step every fifteenth tick is not an approximation of grazing, it IS grazing, and it is
+            // what the animal looks like in the game. Each animal steps on the tick its own slot
+            // number comes up, so a fifteenth of them move on any given tick and the herd as a whole
+            // never stops moving. This is the same trade the previous build made with its crowd and
+            // for the same reason.
+            //
+            // A herd ON THE MOVE is not sliced: its animals follow the centre every tick, because
+            // that motion is the one a player watches cross the ground.
+            public static fixed int STIR_EVERY = 15;
+            // How far the daughter of a split looks for ground of her own, in blocks. BOUNDED IN THE
+            // LINE THAT WRITES IT: the previous build's agents span against walls because a search
+            // with no bound was written once and then trusted everywhere.
+            public static fixed int LOOK_OUT_BLOCKS = 6;
+
+            // One tick of the world's animals.
+            //
+            // THREE PASSES, AND EACH ONE TOUCHES ONLY WHAT IT HAS TO. Walking every animal for
+            // everything is what made the tick cost thirty times what it needed to.
+            public static method tick(Wild* wild, Grid* g, long at, Rng* rng, Chronicle* log)
+                    returns void {
+                // Which fifteenth of the world's animals -- and of its herds -- comes up this tick.
+                int phase = cast<int>(at % cast<long>(Grazing.STIR_EVERY));
+                // Read ONCE: a split appends a herd, and a herd born this tick has already been
+                // placed where it belongs and must not also be thought for in the tick that made it.
+                int n = wild.herdsAlive();
+
+                // ONE: the herds that are on the move walk, every tick, and their animals with them.
+                mutable int i = 0;
+                while (i < n) {
+                    Herd* h = wild.herdAt(i);
+                    if (cast<int>(h.mood()) == cast<int>(HerdMood.MovingOn)) {
+                        Grazing.carryOn(h, wild);
+                        Grazing.walkWith(h, wild, g);
+                    }
+                    i = i + 1;
+                }
+
+                // TWO: a fifteenth of the herds decide something. A herd reconsidering sixty times a
+                // second is sixty times the thinking for a decision it takes twice a minute.
+                mutable int k = phase;
+                while (k < n) {
+                    Grazing.thinkFor(wild.herdAt(k), wild, g, at, rng, log);
+                    k = k + Grazing.STIR_EVERY;
+                }
+
+                // THREE: a fifteenth of the animals take their step.
+                Grazing.stirGrazers(wild, g, phase, at);
+
+                // And once a second, everything alive gets a second older. A full walk, but one tick
+                // in sixty -- and it is two reads and an add per animal, with the array in order.
+                if (at % cast<long>(Grazing.TICKS_A_SECOND) == 0) {
+                    Grazing.ageEveryone(wild);
+                }
+                return;
+            }
+
+            // WHAT THE HERD DECIDES. One decision, and the mood carries it until it is done.
+            //
+            // MOVING ON IS NOT HERE, because a herd on the move is not deciding anything -- it is
+            // walking, which the first pass of the tick does every tick rather than every fifteenth.
+            private static method thinkFor(Herd* h, Wild* wild, Grid* g, long at, Rng* rng,
+                                           Chronicle* log) returns void {
+                match (h.mood()) {
+                    case Drifting {
+                        // Grazing, unless the draw says otherwise. Splitting is asked first because
+                        // a herd too big to feed itself should leave before it wanders further.
+                        if (!Grazing.maySplit(h, wild, g, at, log)) {
+                            if (rng.nextInt(Grazing.MOVE_ON_IN) == 0) {
+                                Grazing.setOut(h, wild, g, rng);
+                            }
+                        }
+                    }
+                    case MovingOn {
+                        // Walking, and the walking is pass one's.
+                    }
+                    case Fleeing {
+                        // S1.6 drives this. Until it does, a frightened herd settles again rather
+                        // than staying frightened forever -- an unreachable state is a bug that
+                        // waits, and a permanent one is a herd that never grazes again.
+                        h.setMood(HerdMood.Drifting);
+                    }
+                    case Hunting {
+                        // S1.7.
+                        h.setMood(HerdMood.Drifting);
+                    }
+                    case Starving {
+                        // S1.7.
+                        h.setMood(HerdMood.Drifting);
+                    }
+                }
+                return;
+            }
+
+            // PICK SOMEWHERE AND GO. The target has to be ground the species lives on, or the herd
+            // stays where it is: a herd that sets out for the sea is a herd that walks into it.
+            // EIGHT TRIES AND THEN IT STAYS -- a loop that searches until it succeeds is a loop that
+            // hangs on a species boxed in by water.
+            private static method setOut(Herd* h, Wild* wild, Grid* g, Rng* rng) returns void {
+                int sp = cast<int>(h.species());
+                mutable int tries = 0;
+                while (tries < 8) {
+                    tries = tries + 1;
+                    float ang = rng.unit() * 6.2831853;
+                    float tx = h.x() + LandMath.cos(ang) * Grazing.JOURNEY;
+                    float ty = h.y() + LandMath.sin(ang) * Grazing.JOURNEY;
+                    int gx = cast<int>(tx);
+                    int gy = cast<int>(ty);
+                    if (gx < 1 || gy < 1 || gx >= g.width() - 1 || gy >= g.height() - 1) {
+                        continue;
+                    }
+                    if (!Beasts.livesIn(sp, g.biomeAt(gx, gy))) {
+                        continue;
+                    }
+                    Grazing.leaveFor(h, wild, tx, ty);
+                    return;
+                }
+                return;
+            }
+
+            // Set a herd walking toward a place, and tell its animals they are on the move -- which
+            // is what lifts the habitat rule for the crossing.
+            private static method leaveFor(Herd* h, Wild* wild, float tx, float ty) returns void {
+                h.aimAt(tx, ty);
+                h.setMood(HerdMood.MovingOn);
+                Grazing.markAll(h, wild, BeastState.Migrating);
+                return;
+            }
+
+            // WALKING. The centre moves and the animals follow it, which is what makes a herd read
+            // as a herd rather than as a scatter that happens to drift the same way.
+            private static method carryOn(Herd* h, Wild* wild) returns void {
+                float dx = h.towardsX() - h.x();
+                float dy = h.towardsY() - h.y();
+                float span = LandMath.sqrt(dx * dx + dy * dy);
+                float pace = Grazing.paceOf(h);
+                if (span <= pace) {
+                    h.moveCentre(h.towardsX(), h.towardsY());
+                    h.setMood(HerdMood.Drifting);
+                    Grazing.markAll(h, wild, BeastState.Grazing);
+                    return;
+                }
+                h.moveCentre(h.x() + dx / span * pace, h.y() + dy / span * pace);
+                wild.noteTravel(pace);
+                return;
+            }
+
+            // Cells a tick, from the species' cells a second.
+            private static method paceOf(Herd* h) returns float {
+                return Beasts.pace(cast<int>(h.species())) / cast<float>(Grazing.TICKS_A_SECOND);
+            }
+
+            // THE ANIMALS OF A HERD THAT IS CROSSING GROUND, every tick, through the herd's own
+            // roster.
+            //
+            // THE ROSTER IS THE RIGHT TOOL HERE AND THE WRONG ONE EVERYWHERE ELSE. It is a linked
+            // list through a shared pool, so walking it touches the beast array out of order and
+            // throws away the reason `Beast` was squeezed to three animals per cache line. That is a
+            // price worth paying for the one herd in eight that is actually on the move, and a price
+            // not worth paying for the seven that are standing still -- which is why the grazers are
+            // reached by walking the array instead.
+            private static method walkWith(Herd* h, Wild* wild, Grid* g) returns void {
+                float reach = h.reach();
+                float tooFar = reach * reach;
+                float pace = Grazing.paceOf(h);
+                float hx = h.x();
+                float hy = h.y();
+                mutable int link = h.firstMember();
+                while (link >= 0) {
+                    BeastId b = h.memberAt(link);
+                    link = h.afterMember(link);
+                    float bx = wild.xOf(b);
+                    float by = wild.yOf(b);
+                    float dx = hx - bx;
+                    float dy = hy - by;
+                    // SQUARED, so an animal that is already with its herd costs two multiplies and
+                    // no square root. The root is taken only by the ones that have fallen behind.
+                    float gap = dx * dx + dy * dy;
+                    if (gap <= tooFar) {
+                        continue;
+                    }
+                    float span = LandMath.sqrt(gap);
+                    Grazing.tryStep(wild, g, b, bx + dx / span * pace, by + dy / span * pace);
+                }
+                return;
+            }
+
+            // A FIFTEENTH OF THE GRAZING ANIMALS TAKE A STEP -- see STIR_EVERY for why a fifteenth.
+            //
+            // Reached by walking the beast array with a stride rather than through any roster: which
+            // animals come up this tick is decided by their SLOT, so the walk needs no list at all,
+            // and over fifteen ticks it reads every animal exactly once.
+            private static method stirGrazers(Wild* wild, Grid* g, int phase, long at) returns void {
+                int n = wild.count();
+                // The step is what the animal could walk in the time since its last one, halved --
+                // it is milling about, not travelling.
+                int spun = cast<int>(at) * 668265263;
+                mutable int i = phase;
+                while (i < n) {
+                    BeastId b = cast<BeastId>(i);
+                    int slot = i;
+                    i = i + Grazing.STIR_EVERY;
+                    int owner = wild.herdOf(b);
+                    if (owner < 0) {
+                        // Nobody's animal. It stands where it is until something gathers it.
+                        continue;
+                    }
+                    Herd* h = wild.herdAt(owner);
+                    if (cast<int>(h.mood()) == cast<int>(HerdMood.MovingOn)) {
+                        // Its herd is crossing ground; the walk above owns it this tick.
+                        continue;
+                    }
+                    float bx = wild.xOf(b);
+                    float by = wild.yOf(b);
+                    float dx = h.x() - bx;
+                    float dy = h.y() - by;
+                    float gap = dx * dx + dy * dy;
+                    float reach = h.reach();
+                    // `hop` and not `step`: `step` is a keyword of the language (`0..n step 2`).
+                    float hop = Grazing.paceOf(h) * cast<float>(Grazing.STIR_EVERY);
+                    if (gap > reach * reach) {
+                        // Too far from the others: walk back in rather than wander further.
+                        float span = LandMath.sqrt(gap);
+                        Grazing.tryStep(wild, g, b, bx + dx / span * hop, by + dy / span * hop);
+                        continue;
+                    }
+                    // A STEP IN A DIRECTION OF ITS OWN, hashed from the animal's slot and the tick
+                    // rather than drawn. Ten thousand random numbers a tick is a cost paid for
+                    // something nobody can see; a hash of two numbers already in hand is not. And it
+                    // has to include the TICK: hashed from the slot alone, every animal walks in one
+                    // fixed direction forever and the herd ends up as a ring around its own edge.
+                    mutable int k = slot * 374761393 + spun;
+                    k = k ^ (k >> 13);
+                    float wx = cast<float>((k & 32767) % 21 - 10) * 0.1;
+                    float wy = cast<float>(((k >> 15) & 32767) % 21 - 10) * 0.1;
+                    Grazing.tryStep(wild, g, b, bx + wx * hop, by + wy * hop);
+                }
+                return;
+            }
+
+            // MOVE IT THERE IF IT MAY STAND THERE. It may not walk off the map or onto ground it
+            // cannot live on -- except while migrating, which is the named exception and the reason
+            // that state exists. An animal refused simply does not move this step.
+            private static method tryStep(Wild* wild, Grid* g, BeastId b, float nx, float ny)
+                    returns void {
+                int gx = cast<int>(nx);
+                int gy = cast<int>(ny);
+                if (gx < 0 || gy < 0 || gx >= g.width() || gy >= g.height()) {
+                    return;
+                }
+                if (cast<int>(wild.stateOf(b)) != cast<int>(BeastState.Migrating)) {
+                    if (!Beasts.livesIn(cast<int>(wild.speciesOf(b)), g.biomeAt(gx, gy))) {
+                        return;
+                    }
+                }
+                wild.placeAt(b, nx, ny);
+                return;
+            }
+
+            // EVERYTHING ALIVE GETS A SECOND OLDER. One walk of the array in order, one tick in
+            // sixty: age is counted in seconds, because `age` is a short and a mammoth's six hundred
+            // seconds fit in one where thirty-six thousand ticks do not.
+            private static method ageEveryone(Wild* wild) returns void {
+                int n = wild.count();
+                mutable int i = 0;
+                while (i < n) {
+                    wild.growOlder(cast<BeastId>(i));
+                    i = i + 1;
+                }
+                return;
+            }
+
+            private static method markAll(Herd* h, Wild* wild, BeastState s) returns void {
+                mutable int link = h.firstMember();
+                while (link >= 0) {
+                    wild.setStateOf(h.memberAt(link), s);
+                    link = h.afterMember(link);
+                }
+                return;
+            }
+
+            // ---- splitting ------------------------------------------------------------------------
+            //
+            // A HERD OVER ITS SPECIES' NUMBER SPLITS, AND THE DAUGHTER MUST GO. The table says how
+            // many run together; a herd that grows past it by breeding is a herd that cannot feed
+            // itself off one place, so half of it walks away to ground of its own.
+            //
+            // Answers whether the herd split, because a herd that has just halved should not also
+            // decide to wander this tick.
+            private static method maySplit(Herd* h, Wild* wild, Grid* g, long at, Chronicle* log)
+                    returns boolean {
+                int sp = cast<int>(h.species());
+                int most = Beasts.herd(sp);
+                int have = h.count();
+                if (have <= most || have < 2) {
+                    return false;
+                }
+                // Somewhere to go, first: a split with nowhere to put the daughter is a split that
+                // must not happen. The herd stays over its number and breeding is what stops --
+                // spec 2026-08-08-fauna-design, the third step of the full-block rule.
+                int home = wild.standing().grid().ofCellClamped(cast<int>(h.x()), cast<int>(h.y()));
+                int room = Grazing.roomNearby(wild, g, sp, home);
+                if (room < 0) {
+                    return false;
+                }
+                BlockGrid* lat = wild.standing().grid();
+                float tx = cast<float>(lat.originX(room)) + 8.0;
+                float ty = cast<float>(lat.originY(room)) + 8.0;
+
+                // Half of them leave, taken off the roster into a list first: a chain cannot be
+                // walked and unlinked at the same time without losing the place.
+                int leaving = have / 2;
+                mutable int[] party = new int[leaving]();
+                mutable int took = 0;
+                mutable int link = h.firstMember();
+                while (link >= 0 && took < leaving) {
+                    party[took] = cast<int>(h.memberAt(link));
+                    took = took + 1;
+                    link = h.afterMember(link);
+                }
+                Herd* daughter = wild.gather(h.species(), h.x(), h.y(), h.reach());
+                for (int i in 0..took) {
+                    BeastId who = cast<BeastId>(party[i]);
+                    h.release(who);
+                    daughter.admit(who);
+                }
+                delete party;
+                Grazing.leaveFor(daughter, wild, tx, ty);
+                log.note(at, "fauna",
+                         $"a herd of {Beasts.name(sp)} outgrew its ground: {took} leave for {cast<int>(tx)},{cast<int>(ty)}");
+                return true;
+            }
+
+            // The nearest block, other than this one, whose ground the species can live on. Searched
+            // in rings outward and STOPPED AT A FIXED DISTANCE: a daughter that cannot find ground
+            // within six blocks does not walk to the other side of the world looking for it.
+            private static method roomNearby(Wild* wild, Grid* g, int sp, int home) returns int {
+                BlockChain* chain = wild.standing();
+                BlockGrid* lat = chain.grid();
+                int bx = lat.colOf(home);
+                int by = lat.rowOf(home);
+                mutable int ring = 1;
+                while (ring <= Grazing.LOOK_OUT_BLOCKS) {
+                    mutable int dy = 0 - ring;
+                    while (dy <= ring) {
+                        mutable int dx = 0 - ring;
+                        while (dx <= ring) {
+                            // Only the edge of the ring: the inside was searched by the ring before.
+                            boolean edge = dx == 0 - ring || dx == ring || dy == 0 - ring || dy == ring;
+                            if (edge && lat.holds(bx + dx, by + dy)) {
+                                int b = lat.at(bx + dx, by + dy);
+                                if (Grazing.livableBlock(lat, g, sp, b)) {
+                                    return b;
+                                }
+                            }
+                            dx = dx + 1;
+                        }
+                        dy = dy + 1;
+                    }
+                    ring = ring + 1;
+                }
+                return 0 - 1;
+            }
+
+            // Whether the middle of a block is ground this species lives on. THE MIDDLE, not a
+            // sweep of all two hundred and fifty-six cells: this is asked up to a hundred and
+            // sixty-eight times per split, and a block whose centre suits is a block worth walking
+            // to -- the animals sort themselves out within it once they arrive.
+            private static method livableBlock(BlockGrid* lat, Grid* g, int sp, int b)
+                    returns boolean {
+                int cx = lat.originX(b) + 8;
+                int cy = lat.originY(b) + 8;
+                if (cx >= g.width() || cy >= g.height()) {
+                    return false;
+                }
+                return Beasts.livesIn(sp, g.biomeAt(cx, cy));
+            }
+        }
+    }
+}

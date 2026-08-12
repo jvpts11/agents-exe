@@ -4,6 +4,8 @@ import Agents.Sim.Herd;
 import Agents.Sim.BeastId;
 import Agents.Sim.HerdId;
 import Agents.Sim.BeastState;
+import Agents.Sim.HerdMood;
+import Agents.Sim.BlockChain;
 import Agents.World.Species;
 program AgentsExe;
 
@@ -35,7 +37,14 @@ public bundle Agents {
             // they are born and die, which also makes it the number extinction is read from.
             private mutable int[] census;
 
-            public constructor Wild() {
+            // WHO STANDS WHERE. Maintained by the three methods that move an animal -- `bear`,
+            // `bury` and `placeAt` -- and by nothing else, which is the only way an index stays
+            // true: a fourth place that moves an animal without telling it produces a chain
+            // pointing at ground the animal left.
+            private mutable BlockChain* blocks;
+
+            // The ground is this big, and the index is cut to fit it. A Wild belongs to a world.
+            public constructor Wild(int width, int height) {
                 room = 1024;
                 beasts = new Beast[room]();
                 alive = 0;
@@ -43,6 +52,8 @@ public bundle Agents {
                 herds = new Herd*[herdRoom]();
                 herdCount = 0;
                 census = new int[Species.count()]();
+                blocks = new BlockChain(width, height, room) on heap;
+                walked = 0.0;
             }
 
             public destructor ~Wild() returns void {
@@ -52,11 +63,18 @@ public bundle Agents {
                 delete herds;
                 delete beasts;
                 delete census;
+                delete blocks;
                 return;
             }
 
             public method count() returns int {
                 return alive;
+            }
+
+            // The block index, for whoever asks who is near -- the bake, and from S1.6 the fauna
+            // itself. Borrowed: it dies with the Wild.
+            public method standing() returns BlockChain* {
+                return blocks;
             }
 
             public method herdsAlive() returns int {
@@ -78,6 +96,7 @@ public bundle Agents {
                 delete beasts;
                 beasts = next;
                 room = bigger;
+                blocks.roomFor(room);
                 return;
             }
 
@@ -96,6 +115,7 @@ public bundle Agents {
                 beasts[at].state = cast<uint>(cast<int>(BeastState.Grazing));
                 alive = alive + 1;
                 census[cast<int>(s)] = census[cast<int>(s)] + 1;
+                blocks.put(at, cast<int>(x), cast<int>(y));
                 return cast<BeastId>(at);
             }
 
@@ -108,11 +128,24 @@ public bundle Agents {
                     return;
                 }
                 census[cast<int>(beasts[at].species)] = census[cast<int>(beasts[at].species)] - 1;
+                // ITS HERD LETS GO OF IT HERE, rather than at whatever line did the killing. A
+                // caller that forgets leaves a roster holding a slot that a moment later holds a
+                // different animal, and nothing says so until a herd behaves oddly three arcs on.
+                int own = cast<int>(beasts[at].herd);
+                if (own >= 0 && own < herdCount) {
+                    herds[own].release(who);
+                }
                 int last = alive - 1;
+                // The dead animal leaves the ground it stood on. Done before the swap, while `at`
+                // still means the animal that died.
+                blocks.take(at);
                 if (at != last) {
-                    // The mover's herd keeps the same animal under a new id.
+                    // The mover's herd keeps the same animal under a new id -- and so does its
+                    // block, which is the same fact told to the other index.
                     int movedHerd = cast<int>(beasts[last].herd);
                     beasts[at] = beasts[last];
+                    blocks.take(last);
+                    blocks.put(at, cast<int>(beasts[at].x), cast<int>(beasts[at].y));
                     if (movedHerd >= 0 && movedHerd < herdCount) {
                         herds[movedHerd].release(cast<BeastId>(last));
                         herds[movedHerd].admit(cast<BeastId>(at));
@@ -130,9 +163,13 @@ public bundle Agents {
                 return beasts[cast<int>(who)].y;
             }
 
+            // THE ONLY WAY AN ANIMAL MOVES, so the index cannot be left behind. Cheap when the
+            // animal stayed in its block, which is nearly every call.
             public method placeAt(BeastId who, float x, float y) returns void {
-                beasts[cast<int>(who)].x = x;
-                beasts[cast<int>(who)].y = y;
+                int at = cast<int>(who);
+                beasts[at].x = x;
+                beasts[at].y = y;
+                blocks.put(at, cast<int>(x), cast<int>(y));
                 return;
             }
 
@@ -212,6 +249,40 @@ public bundle Agents {
 
             public method herdAt(int at) returns Herd* {
                 return herds[at];
+            }
+
+            // ---- what the fauna has been doing ---------------------------------------------------
+            //
+            // HOW FAR THE HERDS HAVE WALKED, in cells, added up over every herd and every tick. Kept
+            // because it is the one number that cannot be produced by a world where the tick is not
+            // wired up at all: a world can have animals, draw them, and count them, and still be
+            // frozen -- which is a state this project has shipped before and not noticed, because
+            // everything else about it looked right.
+            //
+            // It sits BESIDE the record and never in place of it: it says the world moved, and the
+            // chronicle says what happened.
+            private mutable float walked;
+
+            public method noteTravel(float far) returns void {
+                walked = walked + far;
+                return;
+            }
+
+            public method travelled() returns float {
+                return walked;
+            }
+
+            // How many herds are crossing ground right now. Walked when asked, which is at the end
+            // of a run and nowhere else -- a count kept up to date would be a third place that can
+            // disagree with the moods themselves.
+            public method onTheMove() returns int {
+                mutable int n = 0;
+                for (int i in 0..herdCount) {
+                    if (cast<int>(herds[i].mood()) == cast<int>(HerdMood.MovingOn)) {
+                        n = n + 1;
+                    }
+                }
+                return n;
             }
         }
     }

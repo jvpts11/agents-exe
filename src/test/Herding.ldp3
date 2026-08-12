@@ -1,0 +1,276 @@
+import System.IO.Console;
+import System.Test.Test;
+import Agents.Sim.Wild;
+import Agents.Sim.Herd;
+import Agents.Sim.HerdMood;
+import Agents.Sim.BeastState;
+import Agents.Sim.BeastId;
+import Agents.Sim.BlockChain;
+import Agents.Sim.Chronicle;
+import Agents.Sim.Grazing;
+import Agents.World.Grid;
+import Agents.World.Biome;
+import Agents.World.Species;
+import Agents.World.Beasts;
+import Agents.World.Rng;
+program AgentsExe;
+
+// THE BLOCK INDEX AND THE HERD'S TICK -- the arithmetic underneath what the window shows.
+//
+// WHAT THIS SUITE IS FOR AND WHAT IT IS NOT. Whether a herd LOOKS like a herd is judged by running
+// the game and looking at it, and there is no substitute for that. What a window cannot show is
+// whether the index still agrees with where the animals actually are after ten thousand ticks of
+// moving, dying and being swapped into each other's slots -- a disagreement there draws perfectly
+// and behaves strangely, which is the most expensive kind of defect this project has met.
+//
+// THE GROUND IS MADE BY HAND, one biome written into a small grid, and that is deliberate. Generating
+// terrain to check that an animal walks toward its herd would make the check depend on the coastline
+// it happened to land on, and slow, and it would fail for reasons that have nothing to do with the
+// thing under test.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Herding {
+            public static fixed int SIDE = 96;
+
+            // Ground a grazer can live on, everywhere. Prairie is in the Grassland band, which is
+            // where the bison in these checks belong.
+            private static method pasture() returns Grid* {
+                mutable Grid* g = new Grid(Herding.SIDE, Herding.SIDE) on heap;
+                for (int y in 0..Herding.SIDE) {
+                    for (int x in 0..Herding.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.Prairie));
+                    }
+                }
+                return g;
+            }
+
+            // AN ANIMAL IS FILED UNDER THE BLOCK IT STANDS IN. The bake reads the world through this
+            // and nothing else, so an animal in the wrong chain is an animal that is drawn in the
+            // wrong place -- or not at all.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method an_animal_is_filed_where_it_stands() returns void {
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                BeastId b = w.bear(Species.Bison, 40.5, 24.5);
+                BlockChain* chain = w.standing();
+                int block = chain.grid().ofCellClamped(40, 24);
+                Test.assertEqual(chain.blockOf(cast<int>(b)), block);
+                Test.assertEqual(chain.firstIn(block), cast<int>(b));
+                Test.assertEqual(chain.countIn(block), 1);
+                delete w;
+                return;
+            }
+
+            // AND IT IS RE-FILED WHEN IT CROSSES A BORDER, which is the only moment the index costs
+            // anything. A step inside the same block must cost nothing and change nothing.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method crossing_a_block_border_refiles_it() returns void {
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                BeastId b = w.bear(Species.Bison, 15.5, 15.5);
+                BlockChain* chain = w.standing();
+                int was = chain.blockOf(cast<int>(b));
+                // Still inside block (0,0): sixteen cells a side.
+                w.placeAt(b, 14.5, 15.5);
+                Test.assertEqual(chain.blockOf(cast<int>(b)), was);
+                // And over the line into block (1,0).
+                w.placeAt(b, 16.5, 15.5);
+                int now = chain.blockOf(cast<int>(b));
+                Test.assertTrue(now != was);
+                Test.assertEqual(now, chain.grid().ofCellClamped(16, 15));
+                Test.assertEqual(chain.countIn(was), 0);
+                Test.assertEqual(chain.countIn(now), 1);
+                delete w;
+                return;
+            }
+
+            // A DEATH TAKES THE DEAD OUT AND KEEPS THE MOVER IN. The last animal moves into the dead
+            // one's slot, so it is filed under a NEW slot number in the same block -- get that wrong
+            // and the block holds a slot that belongs to nobody, which the bake will happily draw.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method a_death_leaves_the_block_true() returns void {
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                BeastId one = w.bear(Species.Bison, 40.5, 40.5);
+                BeastId two = w.bear(Species.Bison, 41.5, 40.5);
+                BlockChain* chain = w.standing();
+                int block = chain.grid().ofCellClamped(40, 40);
+                Test.assertEqual(chain.countIn(block), 2);
+                w.bury(one);
+                Test.assertEqual(w.count(), 1);
+                // One animal left, and it is the one that is still alive: slot 0, which is where the
+                // survivor was moved to.
+                Test.assertEqual(chain.countIn(block), 1);
+                Test.assertEqual(chain.firstIn(block), 0);
+                Test.assertEqual(chain.blockOf(0), block);
+                delete w;
+                return;
+            }
+
+            // A HERD THAT SETS OUT ARRIVES, AND THEN GRAZES AGAIN. A mood that is entered and never
+            // left is a herd that walks forever, which is exactly what an unbounded wall-follower
+            // looked like in the build this one replaced.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method a_herd_that_sets_out_arrives_and_settles() returns void {
+                mutable Grid* g = Herding.pasture();
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(11) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                Herd* h = w.gather(Species.Bison, 20.5, 20.5, 6.0);
+                for (int i in 0..6) {
+                    h.admit(w.bear(Species.Bison, 20.5, 20.5));
+                }
+                h.aimAt(48.5, 20.5);
+                h.setMood(HerdMood.MovingOn);
+                // A bison walks 1.7 cells a second, a tick is a sixtieth of a second, and it has
+                // twenty-eight cells to cross: about a thousand ticks. The bound is what makes this
+                // a test rather than a hang.
+                mutable int spent = 0;
+                while (spent < 4000 && cast<int>(h.mood()) == cast<int>(HerdMood.MovingOn)) {
+                    Grazing.tick(w, g, cast<long>(spent + 1), rng, log);
+                    spent = spent + 1;
+                }
+                Test.assertEqual(cast<int>(h.mood()), cast<int>(HerdMood.Drifting));
+                Test.assertTrue(h.x() > 48.0 && h.x() < 49.0);
+                // And its animals came with it, rather than being left where they started.
+                mutable int link = h.firstMember();
+                while (link >= 0) {
+                    BeastId b = h.memberAt(link);
+                    Test.assertTrue(w.xOf(b) > 40.0);
+                    Test.assertEqual(cast<int>(w.stateOf(b)), cast<int>(BeastState.Grazing));
+                    link = h.afterMember(link);
+                }
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+
+            // THE ANIMALS STAY WITH THE HERD. This is the whole of "it reads as a herd": nobody has
+            // to be told the group is a group, they are simply near each other and they move at the
+            // same time. Checked as arithmetic here; checked by looking at it in the game.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method the_animals_stay_with_their_herd() returns void {
+                mutable Grid* g = Herding.pasture();
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(3) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                float reach = 6.0;
+                Herd* h = w.gather(Species.Bison, 48.5, 48.5, reach);
+                for (int i in 0..10) {
+                    h.admit(w.bear(Species.Bison, 48.5 + cast<float>(i) * 0.4, 48.5));
+                }
+                for (int t in 0..2000) {
+                    Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                }
+                mutable int link = h.firstMember();
+                mutable int counted = 0;
+                while (link >= 0) {
+                    BeastId b = h.memberAt(link);
+                    float dx = w.xOf(b) - h.x();
+                    float dy = w.yOf(b) - h.y();
+                    // Inside the range, with a cell of slack: an animal at the edge takes a wobble
+                    // outward before it is pulled back on the tick after.
+                    Test.assertTrue(dx * dx + dy * dy < (reach + 1.0) * (reach + 1.0));
+                    counted = counted + 1;
+                    link = h.afterMember(link);
+                }
+                Test.assertEqual(counted, 10);
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+
+            // NOTHING WALKS INTO THE SEA. The habitat rule holds for every animal on every tick, and
+            // the ONE exception is an animal crossing to somewhere else, which is why that state has
+            // a name of its own.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method nothing_grazes_on_ground_it_cannot_live_on() returns void {
+                mutable Grid* g = Herding.pasture();
+                // The eastern half is open water.
+                for (int y in 0..Herding.SIDE) {
+                    for (int x in 48..Herding.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.Ocean));
+                    }
+                }
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(5) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                // Right up against the shore, where a drift of a tenth of a cell would take an
+                // animal into the water if nothing stopped it.
+                Herd* h = w.gather(Species.Bison, 47.0, 40.5, 5.0);
+                for (int i in 0..8) {
+                    h.admit(w.bear(Species.Bison, 47.2, 40.5));
+                }
+                for (int t in 0..1500) {
+                    Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                }
+                mutable int link = h.firstMember();
+                while (link >= 0) {
+                    BeastId b = h.memberAt(link);
+                    int bx = cast<int>(w.xOf(b));
+                    int by = cast<int>(w.yOf(b));
+                    boolean crossing = cast<int>(w.stateOf(b)) == cast<int>(BeastState.Migrating);
+                    if (!crossing) {
+                        Test.assertTrue(Beasts.livesIn(cast<int>(Species.Bison), g.biomeAt(bx, by)));
+                    }
+                    link = h.afterMember(link);
+                }
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+
+            // A HERD OVER ITS SPECIES' NUMBER SPLITS, AND THE DAUGHTER LEAVES. Nothing in S1 makes a
+            // herd grow yet -- breeding is S1.8 -- so this is the only place the path runs. A branch
+            // that is written and never taken until three slices later is a branch that is wrong when
+            // it is finally taken.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method a_herd_that_outgrows_itself_splits() returns void {
+                mutable Grid* g = Herding.pasture();
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(19) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                int most = Beasts.herd(cast<int>(Species.Bison));
+                Herd* h = w.gather(Species.Bison, 40.5, 40.5, 8.0);
+                for (int i in 0..most + 6) {
+                    h.admit(w.bear(Species.Bison, 40.5, 40.5));
+                }
+                Test.assertEqual(w.herdsAlive(), 1);
+                // A HERD DECIDES ONCE EVERY STIR_EVERY TICKS, not every tick, so one tick is not
+                // enough to be sure this herd's turn came up -- which tick it decides on depends on
+                // its place in the array. Fifteen of them covers every herd exactly once.
+                for (int t in 0..Grazing.STIR_EVERY) {
+                    Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                }
+                Test.assertEqual(w.herdsAlive(), 2);
+                Herd* daughter = w.herdAt(1);
+                int left = (most + 6) / 2;
+                Test.assertEqual(daughter.count(), left);
+                Test.assertEqual(h.count(), most + 6 - left);
+                // She is on her way somewhere, and her animals know they are crossing.
+                Test.assertEqual(cast<int>(daughter.mood()), cast<int>(HerdMood.MovingOn));
+                int link = daughter.firstMember();
+                Test.assertEqual(cast<int>(w.stateOf(daughter.memberAt(link))),
+                                 cast<int>(BeastState.Migrating));
+                // And both rosters still agree with the animals about who belongs to whom.
+                Test.assertEqual(w.herdOf(daughter.memberAt(link)), cast<int>(daughter.id()));
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+        }
+    }
+}
