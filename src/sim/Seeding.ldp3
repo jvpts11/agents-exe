@@ -1,0 +1,119 @@
+import System.IO.Console;
+import Agents.Sim.Wild;
+import Agents.Sim.Herd;
+import Agents.Sim.BeastId;
+import Agents.Sim.Chronicle;
+import Agents.World.Grid;
+import Agents.World.Species;
+import Agents.World.Beasts;
+import Agents.World.Rng;
+program AgentsExe;
+
+// PUTTING THE ANIMALS IN THE WORLD, once, when it is made.
+//
+// A species goes where it LIVES, and the table already answers that: `LIVES` is one long with a bit
+// per biome, so the habitat test is a shift and an and. That table made the right call and paid for
+// it -- eight bands of six comparisons was most of a 2.5x -- and nothing here touches it.
+//
+// HERDS, NOT ANIMALS. A herd is drawn, then its animals are scattered inside its range. That is the
+// same shape the tick has: the herd thinks and the beast follows, so seeding by herd means the world
+// starts in a state the tick can carry on from rather than one it has to tidy up first.
+//
+// DETERMINISTIC, from the world's own seed. A world is a search -- the same seed has to give the
+// same world -- and animals placed from a clock would make two runs of "seed 42" different worlds
+// with the same name.
+public bundle Agents {
+    public namespace Sim {
+
+        public class Seeding {
+            // How many herds to try to place per thousand cells of land. Low: a world is mostly
+            // empty of any one species, and crowding is what breeding is for.
+            public static fixed int HERDS_PER_1000 = 1;
+
+            // Sow the world. Answers how many animals were placed.
+            public static method sow(Wild* wild, Grid* g, int seed, Chronicle* log) returns int {
+                int w = g.width();
+                int h = g.height();
+                mutable Rng* rng = new Rng(seed ^ 0x1EA5) on heap;
+                // One herd attempt per this many cells, over the whole map. Land is found by
+                // trying, which is cheaper than building a list of it for a one-off.
+                long cells = cast<long>(w) * cast<long>(h);
+                int tries = cast<int>(cells / 1000) * Seeding.HERDS_PER_1000;
+                mutable int placed = 0;
+                mutable int herds = 0;
+                mutable int t = 0;
+                while (t < tries) {
+                    t = t + 1;
+                    int gx = rng.nextInt(w);
+                    int gy = rng.nextInt(h);
+                    int biome = g.biomeAt(gx, gy);
+                    // Which species can live on this ground? Ask them; the first that can, and that
+                    // the draw picks, gets it.
+                    Species s = Seeding.speciesFor(biome, rng);
+                    if (cast<int>(s) == cast<int>(Species.NoBeast)) {
+                        continue;
+                    }
+                    int want = Beasts.herd(cast<int>(s));
+                    if (want < 1) {
+                        continue;
+                    }
+                    float range = 4.0 + cast<float>(want) * 0.5;
+                    Herd* herd = wild.gather(s, cast<float>(gx) + 0.5, cast<float>(gy) + 0.5, range);
+                    herds = herds + 1;
+                    mutable int made = 0;
+                    while (made < want) {
+                        // Inside the herd's range, and only on ground the species lives on -- an
+                        // animal standing in the sea on the first tick is a defect the invariant
+                        // would catch, and it is cheaper never to make it.
+                        float ox = (rng.unit() - 0.5) * range * 2.0;
+                        float oy = (rng.unit() - 0.5) * range * 2.0;
+                        int bx = gx + cast<int>(ox);
+                        int by = gy + cast<int>(oy);
+                        if (bx < 0 || by < 0 || bx >= w || by >= h) {
+                            made = made + 1;
+                            continue;
+                        }
+                        if (!Beasts.livesIn(cast<int>(s), g.biomeAt(bx, by))) {
+                            made = made + 1;
+                            continue;
+                        }
+                        BeastId b = wild.bear(s, cast<float>(bx) + 0.5, cast<float>(by) + 0.5);
+                        herd.admit(b);
+                        placed = placed + 1;
+                        made = made + 1;
+                    }
+                }
+                delete rng;
+                log.note(0, "fauna", $"sowed {placed} animals in {herds} herds");
+                // And what of each, so a world that comes up empty of something says WHICH rather
+                // than being noticed six tasks later.
+                mutable int k = 1;
+                while (k < Species.count()) {
+                    int n = wild.howMany(cast<Species>(k));
+                    if (n > 0) {
+                        log.note(0, "fauna", $"  {Beasts.name(k)}: {n}");
+                    }
+                    k = k + 1;
+                }
+                return placed;
+            }
+
+            // A species that lives on this ground, or NoBeast. Walks the table from a random start
+            // so no species is systematically favoured by declaration order -- the first world this
+            // was written for put deer everywhere and nothing else, because deer are first.
+            private static method speciesFor(int biome, Rng* rng) returns Species {
+                int n = Species.count();
+                int from = 1 + rng.nextInt(n - 1);
+                mutable int i = 0;
+                while (i < n - 1) {
+                    int at = 1 + ((from - 1 + i) % (n - 1));
+                    if (Beasts.livesIn(at, biome)) {
+                        return cast<Species>(at);
+                    }
+                    i = i + 1;
+                }
+                return Species.NoBeast;
+            }
+        }
+    }
+}

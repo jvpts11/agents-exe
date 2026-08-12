@@ -41,6 +41,17 @@ public bundle Agents {
             private mutable MeshBuffer* coarse;
             private mutable MeshBuffer* detail;
             private mutable MeshBuffer* hint;
+            // AND A FOURTH, REBUILT EVERY FRAME: the animals.
+            //
+            // The other three are baked once and kept, which is right for ground that does not
+            // move. A herd does. So the fauna gets a buffer of its own, filled from where the
+            // animals ARE at the moment the frame is drawn and thrown away after -- which is what
+            // makes movement something you can watch rather than a number the world knows and the
+            // screen does not.
+            private mutable MeshBuffer* fauna;
+            private mutable MeshAtlas* beastArt;
+            private mutable Wild* herds;
+            private mutable int drawnBeasts;
             // world + sources
             private mutable Grid* grid;
             private mutable MeshAtlas* terr;
@@ -129,6 +140,8 @@ public bundle Agents {
                 coarse = new MeshBuffer(gl) on heap;
                 detail = new MeshBuffer(gl) on heap;
                 hint = new MeshBuffer(gl) on heap;
+                fauna = new MeshBuffer(gl) on heap;
+                drawnBeasts = 0;
                 gauge = new Meter() on heap;
                 projM = new GlMat4() on heap;
                 viewM = new GlMat4() on heap;
@@ -169,6 +182,7 @@ public bundle Agents {
                 delete coarse;
                 delete detail;
                 delete hint;
+                delete fauna;
                 delete post;
                 delete camera;
                 projM.dispose();
@@ -1374,6 +1388,95 @@ public bundle Agents {
                 Allocator.free(hbuf);
             }
 
+            // ---- the animals, rebuilt every frame -------------------------------------------------
+            //
+            // WHAT IS SHOWN IS WHERE THEY ARE, not where they were when something was baked. Every
+            // other mesh in this renderer is built once; this one is filled from the live array each
+            // frame, which is the only way a herd that moves looks like a herd that moves.
+            //
+            // ONLY WHAT IS IN THE DETAIL WINDOW. An animal is a few hundred triangles and there are
+            // thousands of them, so drawing the whole world's fauna would cost more than the world.
+            // The window is where the camera is looking closely enough for an animal to be more than
+            // a speck, and it is the same window the ground's detail uses -- so the fauna appears
+            // exactly where the ground it stands on is drawn in full, and the two never disagree.
+            public method takeFauna(Wild* w, MeshAtlas* art) returns void {
+                herds = w;
+                beastArt = art;
+                return;
+            }
+
+            public method beastsDrawn() returns int {
+                return drawnBeasts;
+            }
+
+            private method bakeFauna() returns void {
+                drawnBeasts = 0;
+                if (herds == null || beastArt == null || !window.showing()) {
+                    fauna.upload(cast<address>(0), 0, 0);
+                    return;
+                }
+                int x0 = window.originX();
+                int y0 = window.originY();
+                int x1 = x0 + window.width();
+                int y1 = y0 + window.height();
+                // Count first, then emit -- the same two-pass shape the terrain bake uses, and for
+                // the same reason: a buffer sized by a guess is a buffer that either wastes or
+                // overruns, and the overrun is the one that corrupts the frame.
+                mutable int tris = 0;
+                mutable int i = 0;
+                int n = herds.count();
+                while (i < n) {
+                    BeastId b = cast<BeastId>(i);
+                    float bx = herds.xOf(b);
+                    float by = herds.yOf(b);
+                    if (bx >= cast<float>(x0) && bx < cast<float>(x1) &&
+                        by >= cast<float>(y0) && by < cast<float>(y1)) {
+                        int ord = beastArt.ordOf(Beasts.name(cast<int>(herds.speciesOf(b))));
+                        if (ord >= 0) {
+                            tris = tris + beastArt.triCount[ord];
+                        }
+                    }
+                    i = i + 1;
+                }
+                if (tris == 0) {
+                    fauna.upload(cast<address>(0), 0, 0);
+                    return;
+                }
+                address buf = Allocator.alloc(cast<long>(tris * 27 * 4 + 4));
+                mutable int wv = 0;
+                i = 0;
+                while (i < n) {
+                    BeastId b = cast<BeastId>(i);
+                    float bx = herds.xOf(b);
+                    float by = herds.yOf(b);
+                    if (bx >= cast<float>(x0) && bx < cast<float>(x1) &&
+                        by >= cast<float>(y0) && by < cast<float>(y1)) {
+                        int sp = cast<int>(herds.speciesOf(b));
+                        int ord = beastArt.ordOf(Beasts.name(sp));
+                        if (ord >= 0) {
+                            int gx = cast<int>(bx);
+                            int gy = cast<int>(by);
+                            int cell = grid.biomeAt(gx, gy);
+                            int lvl = stackLvl(cell, gx, gy);
+                            // STANDING ON THE GROUND THAT IS ACTUALLY DRAWN, by the same expression
+                            // the detail pass uses for its own props rather than a constant that
+                            // happens to look right. Two expressions agreeing by accident is how
+                            // the skirt defect arrived in this very file, and an animal floating
+                            // over a hill or sunk into it is the first thing anybody notices.
+                            float zOff = cast<float>(lvl) * stepH + terrainLook[cell].lift + 0.8;
+                            float topZ = terrainLook[cell].top + zOff;
+                            wv = emitMesh(beastArt, buf, wv, ord, bx * 2.0, by * 2.0, topZ,
+                                          1.0, shadeAt(gx, gy, 1, lvl));
+                            drawnBeasts = drawnBeasts + 1;
+                        }
+                    }
+                    i = i + 1;
+                }
+                fauna.upload(buf, wv, tris * 27);
+                Allocator.free(buf);
+                return;
+            }
+
             // ---- detail LOD: full-res window around the camera target, foam + scattered props ----
             private method detailPropAt(int x, int y, int ord) returns int {
                 ScatterRule rule = scatter.at(ord);
@@ -1864,6 +1967,11 @@ public bundle Agents {
                     stepBake();
                 }
                 gauge.lap(cast<int>(Phase.Terrain));
+                // The animals, from where they are RIGHT NOW. Its own phase, so what the fauna
+                // costs the frame is a number from the first day it exists rather than something
+                // discovered six slices later as "the game got slow".
+                bakeFauna();
+                gauge.lap(cast<int>(Phase.Fauna));
                 // The people, fauna, town and border bakes stood here. All four fed off a
                 // simulation that has been taken out, and drawing a thing the world no longer
                 // knows about is how a picture starts lying about what is behind it. Their phases
@@ -1905,6 +2013,9 @@ public bundle Agents {
                 } else {
                     hint.draw();
                 }
+                // The animals, after the ground they stand on. Rebuilt just above, from where they
+                // are this frame.
+                fauna.draw();
                 gl.bindVertexArray(0);
                 gauge.lap(cast<int>(Phase.Draw));
 
