@@ -1,5 +1,6 @@
 import System.IO.Console;
 import System.Time.Time;
+import System.Math.Math;
 import Agents.Sim.Wild;
 import Agents.Sim.Herd;
 import Agents.Sim.HerdMood;
@@ -510,7 +511,7 @@ public bundle Agents {
                         continue;
                     }
                     float span = LandMath.sqrt(gap);
-                    Grazing.tryStep(wild, g, b, bx + dx / span * mine, by + dy / span * mine);
+                    Grazing.tryStep(wild, g, b, bx, by, bx + dx / span * mine, by + dy / span * mine);
                 }
                 if (running) {
                     // Half of them, because a herd is not held up by one straggler and is held up by
@@ -547,7 +548,7 @@ public bundle Agents {
                         continue;
                     }
                     float span = LandMath.sqrt(gap);
-                    Grazing.tryStep(wild, g, b, bx + dx / span * hop, by + dy / span * hop);
+                    Grazing.tryStep(wild, g, b, bx, by, bx + dx / span * hop, by + dy / span * hop);
                 }
                 return;
             }
@@ -613,7 +614,7 @@ public bundle Agents {
                     k = k ^ (k >> 13);
                     float wx = cast<float>((k & 15) - 8) * 0.125;
                     float wy = cast<float>(((k >> 8) & 15) - 8) * 0.125;
-                    Grazing.tryStep(wild, g, b, bx + wx * hop, by + wy * hop);
+                    Grazing.tryStep(wild, g, b, bx, by, bx + wx * hop, by + wy * hop);
                 }
                 return;
             }
@@ -621,22 +622,43 @@ public bundle Agents {
             // MOVE IT THERE IF IT MAY STAND THERE. It may not walk off the map or onto ground it
             // cannot live on -- except while migrating, which is the named exception and the reason
             // that state exists. An animal refused simply does not move this step.
-            private static method tryStep(Wild* wild, Grid* g, BeastId b, float nx, float ny)
+            private static method tryStep(Wild* wild, Grid* g, BeastId b,
+                                          float wasX, float wasY, float nx, float ny)
                     returns void {
-                int gx = cast<int>(nx);
-                int gy = cast<int>(ny);
-                if (gx < 0 || gy < 0 || gx >= g.width() || gy >= g.height()) {
+                // GROUND IT HAS NOT LEFT CANNOT HAVE CHANGED, and the question is asked WITHOUT
+                // CONVERTING ANYTHING. A step is a sixtieth of a cell, so an animal ends the tick in
+                // the cell it started in on nineteen ticks out of twenty -- and this is the one line
+                // every animal runs every tick, so what it costs is what the tick costs.
+                //
+                // IN FLOATING POINT, because `cast<int>(float)` in this language is a SATURATING
+                // conversion with range checks (the no-UB principle, and rightly) -- measured once
+                // before in this same project at about 26 ns an iteration in a hot loop. `floor` is
+                // one instruction and no branch. Two floors and a compare replace two of those, per
+                // animal, per tick.
+                //
+                // AND IT ASKS THE ANIMAL'S OWN OLD POSITION, not a copy of its cell kept alongside.
+                // The cheap version of this stores the cell corner per slot in the index; that is the
+                // animal's position written down twice, which is the thing this build does not do.
+                if (Math.floor(nx) == Math.floor(wasX) && Math.floor(ny) == Math.floor(wasY)) {
+                    wild.slide(b, nx, ny);
                     return;
                 }
-                // GROUND IT HAS NOT LEFT CANNOT HAVE CHANGED. A step is a fiftieth of a cell, so
-                // nineteen steps in twenty end in the cell they started in -- and asking the biome
-                // map about them is a scattered read of three and a half megabytes for an answer
-                // that was true a tick ago. The index already knows which cell each animal is in.
-                if (!wild.inCell(b, gx, gy)) {
-                    if (cast<int>(wild.stateOf(b)) != cast<int>(BeastState.Migrating)) {
-                        if (!Beasts.livesIn(cast<int>(wild.speciesOf(b)), g.biomeAt(gx, gy))) {
-                            return;
-                        }
+                // IT CROSSED INTO ANOTHER CELL, which is where the rest of this method has always
+                // belonged: the ground is looked up, the index is moved, and the integers are finally
+                // worth their price -- on the one tick in twenty that earns them.
+                //
+                // THE EDGE IS TESTED IN FLOATS TOO, and that is a fix rather than a saving. Truncation
+                // sends everything in (-1, 0) to cell 0, so an animal that stepped a hundredth of a
+                // cell off the west edge was filed as standing on it.
+                if (nx < 0.0 || ny < 0.0 ||
+                    nx >= cast<float>(g.width()) || ny >= cast<float>(g.height())) {
+                    return;
+                }
+                int gx = cast<int>(nx);
+                int gy = cast<int>(ny);
+                if (cast<int>(wild.stateOf(b)) != cast<int>(BeastState.Migrating)) {
+                    if (!Beasts.livesIn(cast<int>(wild.speciesOf(b)), g.biomeAt(gx, gy))) {
+                        return;
                     }
                 }
                 wild.placeAt(b, nx, ny);

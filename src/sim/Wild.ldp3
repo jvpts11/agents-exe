@@ -44,6 +44,10 @@ public bundle Agents {
             // `bury` and `placeAt` -- and by nothing else, which is the only way an index stays
             // true: a fourth place that moves an animal without telling it produces a chain
             // pointing at ground the animal left.
+            //
+            // `slide` IS THE ONE EXCEPTION, and it is allowed exactly because it cannot leave the
+            // index behind: it moves an animal only within the cell it is already filed under, so
+            // there is nothing to tell. `indexAgrees` is the check that keeps that honest.
             private mutable BlockChain* blocks;
 
             // The ground is this big, and the index is cut to fit it. A Wild belongs to a world.
@@ -264,6 +268,36 @@ public bundle Agents {
                 beasts[at].y = y;
                 blocks.put(at, cast<int>(x), cast<int>(y));
                 return;
+            }
+
+            // THE SAME MOVE WITHOUT ASKING THE INDEX ANYTHING, for the caller that has already proved
+            // the cell did not change. `placeAt` is the honest general move and stays; this is the one
+            // every animal makes on nineteen ticks out of twenty, and what it saves is the two
+            // float-to-int conversions -- saturating, range-checked -- that `blocks.put` needs in
+            // order to work out a cell it would then find unchanged.
+            //
+            // THE PROMISE IT DEMANDS: floor(x), floor(y) is the cell this animal is already filed
+            // under. Break it and the index quietly disagrees with the world -- an animal drawn in
+            // one block and searched for in another, which looks like a hunt that never lands rather
+            // than like a bug here. `indexAgrees` below checks it for every animal alive, and the
+            // suite runs it, so the promise cannot be broken in silence.
+            public method slide(BeastId who, float x, float y) returns void {
+                int at = cast<int>(who);
+                beasts[at].x = x;
+                beasts[at].y = y;
+                return;
+            }
+
+            // EVERY ANIMAL IS FILED UNDER THE CELL IT IS STANDING IN. Walks the whole population and
+            // asks the index, which is far too slow for a tick and exactly right for a test.
+            public method indexAgrees() returns int {
+                mutable int wrong = 0;
+                for (int i in 0..alive) {
+                    if (!blocks.atCell(i, cast<int>(beasts[i].x), cast<int>(beasts[i].y))) {
+                        wrong = wrong + 1;
+                    }
+                }
+                return wrong;
             }
 
             public method speciesOf(BeastId who) returns Species {

@@ -165,13 +165,25 @@ public bundle Agents {
                 if (cell[slot] == here) {
                     return;
                 }
-                cell[slot] = here;
                 int b = lattice.ofCellClamped(cx, cy);
                 if (within[slot] == b) {
+                    cell[slot] = here;    // same block, finer cell: nothing to relink
                     return;
                 }
                 boolean wasMarked = mark[slot];
                 take(slot);
+                // AFTER THE TAKE, AND THAT ORDER IS THE WHOLE OF IT. `take` clears the cell along with
+                // the links -- it has to, since a slot out of the world stands nowhere -- so a cell
+                // written before it was wiped a line later, and every slot that changed BLOCK was left
+                // filed under no cell at all. Nothing looked wrong: the next move called `put` again,
+                // found the cell disagreeing, and wrote it correctly, so the index healed itself on
+                // the following tick and the only cost was a habitat lookup nobody needed.
+                //
+                // What ended that was `Wild.slide`, which moves an animal without calling `put` -- so
+                // the missing cell stopped being repaired and became an animal drawn in one block and
+                // searched for in another. Found by the check that every animal is filed where it
+                // stands, which is why that check exists.
+                cell[slot] = here;
                 mark[slot] = wasMarked;   // `take` cleared it; the slot is moving, not leaving
                 if (wasMarked) {
                     marked[b] = marked[b] + 1;
@@ -256,6 +268,12 @@ public bundle Agents {
 
             public method after(int slot) returns int {
                 return then[slot];
+            }
+
+            // The cell a slot is filed under, as the index stores it: `y * width + x`, or NONE. For
+            // the check that the index still agrees with where the animals actually are.
+            public method cellOf(int slot) returns int {
+                return cell[slot];
             }
 
             public method blockOf(int slot) returns int {
