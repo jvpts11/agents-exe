@@ -230,6 +230,111 @@ public bundle Agents {
                 return;
             }
 
+            // A PERSON WALKING TOWARD DEER SEES THEM GO -- the fauna spec calls that single
+            // behaviour the difference between a world that feels inhabited and one that is
+            // decorated. There are no people yet, so what it runs from here is the predator, through
+            // the same comparison against the same `SHY` the hunter will walk into in S2.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method a_herd_runs_from_a_predator_that_comes_near() returns void {
+                mutable Grid* g = Herding.pasture();
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(23) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                Herd* h = w.gather(Species.Bison, 40.5, 40.5, 6.0);
+                for (int i in 0..6) {
+                    h.admit(w.bear(Species.Bison, 40.5, 40.5));
+                }
+                // Well inside a bison's twelve cells of shyness, and standing still.
+                BeastId wolf = w.bear(Species.Wolf, 32.5, 40.5);
+                float wasAway = h.x() - w.xOf(wolf);
+
+                // Long enough for a bison to run itself out: it notices on its first decision tick
+                // (once a second, and this is the only herd), and a thousand of stamina at six a
+                // tick is a hundred and sixty-seven ticks of flat-out running.
+                mutable boolean everWinded = false;
+                mutable int leastWind = 1000;
+                for (int t in 0..280) {
+                    Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                    mutable int link = h.firstMember();
+                    while (link >= 0) {
+                        BeastId b = h.memberAt(link);
+                        if (w.staminaOf(b) < leastWind) {
+                            leastWind = w.staminaOf(b);
+                        }
+                        if (cast<int>(w.stateOf(b)) == cast<int>(BeastState.Winded)) {
+                            everWinded = true;
+                        }
+                        link = h.afterMember(link);
+                    }
+                }
+                // It noticed, it ran, and it ran AWAY -- a herd that flees toward the wolf is a herd
+                // that has the sign wrong, which looks like flight and is the opposite of it.
+                Test.assertTrue(w.frights() > 0);
+                Test.assertTrue(h.x() - w.xOf(wolf) > wasAway + 5.0);
+                // RUNNING COSTS. The stamina is the whole of the hunt: what is spent here is what a
+                // hunter in S2 is racing against.
+                Test.assertTrue(leastWind < 1000);
+                Test.assertTrue(everWinded);
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+
+            // AND A WOLF DOES NOT RUN FROM A WOLF. `SHY` is what a prey animal keeps between itself
+            // and a predator; asking it of the predator is how a pack ends up fleeing itself.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method a_pack_does_not_flee_itself() returns void {
+                mutable Grid* g = Herding.pasture();
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(29) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                Herd* pack = w.gather(Species.Wolf, 40.5, 40.5, 5.0);
+                for (int i in 0..5) {
+                    pack.admit(w.bear(Species.Wolf, 40.5 + cast<float>(i) * 0.3, 40.5));
+                }
+                for (int t in 0..120) {
+                    Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                }
+                Test.assertEqual(cast<int>(w.frights()), 0);
+                Test.assertTrue(cast<int>(pack.mood()) != cast<int>(HerdMood.Fleeing));
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+
+            // AND A GRAZING ANIMAL GETS ITS WIND BACK. Without this the first wolf a herd ever meets
+            // leaves it permanently blown, and every herd in the world dies of a rule nobody wrote.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method grazing_is_also_getting_its_wind_back() returns void {
+                mutable Grid* g = Herding.pasture();
+                Wild* w = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                mutable Rng* rng = new Rng(31) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                Herd* h = w.gather(Species.Bison, 40.5, 40.5, 6.0);
+                BeastId b = w.bear(Species.Bison, 40.5, 40.5);
+                h.admit(b);
+                w.setStaminaOf(b, 100);
+                for (int t in 0..200) {
+                    Grazing.tick(w, g, cast<long>(t + 1), rng, log);
+                }
+                Test.assertTrue(w.staminaOf(b) > 100);
+                // And it never goes past full, or an animal that grazed all day would outrun one
+                // that had not.
+                Test.assertTrue(w.staminaOf(b) <= 1000);
+                delete log;
+                delete rng;
+                delete w;
+                delete g;
+                return;
+            }
+
             // A HERD OVER ITS SPECIES' NUMBER SPLITS, AND THE DAUGHTER LEAVES. Nothing in S1 makes a
             // herd grow yet -- breeding is S1.8 -- so this is the only place the path runs. A branch
             // that is written and never taken until three slices later is a branch that is wrong when
@@ -247,10 +352,10 @@ public bundle Agents {
                     h.admit(w.bear(Species.Bison, 40.5, 40.5));
                 }
                 Test.assertEqual(w.herdsAlive(), 1);
-                // A HERD DECIDES ONCE EVERY STIR_EVERY TICKS, not every tick, so one tick is not
-                // enough to be sure this herd's turn came up -- which tick it decides on depends on
-                // its place in the array. Fifteen of them covers every herd exactly once.
-                for (int t in 0..Grazing.STIR_EVERY) {
+                // A HERD DECIDES ONCE A SECOND, not every tick, so one tick is not enough to be sure
+                // this herd's turn came up -- which tick it decides on depends on its place in the
+                // array. DECIDE_EVERY of them covers every herd in the world exactly once.
+                for (int t in 0..Grazing.DECIDE_EVERY) {
                     Grazing.tick(w, g, cast<long>(t + 1), rng, log);
                 }
                 Test.assertEqual(w.herdsAlive(), 2);

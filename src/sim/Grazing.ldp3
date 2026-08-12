@@ -5,6 +5,7 @@ import Agents.Sim.HerdMood;
 import Agents.Sim.BeastState;
 import Agents.Sim.BeastId;
 import Agents.Sim.BlockChain;
+import Agents.Sim.Nearby;
 import Agents.Sim.Chronicle;
 import Agents.World.Grid;
 import Agents.World.BlockGrid;
@@ -36,10 +37,22 @@ public bundle Agents {
 
         public class Grazing {
             // The chance, per DECISION, of a herd deciding to move on: one in this many. A herd
-            // decides four times a second (see STIR_EVERY), so at gear one this is a change of
-            // pasture about every four minutes -- a herd that moved every few seconds would read as
-            // panic rather than as grazing.
-            public static fixed int MOVE_ON_IN = 1000;
+            // decides once a second (see DECIDE_EVERY), so at gear one this is a change of pasture
+            // about every four minutes -- a herd that moved every few seconds would read as panic
+            // rather than as grazing.
+            public static fixed int MOVE_ON_IN = 250;
+            // HOW OFTEN A HERD DECIDES ANYTHING, in ticks: once a second at gear one.
+            //
+            // It was every fifteenth tick until fright was written, and fright is what made the
+            // difference matter: looking around costs a search of nine blocks, and four of those a
+            // second per herd put ten microseconds on a seventeen-microsecond tick. A wolf walks 2.7
+            // cells a second and a deer notices one at fourteen, so a look every second sees it at
+            // eleven instead of fourteen -- which is a difference no player can see, for four times
+            // the price.
+            //
+            // Stepping stayed at a fifteenth, because a step every second reads as a stutter and a
+            // decision every second reads as nothing at all.
+            public static fixed int DECIDE_EVERY = 60;
             // How far it goes when it does, in cells.
             public static fixed float JOURNEY = 24.0;
             // How many ticks make a second of world time -- gear one is real time, one tick a frame,
@@ -88,6 +101,17 @@ public bundle Agents {
             // LINE THAT WRITES IT: the previous build's agents span against walls because a search
             // with no bound was written once and then trusted everywhere.
             public static fixed int LOOK_OUT_BLOCKS = 6;
+            // How much faster than its walk an animal runs when it is frightened.
+            public static fixed float FLEE_BURST = 2.5;
+            // Stamina spent per tick of running, out of the thousand an animal starts with -- about
+            // three seconds of flat-out flight at gear one, and then it is blown.
+            public static fixed int SPEND = 6;
+            // And regained per step of grazing. A step is every fifteenth tick, so this is one a
+            // tick: seventeen seconds of quiet grazing to get its wind back.
+            public static fixed int RECOVER = 15;
+            // What a blown animal can still manage. It falls behind its herd -- and the one that
+            // falls behind is the one that gets caught.
+            public static fixed float WINDED_PACE = 0.45;
 
             // One tick of the world's animals.
             //
@@ -101,23 +125,30 @@ public bundle Agents {
                 // placed where it belongs and must not also be thought for in the tick that made it.
                 int n = wild.herdsAlive();
 
-                // ONE: the herds that are on the move walk, every tick, and their animals with them.
+                // ONE: the herds that are travelling walk, every tick, and their animals with them.
+                // Crossing to another pasture and running from a wolf are the same motion at two
+                // speeds -- and both are motion a player watches, which is why neither is sliced.
                 mutable int i = 0;
                 while (i < n) {
                     Herd* h = wild.herdAt(i);
-                    if (cast<int>(h.mood()) == cast<int>(HerdMood.MovingOn)) {
-                        Grazing.carryOn(h, wild);
-                        Grazing.walkWith(h, wild, g);
+                    int doing = cast<int>(h.mood());
+                    if (doing == cast<int>(HerdMood.MovingOn)) {
+                        Grazing.carryOn(h, wild, 1.0);
+                        Grazing.walkWith(h, wild, g, 1.0, false);
+                    } else if (doing == cast<int>(HerdMood.Fleeing)) {
+                        Grazing.carryOn(h, wild, Grazing.FLEE_BURST);
+                        Grazing.walkWith(h, wild, g, Grazing.FLEE_BURST, true);
                     }
                     i = i + 1;
                 }
 
-                // TWO: a fifteenth of the herds decide something. A herd reconsidering sixty times a
-                // second is sixty times the thinking for a decision it takes twice a minute.
-                mutable int k = phase;
+                // TWO: a sixtieth of the herds decide something -- so every herd decides once a
+                // second. A herd reconsidering sixty times a second is sixty times the thinking for
+                // a decision it takes twice a minute.
+                mutable int k = cast<int>(at % cast<long>(Grazing.DECIDE_EVERY));
                 while (k < n) {
                     Grazing.thinkFor(wild.herdAt(k), wild, g, at, rng, log);
-                    k = k + Grazing.STIR_EVERY;
+                    k = k + Grazing.DECIDE_EVERY;
                 }
 
                 // THREE: a fifteenth of the animals take their step.
@@ -139,8 +170,13 @@ public bundle Agents {
                                            Chronicle* log) returns void {
                 match (h.mood()) {
                     case Drifting {
-                        // Grazing, unless the draw says otherwise. Splitting is asked first because
-                        // a herd too big to feed itself should leave before it wanders further.
+                        // FRIGHT COMES FIRST, because a herd deciding to change pasture while a
+                        // wolf is walking into it is a herd that has not noticed the wolf.
+                        if (Grazing.takeFright(h, wild)) {
+                            return;
+                        }
+                        // Then splitting, because a herd too big to feed itself should leave before
+                        // it wanders further, and then the draw for moving on.
                         if (!Grazing.maySplit(h, wild, g, at, log)) {
                             if (rng.nextInt(Grazing.MOVE_ON_IN) == 0) {
                                 Grazing.setOut(h, wild, g, rng);
@@ -151,10 +187,12 @@ public bundle Agents {
                         // Walking, and the walking is pass one's.
                     }
                     case Fleeing {
-                        // S1.6 drives this. Until it does, a frightened herd settles again rather
-                        // than staying frightened forever -- an unreachable state is a bug that
-                        // waits, and a permanent one is a herd that never grazes again.
-                        h.setMood(HerdMood.Drifting);
+                        // Running, and the running is pass one's -- but whether there is still
+                        // anything to run FROM is asked here, four times a second rather than
+                        // sixty, because a wolf does not appear and vanish between two ticks.
+                        if (Grazing.calmAgain(h, wild)) {
+                            Grazing.settle(h, wild);
+                        }
                     }
                     case Hunting {
                         // S1.7.
@@ -203,17 +241,78 @@ public bundle Agents {
                 return;
             }
 
+            // ---- fright ----------------------------------------------------------------------------
+            //
+            // A PERSON WALKING TOWARD DEER SEES THEM GO, and the fauna spec says that single
+            // behaviour is what makes a world feel inhabited rather than decorated. There are no
+            // people yet, so what a deer runs from today is a predator -- the same comparison against
+            // the same `SHY`, and the hunter in S2 walks into a rule that is already here rather than
+            // one written for him.
+            //
+            // ONE COMPARISON, through the block index: nine blocks around the herd, and the nearest
+            // predator in them. Asked on the herd's decision tick and not on every tick, because a
+            // wolf does not appear and vanish between two sixtieths of a second.
+            //
+            // Answers whether the herd took fright, so a frightened herd does not also decide to
+            // change pasture on the same tick.
+            private static method takeFright(Herd* h, Wild* wild) returns boolean {
+                int sp = cast<int>(h.species());
+                if (!Beasts.isPrey(sp)) {
+                    return false;
+                }
+                float shy = Beasts.shy(sp);
+                int wolf = Nearby.predator(wild, h.x(), h.y(), shy);
+                if (wolf == Nearby.NONE) {
+                    return false;
+                }
+                // AWAY FROM IT, three times the distance it was noticed at. Straight away and not
+                // cleverly: an animal that plots a route around its own herd while a wolf closes is
+                // an animal that has been given a thought it does not have.
+                BeastId from = cast<BeastId>(wolf);
+                mutable float dx = h.x() - wild.xOf(from);
+                mutable float dy = h.y() - wild.yOf(from);
+                mutable float span = LandMath.sqrt(dx * dx + dy * dy);
+                if (span < 0.001) {
+                    // Standing on it. Any direction will do, and this one is free.
+                    dx = 1.0;
+                    dy = 0.0;
+                    span = 1.0;
+                }
+                h.aimAt(h.x() + dx / span * shy * 3.0, h.y() + dy / span * shy * 3.0);
+                h.setMood(HerdMood.Fleeing);
+                Grazing.markAll(h, wild, BeastState.Fleeing);
+                wild.noteFright();
+                return true;
+            }
+
+            // Whether there is no longer anything within twice this herd's `SHY`. TWICE, and not the
+            // same distance, so a herd on the edge of noticing does not flicker between running and
+            // grazing on every decision.
+            private static method calmAgain(Herd* h, Wild* wild) returns boolean {
+                float shy = Beasts.shy(cast<int>(h.species()));
+                return Nearby.predator(wild, h.x(), h.y(), shy * 2.0) == Nearby.NONE;
+            }
+
+            // Back to grazing: the mood, and every animal's state with it -- which is also what
+            // clears `Winded` off the ones that ran themselves out.
+            private static method settle(Herd* h, Wild* wild) returns void {
+                h.setMood(HerdMood.Drifting);
+                h.aimAt(h.x(), h.y());
+                Grazing.markAll(h, wild, BeastState.Grazing);
+                return;
+            }
+
             // WALKING. The centre moves and the animals follow it, which is what makes a herd read
-            // as a herd rather than as a scatter that happens to drift the same way.
-            private static method carryOn(Herd* h, Wild* wild) returns void {
+            // as a herd rather than as a scatter that happens to drift the same way. `times` is what
+            // separates crossing ground at a walk from running from a wolf.
+            private static method carryOn(Herd* h, Wild* wild, float times) returns void {
                 float dx = h.towardsX() - h.x();
                 float dy = h.towardsY() - h.y();
                 float span = LandMath.sqrt(dx * dx + dy * dy);
-                float pace = Grazing.paceOf(h);
+                float pace = Grazing.paceOf(h) * times;
                 if (span <= pace) {
                     h.moveCentre(h.towardsX(), h.towardsY());
-                    h.setMood(HerdMood.Drifting);
-                    Grazing.markAll(h, wild, BeastState.Grazing);
+                    Grazing.settle(h, wild);
                     return;
                 }
                 h.moveCentre(h.x() + dx / span * pace, h.y() + dy / span * pace);
@@ -235,16 +334,31 @@ public bundle Agents {
             // price worth paying for the one herd in eight that is actually on the move, and a price
             // not worth paying for the seven that are standing still -- which is why the grazers are
             // reached by walking the array instead.
-            private static method walkWith(Herd* h, Wild* wild, Grid* g) returns void {
+            private static method walkWith(Herd* h, Wild* wild, Grid* g, float times,
+                                           boolean running) returns void {
                 float reach = h.reach();
                 float tooFar = reach * reach;
-                float pace = Grazing.paceOf(h);
+                float pace = Grazing.paceOf(h) * times;
                 float hx = h.x();
                 float hy = h.y();
                 mutable int link = h.firstMember();
                 while (link >= 0) {
                     BeastId b = h.memberAt(link);
                     link = h.afterMember(link);
+                    // RUNNING COSTS, AND THAT IS THE WHOLE OF THE HUNT. A beast flees in bursts and
+                    // tires; a hunter keeps walking. The animal that runs out first falls behind its
+                    // herd -- and the one that falls behind is the one that gets caught, which is a
+                    // chase resolving itself out of two rules rather than out of a chase routine.
+                    mutable float mine = pace;
+                    if (running) {
+                        int left = wild.staminaOf(b);
+                        if (left <= 0) {
+                            wild.setStateOf(b, BeastState.Winded);
+                            mine = pace * Grazing.WINDED_PACE;
+                        } else {
+                            wild.setStaminaOf(b, left - Grazing.SPEND);
+                        }
+                    }
                     float bx = wild.xOf(b);
                     float by = wild.yOf(b);
                     float dx = hx - bx;
@@ -256,7 +370,7 @@ public bundle Agents {
                         continue;
                     }
                     float span = LandMath.sqrt(gap);
-                    Grazing.tryStep(wild, g, b, bx + dx / span * pace, by + dy / span * pace);
+                    Grazing.tryStep(wild, g, b, bx + dx / span * mine, by + dy / span * mine);
                 }
                 return;
             }
@@ -282,9 +396,18 @@ public bundle Agents {
                         continue;
                     }
                     Herd* h = wild.herdAt(owner);
-                    if (cast<int>(h.mood()) == cast<int>(HerdMood.MovingOn)) {
-                        // Its herd is crossing ground; the walk above owns it this tick.
+                    int doing = cast<int>(h.mood());
+                    if (doing == cast<int>(HerdMood.MovingOn) ||
+                        doing == cast<int>(HerdMood.Fleeing)) {
+                        // Its herd is crossing ground or running; the walk above owns it this tick.
                         continue;
+                    }
+                    // GRAZING IS ALSO GETTING ITS WIND BACK. An animal that ran itself out and then
+                    // never recovered would be caught by the next wolf whatever it did, so the herd
+                    // would die out for a reason nobody wrote.
+                    int wind = wild.staminaOf(b);
+                    if (wind < 1000) {
+                        wild.setStaminaOf(b, wind + Grazing.RECOVER);
                     }
                     float bx = wild.xOf(b);
                     float by = wild.yOf(b);

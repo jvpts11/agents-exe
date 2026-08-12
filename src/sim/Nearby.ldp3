@@ -1,0 +1,92 @@
+import System.IO.Console;
+import Agents.Sim.Wild;
+import Agents.Sim.BeastId;
+import Agents.Sim.BlockChain;
+import Agents.World.BlockGrid;
+import Agents.World.Beasts;
+program AgentsExe;
+
+// WHO IS NEAR -- the question the block index was built to answer, asked here in the two forms the
+// fauna needs: the nearest predator to a place, and the nearest prey.
+//
+// NINE BLOCKS AND NO MORE. A block is sixteen cells; the three-by-three around a place covers
+// forty-eight, which is wider than any `SHY` in the table and wider than a predator's reach. Asking
+// beyond that is asking a question whose answer cannot matter, and asking the whole world is the
+// O(n) per asker -- O(n^2) per tick -- that this project has paid for twice.
+//
+// IT ANSWERS THE NEAREST AND NOT THE FIRST. A deer that runs from the second-closest wolf runs the
+// wrong way, and it is one comparison to be right.
+//
+// SEPARATE FROM `Grazing` BECAUSE IT IS NOT ABOUT GRAZING. Flight asks it, the hunt asks it, and in
+// S2 the people will ask it about each other. It is a way of reading the index, not a rule of the
+// fauna.
+public bundle Agents {
+    public namespace Sim {
+
+        public class Nearby {
+            // Nobody near.
+            public static fixed int NONE = 0 - 1;
+
+            // How far the nearest one was, squared -- set by the last search. Read straight after a
+            // find, so the caller does not measure a distance the search already measured.
+            private static mutable float lastGap;
+
+            public static method howFar() returns float {
+                return Nearby.lastGap;
+            }
+
+            // The nearest PREDATOR to this place within `reach` cells, or NONE.
+            public static method predator(Wild* wild, float x, float y, float reach) returns int {
+                return Nearby.hunt(wild, x, y, reach, true);
+            }
+
+            // The nearest PREY to this place within `reach` cells, or NONE.
+            public static method prey(Wild* wild, float x, float y, float reach) returns int {
+                return Nearby.hunt(wild, x, y, reach, false);
+            }
+
+            // The one search both of the above are. `wantPredator` decides which side is being
+            // looked for; everything else about the two questions is identical, and writing them
+            // twice is writing two chances to bound the search differently.
+            private static method hunt(Wild* wild, float x, float y, float reach,
+                                       boolean wantPredator) returns int {
+                BlockChain* chain = wild.standing();
+                BlockGrid* lat = chain.grid();
+                int home = lat.ofCellClamped(cast<int>(x), cast<int>(y));
+                int bx = lat.colOf(home);
+                int by = lat.rowOf(home);
+                float within = reach * reach;
+                mutable int found = Nearby.NONE;
+                mutable float best = within;
+                mutable int dy = 0 - 1;
+                while (dy <= 1) {
+                    mutable int dx = 0 - 1;
+                    while (dx <= 1) {
+                        if (lat.holds(bx + dx, by + dy)) {
+                            mutable int slot = chain.firstIn(lat.at(bx + dx, by + dy));
+                            while (slot != BlockChain.NONE) {
+                                BeastId other = cast<BeastId>(slot);
+                                int sp = cast<int>(wild.speciesOf(other));
+                                boolean wanted = Beasts.isPredator(sp);
+                                if (wanted == wantPredator) {
+                                    float ox = wild.xOf(other) - x;
+                                    float oy = wild.yOf(other) - y;
+                                    float gap = ox * ox + oy * oy;
+                                    if (gap < best) {
+                                        best = gap;
+                                        found = slot;
+                                    }
+                                }
+                                slot = chain.after(slot);
+                            }
+                        }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                Nearby.lastGap = best;
+                return found;
+            }
+        }
+    }
+}
