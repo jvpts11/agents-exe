@@ -33,6 +33,15 @@ public bundle Agents {
             private mutable BlockGrid* lattice;
             // Per block: the first slot standing in it, or NONE.
             private mutable int[] first;
+            // Per block: how many of the slots in it are MARKED. What the mark means is the owner's
+            // business -- `Wild` marks predators -- and what it buys is the question this index is
+            // for, asked in reverse: not "who is here" but "is there any point looking here".
+            //
+            // Every prey herd in the world looks around once a second for something to run from, and
+            // that is nine block chains walked and a species read off every animal in them, for an
+            // answer that is NO almost everywhere. One integer per block turns the nine walks into
+            // nine compares in the common case.
+            private mutable int[] marked;
             // Per slot: the next and previous slot in the same block, or NONE.
             private mutable int[] then;
             private mutable int[] prior;
@@ -47,6 +56,8 @@ public bundle Agents {
             // map nor the answer. That map is three and a half megabytes and the reads are scattered,
             // which makes it the most expensive line in the tick when it is asked for nothing.
             private mutable int[] cell;
+            // Per slot: whether it is one of the marked ones, so a move can move its count with it.
+            private mutable boolean[] mark;
             private mutable int wide;
             private mutable int room;
 
@@ -54,6 +65,7 @@ public bundle Agents {
                 wide = width;
                 lattice = new BlockGrid(width, height) on heap;
                 first = new int[lattice.count()]();
+                marked = new int[lattice.count()]();
                 for (int b in 0..lattice.count()) {
                     first[b] = BlockChain.NONE;
                 }
@@ -65,6 +77,7 @@ public bundle Agents {
                 prior = new int[room]();
                 within = new int[room]();
                 cell = new int[room]();
+                mark = new boolean[room]();
                 clearSlots(0, room);
             }
 
@@ -75,6 +88,8 @@ public bundle Agents {
                 delete prior;
                 delete within;
                 delete cell;
+                delete mark;
+                delete marked;
                 return;
             }
 
@@ -109,20 +124,24 @@ public bundle Agents {
                 mutable int[] p = new int[slots]();
                 mutable int[] w = new int[slots]();
                 mutable int[] c = new int[slots]();
+                mutable boolean[] m = new boolean[slots]();
                 for (int i in 0..room) {
                     t[i] = then[i];
                     p[i] = prior[i];
                     w[i] = within[i];
                     c[i] = cell[i];
+                    m[i] = mark[i];
                 }
                 delete then;
                 delete prior;
                 delete within;
                 delete cell;
+                delete mark;
                 then = t;
                 prior = p;
                 within = w;
                 cell = c;
+                mark = m;
                 int was = room;
                 room = slots;
                 clearSlots(was, room);
@@ -151,7 +170,12 @@ public bundle Agents {
                 if (within[slot] == b) {
                     return;
                 }
+                boolean wasMarked = mark[slot];
                 take(slot);
+                mark[slot] = wasMarked;   // `take` cleared it; the slot is moving, not leaving
+                if (wasMarked) {
+                    marked[b] = marked[b] + 1;
+                }
                 then[slot] = first[b];
                 prior[slot] = BlockChain.NONE;
                 if (first[b] != BlockChain.NONE) {
@@ -183,7 +207,43 @@ public bundle Agents {
                 prior[slot] = BlockChain.NONE;
                 within[slot] = BlockChain.NONE;
                 cell[slot] = BlockChain.NONE;
+                if (mark[slot]) {
+                    marked[b] = marked[b] - 1;
+                    mark[slot] = false;
+                }
                 return;
+            }
+
+            // ---- the mark -------------------------------------------------------------------------
+            //
+            // One bit per slot, counted per block. `Wild` marks its predators with it, so a prey herd
+            // looking around can skip a block without walking anything in it.
+
+            // (`yes` and not `on`: `on` is a keyword of the language -- `new X on heap`.)
+            public method setMark(int slot, boolean yes) returns void {
+                if (mark[slot] == yes) {
+                    return;
+                }
+                mark[slot] = yes;
+                int b = within[slot];
+                if (b == BlockChain.NONE) {
+                    return;
+                }
+                if (yes) {
+                    marked[b] = marked[b] + 1;
+                } else {
+                    marked[b] = marked[b] - 1;
+                }
+                return;
+            }
+
+            // Whether anything marked stands in this block. The whole point: answered without
+            // touching a single animal.
+            public method anyMarkedIn(int block) returns boolean {
+                if (block < 0 || block >= lattice.count()) {
+                    return false;
+                }
+                return marked[block] > 0;
             }
 
             // The first slot in a block, or NONE. Walk on with `after`.

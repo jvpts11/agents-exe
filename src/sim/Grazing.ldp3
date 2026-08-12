@@ -115,6 +115,14 @@ public bundle Agents {
             // And regained per step of grazing. A step is every fifteenth tick, so this is one a
             // tick: seventeen seconds of quiet grazing to get its wind back.
             public static fixed int RECOVER = 15;
+            // HOW MUCH FASTER AN ANIMAL MOVES WHEN IT IS CATCHING UP than the herd it is catching.
+            // It has to be more than one, and that is not a tuning knob: a follower moving at
+            // exactly the centre's pace can never close a gap, only hold it, so an animal that falls
+            // behind for any reason -- a step refused by the ground, a moment spent grazing while
+            // the herd set off -- trails at that distance for the whole journey and rejoins only
+            // when the herd stops. Found by a test that asked whether the animals arrived with their
+            // herd and got three that had not.
+            public static fixed float FOLLOW_HURRY = 1.3;
             // What a blown animal can still manage, as a fraction of the burst it can no longer
             // manage -- a fifth of two and a half is half its ordinary walk. IT HAS TO BE SLOWER
             // THAN A WALKING PREDATOR or the hunt has no ending: a wolf walks 2.7 cells a second and
@@ -139,6 +147,15 @@ public bundle Agents {
             private static mutable long thinkNs;
             private static mutable long stirNs;
             private static mutable long ageNs;
+            // HOW MANY ANIMALS WERE ALIVE, SUMMED OVER EVERY TICK -- the divisor that makes the total
+            // comparable between two runs, and without it nothing here is.
+            //
+            // A run is bounded by SECONDS, so a faster build simulates more world and ends with a
+            // different population: two builds measured at 47 and 43 microseconds a tick had 12,170
+            // and 13,022 animals in them, and per animal they were the same number. Four
+            // optimizations were judged against that before the divisor existed, and the two that
+            // "worked" and the two that did not were all inside the noise.
+            private static mutable long beastTicks;
 
             public static method report() returns void {
                 long all = Grazing.walkNs + Grazing.thinkNs + Grazing.stirNs + Grazing.ageNs;
@@ -146,6 +163,12 @@ public bundle Agents {
                     return;
                 }
                 System.IO.Console.println($"fauna tick: {all / 1000000} ms total -- walking {Grazing.walkNs * 100 / all}%, deciding {Grazing.thinkNs * 100 / all}%, stirring {Grazing.stirNs * 100 / all}%, ageing {Grazing.ageNs * 100 / all}%");
+                if (Grazing.beastTicks > 0) {
+                    // Picoseconds, because the number is a couple of nanoseconds and integer
+                    // division would throw away everything that distinguishes one build from
+                    // another.
+                    System.IO.Console.println($"fauna tick: {all * 1000 / Grazing.beastTicks} ps per animal per tick over {Grazing.beastTicks / 1000000} million animal-ticks");
+                }
                 return;
             }
 
@@ -153,6 +176,7 @@ public bundle Agents {
                     returns void {
                 // Which fifteenth of the world's animals comes up this tick.
                 int phase = cast<int>(at % cast<long>(Grazing.STIR_EVERY));
+                Grazing.beastTicks = Grazing.beastTicks + cast<long>(wild.count());
                 mutable long mark = Time.nanos();
 
                 // ONE: the herds that are travelling walk, every tick, and their animals with them.
@@ -255,7 +279,12 @@ public bundle Agents {
                 }
                 match (h.mood()) {
                     case Drifting {
-                        // FRIGHT COMES FIRST, because a herd deciding to change pasture while a
+                        // THE STRAGGLERS COME BACK. The step every grazing animal takes is its own
+                        // and knows nothing of the herd -- which is what makes that pass cheap --
+                        // so the only thing holding a herd together is this, once a second, where
+                        // the centre is in hand and the roster is being walked anyway.
+                        Grazing.gatherStrays(h, wild, g);
+                        // FRIGHT COMES NEXT, because a herd deciding to change pasture while a
                         // wolf is walking into it is a herd that has not noticed the wolf.
                         if (Grazing.takeFright(h, wild)) {
                             return;
@@ -437,7 +466,8 @@ public bundle Agents {
                                            boolean running) returns void {
                 float reach = h.reach();
                 float tooFar = reach * reach;
-                float pace = Grazing.paceOf(h) * times;
+                // Faster than the centre, or a gap once opened is a gap for the whole journey.
+                float pace = Grazing.paceOf(h) * times * Grazing.FOLLOW_HURRY;
                 float hx = h.x();
                 float hy = h.y();
                 mutable int mob = 0;
@@ -483,31 +513,66 @@ public bundle Agents {
                 return;
             }
 
-            // A FIFTEENTH OF THE GRAZING ANIMALS TAKE A STEP -- see STIR_EVERY for why a fifteenth.
+            // WHATEVER HAS WANDERED OUT OF THE HERD WALKS BACK IN. Once a second, on the herd's own
+            // decision, because it is the only place that has both the centre and the roster --
+            // and because the alternative is asking every animal for its herd on every step, which
+            // is what made the step cost twenty-four nanoseconds.
             //
-            // Reached by walking the beast array with a stride rather than through any roster: which
-            // animals come up this tick is decided by their SLOT, so the walk needs no list at all,
-            // and over fifteen ticks it reads every animal exactly once.
-            private static method stirGrazers(Wild* wild, Grid* g, int phase, long at) returns void {
-                int n = wild.count();
-                // The step is what the animal could walk in the time since its last one, halved --
-                // it is milling about, not travelling.
-                int spun = cast<int>(at) * 668265263;
-                mutable int i = phase;
-                while (i < n) {
-                    BeastId b = cast<BeastId>(i);
-                    int slot = i;
-                    i = i + Grazing.STIR_EVERY;
-                    int owner = wild.herdOf(b);
-                    if (owner < 0) {
-                        // Nobody's animal. It stands where it is until something gathers it.
+            // A SECOND IS THE RIGHT GRAIN FOR IT. An animal wanders at most a cell in that time and
+            // the range it is being held inside is four to twelve, so nothing visibly escapes; what
+            // it does is stop the slow leak that would otherwise turn a herd into a smear over a
+            // few minutes.
+            private static method gatherStrays(Herd* h, Wild* wild, Grid* g) returns void {
+                float hx = h.x();
+                float hy = h.y();
+                float tooFar = h.reach() * h.reach();
+                float hop = Grazing.paceOf(h) * cast<float>(Grazing.DECIDE_EVERY);
+                mutable int link = h.firstMember();
+                while (link >= 0) {
+                    BeastId b = h.memberAt(link);
+                    link = h.afterMember(link);
+                    float bx = wild.xOf(b);
+                    float by = wild.yOf(b);
+                    float dx = hx - bx;
+                    float dy = hy - by;
+                    float gap = dx * dx + dy * dy;
+                    if (gap <= tooFar) {
                         continue;
                     }
-                    Herd* h = wild.herdAt(owner);
-                    int doing = cast<int>(h.mood());
-                    if (doing == cast<int>(HerdMood.MovingOn) ||
-                        doing == cast<int>(HerdMood.Fleeing)) {
-                        // Its herd is crossing ground or running; the walk above owns it this tick.
+                    float span = LandMath.sqrt(gap);
+                    Grazing.tryStep(wild, g, b, bx + dx / span * hop, by + dy / span * hop);
+                }
+                return;
+            }
+
+            // A FIFTEENTH OF THE GRAZING ANIMALS TAKE A STEP -- see STIR_EVERY for why a fifteenth.
+            //
+            // THE ANIMAL ALREADY KNOWS EVERYTHING THIS PASS NEEDS, and that is the whole of why it is
+            // cheap. It carries its own `state`, so "am I grazing?" is a read of the twenty bytes the
+            // walk is already reading -- no herd, no roster, no pointer chased anywhere.
+            //
+            // Two earlier shapes, both measured and both worse:
+            //   * by SLOT with a herd lookup -- one scattered `Herd` object dereferenced per animal,
+            //     24 ns each;
+            //   * by HERD through the roster -- the herd read once for four animals, but a roster is
+            //     a linked list through a shared pool, so every animal is a DEPENDENT load the
+            //     processor cannot start until the one before it has landed. No better.
+            //
+            // What is given up is the pull back toward the herd's centre, which needed the centre.
+            // It moves to the herd's own decision, once a second, where the centre is already in
+            // hand and the roster is already being walked -- and a straggler that spends a second
+            // out of place is a straggler nobody can see, at the size an animal is drawn.
+            private static method stirGrazers(Wild* wild, Grid* g, int phase, long at) returns void {
+                int n = wild.count();
+                int spun = cast<int>(at) * 668265263;
+                mutable int slot = phase;
+                while (slot < n) {
+                    BeastId b = cast<BeastId>(slot);
+                    int here = slot;
+                    slot = slot + Grazing.STIR_EVERY;
+                    // Its own state, and nothing else asked. Anything crossing ground, running,
+                    // stalking or feeding is owned by another pass this tick.
+                    if (cast<int>(wild.stateOf(b)) != cast<int>(BeastState.Grazing)) {
                         continue;
                     }
                     // GRAZING IS ALSO GETTING ITS WIND BACK. An animal that ran itself out and then
@@ -519,28 +584,21 @@ public bundle Agents {
                     }
                     float bx = wild.xOf(b);
                     float by = wild.yOf(b);
-                    float dx = h.x() - bx;
-                    float dy = h.y() - by;
-                    float gap = dx * dx + dy * dy;
-                    float reach = h.reach();
-                    // `hop` and not `step`: `step` is a keyword of the language (`0..n step 2`).
-                    float hop = Grazing.paceOf(h) * cast<float>(Grazing.STIR_EVERY);
-                    if (gap > reach * reach) {
-                        // Too far from the others: walk back in rather than wander further.
-                        float span = LandMath.sqrt(gap);
-                        Grazing.tryStep(wild, g, b, bx + dx / span * hop, by + dy / span * hop);
-                        continue;
-                    }
+                    // How far it wanders is its species', read off the table by its own species --
+                    // one small array that stays in cache, rather than an object per herd.
+                    float hop = Beasts.paceATick(cast<int>(wild.speciesOf(b)))
+                                * cast<float>(Grazing.STIR_EVERY);
                     // A STEP IN A DIRECTION OF ITS OWN, hashed from the animal's slot and the tick
                     // rather than drawn. Ten thousand random numbers a tick is a cost paid for
                     // something nobody can see; a hash of two numbers already in hand is not. And it
                     // has to include the TICK: hashed from the slot alone, every animal walks in one
                     // fixed direction forever and the herd ends up as a ring around its own edge.
+                    //
                     // MASKS AND NOT REMAINDERS. `% 21` is an integer division, and two of them per
                     // animal in the pass that costs forty per cent of the tick is two divisions in
                     // the hottest loop in the game. Sixteen directions off four bits read exactly
                     // the same on screen as twenty-one do.
-                    mutable int k = slot * 374761393 + spun;
+                    mutable int k = here * 374761393 + spun;
                     k = k ^ (k >> 13);
                     float wx = cast<float>((k & 15) - 8) * 0.125;
                     float wy = cast<float>(((k >> 8) & 15) - 8) * 0.125;
