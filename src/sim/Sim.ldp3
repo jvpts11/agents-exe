@@ -2,6 +2,7 @@ import System.IO.Console;
 import System.Time.Time;
 import Agents.World.Grid;
 import Agents.World.WorldGen;
+import Agents.Sim.Chronicle;
 program AgentsExe;
 
 // THE WORLD, AND THE THING THAT MAKES IT ADVANCE. It owns the layers and it owns the tick.
@@ -45,6 +46,8 @@ public bundle Agents {
             private mutable float owed;
             // Ticks that were owed and refused by the ceiling. See `missed`.
             private mutable long behind;
+            // What the world says it is doing, as it does it. Every layer writes here.
+            private mutable Chronicle* log;
 
             // How long a frame may spend advancing the world, in milliseconds. A frame at sixty a
             // second is about seventeen; half of it to the simulation leaves the other half to draw
@@ -81,13 +84,20 @@ public bundle Agents {
                 ticked = 0;
                 owed = 0.0;
                 behind = 0;
+                log = new Chronicle() on heap;
             }
 
             public destructor ~Sim() returns void {
                 if (standing) {
                     delete ground;
                 }
+                delete log;
                 return;
+            }
+
+            // Where every layer says what it did. Borrowed: it dies with the Sim.
+            public method chronicle() returns Chronicle* {
+                return log;
             }
 
             // Generate the ground and take it over.
@@ -150,34 +160,34 @@ public bundle Agents {
                 // could: the window says x6, the world goes at x1.3, and every number measured off
                 // that run carries a speed it never had.
                 if (owed >= 1.0) {
-                    behind = behind + cast<long>(owed);
+                    long lost = cast<long>(owed);
+                    behind = behind + lost;
+                    // SAID WHEN IT HAPPENS, which is the whole difference. As a total at the end,
+                    // "154,580 ticks refused" cannot tell a world that fell behind once from one
+                    // that fell behind on EVERY frame of the run -- and those are different worlds
+                    // with the same number. A line per occurrence can be counted afterwards; a
+                    // count can never be un-summed.
+                    log.note(ticked, "world",
+                             $"ran out of frame with {lost} ticks still owed");
                     owed = 0.0;
                 }
                 return ran;
             }
 
-            // WHAT HAPPENED IN THIS WORLD, printed when the arc ends.
+            // The totals, at the end, BESIDE the chronicle and never instead of it.
             //
-            // THIS IS HOW A RUN IS JUDGED, and it is the only way. The game runs in the window,
-            // from the beginning of a world to the end of it, and then says what became of it --
-            // there is no second way to run this and no way to run it without looking.
+            // A summary earns a place only as an index to what was already said: "the machine
+            // refused ticks 900 times" is worth knowing after the 900 lines exist, and worthless
+            // in their place -- it cannot distinguish a world that fell behind once from one that
+            // fell behind on every frame, and those are different worlds with the same number.
             //
-            // There WAS one, briefly, and taking it out is why this exists: a `run(n)` that
-            // advanced the world with no window, so the suite could assert on a world that had
-            // run. It is wrong for a reason that took saying twice. A tick measured with no
-            // renderer competing for the same machine -- the same caches, the same core, the same
-            // frame to fit inside -- is a tick that never happens, so the number comes out fine and
-            // means nothing. **Running without the window is measuring and assuming it is well.**
-            //
-            // Every layer adds its lines here as it arrives: how many of its things live, what they
-            // did, and what went wrong that nobody would see by watching.
+            // That is the rule this pair encodes, and it is why the counts stayed rather than
+            // being deleted along with the claim they used to make: **counts may sit beside the
+            // record; they may not stand in for it.**
             public method report() returns void {
                 System.IO.Console.println($"world: {ticked} ticks");
-                // A SPEED THE MACHINE COULD NOT SUSTAIN HAS TO SAY SO. Silent, this is an arc
-                // labelled x6 that went at some other rate, and every number taken off it is about
-                // a world slower than its own report says.
                 if (behind > 0) {
-                    System.IO.Console.println($"world: {behind} ticks were owed and refused -- the machine could not keep up with the gear");
+                    System.IO.Console.println($"world: {behind} ticks owed and refused in total -- see the [tick] lines above for when");
                 }
                 return;
             }
