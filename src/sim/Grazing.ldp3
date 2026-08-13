@@ -536,34 +536,40 @@ public bundle Agents {
                 return;
             }
 
-            // WHATEVER HAS WANDERED OUT OF THE HERD WALKS BACK IN. Once a second, on the herd's own
-            // decision, because it is the only place that has both the centre and the roster --
-            // and because the alternative is asking every animal for its herd on every step, which
-            // is what made the step cost twenty-four nanoseconds.
+            // WHATEVER HAS WANDERED OUT OF THE HERD IS TOLD TO WALK BACK IN. Once a second, on the
+            // herd's own decision, because it is the only place that has both the centre and the
+            // roster -- and because the alternative is asking every animal for its herd on every
+            // step, which is what made the step cost twenty-four nanoseconds.
             //
-            // A SECOND IS THE RIGHT GRAIN FOR IT. An animal wanders at most a cell in that time and
-            // the range it is being held inside is four to twelve, so nothing visibly escapes; what
-            // it does is stop the slow leak that would otherwise turn a herd into a smear over a
-            // few minutes.
+            // IT SETS A STATE; IT DOES NOT MOVE ANYTHING, and that is the fix to a defect a person
+            // found by watching the window. This used to walk the straggler back itself, a whole
+            // SECOND of its pace in ONE tick -- 2.7 cells for a deer, in a single frame at gear 1,
+            // where a walking step is a sixtieth of that and the renderer refuses to interpolate a
+            // jump beyond two cells at all. So an animal grazing peacefully was yanked across the
+            // ground once a second, which is exactly what "it still teleports a bit" meant.
+            //
+            // Marked `Following`, the animal walks home at its own pace on every tick of the next
+            // second, in the pass that is already touching it. `Following` has been in `BeastState`
+            // since the state was written, named for this and unused until now.
             private static method gatherStrays(Herd* h, Wild* wild, Grid* g) returns void {
                 float hx = h.x();
                 float hy = h.y();
                 float tooFar = h.reach() * h.reach();
-                float hop = Grazing.paceOf(h) * cast<float>(Grazing.DECIDE_EVERY);
                 mutable int link = h.firstMember();
                 while (link >= 0) {
                     BeastId b = h.memberAt(link);
                     link = h.afterMember(link);
-                    float bx = wild.xOf(b);
-                    float by = wild.yOf(b);
-                    float dx = hx - bx;
-                    float dy = hy - by;
-                    float gap = dx * dx + dy * dy;
-                    if (gap <= tooFar) {
+                    // Only the ones grazing: an animal running, crossing, stalking or on a kill is
+                    // owned by whatever put it in that state.
+                    if (cast<int>(wild.stateOf(b)) != cast<int>(BeastState.Grazing)) {
                         continue;
                     }
-                    float span = LandMath.sqrt(gap);
-                    Grazing.tryStep(wild, g, b, bx, by, bx + dx / span * hop, by + dy / span * hop);
+                    float dx = hx - wild.xOf(b);
+                    float dy = hy - wild.yOf(b);
+                    if (dx * dx + dy * dy <= tooFar) {
+                        continue;
+                    }
+                    wild.setStateOf(b, BeastState.Following);
                 }
                 return;
             }

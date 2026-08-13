@@ -2,10 +2,12 @@ import System.Math.Math;
 import Agents.Sim.Shift;
 import Agents.Sim.Crossing;
 import Agents.Sim.Wild;
+import Agents.Sim.Herd;
 import Agents.Sim.BeastId;
 import Agents.Sim.BeastState;
 import Agents.World.Grid;
 import Agents.World.Beasts;
+import Agents.World.LandMath;
 program AgentsExe;
 
 // EVERY GRAZING ANIMAL TAKES ITS STEP, and six hands take them at once.
@@ -123,13 +125,15 @@ public bundle Agents {
                 float edgeX = cast<float>(g.width());
                 float edgeY = cast<float>(g.height());
                 int grazing = cast<int>(BeastState.Grazing);
+                int following = cast<int>(BeastState.Following);
                 int migrating = cast<int>(BeastState.Migrating);
                 mutable int got = 0;
                 for (int slot in from..upTo) {
                     BeastId b = cast<BeastId>(slot);
                     // Its own state, and nothing else asked. Anything crossing ground, running,
                     // stalking or feeding is owned by another pass this tick.
-                    if (cast<int>(w.stateOf(b)) != grazing) {
+                    int doing = cast<int>(w.stateOf(b));
+                    if (doing != grazing && doing != following) {
                         continue;
                     }
                     // GRAZING IS ALSO GETTING ITS WIND BACK. An animal that ran itself out and then
@@ -156,10 +160,34 @@ public bundle Agents {
                     // same on screen as twenty-one do.
                     mutable int k = slot * 374761393 + seed;
                     k = k ^ (k >> 13);
-                    float wx = cast<float>((k & 15) - 8) * 0.125;
-                    float wy = cast<float>(((k >> 8) & 15) - 8) * 0.125;
-                    float nx = bx + wx * hop;
-                    float ny = by + wy * hop;
+                    mutable float wx = cast<float>((k & 15) - 8) * 0.125;
+                    mutable float wy = cast<float>(((k >> 8) & 15) - 8) * 0.125;
+                    // ONE THAT HAS WANDERED OUT WALKS BACK IN, at its own pace, on every tick until
+                    // it is home. The herd told it so once a second (`Grazing.gatherStrays`) and did
+                    // not move it: a second of walking delivered in one tick is a jump, and a jump is
+                    // what a person watching the window saw.
+                    //
+                    // THIS IS THE ONE ANIMAL IN A HUNDRED THAT PAYS FOR ITS HERD. Asking every animal
+                    // where its herd is costs 24 ns each and was measured out of this pass on purpose;
+                    // asking only the strays costs that on the few, which is where the answer is
+                    // actually needed. It keeps its own jitter on the way home, so a herd re-forming
+                    // reads as animals drifting in rather than as a column marching.
+                    if (doing == following) {
+                        Herd* home = w.herdAt(w.herdOf(b));
+                        float dx = home.x() - bx;
+                        float dy = home.y() - by;
+                        float gap = dx * dx + dy * dy;
+                        float reach = home.reach();
+                        if (gap <= reach * reach) {
+                            w.setStateOf(b, BeastState.Grazing);
+                        } else {
+                            float span = LandMath.sqrt(gap);
+                            wx = dx / span + wx * 0.25;
+                            wy = dy / span + wy * 0.25;
+                        }
+                    }
+                    mutable float nx = bx + wx * hop;
+                    mutable float ny = by + wy * hop;
                     // GROUND IT HAS NOT LEFT CANNOT HAVE CHANGED, asked WITHOUT CONVERTING ANYTHING.
                     // This is the one line every animal runs every tick, so what it costs is what the
                     // tick costs -- and `cast<int>(float)` here is a saturating, range-checked
@@ -171,12 +199,35 @@ public bundle Agents {
                     // It crossed. The decision still belongs here -- the map edge and the habitat
                     // rule are reads, and reads are what hands may share -- and only the filing is
                     // handed on.
-                    if (nx < 0.0 || ny < 0.0 || nx >= edgeX || ny >= edgeY) {
-                        continue;
-                    }
-                    if (cast<int>(w.stateOf(b)) != migrating) {
-                        if (!Beasts.livesIn(cast<int>(w.speciesOf(b)),
-                                            g.biomeAt(cast<int>(nx), cast<int>(ny)))) {
+                    //
+                    // AND WHERE IT MAY NOT GO, IT WALKS ALONG THE EDGE INSTEAD OF INTO IT. This is
+                    // the third thing a person found by watching, and it was the ugliest: a refused
+                    // step used to mean the animal did not move, and its direction is held for three
+                    // quarters of a second, so an animal that reached a river bank or a treeline
+                    // STOOD THERE, pressed against nothing, for forty-five ticks -- and then tried
+                    // again. Herds piled up against invisible walls, and a species whose good ground
+                    // was cut in two could not spread across the gap, which is a population dying of
+                    // a rendering-shaped bug.
+                    //
+                    // Sliding is one line of arithmetic and it is also what the animal would do: a
+                    // deer that meets water walks the bank. Try the step; if the ground refuses it,
+                    // try the same step with only its east-west part, then with only its
+                    // north-south part. One of the three is along the obstacle unless the animal is
+                    // in a corner, and a corner is the one case where standing still is right.
+                    if (!Stir.mayStand(w, g, b, nx, ny, migrating)) {
+                        nx = bx + wx * hop;
+                        ny = by;
+                        if (!Stir.mayStand(w, g, b, nx, ny, migrating)) {
+                            nx = bx;
+                            ny = by + wy * hop;
+                            if (!Stir.mayStand(w, g, b, nx, ny, migrating)) {
+                                continue;
+                            }
+                        }
+                        // The slide may not have left the cell after all, in which case it is the
+                        // cheap move again and the index has nothing to hear about.
+                        if (Math.floor(nx) == Math.floor(bx) && Math.floor(ny) == Math.floor(by)) {
+                            w.slide(b, nx, ny);
                             continue;
                         }
                     }
@@ -187,6 +238,24 @@ public bundle Agents {
                 }
                 filled[mine] = got;
                 return;
+            }
+
+            // WHETHER AN ANIMAL MAY STAND AT A PLACE: on the map, and on ground its species lives on
+            // -- with the one named exception, a herd crossing to somewhere else, which is the whole
+            // reason `Migrating` has a bit of its own.
+            //
+            // READS ONLY, which is what lets several hands ask it at the same time.
+            private static method mayStand(Wild* w, Grid* g, BeastId b, float x, float y,
+                                           int migrating) returns boolean {
+                if (x < 0.0 || y < 0.0 ||
+                    x >= cast<float>(g.width()) || y >= cast<float>(g.height())) {
+                    return false;
+                }
+                if (cast<int>(w.stateOf(b)) == migrating) {
+                    return true;
+                }
+                return Beasts.livesIn(cast<int>(w.speciesOf(b)),
+                                      g.biomeAt(cast<int>(x), cast<int>(y)));
             }
 
             // THE MOVES NOBODY WAS ALLOWED TO MAKE, MADE. Called by the thread that handed the work
