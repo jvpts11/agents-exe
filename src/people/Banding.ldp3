@@ -1,0 +1,120 @@
+import System.IO.Console;
+import Agents.People.Population;
+import Agents.People.AgentId;
+import Agents.World.Grid;
+import Agents.World.Biome;
+import Agents.World.Biomes;
+import Agents.World.Rng;
+import Agents.Sim.Chronicle;
+program AgentsExe;
+
+// THE FIRST PEOPLE, PUT SOMEWHERE THEY COULD ACTUALLY STAND.
+//
+// ONE BAND AND NOT A SCATTER, and that is the model rather than a convenience. A person alone on a
+// continent is not a beginning -- the band is the unit that feeds itself, and everything S2 goes on
+// to build (kinship, the hunt, the share-out of what is gathered) is between people who are near
+// each other. So they arrive together, in one place, standing where a person can stand.
+//
+// GROUND A PERSON CAN STAND ON, asked of the ground rather than assumed. A band sown into the sea
+// or onto the ice cap is a band that dies before its first tick for a reason that has nothing to do
+// with the model -- which is exactly the class of defect the fauna's own seeding met and fixed by
+// asking the biome instead of trusting a coordinate.
+//
+// FOUND BY A STRIDED SWEEP AND NOT BY DARTS. Throwing random points at the map until one lands
+// somewhere good is what the fauna did first, and on a world where the right ground is rare it
+// throws four thousand darts and finds five places. A sweep that visits one cell per block covers
+// the map once, in order, and cannot miss a region for being unlucky.
+public bundle Agents {
+    public namespace People {
+
+        public class Banding {
+            // How many people a first band is. Small enough to read as a band on screen, big enough
+            // to have both sexes, a spread of ages and somebody to lose.
+            public static fixed int A_BAND = 24;
+            // How far apart they stand when they are sown, in cells.
+            public static fixed float SPREAD = 3.0;
+            // One sample per this many cells when sweeping for ground. A block is sixteen cells, so
+            // this looks at each block about once.
+            public static fixed int SWEEP = 16;
+            // How far out the neighbours are checked, in cells: far enough that a spit or a one-cell
+            // island fails, near enough that the band is still on the ground it was tested for.
+            public static fixed int ELBOW = 6;
+
+            // Sow one band. Answers how many people were put into the world -- nought if the map
+            // held nowhere a person could stand, which a caller may want to say out loud rather
+            // than discover later as an empty world.
+            public static method sow(Population* folk, Grid* g, int seed, Chronicle* log)
+                    returns int {
+                mutable Rng* rng = new Rng(seed ^ 0x0BA9D) on heap;
+                int w = g.width();
+                int h = g.height();
+                mutable int homeX = 0 - 1;
+                mutable int homeY = 0 - 1;
+                // The sweep starts a little way in from the corner so a band never lands with half
+                // of itself off the edge of the world.
+                mutable int y = Banding.SWEEP;
+                while (y < h - Banding.SWEEP && homeX < 0) {
+                    mutable int x = Banding.SWEEP;
+                    while (x < w - Banding.SWEEP) {
+                        if (Banding.roomToSettle(g, x, y)) {
+                            homeX = x;
+                            homeY = y;
+                            x = w;
+                        }
+                        x = x + Banding.SWEEP;
+                    }
+                    y = y + Banding.SWEEP;
+                }
+                if (homeX < 0) {
+                    delete rng;
+                    return 0;
+                }
+                mutable int made = 0;
+                for (int i in 0..Banding.A_BAND) {
+                    mutable float px = cast<float>(homeX) + 0.5
+                                       + (rng.unit() - 0.5) * 2.0 * Banding.SPREAD;
+                    mutable float py = cast<float>(homeY) + 0.5
+                                       + (rng.unit() - 0.5) * 2.0 * Banding.SPREAD;
+                    // A person who would land on ground they cannot settle on stands where the band
+                    // does instead. The alternative is a band with a hole in it where a pond is.
+                    if (!Biomes.buildable(g.biomeAt(cast<int>(px), cast<int>(py)))) {
+                        px = cast<float>(homeX) + 0.5;
+                        py = cast<float>(homeY) + 0.5;
+                    }
+                    folk.bear(px, py);
+                    made = made + 1;
+                }
+                log.note(cast<long>(0), "people", $"a band of {made} at {homeX},{homeY}");
+                delete rng;
+                return made;
+            }
+
+            // WHERE A BAND SETTLES: ground a town may stand on, which is `Biomes.buildable` and not
+            // a list written here. Mountains and shallow water are both passable and neither is a
+            // place to begin -- and that judgement already exists, in the catalogue, where the
+            // camera's opening shot and every future founding read it. A second list would be a
+            // second answer to the same question, and the two would disagree the day one is edited.
+            //
+            // AND ITS NEIGHBOURS TOO, so a band does not begin on a one-cell island or on the tip of
+            // a spit. Eight cells at arm's length is enough to tell a coastline from a continent.
+            private static method roomToSettle(Grid* g, int x, int y) returns boolean {
+                if (!Biomes.buildable(g.biomeAt(x, y))) {
+                    return false;
+                }
+                for (int dy in 0 - 1..2) {
+                    for (int dx in 0 - 1..2) {
+                        int nx = x + dx * Banding.ELBOW;
+                        int ny = y + dy * Banding.ELBOW;
+                        if (nx < 0 || ny < 0 || nx >= g.width() || ny >= g.height()) {
+                            return false;
+                        }
+                        if (!Biomes.buildable(g.biomeAt(nx, ny))) {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+        }
+    }
+}

@@ -1,0 +1,167 @@
+import Agents.Gfx.Turn;
+import Agents.Gfx.Newton;
+program AgentsExe;
+
+// WHERE A BODY WAS DRAWN LAST FRAME, AND WHICH WAY THAT MAKES IT FACE.
+//
+// Everything alive in this world is a slot in an array that moves a little every tick, and a
+// renderer that draws only the truth draws two things wrong: a body that jumps when its slot is
+// reused, and a body that never turns because nothing ever told it which way it was going. Both
+// were found by a person opening the window (ledger S1-19, S1-20, S1-21), and neither is visible in
+// any count the simulation reports.
+//
+// So the drawn position CHASES the true one, and the direction it is chasing in is the facing. A gap
+// too big to be a step -- a herd crossing a ridge, a slot handed to a different body by a death,
+// three hundred ticks in one frame at the top gear -- is snapped rather than glided, so nothing ever
+// slides across the map.
+//
+// A CLASS BECAUSE THERE ARE TWO OF THEM. This was four arrays and five counters inside the renderer,
+// for the animals; the people need the same and the carts after them. Copied, the second one is
+// where the snap threshold quietly differs from the first, and the third is where somebody forgets
+// the facing entirely -- which is exactly the defect this file exists because of, and it has already
+// happened twice in this project.
+public bundle Agents {
+    public namespace Gfx {
+
+        public class Tracks {
+            // Further than this between two frames and the body did not WALK there. The facing is
+            // kept rather than pointed along a jump that never happened.
+            public static fixed float A_JUMP = 2.0;
+            // Below this it has not really moved, and its facing is kept rather than recomputed
+            // from rounding noise -- which is what would make a standing body spin.
+            public static fixed float STILL = 0.0000004;
+
+            private mutable float[] atX;
+            private mutable float[] atY;
+            private mutable float[] faceX;
+            private mutable float[] faceY;
+            private mutable int room;
+            // Of the bodies drawn in the last frame, how many were pointed somewhere of their own.
+            private mutable int turned;
+            // WHICH OF THE THREE THINGS THE CHASE DID, over the whole run. Somebody watched the
+            // window and said the animals still teleported, and there are three ways that can be
+            // true -- every frame snapping (the chase never runs), every frame standing (the drawn
+            // position is already there and the jump is the WORLD's), or gliding so fast that a
+            // glide IS a jump. They want different fixes, and guessing between them is what one
+            // evening of this project did five times.
+            private mutable long snapped;
+            private mutable long glided;
+            private mutable long stood;
+            private mutable float gapSum;
+            private mutable String what;
+
+            // `what` names the crowd in the report -- "animals", "people" -- so two of these do not
+            // print two identical lines that cannot be told apart.
+            public constructor Tracks(String what, int slots) {
+                this.what = what;
+                room = slots;
+                if (room < 1) {
+                    room = 1;
+                }
+                atX = new float[room]();
+                atY = new float[room]();
+                faceX = new float[room]();
+                faceY = new float[room]();
+                turned = 0;
+                snapped = cast<long>(0);
+                glided = cast<long>(0);
+                stood = cast<long>(0);
+                gapSum = 0.0;
+            }
+
+            public destructor ~Tracks() returns void {
+                delete atX;
+                delete atY;
+                delete faceX;
+                delete faceY;
+                return;
+            }
+
+            // Called once per frame, before anything is followed, so the count of what was drawn and
+            // the count of what was turned are measured over the same frame. Measured over different
+            // spans they read as nonsense -- "75,842 of 43", which is what the first version printed.
+            public method openFrame() returns void {
+                turned = 0;
+                return;
+            }
+
+            // WHERE THE EYE SHOULD SEE THIS SLOT, and which way it is pointed. The one method.
+            public method follow(int slot, float px, float py) returns Turn {
+                if (slot >= room) {
+                    growTo(slot + 1);
+                }
+                float dx = px - atX[slot];
+                float dy = py - atY[slot];
+                float gap = dx * dx + dy * dy;
+                atX[slot] = px;
+                atY[slot] = py;
+                if (gap > Tracks.A_JUMP * Tracks.A_JUMP) {
+                    snapped = snapped + cast<long>(1);
+                } else if (gap > Tracks.STILL) {
+                    glided = glided + cast<long>(1);
+                    float span = Newton.sqrt(gap);
+                    gapSum = gapSum + span;
+                    faceX[slot] = dx / span;
+                    faceY[slot] = dy / span;
+                } else {
+                    stood = stood + cast<long>(1);
+                }
+                // A cosine and a sine is what a `Turn` is, and a unit direction already is one, so
+                // nothing here calls a trigonometric function. A body that has never moved keeps the
+                // zero it was born with, which reads as no rotation at all.
+                if (faceX[slot] == 0.0 && faceY[slot] == 0.0) {
+                    return Turn.none();
+                }
+                // COUNTED, because "they all face south" is a thing a person had to notice by
+                // looking, twice, and a number that says how many are pointed somewhere of their own
+                // is a thing a gate can notice instead.
+                turned = turned + 1;
+                return Turn.facing(faceX[slot], faceY[slot]);
+            }
+
+            private method growTo(int want) returns void {
+                mutable int bigger = room;
+                while (bigger < want) {
+                    bigger = bigger * 2;
+                }
+                mutable float[] nx = new float[bigger]();
+                mutable float[] ny = new float[bigger]();
+                mutable float[] fx = new float[bigger]();
+                mutable float[] fy = new float[bigger]();
+                for (int i in 0..room) {
+                    nx[i] = atX[i];
+                    ny[i] = atY[i];
+                    fx[i] = faceX[i];
+                    fy[i] = faceY[i];
+                }
+                delete atX;
+                delete atY;
+                delete faceX;
+                delete faceY;
+                atX = nx;
+                atY = ny;
+                faceX = fx;
+                faceY = fy;
+                room = bigger;
+                return;
+            }
+
+            public method facing() returns int {
+                return turned;
+            }
+
+            // What the chase actually did, over the whole run.
+            public method report() returns String {
+                long all = snapped + glided + stood;
+                if (all == cast<long>(0)) {
+                    return $"{what} draw: nothing was drawn";
+                }
+                mutable int mean = 0;
+                if (glided > cast<long>(0)) {
+                    mean = cast<int>(gapSum * 1000.0 / cast<float>(glided));
+                }
+                return $"{what} draw: {snapped * 100 / all}% snapped, {glided * 100 / all}% glided, {stood * 100 / all}% already there -- a glide covers {mean} thousandths of a cell";
+            }
+        }
+    }
+}

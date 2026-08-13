@@ -1,0 +1,169 @@
+import System.IO.Console;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.AgentClass;
+import Agents.People.Worker;
+import Agents.People.Identity;
+import Agents.People.Body;
+import Agents.Sim.BlockChain;
+import Agents.Sim.TFiler;
+program AgentsExe;
+
+// EVERYBODY ALIVE, and where each of them is standing.
+//
+// THE SAME SHAPE AS `Wild`, DELIBERATELY, and in one place the same CLASS: the block index is
+// `BlockChain`, the one the animals use, which was written slot-shaped and ignorant of what its
+// integers mean for exactly this day. Not a shape copied twice -- the same code, asked a second
+// question. Everything that wants to know who is near a place asks it, and asking it costs a walk
+// of one block's chain instead of a walk of the population.
+//
+// GROUPED BY STANDING, which is the layout design's storage rule, and today there is one standing
+// to group: everybody is a `Worker` until something recruits or raises them, which is S3 and S5. The
+// second array arrives with the second standing rather than being written empty now.
+//
+// A SLOT IS A PERSON AND A DEATH IS A SWAP-REMOVE, which is the same trade the animals make and has
+// the same price: the last person alive moves into the dead one's slot, so every id that pointed at
+// the last one now points at somebody else. `bury` moves the block index with it. Kinship and
+// marriage, when they arrive in S2.6, are relations that have to be maintained through this -- which
+// is why they will be relations and not stored numbers.
+//
+// NO CEILING. The array doubles; the index grows with it; nothing here has a maximum written into
+// it. That is the design's own line and the per-tick pass over the whole population is what it is
+// judged on -- which is why the block index is here in the first slice that has people at all,
+// rather than added once a sweep gets slow.
+public bundle Agents {
+    public namespace People {
+
+        public class Population applies TFiler {
+            // Everybody alive, contiguous, slot-indexed. `Agent*` and not `Worker*`: the array holds
+            // one standing today and the tick that walks it will hold four.
+            private mutable Agent*[] folk;
+            private mutable int alive;
+            private mutable int room;
+
+            // (WHO STANDS WHERE is `TFiler`'s applied field and its procedures -- the same index and
+            // the same code the animals keep, because a crowd of people and a crowd of animals are
+            // the same problem. This class supplies the three lines that differ, at the bottom.)
+
+            // What the world has done to its people, kept as it happens rather than swept for.
+            private mutable long born;
+            private mutable long died;
+
+            public constructor Population(int width, int height) {
+                room = 256;
+                folk = new Agent*[room]();
+                alive = 0;
+                blocks = new BlockChain(width, height, room) on heap;
+                born = cast<long>(0);
+                died = cast<long>(0);
+            }
+
+            public destructor ~Population() returns void {
+                for (int i in 0..alive) {
+                    delete folk[i];
+                }
+                delete folk;
+                delete blocks;
+                return;
+            }
+
+            public method count() returns int {
+                return alive;
+            }
+
+            public method wasBorn() returns long {
+                return born;
+            }
+
+            public method hasDied() returns long {
+                return died;
+            }
+
+            // Somebody, by slot. Borrowed: they die with the population.
+            public method at(AgentId who) returns Agent* {
+                return folk[cast<int>(who)];
+            }
+
+            private method growFolk() returns void {
+                int bigger = room * 2;
+                mutable Agent*[] next = new Agent*[bigger]();
+                for (int i in 0..alive) {
+                    next[i] = folk[i];
+                }
+                delete folk;
+                folk = next;
+                room = bigger;
+                roomForMore(room);
+                return;
+            }
+
+            // A PERSON ARRIVES. Everybody is born a worker -- the other three standings are made out
+            // of workers rather than born, which is the model's own rule and the reason this method
+            // does not take a standing.
+            //
+            // The caller fills in who they are: this places them, files them and counts them, and
+            // nothing else. A birth with parents -- names, nature, nations from both -- is S2.6's,
+            // and it will call this and then fill the parts in.
+            public method bear(float x, float y) returns AgentId {
+                if (alive == room) {
+                    growFolk();
+                }
+                int at = alive;
+                Worker* one = new Worker() on heap;
+                one.whereabouts.position = vec2(x, y);
+                folk[at] = one;
+                alive = alive + 1;
+                born = born + cast<long>(1);
+                fileAt(at, x, y);
+                return cast<AgentId>(at);
+            }
+
+            // AND ONE LEAVES. The last person moves into the slot, exactly as an animal does, and
+            // the index is moved with them before anybody can read it stale.
+            public method bury(AgentId who) returns void {
+                int at = cast<int>(who);
+                if (at < 0 || at >= alive) {
+                    return;
+                }
+                unfile(at);
+                delete folk[at];
+                int last = alive - 1;
+                if (at != last) {
+                    folk[at] = folk[last];
+                    refile(last, at, folk[at].x(), folk[at].y());
+                }
+                folk[last] = 0 as Agent*;
+                alive = alive - 1;
+                died = died + cast<long>(1);
+                return;
+            }
+
+            // THE ONLY WAY A PERSON MOVES, so the index cannot be left behind. Cheap when they
+            // stayed in their cell, which is nearly every call -- see `BlockChain.put`.
+            public method placeAt(AgentId who, float x, float y) returns void {
+                int at = cast<int>(who);
+                folk[at].whereabouts.position = vec2(x, y);
+                fileAt(at, x, y);
+                return;
+            }
+
+            // ---- what `TFiler` needs to know about people ------------------------------------------
+            //
+            // The three lines that differ between a crowd of people and a crowd of animals. An animal
+            // is twenty bytes of value in an array; a person is an object with parts. Everything else
+            // about standing somewhere and being filed for it is the same code.
+
+            protected procedure howManyStand() returns int {
+                return alive;
+            }
+
+            protected procedure xOfSlot(int slot) returns float {
+                return folk[slot].x();
+            }
+
+            protected procedure yOfSlot(int slot) returns float {
+                return folk[slot].y();
+            }
+        }
+    }
+}

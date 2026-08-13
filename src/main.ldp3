@@ -16,6 +16,8 @@ import Agents.Sim.Sim;
 import Agents.Sim.Seeding;
 import Agents.Sim.HerdMood;
 import Agents.Sim.Grazing;
+import Agents.People.Agent;
+import Agents.People.AgentId;
 import System.Os.Exit;
 import Agents.World.WorldAudit;
 import Agents.World.Landmass;
@@ -314,12 +316,14 @@ public bundle Agents {
                 MeshAtlas* nodeMesh = MeshAtlas.loadNamed(root, "nodes.index");
                 MeshAtlas* rivers = MeshAtlas.loadNamed(root, "rivers.index");
                 MeshAtlas* beastArt = MeshAtlas.loadNamed(root, "fauna.index");
+                MeshAtlas* folkArt = MeshAtlas.loadNamed(root, "agents.index");
                 GlWorld3D* r = new GlWorld3D(win.gl) on heap;
                 r.setup(g, terr, props, nodeMesh, rivers, 8, 1.1);
                 // The world was sown when it was built -- a world arrives with what lives in it --
-                // and here the renderer is told where the animals are so it can read them every
-                // frame. It borrows; it never owns them.
+                // and here the renderer is told where the animals and the people are so it can read
+                // them every frame. It borrows; it never owns them.
                 r.takeFauna(sim.wild(), beastArt);
+                r.takeFolk(sim.people(), folkArt);
                 // THE WORLD, AND NOTHING LIVING IN IT.
                 //
                 // The people, the towns and the borders were taken out on purpose. The agent they
@@ -339,10 +343,25 @@ public bundle Agents {
                 // detail layer never even starts -- so the one thing the window still has to show,
                 // the world close up, is the one thing it does not. It opens on a walkable cell
                 // instead, the same draw a founding used to use.
-                int where = Main.somewhereWalkable(g, seed);
-                if (where >= 0) {
-                    r.aimAt(where % g.width(), where / g.width());
+                // AND IT OPENS ON THE PEOPLE, now that there are some. A window that opens on empty
+                // ground while the only living thing in the world is somewhere else is a window that
+                // has to be flown around before the game can be seen at all -- and "is it drawn?"
+                // is not a question anybody should answer by piloting a camera.
+                //
+                // The band's own place, not a second draw for the same kind of ground: two rules for
+                // "somewhere good" are two answers, and the day one is edited they disagree. If
+                // there is nobody -- a map with nowhere to settle -- it falls back to the old draw,
+                // because a camera framing the whole world shows nothing at all.
+                if (sim.people().count() > 0) {
+                    Agent* first = sim.people().at(cast<AgentId>(0));
+                    r.aimAt(cast<int>(first.x()), cast<int>(first.y()));
                     r.setView(35.0, 40.0, 55.0);
+                } else {
+                    int where = Main.somewhereWalkable(g, seed);
+                    if (where >= 0) {
+                        r.aimAt(where % g.width(), where / g.width());
+                        r.setView(35.0, 40.0, 55.0);
+                    }
                 }
                 Batch2D* hud = new Batch2D(win.gl) on heap;
                 Hud* text = new Hud(win.gl, 14) on heap;
@@ -522,6 +541,12 @@ public bundle Agents {
                 Grazing.report();
                 System.IO.Console.println(r.beastChaseReport());
                 System.IO.Console.println($"fauna: {r.beastsFacing()} of {r.beastsDrawn()} drawn animals pointed somewhere of their own");
+                // AND THE PEOPLE, the same three facts. They do not move yet -- that is the next
+                // slice -- so what these say today is that a band exists, is filed where it stands,
+                // and is drawn. The day they walk, the same three lines report it.
+                System.IO.Console.println($"folk: {sim.people().count()} alive, {sim.people().wasBorn()} born, {sim.people().hasDied()} died, {r.folkDrawn()} drawn in the last frame");
+                System.IO.Console.println(r.folkChaseReport());
+                System.IO.Console.println($"folk: {r.folkFacing()} of {r.folkDrawn()} drawn people pointed somewhere of their own");
                 // AND WHAT IS LEFT ALIVE, ONE LINE PER SPECIES. A total cannot say that one of them
                 // is down to nine and falling, and a world where that is true is a different world
                 // from one where every species is healthy.

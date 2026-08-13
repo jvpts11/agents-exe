@@ -6,6 +6,7 @@ import Agents.Sim.HerdId;
 import Agents.Sim.BeastState;
 import Agents.Sim.HerdMood;
 import Agents.Sim.BlockChain;
+import Agents.Sim.TFiler;
 import Agents.Sim.Crew;
 import Agents.Sim.Stir;
 import Agents.Sim.Vanished;
@@ -26,7 +27,11 @@ program AgentsExe;
 public bundle Agents {
     public namespace Sim {
 
-        public class Wild {
+        // `applies TFiler` is where the block index lives -- the same one `Population` keeps, because
+        // a crowd of animals and a crowd of people are the same problem: slots that stand somewhere,
+        // arrive, die by swap-remove, and must never be looked for in a block they left. The three
+        // sockets at the bottom are the only lines about it a `Wild` has to write.
+        public class Wild applies TFiler {
             public static fixed int NO_HERD = 0 - 1;
 
             private mutable Beast[] beasts;
@@ -42,15 +47,14 @@ public bundle Agents {
             // they are born and die, which also makes it the number extinction is read from.
             private mutable int[] census;
 
-            // WHO STANDS WHERE. Maintained by the three methods that move an animal -- `bear`,
-            // `bury` and `placeAt` -- and by nothing else, which is the only way an index stays
-            // true: a fourth place that moves an animal without telling it produces a chain
-            // pointing at ground the animal left.
+            // WHO STANDS WHERE is `TFiler`'s applied field, `blocks`, and its procedures. Maintained
+            // by the three methods that move an animal -- `bear`, `bury` and `placeAt` -- and by
+            // nothing else, which is the only way an index stays true: a fourth place that moves an
+            // animal without telling it produces a chain pointing at ground the animal left.
             //
             // `slide` IS THE ONE EXCEPTION, and it is allowed exactly because it cannot leave the
             // index behind: it moves an animal only within the cell it is already filed under, so
-            // there is nothing to tell. `indexAgrees` is the check that keeps that honest.
-            private mutable BlockChain* blocks;
+            // there is nothing to tell. `indexAgrees` -- the transformer's -- keeps that honest.
 
             // THE HANDS THIS LAYER'S TICK IS SHARED BETWEEN, and the room they need to share it.
             //
@@ -136,11 +140,8 @@ public bundle Agents {
                 return alive;
             }
 
-            // The block index, for whoever asks who is near -- the bake, and from S1.6 the fauna
-            // itself. Borrowed: it dies with the Wild.
-            public method standing() returns BlockChain* {
-                return blocks;
-            }
+            // (The block index itself, for whoever asks who is near -- the bake, and from S1.6 the
+            // fauna itself -- is `TFiler.standing()`.)
 
             // HOW MANY OF ONE SPECIES STAND IN ONE BLOCK -- what breeding asks before it allows a
             // birth, and what a splitting herd's daughter asks of the ground she is thinking of
@@ -217,7 +218,7 @@ public bundle Agents {
                 delete beasts;
                 beasts = next;
                 room = bigger;
-                blocks.roomFor(room);
+                roomForMore(room);
                 return;
             }
 
@@ -238,7 +239,7 @@ public bundle Agents {
                 beasts[at].state = cast<uint>(cast<int>(BeastState.Grazing));
                 alive = alive + 1;
                 census[cast<int>(s)] = census[cast<int>(s)] + 1;
-                blocks.put(at, cast<int>(x), cast<int>(y));
+                fileAt(at, x, y);
                 // A PREDATOR IS MARKED IN THE INDEX, so the block it stands in can be found without
                 // reading a single animal. Set here and in `bury`'s swap, which are the only two
                 // places a slot's species changes.
@@ -265,14 +266,13 @@ public bundle Agents {
                 int last = alive - 1;
                 // The dead animal leaves the ground it stood on. Done before the swap, while `at`
                 // still means the animal that died.
-                blocks.take(at);
+                unfile(at);
                 if (at != last) {
                     // The mover's herd keeps the same animal under a new id -- and so does its
                     // block, which is the same fact told to the other index.
                     int movedHerd = cast<int>(beasts[last].herd);
                     beasts[at] = beasts[last];
-                    blocks.take(last);
-                    blocks.put(at, cast<int>(beasts[at].x), cast<int>(beasts[at].y));
+                    refile(last, at, beasts[at].x, beasts[at].y);
                     // The moved animal takes its mark to its new slot: the species came with it.
                     blocks.setMark(at, Beasts.isPredator(cast<int>(beasts[at].species)));
                     if (movedHerd >= 0 && movedHerd < herdCount) {
@@ -310,7 +310,7 @@ public bundle Agents {
                 int at = cast<int>(who);
                 beasts[at].x = x;
                 beasts[at].y = y;
-                blocks.put(at, cast<int>(x), cast<int>(y));
+                fileAt(at, x, y);
                 return;
             }
 
@@ -332,16 +332,23 @@ public bundle Agents {
                 return;
             }
 
-            // EVERY ANIMAL IS FILED UNDER THE CELL IT IS STANDING IN. Walks the whole population and
-            // asks the index, which is far too slow for a tick and exactly right for a test.
-            public method indexAgrees() returns int {
-                mutable int wrong = 0;
-                for (int i in 0..alive) {
-                    if (!blocks.atCell(i, cast<int>(beasts[i].x), cast<int>(beasts[i].y))) {
-                        wrong = wrong + 1;
-                    }
-                }
-                return wrong;
+            // ---- what `TFiler` needs to know about animals -------------------------------------
+            //
+            // The three lines that differ between a crowd of animals and a crowd of people, and
+            // nothing else does. An animal is twenty bytes of value in an array; a person is an
+            // object with parts. (`indexAgrees`, the check these three exist for, is the
+            // transformer's.)
+
+            protected procedure howManyStand() returns int {
+                return alive;
+            }
+
+            protected procedure xOfSlot(int slot) returns float {
+                return beasts[slot].x;
+            }
+
+            protected procedure yOfSlot(int slot) returns float {
+                return beasts[slot].y;
             }
 
             public method speciesOf(BeastId who) returns Species {

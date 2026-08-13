@@ -1,0 +1,144 @@
+import System.Test.Test;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.AgentClass;
+import Agents.Sim.BlockChain;
+program AgentsExe;
+
+// THE POPULATION: that a person is filed where they stand, and stays filed through every death.
+//
+// These are the animals' own checks asked about people, and that is the point rather than a
+// coincidence -- both crowds keep their index through `TFiler`, so a defect in the filing is a
+// defect in both, and a check that only one of them runs is a check that finds it in one world and
+// not the other.
+//
+// THE SWAP-REMOVE IS WHAT THESE ARE REALLY ABOUT. A death moves the last person into the dead one's
+// slot, so their block chain entry has to move with them. Get it wrong and nothing crashes: somebody
+// is drawn in one block and looked for in another, which reads as a hunter walking past its quarry
+// or a family that never meets -- behaviour nobody can explain, months later.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Crowds {
+            public static fixed int SIDE = 96;
+
+            [Tag(name: "people")]
+            [Test]
+            public static method a_birth_is_filed_where_the_person_stands() returns void {
+                Population* folk = new Population(Crowds.SIDE, Crowds.SIDE) on heap;
+                AgentId who = folk.bear(20.5, 30.5);
+                Test.assertEqual(folk.count(), 1);
+                Test.assertEqualLong(folk.wasBorn(), cast<long>(1));
+                BlockChain* chain = folk.standing();
+                Test.assertTrue(chain.atCell(cast<int>(who), 20, 30));
+                Test.assertEqual(folk.indexAgrees(), 0);
+                delete folk;
+                return;
+            }
+
+            // EVERYBODY IS BORN A WORKER. The other three standings are made out of workers --
+            // recruited, or raised -- and never born.
+            [Tag(name: "people")]
+            [Test]
+            public static method everybody_is_born_a_worker() returns void {
+                Population* folk = new Population(Crowds.SIDE, Crowds.SIDE) on heap;
+                for (int i in 0..10) {
+                    folk.bear(40.5 + cast<float>(i), 40.5);
+                }
+                for (int i in 0..10) {
+                    Agent* one = folk.at(cast<AgentId>(i));
+                    Test.assertEqual(cast<int>(one.standing()), cast<int>(AgentClass.Worker));
+                }
+                delete folk;
+                return;
+            }
+
+            // A NEW PERSON STARTS EMPTY, and that is the language's doing rather than a habit: a
+            // field of a fresh heap object holds whatever the last object at that address left
+            // behind, so a part nobody assigned starts WRONG -- with somebody else's nationality, or
+            // a pregnancy that belonged to a woman who died. The constructor must fill every part,
+            // and the compiler will not build one that does not.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_new_person_carries_nothing_of_the_last_one() returns void {
+                Population* folk = new Population(Crowds.SIDE, Crowds.SIDE) on heap;
+                AgentId first = folk.bear(10.5, 10.5);
+                Agent* one = folk.at(first);
+                one.identity.givenName = 77;
+                one.body.age = 44;
+                folk.bury(first);
+                AgentId next = folk.bear(10.5, 10.5);
+                Agent* two = folk.at(next);
+                Test.assertEqual(two.identity.givenName, 0);
+                Test.assertEqual(two.body.age, 0);
+                delete folk;
+                return;
+            }
+
+            // A DEATH LEAVES EVERY OTHER PERSON FILED WHERE THEY STAND. The last one moves into the
+            // dead one's slot, and the index has to move with them.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_death_leaves_the_block_true() returns void {
+                Population* folk = new Population(Crowds.SIDE, Crowds.SIDE) on heap;
+                // Spread out, so the dead and the mover are in different blocks -- which is the
+                // case the swap-remove gets wrong.
+                for (int i in 0..20) {
+                    folk.bear(8.5 + cast<float>(i) * 4.0, 8.5 + cast<float>(i) * 4.0);
+                }
+                folk.bury(cast<AgentId>(3));
+                Test.assertEqual(folk.count(), 19);
+                Test.assertEqualLong(folk.hasDied(), cast<long>(1));
+                Test.assertEqual(folk.indexAgrees(), 0);
+                // And the person who moved is findable in the block they actually stand in.
+                Agent* moved = folk.at(cast<AgentId>(3));
+                BlockChain* chain = folk.standing();
+                Test.assertTrue(chain.atCell(3, cast<int>(moved.x()), cast<int>(moved.y())));
+                delete folk;
+                return;
+            }
+
+            // AND SO DOES A THOUSAND OF THEM, with the array growing underneath. Growth is where an
+            // index by pointer would break; this one is by slot, so the links survive untouched.
+            [Tag(name: "people")]
+            [Test]
+            public static method births_deaths_and_growth_keep_the_index_true() returns void {
+                Population* folk = new Population(Crowds.SIDE, Crowds.SIDE) on heap;
+                mutable int seed = 7;
+                for (int round in 0..1200) {
+                    seed = seed * 1103515245 + 12345;
+                    int r = (seed >> 16) & 0x7FFF;
+                    if (folk.count() < 8 || r % 3 != 0) {
+                        float x = cast<float>(r % (Crowds.SIDE - 2)) + 0.5;
+                        float y = cast<float>((r / 91) % (Crowds.SIDE - 2)) + 0.5;
+                        folk.bear(x, y);
+                    } else {
+                        folk.bury(cast<AgentId>(r % folk.count()));
+                    }
+                }
+                Test.assertTrue(folk.count() > 8);
+                Test.assertEqual(folk.indexAgrees(), 0);
+                delete folk;
+                return;
+            }
+
+            // MOVING SOMEBODY MOVES THEIR FILING WITH THEM, which is the whole reason `placeAt` is
+            // the only way a person moves.
+            [Tag(name: "people")]
+            [Test]
+            public static method moving_somebody_refiles_them() returns void {
+                Population* folk = new Population(Crowds.SIDE, Crowds.SIDE) on heap;
+                AgentId who = folk.bear(12.5, 12.5);
+                BlockChain* chain = folk.standing();
+                int wasBlock = chain.blockOf(cast<int>(who));
+                folk.placeAt(who, 70.5, 70.5);
+                Test.assertTrue(chain.atCell(cast<int>(who), 70, 70));
+                Test.assertTrue(chain.blockOf(cast<int>(who)) != wasBlock);
+                Test.assertEqual(folk.indexAgrees(), 0);
+                delete folk;
+                return;
+            }
+        }
+    }
+}

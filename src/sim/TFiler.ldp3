@@ -1,0 +1,104 @@
+import Agents.Sim.BlockChain;
+program AgentsExe;
+
+// WHAT A CROWD GAINS BY FILING ITS MEMBERS WHERE THEY STAND: the index, and the code that keeps it
+// true.
+//
+// TWO PLACES IN THIS GAME ARE THE SAME THING. `Wild` holds animals and `Population` holds people,
+// and both are: a contiguous array of slots, an index from block to the slots standing in it,
+// arrivals that file, deaths that swap the last member into the dead one's slot, and growth that
+// leaves every slot number where it was. Written twice, the second one is where the swap-remove
+// forgets to move the index -- and an index that disagrees with the world does not crash. It draws
+// perfectly and behaves strangely, which this project has already named the most expensive kind of
+// defect it meets.
+//
+// WHY A TRANSFORMER AND NOT A MEMBER OBJECT, which is the shape a `Crowd` class would have. The
+// procedures below have to read the OWNER's members -- where does slot 12 stand? how many are there?
+// -- and an owner's array is private. A member object can only be given that through an interface
+// (a virtual call per slot, in a loop over the whole population) or by the owner publishing
+// accessors to the outside world. A transformer's field is APPLIED: it lands inside the owner, and
+// the bodies run there, so a socket is a direct call to a private method.
+//
+// It also names the thing. `Index<Beast>` cannot say whether it indexes animals or the herds they
+// belong to; `Wild applies TFiler` says which.
+//
+// `explicit`, so it is never carried in by another transformer and a grep for `applies TFiler` finds
+// every crowd there is. For anything that puts a field and a release obligation inside your type,
+// that should be the norm -- the same rule `TRoster` states one file over.
+public bundle Agents {
+    public namespace Sim {
+
+        public explicit transformer TFiler {
+            // THE APPLIED FIELD: this crowd's own index. The owner makes it -- the transformer has
+            // no constructor and cannot -- and the compiler says so at every type that applies this,
+            // by name, until the constructor assigns it. That is the applied field carrying its
+            // obligations exactly as an ordinary field does.
+            protected mutable BlockChain* blocks;
+
+            // WHO STANDS WHERE, for whoever needs to ask: the bake walks it instead of walking the
+            // whole crowd, and everything that asks "who is near" goes through it. Borrowed: it dies
+            // with the owner.
+            public procedure standing() returns BlockChain* {
+                return blocks;
+            }
+
+            // A MEMBER ARRIVES AT A PLACE, or moves to one. The common call is the one that does
+            // nothing: a body that drifted a tenth of a cell is in the block it was already in.
+            public procedure fileAt(int slot, float x, float y) returns void {
+                blocks.put(slot, cast<int>(x), cast<int>(y));
+                return;
+            }
+
+            // AND ONE LEAVES THE WORLD. Safe on a slot that is not in it.
+            public procedure unfile(int slot) returns void {
+                blocks.take(slot);
+                return;
+            }
+
+            // THE SWAP-REMOVE, AS THE INDEX SEES IT: the member in `from` is now in `to`, so its old
+            // slot leaves the chains and its new one enters them at the same place on the ground.
+            // One procedure because the two calls must not be separated -- a `take` without the
+            // matching `put` is a body that exists and stands nowhere, which is invisible until
+            // something goes looking for it.
+            public procedure refile(int from, int to, float x, float y) returns void {
+                blocks.take(from);
+                blocks.put(to, cast<int>(x), cast<int>(y));
+                return;
+            }
+
+            // Room for a bigger crowd. THE SLOT NUMBERS SURVIVE, which is why this index is by slot
+            // and not by pointer.
+            public procedure roomForMore(int slots) returns void {
+                blocks.roomFor(slots);
+                return;
+            }
+
+            // EVERY MEMBER IS FILED WHERE IT STANDS. Walks the whole crowd and asks the index, which
+            // is far too slow for a tick and exactly right for a check.
+            //
+            // THIS IS THE PROCEDURE THE WHOLE TRANSFORMER IS WORTH. The fauna's own version of it,
+            // written the day a faster move stopped going through the index, found a defect that had
+            // been in `BlockChain.put` since it was written: the cell was recorded and then cleared
+            // by the `take` inside it, so every member that changed BLOCK was filed under no cell at
+            // all. Nothing had noticed, because the next move repaired it. The people get that check
+            // for free, on the day they are written, instead of on the day somebody wonders why a
+            // hunter walks past its quarry.
+            public procedure indexAgrees() returns int {
+                mutable int wrong = 0;
+                for (int i in 0..howManyStand()) {
+                    if (!blocks.atCell(i, cast<int>(xOfSlot(i)), cast<int>(yOfSlot(i)))) {
+                        wrong = wrong + 1;
+                    }
+                }
+                return wrong;
+            }
+
+            // THE SOCKETS: the three lines that differ between crowds, and nothing else does. An
+            // animal is twenty bytes of value in an array and a person is an object, so where a
+            // member stands is read differently -- and that is the whole of the difference.
+            protected procedure howManyStand() returns int;
+            protected procedure xOfSlot(int slot) returns float;
+            protected procedure yOfSlot(int slot) returns float;
+        }
+    }
+}
