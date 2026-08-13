@@ -1,0 +1,143 @@
+import System.Test.Test;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Body;
+import Agents.People.Gauge;
+import Agents.People.Foraging;
+import Agents.People.Walking;
+import Agents.World.Grid;
+import Agents.World.Biome;
+import Agents.World.FloraNode;
+import Agents.World.NodeField;
+import Agents.World.Harvest;
+import Agents.World.Waymap;
+program AgentsExe;
+
+// A BAND THAT FEEDS ITSELF, which is the whole of what S2 is named after.
+//
+// THE GROUND IS MADE BY HAND AND SO IS THE FOOD: one bush, at a known cell, with a known amount in
+// it. A world generated for the occasion would test whichever coastline it happened to produce, and
+// fail for reasons that have nothing to do with eating.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Meals {
+            public static fixed int SIDE = 64;
+
+            private static method pasture() returns Grid* {
+                mutable Grid* g = new Grid(Meals.SIDE, Meals.SIDE) on heap;
+                for (int y in 0..Meals.SIDE) {
+                    for (int x in 0..Meals.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.Prairie));
+                    }
+                }
+                g.labelMasses();
+                return g;
+            }
+
+            // A HUNGRY PERSON WALKS TO FOOD AND EATS IT, and that sentence is four separate things
+            // any one of which can be missing without the others noticing: it must go hungry, find
+            // the bush, get there, and be fuller afterwards.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_hungry_person_finds_food_and_eats() returns void {
+                mutable Grid* g = Meals.pasture();
+                NodeField* nodes = g.surface();
+                nodes.add(30.5, 30.5, FloraNode.BerryBush.index(), 40);
+                nodes.finish();
+                Population* folk = new Population(Meals.SIDE, Meals.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                AgentId who = folk.bear(20.5, 30.5);
+                Agent* one = folk.at(who);
+                // Hungry enough to go looking, which is the model's own threshold.
+                one.body.fed = new Gauge(Body.PECKISH - 5, 0, Body.FULL);
+                int wasFed = one.body.fed.value();
+                for (int t in 0..40000) {
+                    Foraging.tick(folk, g, nodes, ways, cast<long>(t));
+                    Walking.tick(folk, g, ways, cast<long>(t));
+                }
+                Test.assertTrue(one.body.fed.value() > wasFed);
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+
+            // AND THE FOOD IS TAKEN OUT OF THE WORLD. A bush that feeds everybody forever is not a
+            // bush, it is a rule that will hide every mistake the economy makes later.
+            [Tag(name: "people")]
+            [Test]
+            public static method eating_takes_the_food_out_of_the_bush() returns void {
+                mutable Grid* g = Meals.pasture();
+                NodeField* nodes = g.surface();
+                nodes.add(21.5, 30.5, FloraNode.BerryBush.index(), 40);
+                nodes.finish();
+                int bush = nodes.nodeAt(21, 30, cast<int>(Harvest.Forage));
+                Test.assertTrue(bush >= 0);
+                int before = nodes.qtyAt(bush);
+                Population* folk = new Population(Meals.SIDE, Meals.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                AgentId who = folk.bear(21.5, 30.5);
+                folk.at(who).body.fed = new Gauge(Body.PECKISH - 5, 0, Body.FULL);
+                for (int t in 0..2000) {
+                    Foraging.tick(folk, g, nodes, ways, cast<long>(t));
+                    Walking.tick(folk, g, ways, cast<long>(t));
+                }
+                Test.assertTrue(nodes.qtyAt(bush) < before);
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+
+            // A FED PERSON DOES NOT GO FORAGING, which is what stops a world where everybody spends
+            // their life walking between bushes they do not need.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_fed_person_leaves_the_bush_alone() returns void {
+                mutable Grid* g = Meals.pasture();
+                NodeField* nodes = g.surface();
+                nodes.add(21.5, 30.5, FloraNode.BerryBush.index(), 40);
+                nodes.finish();
+                int bush = nodes.nodeAt(21, 30, cast<int>(Harvest.Forage));
+                int before = nodes.qtyAt(bush);
+                Population* folk = new Population(Meals.SIDE, Meals.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                folk.bear(21.5, 30.5);   // born full, and left that way
+                for (int t in 0..2000) {
+                    Foraging.tick(folk, g, nodes, ways, cast<long>(t));
+                }
+                Test.assertEqual(nodes.qtyAt(bush), before);
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+
+            // AND BARE GROUND IS BARE. Somebody hungry with nothing in reach is counted as having
+            // found nothing -- which is the difference between a world with no food and a world
+            // whose people cannot find the food it has.
+            [Tag(name: "people")]
+            [Test]
+            public static method nothing_in_reach_is_said_rather_than_silent() returns void {
+                mutable Grid* g = Meals.pasture();
+                NodeField* nodes = g.surface();
+                nodes.finish();   // no food anywhere
+                Population* folk = new Population(Meals.SIDE, Meals.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                AgentId who = folk.bear(30.5, 30.5);
+                folk.at(who).body.fed = new Gauge(Body.PECKISH - 5, 0, Body.FULL);
+                long before = Foraging.foundNothingSoFar();
+                for (int t in 0..200) {
+                    Foraging.tick(folk, g, nodes, ways, cast<long>(t));
+                }
+                Test.assertTrue(Foraging.foundNothingSoFar() > before);
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+        }
+    }
+}

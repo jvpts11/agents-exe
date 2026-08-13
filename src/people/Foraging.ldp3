@@ -1,0 +1,185 @@
+import System.IO.Console;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Body;
+import Agents.People.Gauge;
+import Agents.People.Inventory;
+import Agents.People.Walking;
+import Agents.World.Grid;
+import Agents.World.BlockGrid;
+import Agents.World.NodeField;
+import Agents.World.Nodes;
+import Agents.World.Harvest;
+import Agents.World.Waymap;
+program AgentsExe;
+
+// A HUNGRY PERSON GOES AND FINDS SOMETHING TO EAT.
+//
+// THE FOOD IS ALREADY IN THE WORLD. Berry bushes, mushroom patches, herbs, wild grain and vines
+// have stood on the ground since worldgen -- a hundred and seventy thousand of them -- each with an
+// amount in it and a rate it grows back at, and each already classed as `Harvest.Forage` by the
+// catalogue that says which trade fetches which raw material. Nothing here invents food; it walks
+// to what is there and takes some.
+//
+// FOUND THROUGH THE BLOCK LATTICE, not by walking the world. `NodeField` keeps a count per block
+// per harvest class, so "is there anything to eat near here" is one integer per block instead of a
+// search of every bush -- the same shape as everything else that asks "what is near", and the same
+// reason: a question answered by walking the world is a question that costs the world.
+//
+// AND IT IS ASKED WHEN HUNGER ASKS IT, not every tick. A body carries five years of food; the
+// looking starts when a fifth of that is left, which is the model's own threshold.
+public bundle Agents {
+    public namespace People {
+
+        public class Foraging {
+            // How far out to look, in blocks. Two rings is a hundred and twelve cells across --
+            // further than a person will walk before starving, and bounded because an unbounded
+            // search is the defect this project has already paid for twice.
+            public static fixed int LOOK_BLOCKS = 2;
+            // How much a person takes when they reach it. A bush holds forty.
+            public static fixed int TAKE = 12;
+            // What one unit of food is worth to a body, out of a hundred.
+            public static fixed int A_MEAL = 25;
+            // How near counts as being at the food.
+            public static fixed float AT_HAND = 1.2;
+            // One in this many hungry people looks for food per tick, spread by slot. The looking
+            // walks up to five blocks' worth of cells, so everybody looking at once is a spike --
+            // the same lesson the route search taught two slices ago.
+            public static fixed int LOOK_EVERY = 30;
+
+            private static mutable long gathered;
+            private static mutable long meals;
+            private static mutable long noneFound;
+
+            // The same counters the run prints, for the checks to read -- a test that keeps its own
+            // tally is a test that can pass while the number a person sees is wrong.
+            public static method gatheredSoFar() returns long {
+                return gathered;
+            }
+
+            public static method mealsSoFar() returns long {
+                return meals;
+            }
+
+            public static method foundNothingSoFar() returns long {
+                return noneFound;
+            }
+
+            public static method report() returns void {
+                System.IO.Console.println($"folk food: {gathered} gathered, {meals} eaten, {noneFound} found nothing in reach");
+                return;
+            }
+
+            // ONE TICK OF LOOKING FOR FOOD AND EATING IT.
+            public static method tick(Population* folk, Grid* g, NodeField* nodes, Waymap* ways,
+                                      long at) returns void {
+                int n = folk.count();
+                if (n < 1) {
+                    return;
+                }
+                BlockGrid* lat = folk.standing().grid();
+                int forage = cast<int>(Harvest.Forage);
+                int phase = cast<int>(at % cast<long>(Foraging.LOOK_EVERY));
+                mutable int slot = phase;
+                while (slot < n) {
+                    AgentId who = cast<AgentId>(slot);
+                    Agent* one = folk.at(who);
+                    slot = slot + Foraging.LOOK_EVERY;
+                    // EAT FIRST, AND OUT OF ITS OWN HANDS. Somebody carrying food and going hungry
+                    // is the one thing here that would be absurd to watch.
+                    if (one.body.fed.value() < Body.FULL - Foraging.A_MEAL
+                        && !one.inventory.emptyHanded()) {
+                        one.body.fed = one.body.fed + Foraging.A_MEAL;
+                        one.inventory.howMany = one.inventory.howMany - 1;
+                        if (one.inventory.howMany <= 0) {
+                            one.inventory.dropAll();
+                        }
+                        meals = meals + cast<long>(1);
+                        continue;
+                    }
+                    if (one.body.fed.value() > Body.PECKISH || !one.inventory.emptyHanded()) {
+                        continue;   // not hungry, or already carrying what it needs
+                    }
+                    // AT THE FOOD? Take some. A node it is standing on is a node it can pick from.
+                    int here = nodes.nodeAt(cast<int>(one.x()), cast<int>(one.y()), forage);
+                    if (here >= 0) {
+                        int took = nodes.harvest(here, Foraging.TAKE);
+                        if (took > 0) {
+                            one.inventory.carrying = Nodes.gives(nodes.kindAt(here));
+                            one.inventory.howMany = took;
+                            gathered = gathered + cast<long>(took);
+                            one.journey.going = false;
+                            continue;
+                        }
+                    }
+                    if (one.journey.going) {
+                        continue;   // already on its way somewhere
+                    }
+                    // LOOK FOR THE NEAREST THING TO EAT, and set out for it.
+                    int found = Foraging.nearestFood(nodes, lat, one.x(), one.y(), forage);
+                    if (found < 0) {
+                        noneFound = noneFound + cast<long>(1);
+                        continue;
+                    }
+                    Walking.setOut(folk, g, ways, who, nodes.xAt(found), nodes.yAt(found));
+                }
+                return;
+            }
+
+            // THE NEAREST LIVE FORAGE NODE, or -1 if there is none within reach.
+            //
+            // BLOCKS FIRST, CELLS ONLY INSIDE A BLOCK THAT HAS SOMETHING. The count per block is one
+            // integer; a block with nothing in it costs that and no more. Without it this is a scan
+            // of twelve thousand cells for every hungry person.
+            private static method nearestFood(NodeField* nodes, BlockGrid* lat, float px, float py,
+                                              int forage) returns int {
+                int bx = lat.ofCellClamped(cast<int>(px), cast<int>(py)) % lat.cols();
+                int by = lat.ofCellClamped(cast<int>(px), cast<int>(py)) / lat.cols();
+                mutable int best = 0 - 1;
+                mutable float bestGap = 0.0;
+                for (int ring in 0..Foraging.LOOK_BLOCKS + 1) {
+                    for (int dy in 0 - ring..ring + 1) {
+                        for (int dx in 0 - ring..ring + 1) {
+                            // Only the edge of each ring: the inside was searched by the ring before.
+                            if (ring > 0 && dx > 0 - ring && dx < ring && dy > 0 - ring && dy < ring) {
+                                continue;
+                            }
+                            int nbx = bx + dx;
+                            int nby = by + dy;
+                            if (!lat.holds(nbx, nby)) {
+                                continue;
+                            }
+                            if (nodes.inBlock(nbx, nby, forage) < 1) {
+                                continue;
+                            }
+                            int ox = lat.originX(lat.at(nbx, nby));
+                            int oy = lat.originY(lat.at(nbx, nby));
+                            for (int cy in oy..oy + BlockGrid.SIDE) {
+                                for (int cx in ox..ox + BlockGrid.SIDE) {
+                                    int i = nodes.nodeAt(cx, cy, forage);
+                                    if (i < 0) {
+                                        continue;
+                                    }
+                                    float ddx = nodes.xAt(i) - px;
+                                    float ddy = nodes.yAt(i) - py;
+                                    float gap = ddx * ddx + ddy * ddy;
+                                    if (best < 0 || gap < bestGap) {
+                                        best = i;
+                                        bestGap = gap;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // A ring that found something is the nearest ring that has anything: nothing in
+                    // a further ring can be closer than the width of the one already searched.
+                    if (best >= 0) {
+                        return best;
+                    }
+                }
+                return best;
+            }
+        }
+    }
+}
