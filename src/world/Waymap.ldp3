@@ -1,0 +1,496 @@
+import System.IO.Console;
+import Agents.World.Grid;
+import Agents.World.BlockGrid;
+import Agents.World.Biomes;
+program AgentsExe;
+
+// HOW TO GET THERE, OVER BLOCKS, AND WHAT IT COSTS TO CROSS EACH ONE.
+//
+// THE BOUND IS THE POINT OF THIS FILE. The previous build's agents span against walls, and the
+// ledger's account of it is blunt: a search with no bound was written once and then trusted
+// everywhere. So every limit here is a named constant with the reason beside it, the search cannot
+// run longer than one of them, and a search that gives up SAYS SO -- a walker that quietly fails to
+// find a way looks exactly like a walker that has decided to stand still, which is the version of
+// this defect that survives for months.
+//
+// THREE BOUNDS, AND THE FIRST ONE COSTS NOTHING:
+//
+//   1. NOT THE SAME LANDMASS, NOT A SEARCH. `Landmasses` already labels every block with the
+//      connected component of walkable ground it belongs to, so "can a person walk there at all" is
+//      two array reads. Without it, a walk from one continent to another explores every block on the
+//      first continent before failing -- the most expensive possible way to answer a question that
+//      was already known.
+//   2. A CAP ON BLOCKS VISITED. Even inside one continent a search across it is thousands of
+//      blocks, and a walker only needs the NEXT step. Past the cap it gives up.
+//   3. OVER BLOCKS AND NOT CELLS. A block is sixteen cells square, so a continent is ten thousand
+//      blocks rather than two and a half million cells -- the same trade `Landmasses` makes, for the
+//      same reason, on the same lattice.
+//
+// AND THE ROUTE IS NOT STORED. The search answers the NEXT waypoint, and a walker asks again when it
+// gets there. A stored path is a list per agent, and a list per agent is an allocator per agent --
+// which is the one thing the layout design says could never be afforded.
+//
+// COST, NOT PERMISSION, which is the model's own rule: mountains and swamps are crossable and slow,
+// so a walker goes around them unless the way round is longer than the way through. That falls out
+// of least-cost search without a single special case -- and `Biomes.pace` already holds the numbers,
+// so there is no second table here to disagree with it.
+public bundle Agents {
+    public namespace World {
+
+        public class Waymap {
+            // How many blocks one search may look at before it gives up. Twelve hundred is a
+            // hundred-block-wide region -- far more than a walker needs to pick its next step, and
+            // small enough that a thousand walkers replanning cannot eat a frame.
+            public static fixed int LOOK_AT_MOST = 1200;
+            // The most a block can cost to cross, and the number of dials the queue needs. Costs are
+            // small integers so the queue is an array of buckets rather than a heap: cheaper, and
+            // simpler to bound.
+            public static fixed int DEAREST = 8;
+            public static fixed int NOWHERE = 0 - 1;
+
+            private mutable Grid* world;
+            private mutable BlockGrid* lattice;
+            // Per block: what it costs to cross, or NOWHERE for blocks with no walkable ground.
+            private mutable int[] toll;
+            // The search's own scratch, kept between searches so a search allocates nothing.
+            private mutable int[] cameFrom;
+            private mutable int[] spent;
+            private mutable int[] seenOn;     // which search stamped this block, so no clearing pass
+            private mutable int[] dialHead;   // bucket queue: first block at each distance
+            private mutable int[] nextInDial;
+            private mutable int stamp;
+            // How many searches were asked for, and how many gave up. A search that fails is a
+            // person who stands still, so the count is the difference between "the model says stay"
+            // and "the search could not answer".
+            private mutable long asked;
+            private mutable long gaveUp;
+
+            public constructor Waymap(Grid* world, BlockGrid* lattice) {
+                this.world = world;
+                this.lattice = lattice;
+                int n = lattice.count();
+                toll = new int[n]();
+                cameFrom = new int[n]();
+                spent = new int[n]();
+                seenOn = new int[n]();
+                nextInDial = new int[n]();
+                dialHead = new int[Waymap.LOOK_AT_MOST * Waymap.DEAREST + 2]();
+                stamp = 0;
+                asked = cast<long>(0);
+                gaveUp = cast<long>(0);
+                // The fine search's own scratch, made once and reused by every search that ever
+                // runs. A quarter of a megabyte for the life of the world, and no allocation in a
+                // walk -- the same bargain as the coarse arrays above.
+                int win = Waymap.WINDOW * Waymap.WINDOW;
+                cellFrom = new int[win]();
+                cellSpent = new int[win]();
+                cellSeen = new int[win]();
+                cellNext = new int[win]();
+                cellDial = new int[Waymap.FURTHEST + 2]();
+                cellStamp = 0;
+                measure();
+            }
+
+            public destructor ~Waymap() returns void {
+                delete toll;
+                delete cameFrom;
+                delete spent;
+                delete seenOn;
+                delete nextInDial;
+                delete dialHead;
+                delete cellFrom;
+                delete cellSpent;
+                delete cellSeen;
+                delete cellNext;
+                delete cellDial;
+                return;
+            }
+
+            // WHAT EVERY BLOCK COSTS TO CROSS, worked out once when the ground is final.
+            //
+            // The mean of the cells in it, because a block is sixteen cells and a walker crosses
+            // whatever is in the way: a block that is half mountain genuinely does cost more than a
+            // block of meadow, and a block whose centre happens to be a peak does not cost more than
+            // one whose centre happens to be the pass beside it. Sampling the centre alone was the
+            // first version and it made single-cell details decide continent-wide routes.
+            private method measure() returns void {
+                int side = BlockGrid.SIDE;
+                for (int b in 0..lattice.count()) {
+                    int cx = lattice.originX(b);
+                    int cy = lattice.originY(b);
+                    mutable int walkables = 0;
+                    mutable float sum = 0.0;
+                    for (int y in 0..side) {
+                        for (int x in 0..side) {
+                            int px = cx + x;
+                            int py = cy + y;
+                            if (px >= world.width() || py >= world.height()) {
+                                continue;
+                            }
+                            int biome = world.biomeAt(px, py);
+                            if (Biomes.walkable(biome)) {
+                                walkables = walkables + 1;
+                                sum = sum + Biomes.pace(biome);
+                            }
+                        }
+                    }
+                    if (walkables == 0) {
+                        toll[b] = Waymap.NOWHERE;
+                    } else {
+                        // Cost is the reciprocal of pace: half speed is twice the cost. Rounded into
+                        // small integers so the queue can be buckets, and never zero.
+                        float pace = sum / cast<float>(walkables);
+                        mutable int cost = cast<int>(1.0 / pace + 0.5);
+                        if (cost < 1) {
+                            cost = 1;
+                        }
+                        if (cost > Waymap.DEAREST) {
+                            cost = Waymap.DEAREST;
+                        }
+                        toll[b] = cost;
+                    }
+                }
+                return;
+            }
+
+            public method tollOf(int block) returns int {
+                return toll[block];
+            }
+
+            public method searchesAsked() returns long {
+                return asked;
+            }
+
+            public method searchesGivenUp() returns long {
+                return gaveUp;
+            }
+
+            // THE NEXT BLOCK TO HEAD FOR, on the cheapest way from one block to another. NOWHERE if
+            // there is no way, or if the search hit its bound before finding one.
+            //
+            // Least-cost, so a mountain range is walked around when going round is cheaper and
+            // through when it is not -- which is the model's rule, and it needs no rule of its own
+            // here because it IS the arithmetic.
+            public method nextBlockToward(int from, int to) returns int {
+                asked = asked + cast<long>(1);
+                if (from < 0 || to < 0 || from >= lattice.count() || to >= lattice.count()) {
+                    return Waymap.NOWHERE;
+                }
+                if (from == to) {
+                    return to;
+                }
+                if (toll[from] == Waymap.NOWHERE || toll[to] == Waymap.NOWHERE) {
+                    return Waymap.NOWHERE;
+                }
+                // THE FIRST BOUND, AND IT COSTS TWO READS: different continents, no walk. Without
+                // this the search below explores the whole of this one before admitting it.
+                if (world.massAt(lattice.originX(from), lattice.originY(from))
+                    != world.massAt(lattice.originX(to), lattice.originY(to))) {
+                    gaveUp = gaveUp + cast<long>(1);
+                    return Waymap.NOWHERE;
+                }
+                stamp = stamp + 1;
+                int dials = Waymap.LOOK_AT_MOST * Waymap.DEAREST + 2;
+                for (int d in 0..dials) {
+                    dialHead[d] = Waymap.NOWHERE;
+                }
+                seenOn[from] = stamp;
+                spent[from] = 0;
+                cameFrom[from] = Waymap.NOWHERE;
+                dialHead[0] = from;
+                nextInDial[from] = Waymap.NOWHERE;
+                mutable int looked = 0;
+                mutable int reach = 0;
+                while (reach < dials) {
+                    mutable int here = dialHead[reach];
+                    if (here == Waymap.NOWHERE) {
+                        reach = reach + 1;
+                        continue;
+                    }
+                    dialHead[reach] = nextInDial[here];
+                    // A block reached again more cheaply since it was queued: the stale copy is
+                    // dropped rather than removed from the queue, which is what makes a bucket
+                    // queue simple enough to bound.
+                    if (spent[here] != reach) {
+                        continue;
+                    }
+                    if (here == to) {
+                        return Waymap.firstStepOf(cameFrom, here, from);
+                    }
+                    looked = looked + 1;
+                    if (looked >= Waymap.LOOK_AT_MOST) {
+                        // THE SECOND BOUND. It gave up; it says so, and the caller decides what a
+                        // person does when there is no known way -- which is a decision, not a
+                        // silence.
+                        gaveUp = gaveUp + cast<long>(1);
+                        return Waymap.NOWHERE;
+                    }
+                    int col = lattice.colOf(here);
+                    int row = lattice.rowOf(here);
+                    for (int side in 0..4) {
+                        mutable int ncol = col;
+                        mutable int nrow = row;
+                        if (side == 0) { ncol = col - 1; }
+                        if (side == 1) { ncol = col + 1; }
+                        if (side == 2) { nrow = row - 1; }
+                        if (side == 3) { nrow = row + 1; }
+                        if (!lattice.holds(ncol, nrow)) {
+                            continue;
+                        }
+                        int there = lattice.at(ncol, nrow);
+                        if (toll[there] == Waymap.NOWHERE) {
+                            continue;
+                        }
+                        int cost = reach + toll[there];
+                        if (cost >= dials) {
+                            continue;
+                        }
+                        if (seenOn[there] == stamp && spent[there] <= cost) {
+                            continue;
+                        }
+                        seenOn[there] = stamp;
+                        spent[there] = cost;
+                        cameFrom[there] = here;
+                        nextInDial[there] = dialHead[cost];
+                        dialHead[cost] = there;
+                    }
+                }
+                gaveUp = gaveUp + cast<long>(1);
+                return Waymap.NOWHERE;
+            }
+
+            // Walk the trail back from the destination to the block after the start -- which is the
+            // one thing the caller wanted.
+            private static method firstStepOf(int[] cameFrom, int at, int from) returns int {
+                mutable int here = at;
+                while (cameFrom[here] != from && cameFrom[here] != Waymap.NOWHERE) {
+                    here = cameFrom[here];
+                }
+                return here;
+            }
+
+            // ---- and the same question over CELLS, in a window around the walker ------------------
+            //
+            // WHY BOTH. A block is sixteen cells and counts as crossable if any cell in it is, so the
+            // search above will happily route a walker through a block that is mostly lake -- and
+            // then the walker meets the water and cannot pass. That is not a bug in the block search;
+            // it is what a coarse map IS, and it is exactly the gap the previous build fell into: its
+            // walkers slid along whatever they met until somebody watched them spin.
+            //
+            // So the blocks say which way the journey lies, and this says where the next few steps
+            // actually go, over real cells, with the ground read exactly. It is bounded by a WINDOW
+            // rather than by a visit count -- a square around the walker, sized once -- so the memory
+            // is fixed, the work is capped, and both are the same number every time.
+            //
+            // AND IT AIMS RATHER THAN ARRIVES. The destination is usually outside the window, so the
+            // search fills the window and then picks the reachable cell that is nearest the aim: the
+            // best progress available from where the walker is standing. If nothing in the window is
+            // nearer than where it started, there is no local way on -- and it says so, which is what
+            // makes the walker give up instead of pressing against the ground forever.
+            // The square of ground the fine search looks at, around the walker. A hundred and
+            // twenty-eight cells across: wide enough to get round a lake, a headland or a mountain,
+            // and small enough that the arrays are a quarter of a megabyte and never grow.
+            public static fixed int WINDOW = 128;
+            // How far along the trail the walker is sent before it asks again. One cell means a
+            // search every forty ticks per person, which is thousands a minute for a crowd; the
+            // whole trail means walking a straight line to a far place, meeting everything the
+            // trail was avoiding. Eight cells is a few seconds of walking.
+            public static fixed int LOOKAHEAD = 8;
+            // THE THIRD BOUND: the dearest a local way on may cost before it stops being one. Four
+            // crossings of the window -- a path that winds more than that is not the way round
+            // something, it is a maze, and a walker that cannot find its way out of one in four
+            // window-widths should say so and stop rather than search on.
+            //
+            // It is also what the queue costs: the buckets are cleared at the start of every search,
+            // so this number IS the per-search overhead. Sized from the window rather than from the
+            // cells in it -- 131,072 buckets cleared per search cost more than the search did.
+            public static fixed int FURTHEST = 4096;
+            // How many cells one fine search may settle before it answers with the best it has --
+            // and it is the window, deliberately, rather than a smaller number.
+            //
+            // A TIGHTER CAP CHANGES THE ANSWER, NOT THE COST, which is the thing to be careful of.
+            // Four thousand was tried: a walker facing a bay eighty cells wide settled the four
+            // thousand cells nearest itself, none of which was round the far end, and answered with
+            // the shore -- so it walked to the water and gave up, with the way round inside the
+            // window it had just refused to look at. The window is the bound; the search stops when
+            // it reaches the aim, and the aim is usually a few cells away.
+            public static fixed int CELLS_AT_MOST = 16384;
+
+            private mutable int[] cellFrom;
+            private mutable int[] cellSpent;
+            private mutable int[] cellSeen;
+            private mutable int[] cellNext;
+            private mutable int[] cellDial;
+            private mutable int cellStamp;
+
+            // WHETHER THE FINE SEARCH CAN SEE A PLACE FROM ANOTHER: whether it falls inside the
+            // window the search would use. Asked by a walker deciding whether to aim at its
+            // destination or at the coarse route's next block.
+            //
+            // IT LIVES HERE BECAUSE THE WINDOW DOES. Working it out at the call site means the
+            // window's arithmetic written twice -- and the day one of them changes, a walker aims at
+            // a destination the search cannot reach and gives up in sight of it.
+            public method sees(int fromX, int fromY, int x, int y) returns boolean {
+                int wx = Waymap.windowFrom(fromX, world.width());
+                int wy = Waymap.windowFrom(fromY, world.height());
+                return x >= wx && y >= wy && x < wx + Waymap.WINDOW && y < wy + Waymap.WINDOW;
+            }
+
+            // The window's corner on one axis: centred on the walker, pinned inside the world.
+            private static method windowFrom(int at, int span) returns int {
+                mutable int from = at - Waymap.WINDOW / 2;
+                if (from + Waymap.WINDOW > span) {
+                    from = span - Waymap.WINDOW;
+                }
+                if (from < 0) {
+                    from = 0;
+                }
+                return from;
+            }
+
+            // The next cell to head for on the way toward an aim, packed as y * width + x, or
+            // NOWHERE when the window holds no way to make progress.
+            public method nextCellToward(int fromX, int fromY, int aimX, int aimY) returns int {
+                asked = asked + cast<long>(1);
+                // The window, pinned inside the world -- worked out in the one place that knows it.
+                int wx = Waymap.windowFrom(fromX, world.width());
+                int wy = Waymap.windowFrom(fromY, world.height());
+                int startLocal = (fromY - wy) * Waymap.WINDOW + (fromX - wx);
+                if (fromX < wx || fromY < wy || fromX >= wx + Waymap.WINDOW
+                    || fromY >= wy + Waymap.WINDOW) {
+                    gaveUp = gaveUp + cast<long>(1);
+                    return Waymap.NOWHERE;
+                }
+                cellStamp = cellStamp + 1;
+                int dials = Waymap.FURTHEST + 2;
+                for (int d in 0..dials) {
+                    cellDial[d] = Waymap.NOWHERE;
+                }
+                cellSeen[startLocal] = cellStamp;
+                cellSpent[startLocal] = 0;
+                cellFrom[startLocal] = Waymap.NOWHERE;
+                cellDial[0] = startLocal;
+                cellNext[startLocal] = Waymap.NOWHERE;
+                // The best progress found so far: nearest the aim, starting from where it stands.
+                mutable int bestLocal = startLocal;
+                mutable long bestGap = Waymap.gapTo(fromX, fromY, aimX, aimY);
+                mutable int looked = 0;
+                mutable int reach = 0;
+                while (reach < dials) {
+                    mutable int here = cellDial[reach];
+                    if (here == Waymap.NOWHERE) {
+                        reach = reach + 1;
+                        continue;
+                    }
+                    cellDial[reach] = cellNext[here];
+                    if (cellSpent[here] != reach) {
+                        continue;
+                    }
+                    int hx = wx + here % Waymap.WINDOW;
+                    int hy = wy + here / Waymap.WINDOW;
+                    long gap = Waymap.gapTo(hx, hy, aimX, aimY);
+                    if (gap < bestGap) {
+                        bestGap = gap;
+                        bestLocal = here;
+                    }
+                    // STOP WHEN THERE IS NOTHING BETTER TO FIND. Two reasons to stop, and without
+                    // either of them this search settles every cell in the window on every call --
+                    // sixteen thousand of them, for a walk of eight.
+                    //
+                    //   * standing on the aim: no cell can be nearer than nought.
+                    //   * looked at enough: a walk is eight cells, so four thousand settled cells is
+                    //     already far more ground than the answer can come from. It is a bound and
+                    //     not an optimisation -- past it the search stops, with the best it has.
+                    //
+                    // Measured before this: eighteen thousand searches in ten seconds of play, and
+                    // the people's walk was four fifths of the whole world tick.
+                    if (hx == aimX && hy == aimY) {
+                        reach = dials;
+                        continue;
+                    }
+                    looked = looked + 1;
+                    if (looked >= Waymap.CELLS_AT_MOST) {
+                        reach = dials;
+                        continue;
+                    }
+                    for (int side in 0..4) {
+                        mutable int nx = hx;
+                        mutable int ny = hy;
+                        if (side == 0) { nx = hx - 1; }
+                        if (side == 1) { nx = hx + 1; }
+                        if (side == 2) { ny = hy - 1; }
+                        if (side == 3) { ny = hy + 1; }
+                        if (nx < wx || ny < wy || nx >= wx + Waymap.WINDOW
+                            || ny >= wy + Waymap.WINDOW) {
+                            continue;
+                        }
+                        if (nx < 0 || ny < 0 || nx >= world.width() || ny >= world.height()) {
+                            continue;
+                        }
+                        int biome = world.biomeAt(nx, ny);
+                        if (!Biomes.walkable(biome)) {
+                            continue;
+                        }
+                        mutable int toCross = cast<int>(1.0 / Biomes.pace(biome) + 0.5);
+                        if (toCross < 1) { toCross = 1; }
+                        if (toCross > Waymap.DEAREST) { toCross = Waymap.DEAREST; }
+                        int cost = reach + toCross;
+                        if (cost >= dials) {
+                            continue;
+                        }
+                        int there = (ny - wy) * Waymap.WINDOW + (nx - wx);
+                        if (cellSeen[there] == cellStamp && cellSpent[there] <= cost) {
+                            continue;
+                        }
+                        cellSeen[there] = cellStamp;
+                        cellSpent[there] = cost;
+                        cellFrom[there] = here;
+                        cellNext[there] = cellDial[cost];
+                        cellDial[cost] = there;
+                    }
+                }
+                if (bestLocal == startLocal) {
+                    // Nowhere in the window is nearer the aim than where it already stands.
+                    gaveUp = gaveUp + cast<long>(1);
+                    return Waymap.NOWHERE;
+                }
+                // A FEW STEPS ALONG THE TRAIL, not the whole of it and not one cell. One cell means
+                // a search every cell -- forty ticks apart at a walking pace, which is thousands of
+                // searches a minute for a crowd. The whole of it means walking a straight line to a
+                // far place and meeting everything the trail was avoiding.
+                // THE TRAIL IS WALKED BACKWARDS AND THE COUNT IS FROM THE FRONT, which is the one
+                // place this is easy to get exactly wrong: the cell wanted is LOOKAHEAD steps from
+                // where the walker IS, and walking back from the far end by LOOKAHEAD gives the cell
+                // just before the DESTINATION instead. That version handed a walker a waypoint on
+                // the other side of a lake, so it walked into the near shore and gave up there --
+                // with the whole way round already found and thrown away.
+                mutable int at = bestLocal;
+                mutable int back = 0;
+                while (cellFrom[at] != Waymap.NOWHERE) {
+                    back = back + 1;
+                    at = cellFrom[at];
+                }
+                mutable int want = Waymap.LOOKAHEAD;
+                if (want > back) {
+                    want = back;
+                }
+                at = bestLocal;
+                mutable int steps = back;
+                while (steps > want && cellFrom[at] != Waymap.NOWHERE) {
+                    at = cellFrom[at];
+                    steps = steps - 1;
+                }
+                int cx = wx + at % Waymap.WINDOW;
+                int cy = wy + at / Waymap.WINDOW;
+                return cy * world.width() + cx;
+            }
+
+            // Squared distance in cells, as a long: a world is wider than an int square can hold.
+            private static method gapTo(int ax, int ay, int bx, int by) returns long {
+                long dx = cast<long>(ax - bx);
+                long dy = cast<long>(ay - by);
+                return dx * dx + dy * dy;
+            }
+        }
+    }
+}

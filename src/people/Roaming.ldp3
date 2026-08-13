@@ -1,0 +1,75 @@
+import System.IO.Console;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Walking;
+import Agents.World.Grid;
+import Agents.World.Biomes;
+import Agents.World.Waymap;
+import Agents.World.Rng;
+import Agents.World.LandMath;
+program AgentsExe;
+
+// A BAND THAT DOES NOT STAND STILL, which is what makes the walking visible and the route search
+// real rather than written-and-never-run.
+//
+// WHY THIS IS HERE AND NOT LATER. A person walks because they are hungry, or because there is work
+// somewhere -- and hunger is the next slice and work is the one after that. Written in that order,
+// the walking would sit unused for two slices, and code nobody runs is code nobody knows is wrong:
+// the previous build's pathing was written that way and its defects surfaced a month later, in a
+// crowd, as agents spinning against walls.
+//
+// So the band wanders. Somebody picks a spot within reach, walks there around whatever is in the
+// way, and stands a while before picking another. It is not the reason people will walk -- when
+// hunger arrives, THAT is why they set out -- but it exercises every line of the walk on the real
+// map, in the window, from this slice on.
+public bundle Agents {
+    public namespace People {
+
+        // How far a wander goes, in cells. Far enough to cross a few blocks -- so the route search
+        // is genuinely searching -- and near enough that the band stays a band.
+        public class Roaming {
+            public static fixed float WANDER = 40.0;
+            // One person decides per this many ticks, so a band of two dozen sets somebody off
+            // about twice a second at gear one and nobody moves in lockstep.
+            public static fixed int DECIDE_EVERY = 30;
+            // How many places to try before giving up this tick. Bounded: the ground may be a
+            // peninsula, and a loop that searches until it succeeds is the defect this whole slice
+            // is written against.
+            public static fixed int TRIES = 6;
+
+            public static method tick(Population* folk, Grid* g, Waymap* ways, long at, Rng* rng)
+                    returns void {
+                if (folk.count() < 1) {
+                    return;
+                }
+                if (at % cast<long>(Roaming.DECIDE_EVERY) != cast<long>(0)) {
+                    return;
+                }
+                // Whose turn it is, spread over the population rather than everybody at once.
+                int slot = cast<int>(at / cast<long>(Roaming.DECIDE_EVERY)) % folk.count();
+                AgentId who = cast<AgentId>(slot);
+                Agent* one = folk.at(who);
+                if (one.journey.going) {
+                    return;
+                }
+                mutable int tries = 0;
+                while (tries < Roaming.TRIES) {
+                    tries = tries + 1;
+                    float ang = rng.unit() * 6.2831853;
+                    float far = rng.unit() * Roaming.WANDER;
+                    float tx = one.x() + LandMath.cos(ang) * far;
+                    float ty = one.y() + LandMath.sin(ang) * far;
+                    if (tx < 1.0 || ty < 1.0 || tx >= cast<float>(g.width()) - 1.0
+                        || ty >= cast<float>(g.height()) - 1.0) {
+                        continue;
+                    }
+                    if (Walking.setOut(folk, g, ways, who, tx, ty)) {
+                        return;
+                    }
+                }
+                return;
+            }
+        }
+    }
+}

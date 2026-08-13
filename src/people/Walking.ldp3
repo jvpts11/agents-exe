@@ -1,0 +1,263 @@
+import System.IO.Console;
+import System.Math.Math;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Journey;
+import Agents.World.Grid;
+import Agents.World.BlockGrid;
+import Agents.World.Biomes;
+import Agents.World.Waymap;
+import Agents.World.LandMath;
+program AgentsExe;
+
+// PEOPLE WALK, AND THE GROUND DECIDES HOW FAST.
+//
+// EVERY WALKER EVERY TICK, at its own pace, which is the lesson the fauna paid for: a body that
+// moves once every fifteenth tick does not walk, it appears somewhere else four times a second, and
+// no amount of smoothing in a renderer repairs that. What makes it affordable is that a step is
+// arithmetic on the walker's own bytes -- and when there are enough people to feel it, this pass is
+// a `Shift` and the crew shares it out, exactly as the animals' is.
+//
+// THE GROUND'S RULES ARE THE CATALOGUE'S, not this file's. `Biomes.pace` says how fast each biome is
+// crossed, `Biomes.walkable` says where a body may be at all, `Biomes.swims` says where being there
+// means swimming. Those numbers are already written, already drawn from, and a second copy here
+// would be a second answer that disagrees the day one of them is edited.
+//
+// AND THE WAY ROUND IS FOUND BY COST, not by rules about mountains. `Waymap` searches for the
+// cheapest way over blocks, so a walker goes around a range when going round is cheaper and through
+// it when it is not -- which is the model's sentence, arrived at rather than encoded.
+public bundle Agents {
+    public namespace People {
+
+        public class Walking {
+            // How far a person walks in a tick on ordinary ground, in cells. About one and a half
+            // cells a second at gear one -- a walking pace next to a deer's two and three quarters.
+            public static fixed float PACE = 0.025;
+            // How near the next waypoint counts as reached. A waypoint is a block's middle and a
+            // block is sixteen cells; landing within one is arriving.
+            public static fixed float AT_WAYPOINT = 1.0;
+            // A walker that has been refused this many ticks running gives up on its destination.
+            // BOUNDED IN THE LINE THAT WRITES IT: the previous build's agents span against walls
+            // forever because nothing ever counted the refusals, and a body that cannot make
+            // progress and will not stop trying is indistinguishable from a body that is stuck.
+            public static fixed int PATIENCE = 120;
+            // The least a walker may leave between one route search and the next, in ticks. Half a
+            // second: the ground does not change faster than that, and without a floor a walker
+            // whose way on is short asks on every tick -- which is what turned the people's walk
+            // into four fifths of the world's tick with twenty-four of them in the world.
+            public static fixed int THINK_EVERY = 30;
+
+            // How many arrived, and how many gave up, over the run. A journey that ends because the
+            // ground refused is a different fact from one that ends at its destination, and a world
+            // that reports only the first cannot be asked why nobody ever gets anywhere.
+            private static mutable long arrived;
+            private static mutable long abandoned;
+            private static mutable long refusals;
+
+            public static method report() returns void {
+                System.IO.Console.println($"folk walk: {arrived} arrived, {abandoned} gave up, {refusals} steps refused");
+                return;
+            }
+
+            // SEND SOMEBODY SOMEWHERE. Answers false if there is no way there at all -- another
+            // landmass, or ground nobody may stand on -- which the caller must handle rather than
+            // discover later as a person who never arrives.
+            public static method setOut(Population* folk, Grid* g, Waymap* ways, AgentId who,
+                                        float tx, float ty) returns boolean {
+                if (tx < 0.0 || ty < 0.0 || tx >= cast<float>(g.width())
+                    || ty >= cast<float>(g.height())) {
+                    return false;
+                }
+                if (!Biomes.walkable(g.biomeAt(cast<int>(tx), cast<int>(ty)))) {
+                    return false;
+                }
+                Agent* one = folk.at(who);
+                BlockGrid* lat = folk.standing().grid();
+                int from = lat.ofCellClamped(cast<int>(one.x()), cast<int>(one.y()));
+                int to = lat.ofCellClamped(cast<int>(tx), cast<int>(ty));
+                if (ways.nextBlockToward(from, to) == Waymap.NOWHERE) {
+                    return false;
+                }
+                one.journey.to = vec2(tx, ty);
+                one.journey.going = true;
+                one.journey.balked = 0;
+                // THE WAYPOINT STARTS UNDER ITS OWN FEET, so the first tick of walking asks for a
+                // real one. That is not a trick: whoever is choosing a destination may try several
+                // before one is accepted -- a wanderer picks at random and the sea refuses most of
+                // them -- and running the fine search for every rejected candidate cost six window
+                // searches per decision. The coarse question above is the cheap one and it is the
+                // one that decides whether a place is reachable at all.
+                one.journey.waypoint = vec2(one.x(), one.y());
+                return true;
+            }
+
+            // ONE TICK OF WALKING, FOR EVERYBODY WHO IS GOING SOMEWHERE.
+            public static method tick(Population* folk, Grid* g, Waymap* ways, long at) returns void {
+                for (int slot in 0..folk.count()) {
+                    AgentId who = cast<AgentId>(slot);
+                    Agent* one = folk.at(who);
+                    if (!one.journey.going) {
+                        continue;
+                    }
+                    float px = one.x();
+                    float py = one.y();
+                    // ARRIVED? The destination first, because a walker whose last waypoint IS the
+                    // destination would otherwise stop one waypoint short of it.
+                    float dx = one.journey.to.x - px;
+                    float dy = one.journey.to.y - py;
+                    if (dx * dx + dy * dy
+                        <= Journey.CLOSE_ENOUGH * Journey.CLOSE_ENOUGH) {
+                        one.journey.going = false;
+                        arrived = arrived + cast<long>(1);
+                        continue;
+                    }
+                    // At the waypoint: ask for the next one. The route is never stored -- see
+                    // `Waymap` for why a path per agent is a thing this build cannot have.
+                    mutable float wx = one.journey.waypoint.x - px;
+                    mutable float wy = one.journey.waypoint.y - py;
+                    if (wx * wx + wy * wy <= Walking.AT_WAYPOINT * Walking.AT_WAYPOINT) {
+                        if (at < one.journey.thinkAt) {
+                            // Not allowed to think yet: head straight at the destination for the
+                            // few ticks until it is. A walk of half a second in a straight line is
+                            // what the ground's own refusals are there to catch, and it is what
+                            // stops a walker whose way on is short from asking every tick.
+                            wx = one.journey.to.x - px;
+                            wy = one.journey.to.y - py;
+                        } else {
+                            one.journey.thinkAt = at + cast<long>(Walking.THINK_EVERY);
+                            if (!Walking.aimNext(folk, g, ways, one, px, py)) {
+                                one.journey.going = false;
+                                abandoned = abandoned + cast<long>(1);
+                                continue;
+                            }
+                            wx = one.journey.waypoint.x - px;
+                            wy = one.journey.waypoint.y - py;
+                        }
+                    }
+                    float span = LandMath.sqrt(wx * wx + wy * wy);
+                    if (span < 0.0001) {
+                        continue;
+                    }
+                    // THE GROUND UNDER ITS FEET SETS THE PACE. Rough ground is slow, sea ice is
+                    // quick, and swimming is its own speed -- all of it read from the one table.
+                    float hop = Walking.PACE * Biomes.pace(g.biomeAt(cast<int>(px), cast<int>(py)));
+                    float nx = px + wx / span * hop;
+                    float ny = py + wy / span * hop;
+                    if (Walking.mayStand(g, nx, ny)) {
+                        folk.placeAt(who, nx, ny);
+                        one.whereabouts.facing = vec2(wx / span, wy / span);
+                        one.journey.balked = 0;
+                        continue;
+                    }
+                    // REFUSED. Walk along the edge rather than into it -- the same repair the fauna
+                    // needed, and for the same reason: a body that keeps trying the one direction it
+                    // cannot go stands still against nothing.
+                    refusals = refusals + cast<long>(1);
+                    if (Walking.mayStand(g, px + wx / span * hop, py)) {
+                        folk.placeAt(who, px + wx / span * hop, py);
+                        one.whereabouts.facing = vec2(wx / span, 0.0);
+                        one.journey.balked = 0;
+                        continue;
+                    }
+                    if (Walking.mayStand(g, px, py + wy / span * hop)) {
+                        folk.placeAt(who, px, py + wy / span * hop);
+                        one.whereabouts.facing = vec2(0.0, wy / span);
+                        one.journey.balked = 0;
+                        continue;
+                    }
+                    // AND A WALKER THAT GETS NOWHERE AT ALL FOR LONG ENOUGH STOPS TRYING. Counted,
+                    // so "nobody arrives" is a number somebody can read rather than a mystery.
+                    //
+                    // NOWHERE AT ALL, and not "was refused": a walker edging along a shore is
+                    // refused on every tick of it and is getting somewhere the whole time. Counting
+                    // those as balking made a walker give up two seconds into a coastline it was
+                    // successfully following -- found by printing where it actually was, after two
+                    // wrong guesses at why it stopped.
+                    one.journey.balked = one.journey.balked + 1;
+                    if (one.journey.balked > Walking.PATIENCE) {
+                        one.journey.going = false;
+                        abandoned = abandoned + cast<long>(1);
+                    }
+                }
+                return;
+            }
+
+            // WHERE THE NEXT FEW STEPS GO. Two searches, coarse then fine, and each answers what
+            // only it can:
+            //
+            //   * the BLOCKS say which way the journey lies. That search crosses continents cheaply
+            //     because a block is sixteen cells -- and it is too coarse to trust with the actual
+            //     steps, since a block counts as crossable when any cell in it is, so it will route
+            //     a walker straight through a block that is mostly lake.
+            //   * the CELLS say where the feet actually go, over the real ground, inside a window
+            //     around the walker. That is what gets round the lake.
+            //
+            // Written with only the first, a walker meets the water and slides along it -- which is
+            // what the previous build did, for a month, until somebody watched them spin. Written
+            // with only the second, a walker cannot see past its own window and wanders.
+            private static method aimNext(Population* folk, Grid* g, Waymap* ways, Agent* one,
+                                          float px, float py) returns boolean {
+                BlockGrid* lat = folk.standing().grid();
+                int here = lat.ofCellClamped(cast<int>(px), cast<int>(py));
+                int end = lat.ofCellClamped(cast<int>(one.journey.to.x),
+                                            cast<int>(one.journey.to.y));
+                int block = ways.nextBlockToward(here, end);
+                if (block == Waymap.NOWHERE) {
+                    return false;
+                }
+                // WHAT THE FINE SEARCH AIMS AT, and getting this wrong is a local minimum a walker
+                // never escapes. It aims at the DESTINATION whenever the destination is inside the
+                // window it can see, and only falls back on the coarse route when it is not.
+                //
+                // Aiming always at the coarse waypoint was the first version and it walked people
+                // into the near shore of a lake and left them there: the waypoint was the middle of
+                // a block across the water, the nearest reachable cell to it is the shore, so the
+                // walker reached the shore, found nothing nearer, and gave up -- with the way round
+                // in plain sight inside the same window. The search can see the far side; the aim
+                // was what stopped it looking there.
+                mutable float aimX = one.journey.to.x;
+                mutable float aimY = one.journey.to.y;
+                if (!ways.sees(cast<int>(px), cast<int>(py),
+                               cast<int>(aimX), cast<int>(aimY))) {
+                    vec2 coarse = Walking.middleOf(lat, block, one.journey.to.x,
+                                                   one.journey.to.y, end);
+                    aimX = coarse.x;
+                    aimY = coarse.y;
+                }
+                // (`cell` and not `step`: `step` is a word of the language -- `for x in 0..10 step 2`.)
+                int cell = ways.nextCellToward(cast<int>(px), cast<int>(py),
+                                               cast<int>(aimX), cast<int>(aimY));
+                if (cell == Waymap.NOWHERE) {
+                    return false;
+                }
+                one.journey.waypoint = vec2(cast<float>(cell % g.width()) + 0.5,
+                                            cast<float>(cell / g.width()) + 0.5);
+                return true;
+            }
+
+            // The middle of a block, except for the block the destination is in -- there, the
+            // destination itself, so the last stretch of a walk ends where it was asked to rather
+            // than at the middle of the block it happens to be in.
+            private static method middleOf(BlockGrid* lat, int block, float tx, float ty, int end)
+                    returns vec2 {
+                if (block == end) {
+                    return vec2(tx, ty);
+                }
+                float half = cast<float>(BlockGrid.SIDE) * 0.5;
+                return vec2(cast<float>(lat.originX(block)) + half,
+                            cast<float>(lat.originY(block)) + half);
+            }
+
+            // WHERE A BODY MAY BE: on the map, and on ground a body may stand in or swim in. The
+            // catalogue answers both.
+            private static method mayStand(Grid* g, float x, float y) returns boolean {
+                if (x < 0.0 || y < 0.0 || x >= cast<float>(g.width())
+                    || y >= cast<float>(g.height())) {
+                    return false;
+                }
+                return Biomes.walkable(g.biomeAt(cast<int>(x), cast<int>(y)));
+            }
+        }
+    }
+}

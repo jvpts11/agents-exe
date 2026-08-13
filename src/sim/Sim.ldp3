@@ -10,6 +10,9 @@ import Agents.Sim.Grazing;
 import Agents.Sim.Seeding;
 import Agents.People.Population;
 import Agents.People.Banding;
+import Agents.People.Walking;
+import Agents.People.Roaming;
+import Agents.World.Waymap;
 program AgentsExe;
 
 // THE WORLD, AND THE THING THAT MAKES IT ADVANCE. It owns the layers and it owns the tick.
@@ -65,6 +68,9 @@ public bundle Agents {
             private mutable Wild* beasts;
             // Everybody alive. Made with the world and empty until something sows a band into it.
             private mutable Population* folk;
+            // What every block costs to cross, and the bounded search that reads it. Made when the
+            // ground is final, because it is a fact ABOUT the ground: measured once, read forever.
+            private mutable Waymap* ways;
             // THE WORLD'S OWN DRAW, seeded from the world's seed. Every decision the layers make
             // comes from here, so the same seed replays the same world -- a herd that chose its
             // pasture from a clock would make two runs of "seed 42" different worlds with one name.
@@ -176,9 +182,18 @@ public bundle Agents {
                 return folk;
             }
 
+            // What every block costs to cross, and the search that reads it. Borrowed; it exists
+            // only once the ground does.
+            public method routes() returns Waymap* {
+                return ways;
+            }
+
             public destructor ~Sim() returns void {
                 if (standing) {
                     delete ground;
+                }
+                if (standing) {
+                    delete ways;
                 }
                 delete folk;
                 delete beasts;
@@ -209,6 +224,20 @@ public bundle Agents {
             public method buildWorld(boolean loud) returns void {
                 ground = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, wide, tall, 6, loud);
                 standing = true;
+                // WHICH BLOCKS ARE THE SAME CONTINENT, labelled once, here, because the terrain is
+                // final at this line and nobody has been placed on it yet -- which is what
+                // `labelMasses` asks for in its own comment.
+                //
+                // IT WAS NEVER BEING CALLED. The old simulation called it and went to the bin with
+                // it, leaving the labelling orphaned: every block read as mass ZERO, so the whole
+                // world answered "same continent" and nothing noticed, because nothing asked. The
+                // route search asks -- it is how a walk to another continent is refused in two
+                // reads instead of by exploring this one first -- and an unlabelled map would have
+                // let it search the whole of a continent to find out what a lookup knew.
+                ground.labelMasses();
+                // AND WHAT EACH BLOCK COSTS TO CROSS, measured once here for the same reason. A walk
+                // asks it and never measures anything.
+                ways = new Waymap(ground, folk.standing().grid()) on heap;
                 Seeding.sow(beasts, ground, seed, log);
                 Banding.sow(folk, ground, seed, log);
                 return;
@@ -345,6 +374,12 @@ public bundle Agents {
                 ticked = ticked + 1;
                 if (standing) {
                     Grazing.tick(beasts, ground, ticked, dice, log);
+                    // THE PEOPLE, AFTER THE ANIMALS AND BEFORE ANYTHING READS EITHER. Somebody
+                    // decides where to go, and everybody who is going takes a step -- in that
+                    // order, so a person who sets out this tick starts walking this tick rather
+                    // than standing through one.
+                    Roaming.tick(folk, ground, ways, ticked, dice);
+                    Walking.tick(folk, ground, ways, ticked);
                 }
                 return;
             }

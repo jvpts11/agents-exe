@@ -1,0 +1,191 @@
+import System.Test.Test;
+import System.IO.Console;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Walking;
+import Agents.World.Grid;
+import Agents.World.Biome;
+import Agents.World.Biomes;
+import Agents.World.Waymap;
+program AgentsExe;
+
+// WALKING, AND THE THREE WAYS IT USED TO GO WRONG.
+//
+// The window shows people walking on open ground, which is the case that cannot fail. What a check
+// is for is the cases the window will not show for weeks: a bay that has to be walked around, a
+// target across water, and a search that has to give up rather than run forever. The previous build
+// shipped agents that span against walls, and the ledger's account of why is one sentence -- a
+// search with no bound was written once and then trusted everywhere.
+//
+// THE GROUND IS MADE BY HAND, one biome written into a small grid, for the reason the fauna's own
+// checks give: generating terrain to test a walk makes the test depend on the coastline it happened
+// to land on, and fail for reasons that have nothing to do with walking.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Walks {
+            public static fixed int SIDE = 128;
+
+            // Ground anybody can cross, everywhere.
+            private static method plain() returns Grid* {
+                mutable Grid* g = new Grid(Walks.SIDE, Walks.SIDE) on heap;
+                for (int y in 0..Walks.SIDE) {
+                    for (int x in 0..Walks.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.Prairie));
+                    }
+                }
+                g.labelMasses();
+                return g;
+            }
+
+            [Tag(name: "people")]
+            [Test]
+            public static method a_walker_sets_out_and_arrives() returns void {
+                mutable Grid* g = Walks.plain();
+                Population* folk = new Population(Walks.SIDE, Walks.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                AgentId who = folk.bear(10.5, 10.5);
+                Test.assertTrue(Walking.setOut(folk, g, ways, who, 60.5, 60.5));
+                // Long enough to cross seventy cells at a walking pace, and no longer: a walk that
+                // has not arrived by then is not slow, it is stuck.
+                for (int t in 0..12000) {
+                    Walking.tick(folk, g, ways, cast<long>(t));
+                }
+                Agent* one = folk.at(who);
+                Test.assertFalse(one.journey.going);
+                float dx = one.x() - 60.5;
+                float dy = one.y() - 60.5;
+                Test.assertTrue(dx * dx + dy * dy < 1.0);
+                Test.assertEqual(folk.indexAgrees(), 0);
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+
+            // A BAY IS WALKED AROUND. Water across the middle with a gap at one end: the straight
+            // line is blocked, and a walker that only knows how to slide along an obstacle would
+            // press against it forever. This is the shape that span in the previous build.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_walker_goes_around_water_rather_than_into_it() returns void {
+                mutable Grid* g = Walks.plain();
+                // A wall of ocean from x=0 to x=100 at y=60..68, leaving a gap on the east side.
+                for (int y in 60..68) {
+                    for (int x in 0..100) {
+                        g.setBiome(x, y, cast<int>(Biome.Ocean));
+                    }
+                }
+                g.labelMasses();
+                Population* folk = new Population(Walks.SIDE, Walks.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                AgentId who = folk.bear(20.5, 30.5);
+                // Straight across the water; the only way is round the east end.
+                Test.assertTrue(Walking.setOut(folk, g, ways, who, 20.5, 100.5));
+                for (int t in 0..60000) {
+                    Walking.tick(folk, g, ways, cast<long>(t));
+                }
+                Agent* one = folk.at(who);
+                // IT ARRIVED, which is the whole claim: the only way from one side to the other is
+                // eighty cells east, through the gap, and eighty back west.
+                Test.assertFalse(one.journey.going);
+                // It got to the far side -- which it can only have done by going round.
+                Test.assertTrue(one.y() > 68.0);
+                // AND IT NEVER STOOD IN THE WATER, at any point along the way. Checked here at the
+                // end and by the tick itself at every step: `mayStand` is what allows a move.
+                Test.assertTrue(Biomes.walkable(g.biomeAt(cast<int>(one.x()), cast<int>(one.y()))));
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+
+            // NOBODY SETS OUT FOR THE OPEN SEA. The model's rule: an agent may not have a target in
+            // water it cannot swim, nor cross one on the way.
+            [Tag(name: "people")]
+            [Test]
+            public static method nobody_sets_out_for_water_they_cannot_cross() returns void {
+                mutable Grid* g = Walks.plain();
+                for (int y in 90..110) {
+                    for (int x in 90..110) {
+                        g.setBiome(x, y, cast<int>(Biome.DeepOcean));
+                    }
+                }
+                g.labelMasses();
+                Population* folk = new Population(Walks.SIDE, Walks.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                AgentId who = folk.bear(20.5, 20.5);
+                Test.assertFalse(Walking.setOut(folk, g, ways, who, 100.5, 100.5));
+                Test.assertFalse(folk.at(who).journey.going);
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+
+            // AND NOBODY WALKS TO ANOTHER ISLAND. Two lands with sea between them: the refusal is a
+            // lookup of the landmass labels, not a search that explores the first island and fails.
+            // That is the bound that costs nothing, and it only works because the labelling is
+            // actually run -- it was orphaned when the old simulation was deleted, and every block
+            // read as the same continent until this slice called it again.
+            [Tag(name: "people")]
+            [Test]
+            public static method nobody_walks_to_another_island() returns void {
+                mutable Grid* g = new Grid(Walks.SIDE, Walks.SIDE) on heap;
+                for (int y in 0..Walks.SIDE) {
+                    for (int x in 0..Walks.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.DeepOcean));
+                    }
+                }
+                for (int y in 8..40) {
+                    for (int x in 8..40) {
+                        g.setBiome(x, y, cast<int>(Biome.Prairie));
+                    }
+                }
+                for (int y in 80..120) {
+                    for (int x in 80..120) {
+                        g.setBiome(x, y, cast<int>(Biome.Prairie));
+                    }
+                }
+                g.labelMasses();
+                Population* folk = new Population(Walks.SIDE, Walks.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                AgentId who = folk.bear(20.5, 20.5);
+                long askedBefore = ways.searchesAsked();
+                Test.assertFalse(Walking.setOut(folk, g, ways, who, 100.5, 100.5));
+                // It was refused by ONE question, not by a search that gave up after exploring.
+                Test.assertEqualLong(ways.searchesAsked() - askedBefore, cast<long>(1));
+                Test.assertTrue(ways.searchesGivenUp() > cast<long>(0));
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+
+            // ROUGH GROUND IS GONE AROUND when going round is cheaper, which is the model's sentence
+            // about mountains -- and it is arithmetic here rather than a rule: the search is by cost,
+            // and a mountain costs more per block than the meadow beside it.
+            [Tag(name: "people")]
+            [Test]
+            public static method rough_ground_costs_more_to_cross() returns void {
+                mutable Grid* g = Walks.plain();
+                for (int y in 32..48) {
+                    for (int x in 32..48) {
+                        g.setBiome(x, y, cast<int>(Biome.Mountain));
+                    }
+                }
+                g.labelMasses();
+                Population* folk = new Population(Walks.SIDE, Walks.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                int mountainBlock = folk.standing().grid().ofCell(40, 40);
+                int meadowBlock = folk.standing().grid().ofCell(8, 8);
+                Test.assertTrue(ways.tollOf(mountainBlock) > ways.tollOf(meadowBlock));
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+        }
+    }
+}
