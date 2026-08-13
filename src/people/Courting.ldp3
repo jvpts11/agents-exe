@@ -1,0 +1,256 @@
+import System.IO.Console;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Kinship;
+import Agents.People.Kindred;
+import Agents.People.Relation;
+import Agents.People.Sex;
+import Agents.People.Body;
+import Agents.Sim.BlockChain;
+import Agents.Sim.Clock;
+program AgentsExe;
+
+// PEOPLE MARRY, AND THEN THERE ARE MORE PEOPLE.
+//
+// THE MODEL'S RULES, EACH ONE A LINE: from eighteen; not blood; whoever their orientation lets them
+// court. What is NOT here is the part that needs things this world does not have yet -- cities to
+// move between, nations to be at war -- and those arrive at the line that names them rather than as
+// a rule half-written now.
+//
+// WHO IS NEAR IS ASKED OF THE BLOCK INDEX, which is the third thing to use it and the reason it was
+// built slot-shaped: courtship over a whole population is everybody against everybody, which is
+// twenty-eight million pairs at five thousand people and rises with the square. The chain of the
+// block somebody is standing in holds the handful of candidates, and there is no other kind of
+// candidate: people marry who they meet.
+public bundle Agents {
+    public namespace People {
+
+        public class Courting {
+            // The model's own age.
+            public static fixed int OF_AGE = 18;
+            // And an age past which nobody starts a first marriage. Not in the model; here because
+            // a world without it marries off ninety-year-olds at the same rate as twenty-year-olds,
+            // which reads as a bug even though nothing forbids it.
+            public static fixed int PAST_IT = 55;
+            // One in this many people looks for somebody per tick, spread by slot -- the same
+            // shaping as everything else that would otherwise be a spike.
+            public static fixed int LOOK_EVERY = 60;
+            // How long a pregnancy lasts. Nine months of a year that is the world's only unit.
+            public static fixed int TERM = 900;
+            // How many come of one, at most. The model says one to five, and flags the number as
+            // the one that compounds -- so it is written where it can be found and changed.
+            public static fixed int MOST_BORN = 5;
+            // And how often a year that comes round at all. THE NUMBER THAT DECIDES WHETHER THE
+            // WORLD FILLS OR EMPTIES, which is why it is a named constant on its own line rather
+            // than a literal inside the condition it governs.
+            public static fixed int IN_A_HUNDRED_YEARS = 55;
+
+            // HOW MANY COME OF ONE PREGNANCY, out of a hundred. One, nearly always; five, almost
+            // never; and never nought, which is what a bare `nextInt(MOST_BORN)` would have given
+            // one time in five.
+            private static method howManyCome(int roll) returns byte {
+                if (roll < 84) {
+                    return cast<byte>(1);
+                }
+                if (roll < 95) {
+                    return cast<byte>(2);
+                }
+                if (roll < 98) {
+                    return cast<byte>(3);
+                }
+                if (roll < 99) {
+                    return cast<byte>(4);
+                }
+                return cast<byte>(Courting.MOST_BORN);
+            }
+
+            private static mutable long weddings;
+            private static mutable long births;
+            private static mutable long childrenBorn;
+
+            public static method report() returns void {
+                System.IO.Console.println($"folk kin: {weddings} married, {births} births, {childrenBorn} children born");
+                return;
+            }
+
+            public static method weddingsSoFar() returns long {
+                return weddings;
+            }
+
+            public static method childrenSoFar() returns long {
+                return childrenBorn;
+            }
+
+            public static method tick(Population* folk, long at) returns void {
+                int n = folk.count();
+                if (n < 2) {
+                    return;
+                }
+                BlockChain* chain = folk.standing();
+                int phase = cast<int>(at % cast<long>(Courting.LOOK_EVERY));
+                mutable int slot = phase;
+                while (slot < n) {
+                    int mine = slot;
+                    slot = slot + Courting.LOOK_EVERY;
+                    Agent* one = folk.at(cast<AgentId>(mine));
+                    // WHOEVER'S TURN IT IS THIS TICK is asked BOTH questions -- whether they are
+                    // carrying, and whether they are looking. Delivery used to walk the whole
+                    // population every tick to find the handful who were due, which is the one
+                    // shape this file's own note says nothing here has: a sweep for a rare event.
+                    // A woman is visited every sixtieth tick, so a child arrives at most a minute
+                    // of world late, out of nine months.
+                    Courting.deliver(folk, one, mine, at);
+                    if (!Courting.mayMarry(one) || one.kin.spouse() != Kinship.NOBODY) {
+                        continue;
+                    }
+                    // WHOEVER IS STANDING IN THE SAME BLOCK. People marry who they meet, and this
+                    // is what "meet" means in a world where being near is a chain.
+                    mutable int other = chain.firstIn(chain.blockOf(mine));
+                    while (other != BlockChain.NONE) {
+                        if (other != mine && other < folk.count()) {
+                            Agent* them = folk.at(cast<AgentId>(other));
+                            if (Courting.wouldHave(one, them, mine, other)) {
+                                Kindred.bind(folk, mine, other, Relation.Spouse, Kindred.WED);
+                                weddings = weddings + cast<long>(1);
+                                other = BlockChain.NONE;
+                                continue;
+                            }
+                        }
+                        other = chain.after(other);
+                    }
+                }
+                return;
+            }
+
+            // WHETHER SOMEBODY IS IN A POSITION TO MARRY AT ALL: old enough, young enough, alive
+            // enough. Asked of each of the two before they are asked about each other.
+            private static method mayMarry(Agent* who) returns boolean {
+                return who.body.age >= Courting.OF_AGE && who.body.age <= Courting.PAST_IT;
+            }
+
+            // AND WHETHER THESE TWO WOULD HAVE EACH OTHER. Both orientations have to allow it --
+            // one person's willingness is not a marriage -- and neither may be the other's blood.
+            private static method wouldHave(Agent* a, Agent* b, int aSlot, int bSlot)
+                    returns boolean {
+                if (!Courting.mayMarry(b) || b.kin.spouse() != Kinship.NOBODY) {
+                    return false;
+                }
+                // NOT COUSINS, says the model. What this holds is closer than that -- parents,
+                // children, siblings, uncles, grandparents -- because a cousin is a tie this world
+                // does not name yet, and refusing what it CAN see is the honest half of the rule.
+                if (a.kin.isBloodOf(bSlot) || b.kin.isBloodOf(aSlot)) {
+                    return false;
+                }
+                return a.identity.orientation.courts(a.identity.sex, b.identity.sex)
+                    && b.identity.orientation.courts(b.identity.sex, a.identity.sex);
+            }
+
+            // ---- children --------------------------------------------------------------------
+
+            // A MARRIED WOMAN CARRIES, AND NINE MONTHS LATER THERE ARE CHILDREN.
+            //
+            // PREGNANCY IS NOT A STATE, and the model is explicit: a pregnant person goes on
+            // walking, eating and sleeping, so it is two numbers on the body -- the tick it began
+            // and how many are coming -- rather than something that stops her doing anything.
+            private static method deliver(Population* folk, Agent* her, int i, long at)
+                    returns void {
+                if (cast<int>(her.identity.sex) != cast<int>(Sex.Female)) {
+                    return;
+                }
+                int man = her.kin.spouse();
+                if (man == Kinship.NOBODY) {
+                    return;
+                }
+                // AND WHO SHE IS MARRIED TO, which this asked about exactly as much as the world
+                // asked what sex anybody was: not at all. Two women married to each other were both
+                // bearing children of each other, because "has a spouse" was read as "has a
+                // husband". A conception needs the two the model says it needs; a family made any
+                // other way is a thing this world will have to be told about on purpose.
+                if (cast<int>(folk.at(cast<AgentId>(man)).identity.sex) != cast<int>(Sex.Male)) {
+                    return;
+                }
+                if (her.body.carrying == Body.NOT_CARRYING) {
+                    // HER TURN COMES ROUND ONCE A YEAR, spread across the year by slot so the world
+                    // does not deliver a whole generation on one afternoon -- and when it comes it
+                    // is a CHANCE and not an appointment. Written as a certainty, every married
+                    // woman of age bore a child every single year of her life, which is not a
+                    // family, it is a clock.
+                    if (at % cast<long>(Clock.TICKS_A_YEAR) == cast<long>(i % Clock.TICKS_A_YEAR)
+                        && her.body.age <= Courting.PAST_IT
+                        && folk.roll(100) < Courting.IN_A_HUNDRED_YEARS) {
+                        her.body.carrying = cast<int>(at);
+                        her.body.expecting = Courting.howManyCome(folk.roll(100));
+                    }
+                    return;
+                }
+                if (at - cast<long>(her.body.carrying) < cast<long>(Courting.TERM)) {
+                    return;
+                }
+                // BORN. The child holds what both parents held, and is tied to both of them and to
+                // whatever brothers and sisters it already has -- all of it through `Kindred`, which
+                // writes both ends of every tie there is.
+                int howMany = cast<int>(her.body.expecting);
+                for (int k in 0..howMany) {
+                    Courting.beBorn(folk, i, man, at);
+                }
+                her.body.carrying = Body.NOT_CARRYING;
+                her.body.expecting = cast<byte>(0);
+                births = births + cast<long>(1);
+                return;
+            }
+
+            // ONE CHILD OF TWO PARENTS.
+            private static method beBorn(Population* folk, int mother, int father, long at)
+                    returns void {
+                Agent* mum = folk.at(cast<AgentId>(mother));
+                AgentId kid = folk.bear(mum.x(), mum.y());
+                int childSlot = cast<int>(kid);
+                Agent* child = folk.at(kid);
+                Agent* dad = folk.at(cast<AgentId>(father));
+                // BOTH PARENTS' NATIONS AND BOTH PARENTS' LANGUAGES, which is the whole of
+                // inheritance here and costs the birth one OR of two bitmasks each.
+                child.belonging.nationalities = mum.belonging.nationalities
+                                                | dad.belonging.nationalities;
+                child.belonging.languages = mum.belonging.languages | dad.belonging.languages;
+                // The family name comes from one of them; which one is the world's business and
+                // fifty-fifty is what the model says.
+                child.identity.familyName = mum.identity.familyName;
+                child.identity.culture = mum.identity.culture;
+                child.identity.religion = mum.identity.religion;
+                // NATURE IS THE MEAN OF THE TWO, which is the model's line -- and the deviation
+                // that goes with it arrives when a birth has a die to roll with. Even without it
+                // this is already the thing that matters: a child of two bold parents is bold.
+                child.identity.nature.boldness = Courting.between(mum.identity.nature.boldness,
+                                                                  dad.identity.nature.boldness);
+                child.identity.nature.sociability = Courting.between(mum.identity.nature.sociability,
+                                                                     dad.identity.nature.sociability);
+                child.identity.nature.greed = Courting.between(mum.identity.nature.greed,
+                                                               dad.identity.nature.greed);
+                child.identity.nature.curiosity = Courting.between(mum.identity.nature.curiosity,
+                                                                   dad.identity.nature.curiosity);
+                child.identity.nature.ambition = Courting.between(mum.identity.nature.ambition,
+                                                                  dad.identity.nature.ambition);
+                Kindred.bind(folk, childSlot, mother, Relation.Parent, Kindred.BLOOD);
+                Kindred.bind(folk, childSlot, father, Relation.Parent, Kindred.BLOOD);
+                // AND ITS BROTHERS AND SISTERS: whoever else holds this mother as a parent.
+                Kinship* hers = folk.at(cast<AgentId>(mother)).kin;
+                mutable int link = hers.first();
+                while (link >= 0) {
+                    int who = Kinship.whoOf(hers.at(link));
+                    if (cast<int>(Kinship.howOf(hers.at(link))) == cast<int>(Relation.Child)
+                        && who != childSlot) {
+                        Kindred.bind(folk, childSlot, who, Relation.Sibling, Kindred.BLOOD);
+                    }
+                    link = hers.after(link);
+                }
+                childrenBorn = childrenBorn + cast<long>(1);
+                return;
+            }
+
+            private static method between(ubyte a, ubyte b) returns ubyte {
+                return cast<ubyte>((cast<int>(a) + cast<int>(b)) / 2);
+            }
+        }
+    }
+}

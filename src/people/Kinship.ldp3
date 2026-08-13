@@ -1,0 +1,191 @@
+import Agents.People.Relation;
+import Agents.People.Tie;
+import Agents.Sim.Chain;
+program AgentsExe;
+
+// WHO SOMEBODY KNOWS, AND HOW.
+//
+// A HEAD, NOT A LIST. The links live in a pool every kinship in the world shares, so a newborn who
+// knows two people costs one integer and a matriarch who knows sixty costs the pool. That is the
+// one thing carried over from the data-oriented draft, and the measurement behind it is in `Chain`:
+// a list per person is an allocator per person, eleven per person, five and a half million of them.
+//
+// BOTH ENDS OR NEITHER. `bind` writes the tie on both people, each with its own name for it -- A
+// holds `Parent: B` and B holds `Child: A` -- and `cut` removes both. There is no way to write one
+// half from outside, which is the whole design: this project has already paid for a half-linked
+// relation once (the herd rosters, ledger S0-8), and the failure is not a crash. It is a parent
+// whose child does not know them, found months later as behaviour nobody can explain.
+public bundle Agents {
+    public namespace People {
+
+        public class Kinship {
+            public static fixed int NOBODY = 0 - 1;
+            // The int a tie is packed into: 24 bits of slot, 4 of relation, 4 of affinity.
+            public static fixed int SLOT_BITS = 24;
+            public static fixed int KIND_BITS = 4;
+            public static fixed int MOST_AFFINITY = 15;
+
+            private mutable Chain<Tie>* ties;
+            // WHOSE KINSHIP THIS IS. A tie is written on both sides, so binding needs to know the
+            // slot to write on the other person's side.
+            private mutable int mine;
+
+            public constructor Kinship(int mine) {
+                this.mine = mine;
+                ties = new Chain<Tie>() on heap;
+            }
+
+            public destructor ~Kinship() returns void {
+                ties.clear();       // the links go back to the pool, not to the garbage
+                delete ties;
+                return;
+            }
+
+            public method whose() returns int {
+                return mine;
+            }
+
+            // A DEATH RENUMBERS PEOPLE. The last person alive moves into the dead one's slot, so a
+            // kinship that stores slots has to be told -- and every OTHER kinship that holds a tie
+            // to the moved person has to be told as well, which is `Kindred.moved`. This is the
+            // price of an index rather than a handle, and it is paid in one place.
+            public method renumber(int nowMine) returns void {
+                mine = nowMine;
+                return;
+            }
+
+            // ---- one tie ---------------------------------------------------------------------
+
+            public static method pack(int who, Relation how, int affinity) returns Tie {
+                mutable int warmth = affinity;
+                if (warmth < 0) {
+                    warmth = 0;
+                }
+                if (warmth > Kinship.MOST_AFFINITY) {
+                    warmth = Kinship.MOST_AFFINITY;
+                }
+                return cast<Tie>(who | (cast<int>(how) << Kinship.SLOT_BITS)
+                                 | (warmth << (Kinship.SLOT_BITS + Kinship.KIND_BITS)));
+            }
+
+            public static method whoOf(Tie t) returns int {
+                return cast<int>(t) & 0xFFFFFF;
+            }
+
+            public static method howOf(Tie t) returns Relation {
+                return cast<Relation>((cast<int>(t) >> Kinship.SLOT_BITS) & 0xF);
+            }
+
+            public static method warmthOf(Tie t) returns int {
+                return (cast<int>(t) >> (Kinship.SLOT_BITS + Kinship.KIND_BITS)) & 0xF;
+            }
+
+            // ---- reading them ----------------------------------------------------------------
+
+            public method howMany() returns int {
+                return ties.size();
+            }
+
+            public method first() returns int {
+                return ties.head();
+            }
+
+            public method after(int link) returns int {
+                return ties.next(link);
+            }
+
+            public method at(int link) returns Tie {
+                return ties.at(link);
+            }
+
+            // The tie to somebody, or NOBODY's tie. Walks the chain, which is short: a person knows
+            // tens of people, not thousands.
+            public method howTied(int who) returns Relation {
+                mutable int link = ties.head();
+                while (link >= 0) {
+                    Tie t = ties.at(link);
+                    if (Kinship.whoOf(t) == who) {
+                        return Kinship.howOf(t);
+                    }
+                    link = ties.next(link);
+                }
+                return Relation.Friend;   // meaningless without `knows`; callers ask that first
+            }
+
+            public method knows(int who) returns boolean {
+                mutable int link = ties.head();
+                while (link >= 0) {
+                    if (Kinship.whoOf(ties.at(link)) == who) {
+                        return true;
+                    }
+                    link = ties.next(link);
+                }
+                return false;
+            }
+
+            // Whether this person is somebody's blood -- the question marriage asks, and the reason
+            // `Relation.isBlood` is on the enum rather than in a list here.
+            public method isBloodOf(int who) returns boolean {
+                mutable int link = ties.head();
+                while (link >= 0) {
+                    Tie t = ties.at(link);
+                    if (Kinship.whoOf(t) == who && Kinship.howOf(t).isBlood()) {
+                        return true;
+                    }
+                    link = ties.next(link);
+                }
+                return false;
+            }
+
+            public method spouse() returns int {
+                mutable int link = ties.head();
+                while (link >= 0) {
+                    Tie t = ties.at(link);
+                    if (cast<int>(Kinship.howOf(t)) == cast<int>(Relation.Spouse)) {
+                        return Kinship.whoOf(t);
+                    }
+                    link = ties.next(link);
+                }
+                return Kinship.NOBODY;
+            }
+
+            // ---- writing them, which only `Kindred` may do -----------------------------------
+            //
+            // One side. Not public: a tie written on one side only is the defect this whole file is
+            // shaped against, so the only way in is `Kindred.bind`, which writes both.
+            protected method hold(int who, Relation how, int affinity) returns void {
+                ties.add(Kinship.pack(who, how, affinity));
+                return;
+            }
+
+            protected method letGo(int who) returns void {
+                mutable int link = ties.head();
+                while (link >= 0) {
+                    Tie t = ties.at(link);
+                    int next = ties.next(link);
+                    if (Kinship.whoOf(t) == who) {
+                        ties.remove(t);
+                    }
+                    link = next;
+                }
+                return;
+            }
+
+            // Somebody this person knows has moved to another slot: rewrite the tie, keeping what
+            // it was and how warm.
+            protected method theyMoved(int from, int to) returns void {
+                mutable int link = ties.head();
+                while (link >= 0) {
+                    Tie t = ties.at(link);
+                    int next = ties.next(link);
+                    if (Kinship.whoOf(t) == from) {
+                        ties.remove(t);
+                        ties.add(Kinship.pack(to, Kinship.howOf(t), Kinship.warmthOf(t)));
+                    }
+                    link = next;
+                }
+                return;
+            }
+        }
+    }
+}

@@ -1,0 +1,257 @@
+import System.Test.Test;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Kinship;
+import Agents.People.Kindred;
+import Agents.People.Relation;
+import Agents.People.Courting;
+import Agents.People.Sex;
+import Agents.People.Orientation;
+import Agents.People.Body;
+program AgentsExe;
+
+// FAMILIES, AND THE TWO WAYS THEY GO WRONG SILENTLY.
+//
+// A HALF-WRITTEN TIE DOES NOT CRASH, and a tie that survives a death pointing at the wrong slot does
+// not crash either. Both of them read as a world where somebody's mother is a stranger, months
+// later, with nothing to point at. So the first two checks here are not about marriage at all --
+// they are about the bookkeeping underneath it, which is where the failure would actually live.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Kin {
+            public static fixed int SIDE = 64;
+
+            // Somebody who could marry: of age, and told what sex they are -- which the world did
+            // not do for its first thirty-four years, so every person in it was the zeroth constant
+            // of every enum and not one marriage happened. See `Population.bear`.
+            private static method someone(Population* folk, Sex sex, int age) returns AgentId {
+                AgentId who = folk.bear(10.5, 10.5);
+                Agent* one = folk.at(who);
+                one.identity.sex = sex;
+                one.identity.orientation = Orientation.Straight;
+                one.body.age = age;
+                return who;
+            }
+
+            // Enough ticks for everybody's turn to come round at least once.
+            private static method court(Population* folk) returns void {
+                for (int t in 0..Courting.LOOK_EVERY) {
+                    Courting.tick(folk, cast<long>(t));
+                }
+                return;
+            }
+
+            // ---- the bookkeeping ---------------------------------------------------------------
+
+            // BOTH ENDS, ALWAYS. A holds `Parent: B` and B holds `Child: A`, from one call.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_tie_is_written_at_both_ends() returns void {
+                Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                folk.bear(10.5, 10.5);
+                folk.bear(10.5, 10.5);
+                Kindred.bind(folk, 0, 1, Relation.Parent, Kindred.BLOOD);
+                Kinship* mine = folk.at(cast<AgentId>(0)).kin;
+                Kinship* theirs = folk.at(cast<AgentId>(1)).kin;
+                Test.assertTrue(mine.knows(1));
+                Test.assertTrue(theirs.knows(0));
+                Test.assertEqual(cast<int>(mine.howTied(1)), cast<int>(Relation.Parent));
+                Test.assertEqual(cast<int>(theirs.howTied(0)), cast<int>(Relation.Child));
+                // And both directions are blood, so neither may marry the other.
+                Test.assertTrue(mine.isBloodOf(1));
+                Test.assertTrue(theirs.isBloodOf(0));
+                delete folk;
+                return;
+            }
+
+            // A DEATH DOES NOT LEAVE A WIDOW MARRIED TO WHOEVER TOOK THE GRAVE. The last person
+            // alive moves into the dead one's slot, so a tie that is a slot number is a tie that
+            // silently re-points at a stranger unless every holder is told.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_death_does_not_marry_the_widow_to_the_mover() returns void {
+                Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                folk.bear(10.5, 10.5);      // 0: the wife
+                folk.bear(10.5, 10.5);      // 1: the husband, who dies
+                folk.bear(10.5, 10.5);      // 2: a stranger, who will move into slot 1
+                Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
+                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), 1);
+                folk.bury(cast<AgentId>(1));
+                Test.assertEqual(folk.count(), 2);
+                // The stranger is now in slot 1, and the widow is married to nobody at all.
+                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
+                Test.assertFalse(folk.at(cast<AgentId>(0)).kin.knows(1));
+                Test.assertFalse(folk.at(cast<AgentId>(1)).kin.knows(0));
+                delete folk;
+                return;
+            }
+
+            // AND THE OTHER HALF OF THE SAME CLAIM: a tie to somebody who MOVES follows them. Without
+            // this the check above passes by cutting everything, which is the wrong cure.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_tie_follows_whoever_changes_slot() returns void {
+                Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                folk.bear(10.5, 10.5);      // 0: the wife
+                folk.bear(10.5, 10.5);      // 1: a stranger, who dies
+                folk.bear(10.5, 10.5);      // 2: the husband, who moves into slot 1
+                Kindred.bind(folk, 0, 2, Relation.Spouse, Kindred.WED);
+                folk.bury(cast<AgentId>(1));
+                Test.assertEqual(folk.count(), 2);
+                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), 1);
+                // And he still knows her, from his new slot, as her husband.
+                Kinship* his = folk.at(cast<AgentId>(1)).kin;
+                Test.assertEqual(his.whose(), 1);
+                Test.assertEqual(his.spouse(), 0);
+                delete folk;
+                return;
+            }
+
+            // ---- and the marrying itself -------------------------------------------------------
+
+            // TWO PEOPLE WHO MEET AND MAY HAVE EACH OTHER, DO.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_man_and_a_woman_who_meet_marry() returns void {
+                Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                Kin.someone(folk, Sex.Female, 25);
+                Kin.someone(folk, Sex.Male, 27);
+                Kin.court(folk);
+                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), 1);
+                Test.assertEqual(folk.at(cast<AgentId>(1)).kin.spouse(), 0);
+                delete folk;
+                return;
+            }
+
+            // NOT UNDER EIGHTEEN, which is the model's own line and the only age it names.
+            [Tag(name: "people")]
+            [Test]
+            public static method nobody_marries_a_child() returns void {
+                Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                Kin.someone(folk, Sex.Female, Courting.OF_AGE - 1);
+                Kin.someone(folk, Sex.Male, 30);
+                Kin.court(folk);
+                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
+                Test.assertEqual(folk.at(cast<AgentId>(1)).kin.spouse(), Kinship.NOBODY);
+                delete folk;
+                return;
+            }
+
+            // AND NOT BLOOD. A brother and a sister standing in the same block are exactly the pair
+            // the block index hands to courtship first.
+            [Tag(name: "people")]
+            [Test]
+            public static method nobody_marries_their_blood() returns void {
+                Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                Kin.someone(folk, Sex.Female, 25);
+                Kin.someone(folk, Sex.Male, 27);
+                Kindred.bind(folk, 0, 1, Relation.Sibling, Kindred.BLOOD);
+                Kin.court(folk);
+                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
+                delete folk;
+                return;
+            }
+
+            // AND BOTH HAVE TO WANT IT. One person's orientation is not a marriage -- which is the
+            // rule that stops a world of straight men marrying each other for want of anybody
+            // asking the second question.
+            [Tag(name: "people")]
+            [Test]
+            public static method both_have_to_want_it() returns void {
+                Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                Kin.someone(folk, Sex.Female, 25);
+                Kin.someone(folk, Sex.Female, 27);
+                // She would have a woman; the other would not.
+                folk.at(cast<AgentId>(0)).identity.orientation = Orientation.Gay;
+                Kin.court(folk);
+                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
+                // Both willing, and it happens.
+                folk.at(cast<AgentId>(1)).identity.orientation = Orientation.Gay;
+                Kin.court(folk);
+                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), 1);
+                delete folk;
+                return;
+            }
+
+            // ---- and the children --------------------------------------------------------------
+
+            // A CHILD ARRIVES, KNOWING BOTH PARENTS AND CARRYING WHAT BOTH OF THEM CARRIED.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_child_holds_both_parents_nations() returns void {
+                Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                AgentId mum = Kin.someone(folk, Sex.Female, 25);
+                AgentId dad = Kin.someone(folk, Sex.Male, 27);
+                Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
+                folk.at(mum).belonging.nationalities = cast<long>(1);
+                folk.at(dad).belonging.nationalities = cast<long>(2);
+                folk.at(mum).belonging.languages = cast<long>(4);
+                folk.at(dad).belonging.languages = cast<long>(8);
+                // She is carrying one, and its term is up.
+                folk.at(mum).body.carrying = 0;
+                folk.at(mum).body.expecting = cast<byte>(1);
+                Courting.tick(folk, cast<long>(Courting.TERM + Courting.LOOK_EVERY
+                                               - (Courting.TERM % Courting.LOOK_EVERY)));
+                Test.assertEqual(folk.count(), 3);
+                Agent* child = folk.at(cast<AgentId>(2));
+                Test.assertEqualLong(child.belonging.nationalities, cast<long>(3));
+                Test.assertEqualLong(child.belonging.languages, cast<long>(12));
+                Test.assertTrue(child.kin.knows(0));
+                Test.assertTrue(child.kin.knows(1));
+                Test.assertEqual(cast<int>(child.kin.howTied(0)), cast<int>(Relation.Parent));
+                Test.assertEqual(cast<int>(child.kin.howTied(1)), cast<int>(Relation.Parent));
+                // And both parents know it as theirs.
+                Test.assertEqual(cast<int>(folk.at(mum).kin.howTied(2)), cast<int>(Relation.Child));
+                Test.assertEqual(cast<int>(folk.at(dad).kin.howTied(2)), cast<int>(Relation.Child));
+                // It is born with no pregnancy left behind it.
+                Test.assertEqual(folk.at(mum).body.carrying, Body.NOT_CARRYING);
+                delete folk;
+                return;
+            }
+
+            // A CHILD OF TWO BOLD PARENTS IS BOLD -- nature is the mean of the two, which is the
+            // one line of inheritance the model gives and the reason a family reads as a family.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_child_takes_after_both_of_them() returns void {
+                Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                AgentId mum = Kin.someone(folk, Sex.Female, 25);
+                AgentId dad = Kin.someone(folk, Sex.Male, 27);
+                Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
+                folk.at(mum).identity.nature.boldness = cast<ubyte>(200);
+                folk.at(dad).identity.nature.boldness = cast<ubyte>(100);
+                folk.at(mum).body.carrying = 0;
+                folk.at(mum).body.expecting = cast<byte>(1);
+                Courting.tick(folk, cast<long>(Courting.TERM + Courting.LOOK_EVERY
+                                               - (Courting.TERM % Courting.LOOK_EVERY)));
+                Test.assertEqual(folk.count(), 3);
+                Test.assertEqual(cast<int>(folk.at(cast<AgentId>(2)).identity.nature.boldness), 150);
+                delete folk;
+                return;
+            }
+
+            // AND A WOMAN MARRIED TO A WOMAN BEARS NOBODY. Not a rule about who may marry -- they
+            // may, and the check above proves it -- but about what a conception needs. `deliver`
+            // read "has a spouse" as "has a husband" and both wives bore children of each other.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_conception_needs_the_two_it_needs() returns void {
+                Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                Kin.someone(folk, Sex.Female, 25);
+                Kin.someone(folk, Sex.Female, 27);
+                Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
+                for (int y in 0..4) {
+                    for (int t in 0..Courting.LOOK_EVERY) {
+                        Courting.tick(folk, cast<long>(y * 1200 + t));
+                    }
+                }
+                Test.assertEqual(folk.count(), 2);
+                Test.assertEqual(folk.at(cast<AgentId>(0)).body.carrying, Body.NOT_CARRYING);
+                delete folk;
+                return;
+            }
+        }
+    }
+}

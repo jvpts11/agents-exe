@@ -1,0 +1,74 @@
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Kinship;
+import Agents.People.Relation;
+program AgentsExe;
+
+// THE ONLY WAY A TIE IS MADE OR CUT, and the only reason this class exists.
+//
+// A TIE HAS TWO ENDS AND THEY ARE WRITTEN TOGETHER. A holds `Parent: B`, B holds `Child: A`, and
+// both are written by one call so there is no arrangement of the code in which one of them happens
+// and the other does not. This project has already paid for the other arrangement -- the herd
+// rosters (ledger S0-8), where a member pointed at an owner whose list did not have it -- and the
+// account of it is worth repeating because kinship is where it would hurt most: it does not crash.
+// It is a parent whose child does not know them, a widow still married to a dead man, and it
+// surfaces months later as behaviour nobody can explain.
+//
+// AND A DEATH RENUMBERS PEOPLE, which is the price of holding a slot rather than a handle. The last
+// person alive is swapped into the dead one's place, so everybody who held a tie to either of them
+// has to be told. `buried` does that, in one place, for the same reason `bind` is in one place.
+public bundle Agents {
+    public namespace People {
+
+        public class Kindred {
+            // How warm a tie starts. Blood is warm; a marriage is warmer than most blood.
+            public static fixed int BLOOD = 11;
+            public static fixed int WED = 14;
+
+            // TIE TWO PEOPLE, BOTH WAYS. `how` is what the FIRST one holds; the second holds its
+            // mirror, which the relation itself knows.
+            public static method bind(Population* folk, int a, int b, Relation how, int warmth)
+                    returns void {
+                if (a == b || a < 0 || b < 0 || a >= folk.count() || b >= folk.count()) {
+                    return;
+                }
+                folk.at(cast<AgentId>(a)).kin.hold(b, how, warmth);
+                folk.at(cast<AgentId>(b)).kin.hold(a, how.mirror(), warmth);
+                return;
+            }
+
+            // AND CUT BOTH. Nothing calls this yet -- a tie in this world is for life, and divorce,
+            // exile and disinheritance are all later -- but it exists beside `bind` because the
+            // half-written cut is exactly as bad as the half-written bind, and finding that out
+            // later means writing it in a hurry.
+            public static method cut(Population* folk, int a, int b) returns void {
+                if (a < 0 || b < 0 || a >= folk.count() || b >= folk.count()) {
+                    return;
+                }
+                folk.at(cast<AgentId>(a)).kin.letGo(b);
+                folk.at(cast<AgentId>(b)).kin.letGo(a);
+                return;
+            }
+
+            // SOMEBODY DIED, AND SOMEBODY ELSE TOOK THEIR SLOT. Told to everybody who held a tie to
+            // either of them, before anything can read one stale.
+            //
+            // WALKS THE WHOLE POPULATION, and that is honest rather than clever: a tie is a slot
+            // written inside somebody else's chain, so the only way to find every holder is to ask
+            // everybody -- unless every tie were held twice over in an index, which is a second
+            // structure to keep true and the thing this design is avoiding. A death is rare next to
+            // a tick; the walk is not.
+            public static method buried(Population* folk, int dead, int movedFrom) returns void {
+                for (int i in 0..folk.count()) {
+                    Kinship* k = folk.at(cast<AgentId>(i)).kin;
+                    k.letGo(dead);
+                    if (movedFrom != dead) {
+                        k.theyMoved(movedFrom, dead);
+                    }
+                }
+                return;
+            }
+        }
+    }
+}

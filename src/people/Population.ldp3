@@ -3,6 +3,9 @@ import Agents.People.Agent;
 import Agents.People.AgentId;
 import Agents.People.AgentClass;
 import Agents.People.Worker;
+import Agents.People.Kindred;
+import Agents.People.Sex;
+import Agents.People.Orientation;
 import Agents.People.Identity;
 import Agents.People.Body;
 import Agents.Sim.BlockChain;
@@ -61,6 +64,22 @@ public bundle Agents {
             public static fixed int SHORTEST_LIFE = 80;
             public static fixed int LONGEST_LIFE = 120;
 
+            // HOW A HUNDRED PEOPLE ARE ORIENTED. The model names the four and does not give their
+            // proportions, so these are a choice and are written where a choice can be found and
+            // changed -- the audit's own instruction about the numbers it flagged (A9).
+            private static method anOrientation(int roll) returns Orientation {
+                if (roll < 88) {
+                    return Orientation.Straight;
+                }
+                if (roll < 94) {
+                    return Orientation.Gay;
+                }
+                if (roll < 99) {
+                    return Orientation.Bisexual;
+                }
+                return Orientation.Asexual;
+            }
+
             public constructor Population(int width, int height) {
                 room = 256;
                 folk = new Agent*[room]();
@@ -83,6 +102,14 @@ public bundle Agents {
 
             public method count() returns int {
                 return alive;
+            }
+
+            // THE POPULATION'S OWN CHANCE, lent out. Everything about people that turns on luck --
+            // how long they live, who they are, how many come of a pregnancy -- draws from this one
+            // stream, for the reason written on the field: a second stream would make one person's
+            // luck depend on how many of somebody else's rolls happened first.
+            public method roll(int bound) returns int {
+                return dice.nextInt(bound);
             }
 
             public method wasBorn() returns long {
@@ -123,7 +150,7 @@ public bundle Agents {
                     growFolk();
                 }
                 int at = alive;
-                Worker* one = new Worker() on heap;
+                Worker* one = new Worker(at) on heap;
                 one.whereabouts.position = vec2(x, y);
                 // THE AGE IT WILL REACH, ROLLED HERE, AT THE BIRTH -- which is where the model says
                 // it is rolled, and the only place it can be: drawn later, a person who is already
@@ -133,6 +160,17 @@ public bundle Agents {
                 one.body.diesAt = Population.SHORTEST_LIFE
                                   + dice.nextInt(Population.LONGEST_LIFE
                                                  - Population.SHORTEST_LIFE + 1);
+                // AND WHO IT IS, which is rolled here for the same reason and was rolled NOWHERE
+                // until this line. Every part of an agent is zeroed at birth, so the whole world
+                // was `Sex.Female` and `Orientation.Straight` -- five thousand women, none of whom
+                // could court any of the others, and not one marriage in thirty-four years. The
+                // fields were right, the enums were right, and nobody was ever asked.
+                //
+                // It is the third time this exact shape has bitten in this slice: a body born with
+                // no health, a person born with no sex. A field that nothing writes reads as the
+                // zeroth constant of its type, and the zeroth constant is always plausible.
+                one.identity.sex = cast<Sex>(dice.nextInt(2));
+                one.identity.orientation = Population.anOrientation(dice.nextInt(100));
                 folk[at] = one;
                 alive = alive + 1;
                 born = born + cast<long>(1);
@@ -148,10 +186,16 @@ public bundle Agents {
                     return;
                 }
                 unfile(at);
-                delete folk[at];
+                // EVERYBODY WHO KNEW THEM IS TOLD, BEFORE THE SLOT IS REUSED. A tie is a slot
+                // number written inside somebody else's chain, so a death that is not announced
+                // leaves a widow married to whoever moves into the grave -- which is not a crash,
+                // and is the worst kind of defect this project has met. See `Kindred.buried`.
                 int last = alive - 1;
+                Kindred.buried(this, at, last);
+                delete folk[at];
                 if (at != last) {
                     folk[at] = folk[last];
+                    folk[at].kin.renumber(at);
                     refile(last, at, folk[at].x(), folk[at].y());
                 }
                 folk[last] = 0 as Agent*;
