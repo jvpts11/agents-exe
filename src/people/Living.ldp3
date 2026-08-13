@@ -1,0 +1,132 @@
+import System.IO.Console;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Body;
+import Agents.People.Gauge;
+import Agents.People.Ending;
+import Agents.Sim.Clock;
+import Agents.Sim.Chronicle;
+program AgentsExe;
+
+// GETTING OLDER, GETTING HUNGRY, GETTING TIRED, AND DYING OF ANY OF THE THREE.
+//
+// ONCE A YEAR, NOT EVERY TICK. A body changes on the world's own unit -- see `Clock` for why the
+// year is the only one there is -- so this pass runs on the tick a year turns and does nothing on
+// the other eleven hundred and ninety-nine. That is not an optimisation bolted on: hunger measured
+// per tick is a number nobody can read and a rate nobody can state, and "a person can go about a
+// year without eating" is a sentence somebody can argue with.
+//
+// WHAT THIS SLICE DOES NOT HAVE IS FOOD. Gathering is the next slice, so `fed` falls and there is
+// nothing to fill it: a band sown with no way to eat starves, in order, and says so. That is the
+// honest result of building the need before the answer to it, and it is worth seeing once -- the
+// world where everybody starves is the world that proves the need is real.
+//
+// AND ENERGY REFILLS BY LYING DOWN, which needs nothing that does not exist: there are no houses
+// yet, so everybody sleeps on the ground, which the model says is half as good as sleeping at home.
+// When houses arrive, the rate changes and nothing else does.
+public bundle Agents {
+    public namespace People {
+
+        public class Living {
+            // How much of a body's food a year takes. Twenty a year: a full body has five years of
+            // eating nothing in it, which is the model's "two minutes to starve" at gear one said
+            // in the world's own unit rather than the player's.
+            public static fixed int EATEN_A_YEAR = 20;
+            // What starving costs a body each year, once there is nothing left to spend.
+            public static fixed int STARVED_A_YEAR = 25;
+            // What a year of walking about costs, and what a year of lying down gives back. Sleeping
+            // on the ground is half of what a bed will be worth.
+            public static fixed int SPENT_A_YEAR = 200;
+            public static fixed int SLEPT_A_YEAR = 400;
+            // A body that is not starving mends, slowly.
+            public static fixed int MENDED_A_YEAR = 5;
+            // Nobody dies of old age before this, whatever the roll said -- a `diesAt` of eighty is
+            // an age, not a countdown, and a newborn that rolled low must still grow up.
+            public static fixed int GROWN = 16;
+
+            private static mutable long ofAge;
+            private static mutable long ofHunger;
+            private static mutable long years;
+
+            // What the world has done to its people, by cause. Read by the checks, so a test asks
+            // the same counters the run prints rather than a second set that could disagree.
+            public static method agedSoFar() returns long {
+                return ofAge;
+            }
+
+            public static method starvedSoFar() returns long {
+                return ofHunger;
+            }
+
+            public static method report() returns void {
+                System.IO.Console.println($"folk lives: {years} years passed, {ofAge} died of age, {ofHunger} starved");
+                return;
+            }
+
+            // ONE YEAR OF BEING ALIVE, FOR EVERYBODY. Does nothing on a tick that is not the turn of
+            // a year, so the tick may call it every time without knowing that.
+            public static method tick(Population* folk, long at, Chronicle* log) returns void {
+                if (!Clock.turnsYear(at)) {
+                    return;
+                }
+                years = years + cast<long>(1);
+                // THE SLOT IS NOT ADVANCED WHEN SOMEBODY DIES, and that is not an optimisation: a
+                // death is a swap-remove, so the LAST person has just been moved into the slot being
+                // looked at, and stepping past it would skip one person for every one that died.
+                // The count is re-read for the same reason. (The fauna's ageing walk says this too,
+                // and it is the same trap.)
+                mutable int i = 0;
+                while (i < folk.count()) {
+                    Agent* one = folk.at(cast<AgentId>(i));
+                    one.body.age = one.body.age + 1;
+                    // OLD AGE. `diesAt` was rolled when it was born.
+                    if (one.body.age >= one.body.diesAt && one.body.age >= Living.GROWN) {
+                        Living.bury(folk, log, at, i, Ending.OldAge);
+                        ofAge = ofAge + cast<long>(1);
+                        continue;
+                    }
+                    // HUNGER. It falls whatever the body is doing; when there is nothing left it is
+                    // the health that pays.
+                    one.body.fed = one.body.fed - Living.EATEN_A_YEAR;
+                    if (one.body.fed.value() <= Body.STARVING) {
+                        one.body.health = one.body.health - Living.STARVED_A_YEAR;
+                        if (one.body.health.value() <= 0) {
+                            Living.bury(folk, log, at, i, Ending.Hunger);
+                            ofHunger = ofHunger + cast<long>(1);
+                            continue;
+                        }
+                    } else {
+                        one.body.health = one.body.health + Living.MENDED_A_YEAR;
+                    }
+                    // ENERGY. Walking spends it and lying down gives it back -- and a body with
+                    // none left lies down wherever it is, which is what `SPENT` means.
+                    if (one.body.energy.value() <= Body.SPENT || !one.journey.going) {
+                        one.body.energy = one.body.energy + Living.SLEPT_A_YEAR;
+                    } else {
+                        one.body.energy = one.body.energy - Living.SPENT_A_YEAR;
+                    }
+                    i = i + 1;
+                }
+                return;
+            }
+
+            // A DEATH, WITH WHAT KILLED IT. Chronicled rather than counted, because the count cannot
+            // say which of them it was, and the difference between a world that ages out and a world
+            // that starves is the whole question this slice asks.
+            private static method bury(Population* folk, Chronicle* log, long at, int slot,
+                                       Ending how) returns void {
+                Agent* who = folk.at(cast<AgentId>(slot));
+                if (folk.count() <= Living.SAY_UNDER) {
+                    log.note(at, "people", $"somebody {how.said()} at {who.body.age}, {folk.count() - 1} left");
+                }
+                folk.bury(cast<AgentId>(slot));
+                return;
+            }
+
+            // Below this many people, every death gets a line. Above it, a line per death is a
+            // thousand lines a year that nobody reads and that drown what does matter.
+            public static fixed int SAY_UNDER = 40;
+        }
+    }
+}

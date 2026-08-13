@@ -7,6 +7,7 @@ import Agents.People.Identity;
 import Agents.People.Body;
 import Agents.Sim.BlockChain;
 import Agents.Sim.TFiler;
+import Agents.World.Rng;
 program AgentsExe;
 
 // EVERYBODY ALIVE, and where each of them is standing.
@@ -48,6 +49,17 @@ public bundle Agents {
             // What the world has done to its people, kept as it happens rather than swept for.
             private mutable long born;
             private mutable long died;
+            // The stream every birth draws its lifetime from. ITS OWN, and not the world's: a
+            // stream shared between the animals and the people would make how long a person lives
+            // depend on how many animals happened to be born first -- the same defect the fauna's
+            // own note warns about, one layer over.
+            private mutable Rng* dice;
+
+            // The ages a person may be born to reach. From the model: eighty to a hundred and
+            // twenty. A year is twenty seconds of world (see `Clock`), so that is twenty-seven to
+            // forty minutes at gear one -- a life somebody can sit and watch.
+            public static fixed int SHORTEST_LIFE = 80;
+            public static fixed int LONGEST_LIFE = 120;
 
             public constructor Population(int width, int height) {
                 room = 256;
@@ -56,6 +68,7 @@ public bundle Agents {
                 blocks = new BlockChain(width, height, room) on heap;
                 born = cast<long>(0);
                 died = cast<long>(0);
+                dice = new Rng(width * 31 + height * 17 + 0x11FE) on heap;
             }
 
             public destructor ~Population() returns void {
@@ -64,6 +77,7 @@ public bundle Agents {
                 }
                 delete folk;
                 delete blocks;
+                delete dice;
                 return;
             }
 
@@ -111,6 +125,14 @@ public bundle Agents {
                 int at = alive;
                 Worker* one = new Worker() on heap;
                 one.whereabouts.position = vec2(x, y);
+                // THE AGE IT WILL REACH, ROLLED HERE, AT THE BIRTH -- which is where the model says
+                // it is rolled, and the only place it can be: drawn later, a person who is already
+                // old could draw an age they have passed and die twice over; shared, a whole
+                // generation dies on the same afternoon. The fauna paid for that one exactly
+                // (S1: every animal sown at age nought, whole cohorts gone at the same tick).
+                one.body.diesAt = Population.SHORTEST_LIFE
+                                  + dice.nextInt(Population.LONGEST_LIFE
+                                                 - Population.SHORTEST_LIFE + 1);
                 folk[at] = one;
                 alive = alive + 1;
                 born = born + cast<long>(1);

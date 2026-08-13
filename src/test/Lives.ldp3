@@ -1,0 +1,144 @@
+import System.Test.Test;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Body;
+import Agents.People.Gauge;
+import Agents.People.Living;
+import Agents.Sim.Clock;
+import Agents.Sim.Chronicle;
+program AgentsExe;
+
+// BEING ALIVE COSTS SOMETHING, AND RUNNING OUT OF IT KILLS.
+//
+// THE WORLD'S CLOCK IS CHECKED FIRST, because every number below is in years and a year that is not
+// what it says it is makes all of them wrong together -- quietly, and in the same direction, which
+// is the hardest kind of wrong to notice.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Lives {
+            public static fixed int SIDE = 64;
+
+            [Tag(name: "people")]
+            [Test]
+            public static method a_year_is_what_the_clock_says_it_is() returns void {
+                Test.assertEqual(Clock.TICKS_A_YEAR,
+                                 Clock.TICKS_A_SECOND * Clock.SECONDS_A_YEAR);
+                Test.assertTrue(Clock.turnsYear(cast<long>(0)));
+                Test.assertFalse(Clock.turnsYear(cast<long>(1)));
+                Test.assertTrue(Clock.turnsYear(Clock.ticksFor(1)));
+                Test.assertEqual(Clock.yearsIn(Clock.ticksFor(37)), 37);
+                return;
+            }
+
+            // A BODY IS BORN ALIVE. It was not: every part of an agent is zeroed when it is made --
+            // the language insists, and rightly -- so a fresh body had no health, no energy and no
+            // food until `Body.born` existed. Nothing noticed for two slices because nothing read
+            // them, and the first thing that did would have found everybody already dead.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_body_is_born_alive() returns void {
+                Population* folk = new Population(Lives.SIDE, Lives.SIDE) on heap;
+                AgentId who = folk.bear(10.5, 10.5);
+                Agent* one = folk.at(who);
+                Test.assertEqual(one.body.health.value(), Body.HALE);
+                Test.assertEqual(one.body.energy.value(), Body.RESTED);
+                Test.assertEqual(one.body.fed.value(), Body.FULL);
+                Test.assertEqual(one.body.age, 0);
+                // And it is born with an age to reach, inside the span the model names.
+                Test.assertBetween(one.body.diesAt, Population.SHORTEST_LIFE,
+                                   Population.LONGEST_LIFE);
+                delete folk;
+                return;
+            }
+
+            // AND NOT EVERYBODY WITH THE SAME ONE, which is what makes a generation turn over
+            // instead of ending on one afternoon.
+            [Tag(name: "people")]
+            [Test]
+            public static method lifetimes_are_not_all_the_same() returns void {
+                Population* folk = new Population(Lives.SIDE, Lives.SIDE) on heap;
+                mutable int first = 0;
+                mutable boolean varies = false;
+                for (int i in 0..40) {
+                    AgentId who = folk.bear(10.5, 10.5);
+                    int dies = folk.at(who).body.diesAt;
+                    if (i == 0) {
+                        first = dies;
+                    } else if (dies != first) {
+                        varies = true;
+                    }
+                }
+                Test.assertTrue(varies);
+                delete folk;
+                return;
+            }
+
+            // A YEAR PASSES AND EVERYBODY IS A YEAR OLDER -- once, on the tick the year turns, and
+            // not on the eleven hundred and ninety-nine others.
+            [Tag(name: "people")]
+            [Test]
+            public static method everybody_ages_once_a_year() returns void {
+                Population* folk = new Population(Lives.SIDE, Lives.SIDE) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                AgentId who = folk.bear(10.5, 10.5);
+                for (int t in 1..Clock.TICKS_A_YEAR) {
+                    Living.tick(folk, cast<long>(t), log);
+                }
+                Test.assertEqual(folk.at(who).body.age, 0);   // not yet a year
+                Living.tick(folk, Clock.ticksFor(1), log);
+                Test.assertEqual(folk.at(who).body.age, 1);
+                delete log;
+                delete folk;
+                return;
+            }
+
+            // NOTHING TO EAT IS A DEATH, AND IT IS THE HUNGER THAT IS BLAMED. A full body holds
+            // five years of food and then its health pays, so it dies in the ninth year -- and the
+            // world says which of the two ways it went, because a count of the dead cannot.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_body_with_nothing_to_eat_starves() returns void {
+                Population* folk = new Population(Lives.SIDE, Lives.SIDE) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                folk.bear(10.5, 10.5);
+                long before = Living.starvedSoFar();
+                for (int y in 1..12) {
+                    Living.tick(folk, Clock.ticksFor(y), log);
+                }
+                Test.assertEqual(folk.count(), 0);
+                Test.assertTrue(Living.starvedSoFar() > before);
+                delete log;
+                delete folk;
+                return;
+            }
+
+            // AND A BODY THAT IS FED DIES OF ITS AGE INSTEAD, which is the other half of the same
+            // claim: without it, "everybody died" says nothing about whether the world works.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_fed_body_lives_out_its_years() returns void {
+                Population* folk = new Population(Lives.SIDE, Lives.SIDE) on heap;
+                mutable Chronicle* log = new Chronicle() on heap;
+                AgentId who = folk.bear(10.5, 10.5);
+                int dies = folk.at(who).body.diesAt;
+                long before = Living.agedSoFar();
+                mutable int y = 1;
+                while (y <= dies + 2 && folk.count() > 0) {
+                    // Fed by hand, which is what the next slice will do with food that exists.
+                    folk.at(cast<AgentId>(0)).body.fed = new Gauge(Body.FULL, 0, Body.FULL);
+                    Living.tick(folk, Clock.ticksFor(y), log);
+                    y = y + 1;
+                }
+                Test.assertEqual(folk.count(), 0);
+                Test.assertTrue(Living.agedSoFar() > before);
+                // It lived to the age it was born to reach, give or take the year it died in.
+                Test.assertTrue(y >= dies);
+                delete log;
+                delete folk;
+                return;
+            }
+        }
+    }
+}
