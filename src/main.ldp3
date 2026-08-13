@@ -175,15 +175,20 @@ public bundle Agents {
                 // number in `Sim` is the one this option was used to find, and it can be found again
                 // on another machine without rebuilding anything.
                 int hands = cmd.number("hands", 0);
+                // EVERY AGENT'S EVERY FIELD, EVERY TICK, INTO A FILE. Empty means no journal, which
+                // is the default: a few thousand agents over a few hundred ticks is hundreds of
+                // megabytes, and a run that has not asked for that should not pay for it.
+                String journal = cmd.text("log", "");
                 String odd = cmd.stray();
                 if (odd.length() > 0) {
                     System.IO.Console.println($"agents.exe game: '{odd}' is not an option.");
                     System.IO.Console.println("options: gear=1..6 (the speed it OPENS at; the keys still work)");
                     System.IO.Console.println("         for=SECONDS (close the window by itself)");
                     System.IO.Console.println("         hands=N (how many threads share the tick; 0 = suit the machine)");
+                    System.IO.Console.println("         log=FILE (every agent, every field, every tick -- large)");
                     return;
                 }
-                Main.renderGlWorld(Main.SEED, seconds, start, hands);
+                Main.renderGlWorld(Main.SEED, seconds, start, hands, journal);
                 return;
             }
 
@@ -284,8 +289,8 @@ public bundle Agents {
             // `opensAt` is where the speed STARTS. The gear is still the player's -- the 1-6 keys
             // write the same variable this initializes -- so this moves the beginning of a session
             // and takes nothing away from it.
-            private static method renderGlWorld(int seed, int seconds, Gear opensAt, int hands)
-                    returns void {
+            private static method renderGlWorld(int seed, int seconds, Gear opensAt, int hands,
+                                                String journal) returns void {
                 int w = Sim.WIDTH;
                 int h = Sim.HEIGHT;
                 System.IO.Console.println("agents.exe: generating the world...");
@@ -297,6 +302,9 @@ public bundle Agents {
                 Sim sim = new Sim(seed, w, h) on stack;
                 if (hands > 0) {
                     sim.shareBetween(hands);
+                }
+                if (journal.length() > 0) {
+                    sim.keepJournal(journal);
                 }
                 sim.buildWorld(true);
                 Grid* g = sim.world();
@@ -553,6 +561,10 @@ public bundle Agents {
                 // not answer". Bounded searches must say when they hit the bound, or the bound is
                 // just a quieter kind of failure.
                 System.IO.Console.println($"folk ways: {sim.routes().searchesAsked()} routes asked, {sim.routes().searchesGivenUp()} unanswerable");
+                if (sim.journal().keeping()) {
+                    sim.journal().flush();
+                    System.IO.Console.println($"folk journal: {sim.journal().rowsWritten()} rows, {sim.journal().bytesWritten() / cast<long>(1048576)} MB");
+                }
                 System.IO.Console.println(r.folkChaseReport());
                 System.IO.Console.println($"folk: {r.folkFacing()} of {r.folkDrawn()} drawn people pointed somewhere of their own");
                 // AND WHAT IS LEFT ALIVE, ONE LINE PER SPECIES. A total cannot say that one of them

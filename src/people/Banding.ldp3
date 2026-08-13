@@ -39,6 +39,46 @@ public bundle Agents {
             // How far out the neighbours are checked, in cells: far enough that a spit or a one-cell
             // island fails, near enough that the band is still on the ground it was tested for.
             public static fixed int ELBOW = 6;
+            // How far apart bands are sown when the whole world is seeded, in cells. Sixty-four is
+            // four blocks: near enough that a continent gets several bands and they may meet, far
+            // enough that each begins as its own band rather than as part of one long smear.
+            public static fixed int APART = 64;
+
+            // A BAND EVERYWHERE THE GROUND WILL HOLD ONE, and not one band in the first place the
+            // sweep happens to find.
+            //
+            // WHY THE WHOLE WORLD. One band is one experiment, and where it lands decides the
+            // answer: the first sweep put it on TUNDRA, at the top edge of the map, because that is
+            // where a scan from the north-west corner first meets firm ground -- and a band on
+            // tundra tells you about tundra. Sown everywhere, the world runs every start at once:
+            // the ones on good ground, the ones on ice, the ones on an island with nothing on it.
+            // What happens to each is then a fact about the model rather than about my sweep.
+            //
+            // THEY WILL NOT ALL LIVE, and that is the experiment rather than a flaw in it.
+            //
+            // SPACED, so a band is a band and not a smear. One every APART cells, which on this map
+            // is a few hundred bands rather than a hundred thousand people.
+            public static method sowEverywhere(Population* folk, Grid* g, int seed, Chronicle* log)
+                    returns int {
+                mutable Rng* rng = new Rng(seed ^ 0x0BA9D) on heap;
+                mutable int bands = 0;
+                mutable int made = 0;
+                mutable int y = Banding.APART;
+                while (y < g.height() - Banding.APART) {
+                    mutable int x = Banding.APART;
+                    while (x < g.width() - Banding.APART) {
+                        if (Banding.roomToSettle(g, x, y)) {
+                            made = made + Banding.put(folk, g, rng, x, y);
+                            bands = bands + 1;
+                        }
+                        x = x + Banding.APART;
+                    }
+                    y = y + Banding.APART;
+                }
+                log.note(cast<long>(0), "people", $"{made} people in {bands} bands, sown over the whole world");
+                delete rng;
+                return made;
+            }
 
             // Sow one band. Answers how many people were put into the world -- nought if the map
             // held nowhere a person could stand, which a caller may want to say out loud rather
@@ -69,6 +109,19 @@ public bundle Agents {
                     delete rng;
                     return 0;
                 }
+                int made = Banding.put(folk, g, rng, homeX, homeY);
+                // WHERE, AND ON WHAT. The coordinates alone cannot be read: 608,48 is a number, and
+                // "on Tundra, at 608,48" is a place. The ground a band begins on decides what it
+                // eats and what it can survive, so it is the first thing anybody asks.
+                log.note(cast<long>(0), "people",
+                         $"a band of {made} on {Biomes.name(g.biomeAt(homeX, homeY))} at {homeX},{homeY}");
+                delete rng;
+                return made;
+            }
+
+            // The people of one band, standing about a spot. Answers how many were made.
+            private static method put(Population* folk, Grid* g, Rng* rng, int homeX, int homeY)
+                    returns int {
                 mutable int made = 0;
                 for (int i in 0..Banding.A_BAND) {
                     mutable float px = cast<float>(homeX) + 0.5
@@ -84,8 +137,6 @@ public bundle Agents {
                     folk.bear(px, py);
                     made = made + 1;
                 }
-                log.note(cast<long>(0), "people", $"a band of {made} at {homeX},{homeY}");
-                delete rng;
                 return made;
             }
 

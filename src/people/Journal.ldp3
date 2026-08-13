@@ -1,0 +1,109 @@
+import System.IO.Console;
+import System.IO.File;
+import System.Text.StringBuilder;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.World.Grid;
+import Agents.World.Biomes;
+program AgentsExe;
+
+// EVERY AGENT, EVERY FIELD, EVERY TICK, WRITTEN DOWN.
+//
+// NOT A SUMMARY. A summary is what the world already prints on the way out, and a summary cannot be
+// asked a question it was not written to answer -- "did that one starve before it got there, or
+// after?", "were they all heading the same way?", "which tick did it stop moving?". A row per agent
+// per tick can be asked anything, afterwards, by anybody, with no rebuild.
+//
+// AND EVERY TICK EVEN WHEN NOTHING CHANGED, which is the point rather than an oversight. A gap in a
+// log is ambiguous -- did nothing happen, or did the logger not run? -- and the whole reason to
+// keep one is to be able to tell those apart. A row that is identical to the row above it says
+// "this world was asked and it was the same", which is a fact.
+//
+// IT IS BIG, AND THAT IS THE BARGAIN. Two hundred and fifty bytes a row, a few thousand agents, a
+// few hundred ticks: hundreds of megabytes an hour of world. So it is OFF unless a run asks for it
+// by name (`log=<file>`), and it says how much it wrote.
+//
+// BUFFERED, because a write per agent is a system call per agent. The rows pile up in a builder and
+// go to the file every FLUSH_EVERY ticks -- one call for tens of thousands of rows.
+public bundle Agents {
+    public namespace People {
+
+        public class Journal {
+            // How many ticks of rows are held before they go to the file. Thirty is half a second
+            // of world at gear one: small enough that a run killed at the console loses half a
+            // second, big enough that the file is opened twice a second and not ten thousand times.
+            public static fixed int FLUSH_EVERY = 30;
+
+            private mutable String path;
+            private mutable StringBuilder* rows;
+            private mutable long written;
+            private mutable long bytes;
+            // (`writing` and not `on`: `on` is a word of the language -- `new X on heap`.)
+            private mutable boolean writing;
+
+            public constructor Journal(String path) {
+                this.path = path;
+                rows = new StringBuilder() on heap;
+                written = cast<long>(0);
+                bytes = cast<long>(0);
+                writing = path.length() > 0;
+                if (writing) {
+                    // THE HEADER NAMES EVERY COLUMN, in the order they are written. A file of
+                    // numbers whose columns are only described in the code that wrote them is a file
+                    // that stops being readable the day that code changes.
+                    File.writeAll(path,
+                        "tick\tid\tstanding\tx\ty\tground\tfaceX\tfaceY\tgoing\ttoX\ttoY\twayX\twayY\tbalked\tthinkAt\thealth\tenergy\tfed\tage\tdiesAt\tcarryingTick\texpecting\tgiven\tfamily\tculture\treligion\tsex\torientation\tbold\tsocial\tgreedy\tcurious\tambitious\tsanity\tmood\tconditions\tnations\tlanguages\tcarrying\thowMany\ttool\tweapon\thead\ttorso\tlegs\tfeet\tshield\thomeCity\tworkplace\n");
+                }
+            }
+
+            public destructor ~Journal() returns void {
+                flush();
+                delete rows;
+                return;
+            }
+
+            public method keeping() returns boolean {
+                return writing;
+            }
+
+            public method rowsWritten() returns long {
+                return written;
+            }
+
+            public method bytesWritten() returns long {
+                return bytes;
+            }
+
+            // ONE TICK OF THE WHOLE POPULATION.
+            public method note(Population* folk, Grid* g, long at) returns void {
+                if (!writing) {
+                    return;
+                }
+                for (int slot in 0..folk.count()) {
+                    Agent* one = folk.at(cast<AgentId>(slot));
+                    // THE GROUND UNDER THE FEET, by name. Everything the next slices decide -- what
+                    // there is to eat, whether it can be gathered, whether a body freezes -- is
+                    // decided by this, so a row without it can be asked half the questions.
+                    rows.append($"{at}\t{slot}\t{one.standing().name()}\t{one.x()}\t{one.y()}\t{Biomes.name(g.biomeAt(cast<int>(one.x()), cast<int>(one.y())))}\t{one.whereabouts.facing.x}\t{one.whereabouts.facing.y}\t{one.journey.going}\t{one.journey.to.x}\t{one.journey.to.y}\t{one.journey.waypoint.x}\t{one.journey.waypoint.y}\t{one.journey.balked}\t{one.journey.thinkAt}\t{one.body.health.value()}\t{one.body.energy.value()}\t{one.body.fed.value()}\t{one.body.age}\t{one.body.diesAt}\t{one.body.carrying}\t{cast<int>(one.body.expecting)}\t{one.identity.givenName}\t{one.identity.familyName}\t{one.identity.culture}\t{one.identity.religion}\t{one.identity.sex.name()}\t{one.identity.orientation.name()}\t{cast<int>(one.identity.nature.boldness)}\t{cast<int>(one.identity.nature.sociability)}\t{cast<int>(one.identity.nature.greed)}\t{cast<int>(one.identity.nature.curiosity)}\t{cast<int>(one.identity.nature.ambition)}\t{one.mind.sanity.value()}\t{one.mind.mood.name()}\t{one.mind.conditions}\t{one.belonging.nationalities}\t{one.belonging.languages}\t{one.inventory.carrying}\t{one.inventory.howMany}\t{one.inventory.tool}\t{one.inventory.weapon}\t{one.inventory.armour.head}\t{one.inventory.armour.torso}\t{one.inventory.armour.legs}\t{one.inventory.armour.feet}\t{one.inventory.armour.shield}\t{cast<int>(one.whereabouts.homeCity)}\t{cast<int>(one.whereabouts.workplace)}\n");
+                    written = written + cast<long>(1);
+                }
+                if (at % cast<long>(Journal.FLUSH_EVERY) == cast<long>(0)) {
+                    flush();
+                }
+                return;
+            }
+
+            public method flush() returns void {
+                if (!writing || rows.length() == 0) {
+                    return;
+                }
+                String text = rows.toString();
+                bytes = bytes + cast<long>(text.length());
+                File.appendAll(path, text);
+                rows.clear();
+                return;
+            }
+        }
+    }
+}

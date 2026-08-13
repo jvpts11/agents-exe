@@ -1,5 +1,6 @@
 import System.IO.Console;
 import System.Math.Math;
+import System.Time.Time;
 import Agents.People.Population;
 import Agents.People.Agent;
 import Agents.People.AgentId;
@@ -54,9 +55,21 @@ public bundle Agents {
             private static mutable long arrived;
             private static mutable long abandoned;
             private static mutable long refusals;
+            // WHERE THE TIME GOES, split at the seam that matters: the steps every walker takes
+            // every tick, against the route searches a few of them ask for. Guessing between those
+            // two is what this project has done wrong often enough to have a rule about it -- so the
+            // pass carries its own meter from the day it exists, like the fauna's.
+            private static mutable long stepNs;
+            private static mutable long thinkNs;
+            private static mutable long walkerTicks;
 
             public static method report() returns void {
                 System.IO.Console.println($"folk walk: {arrived} arrived, {abandoned} gave up, {refusals} steps refused");
+                if (walkerTicks > cast<long>(0)) {
+                    long all = stepNs + thinkNs;
+                    System.IO.Console.println($"folk walk: {all / cast<long>(1000000)} ms total -- stepping {stepNs * cast<long>(100) / all}%, routing {thinkNs * cast<long>(100) / all}%");
+                    System.IO.Console.println($"folk walk: {all * cast<long>(1000) / walkerTicks} ps per person per tick over {walkerTicks / cast<long>(1000000)} million person-ticks");
+                }
                 return;
             }
 
@@ -94,6 +107,9 @@ public bundle Agents {
 
             // ONE TICK OF WALKING, FOR EVERYBODY WHO IS GOING SOMEWHERE.
             public static method tick(Population* folk, Grid* g, Waymap* ways, long at) returns void {
+                long began = Time.nanos();
+                long thoughtBefore = thinkNs;   // so the routing this tick can be taken back out
+                walkerTicks = walkerTicks + cast<long>(folk.count());
                 for (int slot in 0..folk.count()) {
                     AgentId who = cast<AgentId>(slot);
                     Agent* one = folk.at(who);
@@ -126,7 +142,10 @@ public bundle Agents {
                             wy = one.journey.to.y - py;
                         } else {
                             one.journey.thinkAt = at + cast<long>(Walking.THINK_EVERY);
-                            if (!Walking.aimNext(folk, g, ways, one, px, py)) {
+                            long thought = Time.nanos();
+                            boolean found = Walking.aimNext(folk, g, ways, one, px, py);
+                            thinkNs = thinkNs + (Time.nanos() - thought);
+                            if (!found) {
                                 one.journey.going = false;
                                 abandoned = abandoned + cast<long>(1);
                                 continue;
@@ -180,6 +199,8 @@ public bundle Agents {
                         abandoned = abandoned + cast<long>(1);
                     }
                 }
+                // The stepping is what is left when the routing is taken out of the whole pass.
+                stepNs = stepNs + (Time.nanos() - began) - thinkNs + thoughtBefore;
                 return;
             }
 
@@ -198,33 +219,33 @@ public bundle Agents {
             // with only the second, a walker cannot see past its own window and wanders.
             private static method aimNext(Population* folk, Grid* g, Waymap* ways, Agent* one,
                                           float px, float py) returns boolean {
-                BlockGrid* lat = folk.standing().grid();
-                int here = lat.ofCellClamped(cast<int>(px), cast<int>(py));
-                int end = lat.ofCellClamped(cast<int>(one.journey.to.x),
-                                            cast<int>(one.journey.to.y));
-                int block = ways.nextBlockToward(here, end);
-                if (block == Waymap.NOWHERE) {
-                    return false;
-                }
-                // WHAT THE FINE SEARCH AIMS AT, and getting this wrong is a local minimum a walker
-                // never escapes. It aims at the DESTINATION whenever the destination is inside the
-                // window it can see, and only falls back on the coarse route when it is not.
-                //
-                // Aiming always at the coarse waypoint was the first version and it walked people
-                // into the near shore of a lake and left them there: the waypoint was the middle of
-                // a block across the water, the nearest reachable cell to it is the shore, so the
-                // walker reached the shore, found nothing nearer, and gave up -- with the way round
-                // in plain sight inside the same window. The search can see the far side; the aim
-                // was what stopped it looking there.
+                // THE COARSE SEARCH IS ONLY ASKED WHEN IT IS NEEDED, which is when the destination
+                // is out of sight. If the walker can already see where it is going, the blocks have
+                // nothing to add -- and asking them anyway was a search whose answer was thrown
+                // away, on every replan, for every walker.
                 mutable float aimX = one.journey.to.x;
                 mutable float aimY = one.journey.to.y;
-                if (!ways.sees(cast<int>(px), cast<int>(py),
-                               cast<int>(aimX), cast<int>(aimY))) {
+                if (!ways.sees(cast<int>(px), cast<int>(py), cast<int>(aimX), cast<int>(aimY))) {
+                    BlockGrid* lat = folk.standing().grid();
+                    int here = lat.ofCellClamped(cast<int>(px), cast<int>(py));
+                    int end = lat.ofCellClamped(cast<int>(one.journey.to.x),
+                                                cast<int>(one.journey.to.y));
+                    int block = ways.nextBlockToward(here, end);
+                    if (block == Waymap.NOWHERE) {
+                        return false;
+                    }
                     vec2 coarse = Walking.middleOf(lat, block, one.journey.to.x,
                                                    one.journey.to.y, end);
                     aimX = coarse.x;
                     aimY = coarse.y;
                 }
+                // (The aim above is the DESTINATION whenever the walker can see it, and the coarse
+                // route's next block only when it cannot. Aiming always at the coarse waypoint was
+                // the first version and it walked people into the near shore of a lake and left them
+                // there: that waypoint is the middle of a block across the water, the nearest
+                // reachable cell to it is the shore, so the walker reached the shore, found nothing
+                // nearer, and gave up -- with the way round in plain sight inside the same window.)
+                //
                 // (`cell` and not `step`: `step` is a word of the language -- `for x in 0..10 step 2`.)
                 int cell = ways.nextCellToward(cast<int>(px), cast<int>(py),
                                                cast<int>(aimX), cast<int>(aimY));

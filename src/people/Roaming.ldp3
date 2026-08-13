@@ -43,29 +43,41 @@ public bundle Agents {
                 if (folk.count() < 1) {
                     return;
                 }
-                if (at % cast<long>(Roaming.DECIDE_EVERY) != cast<long>(0)) {
-                    return;
-                }
-                // Whose turn it is, spread over the population rather than everybody at once.
-                int slot = cast<int>(at / cast<long>(Roaming.DECIDE_EVERY)) % folk.count();
-                AgentId who = cast<AgentId>(slot);
-                Agent* one = folk.at(who);
-                if (one.journey.going) {
-                    return;
-                }
-                mutable int tries = 0;
-                while (tries < Roaming.TRIES) {
-                    tries = tries + 1;
-                    float ang = rng.unit() * 6.2831853;
-                    float far = rng.unit() * Roaming.WANDER;
-                    float tx = one.x() + LandMath.cos(ang) * far;
-                    float ty = one.y() + LandMath.sin(ang) * far;
-                    if (tx < 1.0 || ty < 1.0 || tx >= cast<float>(g.width()) - 1.0
-                        || ty >= cast<float>(g.height()) - 1.0) {
+                // A SHARE OF THE POPULATION DECIDES EACH TICK, and not one person in the world.
+                //
+                // It WAS one person: `at % DECIDE_EVERY` picked a single slot, which is a decision
+                // every half second for everybody together. With one band that reads as a band
+                // making up its mind; with the whole world sown -- five thousand people -- it is one
+                // decision per person every forty-four HOURS of world time, and the people stand
+                // still while every number about them says the walk works. A rate has to be per
+                // person, or it silently becomes a rate per world divided by however many there are.
+                //
+                // Sliced by slot, the same way the fauna's stir is: everybody comes up once every
+                // DECIDE_EVERY ticks, and a different share of them comes up on each of those ticks.
+                int n = folk.count();
+                int phase = cast<int>(at % cast<long>(Roaming.DECIDE_EVERY));
+                mutable int slot = phase;
+                while (slot < n) {
+                    AgentId who = cast<AgentId>(slot);
+                    Agent* one = folk.at(who);
+                    slot = slot + Roaming.DECIDE_EVERY;
+                    if (one.journey.going) {
                         continue;
                     }
-                    if (Walking.setOut(folk, g, ways, who, tx, ty)) {
-                        return;
+                    mutable int tries = 0;
+                    while (tries < Roaming.TRIES) {
+                        tries = tries + 1;
+                        float ang = rng.unit() * 6.2831853;
+                        float far = rng.unit() * Roaming.WANDER;
+                        float tx = one.x() + LandMath.cos(ang) * far;
+                        float ty = one.y() + LandMath.sin(ang) * far;
+                        if (tx < 1.0 || ty < 1.0 || tx >= cast<float>(g.width()) - 1.0
+                            || ty >= cast<float>(g.height()) - 1.0) {
+                            continue;
+                        }
+                        if (Walking.setOut(folk, g, ways, who, tx, ty)) {
+                            tries = Roaming.TRIES;
+                        }
                     }
                 }
                 return;

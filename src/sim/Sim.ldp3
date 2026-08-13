@@ -12,6 +12,7 @@ import Agents.People.Population;
 import Agents.People.Banding;
 import Agents.People.Walking;
 import Agents.People.Roaming;
+import Agents.People.Journal;
 import Agents.World.Waymap;
 program AgentsExe;
 
@@ -68,6 +69,8 @@ public bundle Agents {
             private mutable Wild* beasts;
             // Everybody alive. Made with the world and empty until something sows a band into it.
             private mutable Population* folk;
+            // Every agent's every field, every tick, to a file -- off unless a run asks for it.
+            private mutable Journal* diary;
             // What every block costs to cross, and the bounded search that reads it. Made when the
             // ground is final, because it is a fact ABOUT the ground: measured once, read forever.
             private mutable Waymap* ways;
@@ -138,6 +141,7 @@ public bundle Agents {
                 log = new Chronicle() on heap;
                 beasts = new Wild(width, height) on heap;
                 folk = new Population(width, height) on heap;
+                diary = new Journal("") on heap;   // silent until `keepJournal` names a file
                 // A DIFFERENT STREAM FROM THE TERRAIN'S. The world is generated once and ticked
                 // forever; one stream shared would make the first animal's decision depend on how
                 // many rolls the coastline happened to take, so a change to the generator would
@@ -163,6 +167,20 @@ public bundle Agents {
                 // A world built by a check keeps the one hand it is born with -- checks do not open
                 // windows and must not open threads.
                 beasts.shareBetween(Machine.threads() * 3 / 4);
+            }
+
+            // WRITE EVERY AGENT'S EVERY FIELD, EVERY TICK, TO THIS FILE. Off by default, because a
+            // few thousand agents over a few hundred ticks is hundreds of megabytes -- and on when a
+            // run wants to be analysed afterwards rather than summarised on the way out.
+            public method keepJournal(String path) returns void {
+                delete diary;
+                diary = new Journal(path) on heap;
+                return;
+            }
+
+            // What the journal wrote, for the line the run prints on its way out.
+            public method journal() returns Journal* {
+                return diary;
             }
 
             // Share the tick between this many hands, overriding what the machine suggested. For
@@ -195,6 +213,7 @@ public bundle Agents {
                 if (standing) {
                     delete ways;
                 }
+                delete diary;    // its destructor flushes whatever the last ticks wrote
                 delete folk;
                 delete beasts;
                 delete dice;
@@ -239,7 +258,10 @@ public bundle Agents {
                 // asks it and never measures anything.
                 ways = new Waymap(ground, folk.standing().grid()) on heap;
                 Seeding.sow(beasts, ground, seed, log);
-                Banding.sow(folk, ground, seed, log);
+                // EVERYWHERE THE GROUND WILL HOLD A BAND, and not one band where a sweep first found
+                // firm ground -- which put the whole of humanity on tundra at the top of the map.
+                // See `Banding.sowEverywhere`: one start is one experiment about one biome.
+                Banding.sowEverywhere(folk, ground, seed, log);
                 return;
             }
 
@@ -380,6 +402,10 @@ public bundle Agents {
                     // than standing through one.
                     Roaming.tick(folk, ground, ways, ticked, dice);
                     Walking.tick(folk, ground, ways, ticked);
+                    // AND EVERY AGENT'S EVERY FIELD IS WRITTEN DOWN, if a run asked for that. After
+                    // the passes, so a row is the world as the tick LEFT it rather than half way
+                    // through being decided.
+                    diary.note(folk, ground, ticked);
                 }
                 return;
             }

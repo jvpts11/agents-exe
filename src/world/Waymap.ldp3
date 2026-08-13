@@ -139,8 +139,17 @@ public bundle Agents {
                     } else {
                         // Cost is the reciprocal of pace: half speed is twice the cost. Rounded into
                         // small integers so the queue can be buckets, and never zero.
+                        //
+                        // AND WHAT IS *NOT* WALKABLE IN IT COUNTS TOO. A block is crossable if any
+                        // cell in it is, which is the right test for "can this be part of a route"
+                        // and a terrible one for "what does it cost": a block that is nine tenths
+                        // lake reads exactly like a meadow, so a coarse route runs a walker straight
+                        // into the water and the fine search has to find the way out. Weighted by
+                        // how much of the block is actually ground, the route prefers the way round
+                        // before anybody's feet are involved.
                         float pace = sum / cast<float>(walkables);
-                        mutable int cost = cast<int>(1.0 / pace + 0.5);
+                        float open = cast<float>(walkables) / cast<float>(side * side);
+                        mutable int cost = cast<int>(1.0 / (pace * open) + 0.5);
                         if (cost < 1) {
                             cost = 1;
                         }
@@ -290,12 +299,23 @@ public bundle Agents {
             // The square of ground the fine search looks at, around the walker. A hundred and
             // twenty-eight cells across: wide enough to get round a lake, a headland or a mountain,
             // and small enough that the arrays are a quarter of a megabyte and never grow.
-            public static fixed int WINDOW = 128;
+            //
+            // SIXTY-FOUR AND NOT A HUNDRED AND TWENTY-EIGHT, and the number was measured rather than
+            // picked: at 128 a search settles up to sixteen thousand cells and cost 20.5 µs, which
+            // with five thousand people walking was 86% of the whole people's tick and took gear 4
+            // from twenty ticks a frame to six. At 64 it is a quarter of the cells. What is given up
+            // is how big an obstacle a walker can see its way around in one look -- and what handles
+            // anything bigger is the coarse route, which now knows how much of a block is water.
+            public static fixed int WINDOW = 64;
             // How far along the trail the walker is sent before it asks again. One cell means a
             // search every forty ticks per person, which is thousands a minute for a crowd; the
             // whole trail means walking a straight line to a far place, meeting everything the
             // trail was avoiding. Eight cells is a few seconds of walking.
-            public static fixed int LOOKAHEAD = 8;
+            // TWENTY-FOUR AND NOT EIGHT, for the same measurement: a journey of forty cells asked
+            // for five routes at eight, and asks for two at twenty-four. What is given up is how
+            // closely the walk follows the trail between one look and the next -- and a step that
+            // meets ground it may not stand on slides along it, which is the case this covers.
+            public static fixed int LOOKAHEAD = 24;
             // THE THIRD BOUND: the dearest a local way on may cost before it stops being one. Four
             // crossings of the window -- a path that winds more than that is not the way round
             // something, it is a maze, and a walker that cannot find its way out of one in four
@@ -314,7 +334,7 @@ public bundle Agents {
             // the shore -- so it walked to the water and gave up, with the way round inside the
             // window it had just refused to look at. The window is the bound; the search stops when
             // it reaches the aim, and the aim is usually a few cells away.
-            public static fixed int CELLS_AT_MOST = 16384;
+            public static fixed int CELLS_AT_MOST = 4096;
 
             private mutable int[] cellFrom;
             private mutable int[] cellSpent;
