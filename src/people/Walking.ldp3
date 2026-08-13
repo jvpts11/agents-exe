@@ -78,11 +78,10 @@ public bundle Agents {
             // discover later as a person who never arrives.
             public static method setOut(Population* folk, Grid* g, Waymap* ways, AgentId who,
                                         float tx, float ty) returns boolean {
-                if (tx < 0.0 || ty < 0.0 || tx >= cast<float>(g.width())
-                    || ty >= cast<float>(g.height())) {
-                    return false;
-                }
-                if (!Biomes.walkable(g.biomeAt(cast<int>(tx), cast<int>(ty)))) {
+                // NOBODY SETS OUT FOR SOMEWHERE THEY MAY NOT BE. The same question the step asks,
+                // asked of the destination -- which is the model's rule stated in the model's own
+                // words: an agent may not have a target in a tile it cannot go to.
+                if (!Walking.mayStand(ways, tx, ty)) {
                     return false;
                 }
                 Agent* one = folk.at(who);
@@ -163,7 +162,7 @@ public bundle Agents {
                     float hop = Walking.PACE * Biomes.pace(g.biomeAt(cast<int>(px), cast<int>(py)));
                     float nx = px + wx / span * hop;
                     float ny = py + wy / span * hop;
-                    if (Walking.mayStand(g, nx, ny)) {
+                    if (Walking.mayStand(ways,nx, ny)) {
                         folk.placeAt(who, nx, ny);
                         one.whereabouts.facing = vec2(wx / span, wy / span);
                         one.journey.balked = 0;
@@ -173,13 +172,13 @@ public bundle Agents {
                     // needed, and for the same reason: a body that keeps trying the one direction it
                     // cannot go stands still against nothing.
                     refusals = refusals + cast<long>(1);
-                    if (Walking.mayStand(g, px + wx / span * hop, py)) {
+                    if (Walking.mayStand(ways,px + wx / span * hop, py)) {
                         folk.placeAt(who, px + wx / span * hop, py);
                         one.whereabouts.facing = vec2(wx / span, 0.0);
                         one.journey.balked = 0;
                         continue;
                     }
-                    if (Walking.mayStand(g, px, py + wy / span * hop)) {
+                    if (Walking.mayStand(ways,px, py + wy / span * hop)) {
                         folk.placeAt(who, px, py + wy / span * hop);
                         one.whereabouts.facing = vec2(0.0, wy / span);
                         one.journey.balked = 0;
@@ -270,14 +269,17 @@ public bundle Agents {
                             cast<float>(lat.originY(block)) + half);
             }
 
-            // WHERE A BODY MAY BE: on the map, and on ground a body may stand in or swim in. The
-            // catalogue answers both.
-            private static method mayStand(Grid* g, float x, float y) returns boolean {
-                if (x < 0.0 || y < 0.0 || x >= cast<float>(g.width())
-                    || y >= cast<float>(g.height())) {
-                    return false;
-                }
-                return Biomes.walkable(g.biomeAt(cast<int>(x), cast<int>(y)));
+            // WHERE A BODY MAY BE: on the map, on ground it may stand in or swim in, and -- if that
+            // is water -- no further from a shore than a body may swim. `Waymap` answers all three,
+            // because the last of them is a fact about the ground that was measured when the ground
+            // was made.
+            //
+            // THE SAME QUESTION AT THE STEP AND AT THE DESTINATION, which is the model's own rule:
+            // an agent may not have a target in a tile it cannot go to, nor a path crossing one.
+            // Two different answers to that is how a walker ends up swimming at something it can
+            // never reach.
+            private static method mayStand(Waymap* ways, float x, float y) returns boolean {
+                return ways.mayBeAt(cast<int>(x), cast<int>(y));
             }
         }
     }

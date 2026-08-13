@@ -170,6 +170,79 @@ public bundle Agents {
                 return;
             }
 
+            // A BODY MAY SWIM, AND ONLY SO FAR OUT. The model's line is "up to 4 tiles from the
+            // coast", and without it a wander that picks a spot out at sea sends somebody swimming
+            // for the horizon. Found by watching the window.
+            //
+            // BOTH HALVES ARE CHECKED, because the model states both: not a destination in a tile a
+            // body may not enter, and not a path through one. A rule enforced only at the step is a
+            // walker that sets out for somewhere unreachable and stops at the water's edge --
+            // which is exactly what it looked like.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_swimmer_stays_within_reach_of_the_shore() returns void {
+                mutable Grid* g = Walks.plain();
+                // Open water from y=64 south, so the shore is the line y=63.
+                for (int y in 64..Walks.SIDE) {
+                    for (int x in 0..Walks.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.ShallowSea));
+                    }
+                }
+                g.labelMasses();
+                Population* folk = new Population(Walks.SIDE, Walks.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                // The water right off the beach is measured as being off the beach.
+                Test.assertEqual(ways.shoreDistance(20, 64), 1);
+                Test.assertEqual(ways.shoreDistance(20, 67), 4);
+                Test.assertTrue(ways.mayBeAt(20, 67));
+                // And five tiles out is out of reach, whatever the biome says on its own.
+                Test.assertFalse(ways.mayBeAt(20, 68));
+                Test.assertTrue(Biomes.walkable(g.biomeAt(20, 68)));
+
+                AgentId who = folk.bear(20.5, 40.5);
+                // Nobody sets out for the deep, and nobody swims there over ticks either.
+                Test.assertFalse(Walking.setOut(folk, g, ways, who, 20.5, 90.5));
+                Test.assertTrue(Walking.setOut(folk, g, ways, who, 20.5, 66.5));
+                for (int t in 0..20000) {
+                    Walking.tick(folk, g, ways, cast<long>(t));
+                }
+                Agent* one = folk.at(who);
+                Test.assertTrue(ways.mayBeAt(cast<int>(one.x()), cast<int>(one.y())));
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+
+            // AND A RIVER IS CROSSED RATHER THAN BANKED UP AGAINST. The catalogue said a river was
+            // not walkable while the note beside it said a river is walked -- so rivers were walls,
+            // and people piled along them for no reason a player could see.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_river_is_crossed() returns void {
+                mutable Grid* g = Walks.plain();
+                for (int y in 60..62) {
+                    for (int x in 0..Walks.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.River));
+                    }
+                }
+                g.labelMasses();
+                Population* folk = new Population(Walks.SIDE, Walks.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                Test.assertTrue(ways.mayBeAt(20, 60));
+                AgentId who = folk.bear(20.5, 40.5);
+                Test.assertTrue(Walking.setOut(folk, g, ways, who, 20.5, 80.5));
+                for (int t in 0..30000) {
+                    Walking.tick(folk, g, ways, cast<long>(t));
+                }
+                // It is on the far bank, which it can only be by having forded the river.
+                Test.assertTrue(folk.at(who).y() > 62.0);
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+
             // ROUGH GROUND IS GONE AROUND when going round is cheaper, which is the model's sentence
             // about mountains -- and it is arithmetic here rather than a rule: the search is by cost,
             // and a mountain costs more per block than the meadow beside it.
