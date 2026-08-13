@@ -1613,6 +1613,20 @@ public bundle Agents {
             // the look this world is being built in, and it also stops a cube from being buried in
             // a slope it happens to be standing on.
             private static fixed float A_HOVER = 0.35;
+            // AND THE HOVER BREATHES, or it is not hovering, it is standing on nothing. Up and down
+            // by a fifth of a person, once every three seconds or so.
+            private static fixed float BOB_HIGH = 0.10;
+            private static fixed float BOB_RATE = 2.1;
+            // EACH ONE ON ITS OWN BEAT. Without this the whole population rises and falls together,
+            // which reads as the ground breathing rather than as bodies floating -- the same
+            // failure as every animal facing south, one dimension over. The phase comes off the
+            // slot, so it is stable for a body and different from its neighbour's.
+            private static fixed float BOB_APART = 2.399963;
+            // A SHADOW, so a floating body is READ as floating rather than as a body drawn too
+            // high. It sits on the ground, does not bob, and shrinks as the body rises -- which is
+            // the whole of what tells an eye how far up something is.
+            private static fixed float SHADOW_WIDE = 0.62;
+            private static fixed float SHADOW_DARK = 0.34;
 
             private method bakeFolk() returns void {
                 drawnFolk = 0;
@@ -1649,7 +1663,7 @@ public bundle Agents {
                                 py >= cast<float>(y0) && py < cast<float>(y1)) {
                                 int ord = folkArt.ordOf(GlWorld3D.bodyFor(who.standing()));
                                 if (ord >= 0) {
-                                    tris = tris + folkArt.triCount[ord];
+                                    tris = tris + folkArt.triCount[ord] + 2;   // + its shadow
                                 }
                             }
                             slot = chain.after(slot);
@@ -1686,8 +1700,7 @@ public bundle Agents {
                                     // expression the animals use -- two expressions agreeing by
                                     // accident is how a body ends up floating over a hill.
                                     mutable float zOff = cast<float>(lvl) * stepH
-                                                         + terrainLook[cell].lift + 0.8
-                                                         + GlWorld3D.A_HOVER;
+                                                         + terrainLook[cell].lift + 0.8;
                                     // HALF UNDER, WHEN THE GROUND IS WATER. The model says a person
                                     // may swim a lake, a river or a shallow sea, and that when they
                                     // do "half of their body is submerged, and only the upper half
@@ -1698,7 +1711,25 @@ public bundle Agents {
                                     if (Biomes.swims(cell)) {
                                         zOff = zOff - GlWorld3D.A_PERSON * 0.5;
                                     }
-                                    float topZ = terrainLook[cell].top + zOff;
+                                    float groundZ = terrainLook[cell].top + zOff;
+                                    // HOW HIGH IT IS FLOATING THIS FRAME. On its own beat -- see
+                                    // BOB_APART for why a shared one reads as the ground breathing.
+                                    // A swimmer does not bob: the water already moves it, and a
+                                    // body rising out of a lake reads as a bug.
+                                    mutable float up = 0.0;
+                                    if (!Biomes.swims(cell)) {
+                                        up = GlWorld3D.A_HOVER
+                                             + GlWorld3D.BOB_HIGH
+                                               * fsin(timeSec * GlWorld3D.BOB_RATE
+                                                      + cast<float>(slot) * GlWorld3D.BOB_APART);
+                                        // The shadow goes on the ground and stays there, and draws
+                                        // smaller the higher the body is -- which is the only thing
+                                        // in the picture that says how far up it actually is.
+                                        wv = emitShadow(buf, wv, px * 2.0, py * 2.0, groundZ,
+                                                        GlWorld3D.SHADOW_WIDE
+                                                        * (1.0 - up * 0.35));
+                                    }
+                                    float topZ = groundZ + up;
                                     wv = emitTurned(folkArt, buf, wv, ord, px * 2.0, py * 2.0, topZ,
                                                     GlWorld3D.PERSON_SCALE,
                                                     shadeAt(gx, gy, 1, lvl), turn);
@@ -1714,6 +1745,31 @@ public bundle Agents {
                 folk.upload(buf, wv, tris * 27);
                 Allocator.free(buf);
                 return;
+            }
+
+            // A DARK PATCH ON THE GROUND UNDER A FLOATING BODY. Two triangles, flat, facing up.
+            //
+            // IT IS WHAT MAKES FLOATING READ AS FLOATING. A body drawn above the ground with
+            // nothing beneath it is a body drawn at the wrong height -- an eye cannot tell those
+            // apart, and it does not try: it reads the higher one as bigger, or as further away, or
+            // as a bug. The shadow is the only thing in the picture that says how far up it is,
+            // which is why it shrinks as the body rises.
+            //
+            // A HAIR ABOVE THE GROUND, because a dark quad at exactly the ground's height fights
+            // the ground for the same depth and flickers -- which is the one way a shadow can look
+            // worse than none.
+            private method emitShadow(address buf, int w, float wx, float wy, float wz, float half)
+                    returns int {
+                float z = wz + 0.02;
+                float d = GlWorld3D.SHADOW_DARK * 255.0;
+                mutable int p = w;
+                p = wr(buf, p, wx - half, wy - half, z, 0.0, 0.0, 1.0, d, d, d);
+                p = wr(buf, p, wx + half, wy - half, z, 0.0, 0.0, 1.0, d, d, d);
+                p = wr(buf, p, wx + half, wy + half, z, 0.0, 0.0, 1.0, d, d, d);
+                p = wr(buf, p, wx - half, wy - half, z, 0.0, 0.0, 1.0, d, d, d);
+                p = wr(buf, p, wx + half, wy + half, z, 0.0, 0.0, 1.0, d, d, d);
+                p = wr(buf, p, wx - half, wy + half, z, 0.0, 0.0, 1.0, d, d, d);
+                return p;
             }
 
             // WHICH BODY A STANDING IS DRAWN WITH. A `match` over the sealed enum, so the fifth

@@ -170,37 +170,39 @@ public bundle Agents {
                 return;
             }
 
-            // A BODY MAY SWIM, AND ONLY SO FAR OUT. The model's line is "up to 4 tiles from the
-            // coast", and without it a wander that picks a spot out at sea sends somebody swimming
-            // for the horizon. Found by watching the window.
+            // A BODY MAY SWIM THE SHALLOWS AND NOT THE DEEP, and the deep is what stops it going
+            // anywhere it should not. There is no separate rule about distance from a coast: an
+            // ocean cannot be crossed by swimming because the water in the middle of it is water a
+            // body may not enter, and that is the whole of it. Crossing THAT is what a boat is for.
             //
-            // BOTH HALVES ARE CHECKED, because the model states both: not a destination in a tile a
-            // body may not enter, and not a path through one. A rule enforced only at the step is a
-            // walker that sets out for somewhere unreachable and stops at the water's edge --
-            // which is exactly what it looked like.
+            // THE REFUSAL IS AT ALL THREE PLACES, which is the model's own sentence: not a target
+            // in a tile a body cannot enter, not a step into one, and not a path through one. Held
+            // at only one of the three, a walker sets out for somewhere it can never reach and
+            // stands at the water's edge apparently swimming at nothing -- which is what it looked
+            // like in the window.
             [Tag(name: "people")]
             [Test]
-            public static method a_swimmer_stays_within_reach_of_the_shore() returns void {
+            public static method a_swimmer_crosses_the_shallows_and_not_the_deep() returns void {
                 mutable Grid* g = Walks.plain();
-                // Open water from y=64 south, so the shore is the line y=63.
-                for (int y in 64..Walks.SIDE) {
+                // A strip of shallows, then open ocean beyond it.
+                for (int y in 64..70) {
                     for (int x in 0..Walks.SIDE) {
                         g.setBiome(x, y, cast<int>(Biome.ShallowSea));
+                    }
+                }
+                for (int y in 70..Walks.SIDE) {
+                    for (int x in 0..Walks.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.DeepOcean));
                     }
                 }
                 g.labelMasses();
                 Population* folk = new Population(Walks.SIDE, Walks.SIDE) on heap;
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
-                // The water right off the beach is measured as being off the beach.
-                Test.assertEqual(ways.shoreDistance(20, 64), 1);
-                Test.assertEqual(ways.shoreDistance(20, 67), 4);
-                Test.assertTrue(ways.mayBeAt(20, 67));
-                // And five tiles out is out of reach, whatever the biome says on its own.
-                Test.assertFalse(ways.mayBeAt(20, 68));
-                Test.assertTrue(Biomes.walkable(g.biomeAt(20, 68)));
+                Test.assertTrue(ways.mayBeAt(20, 66));    // the shallows: swum
+                Test.assertFalse(ways.mayBeAt(20, 90));   // the deep: never
 
                 AgentId who = folk.bear(20.5, 40.5);
-                // Nobody sets out for the deep, and nobody swims there over ticks either.
+                // Nobody sets out for the deep, and nobody ends up there over ticks either.
                 Test.assertFalse(Walking.setOut(folk, g, ways, who, 20.5, 90.5));
                 Test.assertTrue(Walking.setOut(folk, g, ways, who, 20.5, 66.5));
                 for (int t in 0..20000) {

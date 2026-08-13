@@ -48,22 +48,8 @@ public bundle Agents {
             public static fixed int DEAREST = 8;
             public static fixed int NOWHERE = 0 - 1;
 
-            // HOW FAR OUT TO SEA A BODY MAY GO, in tiles from the nearest dry ground.
-            //
-            // The model's line is "up to 4 tiles from the coast". A swimmer is not a boat: it may
-            // cross a river, round a headland, cut a bay -- and it may not strike out for open
-            // water, which is what a body without this rule does the moment a wander picks a
-            // target out there. Found by watching the window.
-            public static fixed int OUT_TO = 4;
-            // What `fromShore` holds for anywhere further out than that, and for open sea.
-            public static fixed int TOO_FAR = 9;
-
             private mutable Grid* world;
             private mutable BlockGrid* lattice;
-            // Per cell: 0 on dry land, then 1..OUT_TO for each tile of water out from it, and
-            // TOO_FAR beyond. Measured once, when the ground is final; read on every step a body
-            // takes into water, which is why it is a lookup and not a search of the neighbourhood.
-            private mutable ubyte[] fromShore;
             // Per block: what it costs to cross, or NOWHERE for blocks with no walkable ground.
             private mutable int[] toll;
             // The search's own scratch, kept between searches so a search allocates nothing.
@@ -102,8 +88,6 @@ public bundle Agents {
                 cellNext = new int[win]();
                 cellDial = new int[Waymap.FURTHEST + 2]();
                 cellStamp = 0;
-                fromShore = new ubyte[world.width() * world.height()]();
-                soundTheShallows();
                 measure();
             }
 
@@ -119,7 +103,6 @@ public bundle Agents {
                 delete cellSeen;
                 delete cellNext;
                 delete cellDial;
-                delete fromShore;
                 return;
             }
 
@@ -179,77 +162,21 @@ public bundle Agents {
                 return;
             }
 
-            // HOW FAR FROM DRY LAND EVERY CELL OF WATER IS, up to the point where it stops
-            // mattering. A flood outward from every shore, four steps, over the whole map.
+            // WHETHER A BODY MAY BE AT THIS CELL AT ALL. The one question every step, every
+            // destination and every step of every route asks -- one method, so the three cannot
+            // drift apart, which is what let a walker be handed a way its own feet refused.
             //
-            // ONCE, HERE, rather than a search of the neighbourhood on every step a swimmer takes:
-            // asked at the water's edge, "is there land within four" is up to eighty-one reads of a
-            // three-and-a-half megabyte map, per body, per tick. Flooded once it is one byte.
-            private method soundTheShallows() returns void {
-                int w = world.width();
-                int h = world.height();
-                for (int y in 0..h) {
-                    for (int x in 0..w) {
-                        int cell = y * w + x;
-                        int biome = world.biomeAt(x, y);
-                        // Dry land is the shore this is measured from. Anything a body swims in --
-                        // and open sea, which it cannot -- starts unmeasured.
-                        if (Biomes.walkable(biome) && !Biomes.swims(biome)) {
-                            fromShore[cell] = cast<ubyte>(0);
-                        } else {
-                            fromShore[cell] = cast<ubyte>(Waymap.TOO_FAR);
-                        }
-                    }
-                }
-                // Four passes out from the land, each marking the water that touches what the pass
-                // before marked. Cheaper than a queue and bounded by the same constant that means
-                // something: how far a body may be from a shore.
-                for (int out in 1..Waymap.OUT_TO + 1) {
-                    for (int y in 0..h) {
-                        for (int x in 0..w) {
-                            int cell = y * w + x;
-                            if (cast<int>(fromShore[cell]) != Waymap.TOO_FAR) {
-                                continue;
-                            }
-                            if (!Biomes.swims(world.biomeAt(x, y))) {
-                                continue;   // open sea is never near a shore, however close it is
-                            }
-                            if (Waymap.touches(fromShore, w, h, x, y, out - 1)) {
-                                fromShore[cell] = cast<ubyte>(out);
-                            }
-                        }
-                    }
-                }
-                return;
-            }
-
-            private static method touches(ubyte[] depth, int w, int h, int x, int y, int want)
-                    returns boolean {
-                if (x > 0 && cast<int>(depth[y * w + x - 1]) == want) { return true; }
-                if (x < w - 1 && cast<int>(depth[y * w + x + 1]) == want) { return true; }
-                if (y > 0 && cast<int>(depth[(y - 1) * w + x]) == want) { return true; }
-                if (y < h - 1 && cast<int>(depth[(y + 1) * w + x]) == want) { return true; }
-                return false;
-            }
-
-            // WHETHER A BODY MAY BE AT THIS CELL AT ALL: the ground allows it, and if it is water,
-            // the shore is within reach. The one question every step and every destination asks.
+            // OPEN SEA IS THE WALL, and it is enough of one. A rule was tried that also held a
+            // swimmer within four tiles of a shore, and it was taken out again: it cost a flood of
+            // the whole map at startup and a lookup on every step, to stop something the water
+            // already stops. Shallow sea does not reach across an ocean -- a body cannot swim from
+            // one continent to another without crossing deep water, and deep water it may not
+            // enter. Crossing that is what a boat is for, and a boat is its own slice.
             public method mayBeAt(int x, int y) returns boolean {
                 if (x < 0 || y < 0 || x >= world.width() || y >= world.height()) {
                     return false;
                 }
-                if (!Biomes.walkable(world.biomeAt(x, y))) {
-                    return false;
-                }
-                return cast<int>(fromShore[y * world.width() + x]) <= Waymap.OUT_TO;
-            }
-
-            // How far out this cell is, for whoever wants to say it rather than just obey it.
-            public method shoreDistance(int x, int y) returns int {
-                if (x < 0 || y < 0 || x >= world.width() || y >= world.height()) {
-                    return Waymap.TOO_FAR;
-                }
-                return cast<int>(fromShore[y * world.width() + x]);
+                return Biomes.walkable(world.biomeAt(x, y));
             }
 
             public method tollOf(int block) returns int {
