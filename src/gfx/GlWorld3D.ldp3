@@ -1622,11 +1622,9 @@ public bundle Agents {
             // failure as every animal facing south, one dimension over. The phase comes off the
             // slot, so it is stable for a body and different from its neighbour's.
             private static fixed float BOB_APART = 2.399963;
-            // A SHADOW, so a floating body is READ as floating rather than as a body drawn too
-            // high. It sits on the ground, does not bob, and shrinks as the body rises -- which is
-            // the whole of what tells an eye how far up something is.
-            private static fixed float SHADOW_WIDE = 0.62;
-            private static fixed float SHADOW_DARK = 0.34;
+            // (The shadow itself is `emitMeshShadowTurned`, the one every prop and node in this
+            // renderer already casts. See the call in `bakeFolk` for what a hand-written one got
+            // wrong -- three things, all of them visible from the first frame.)
 
             private method bakeFolk() returns void {
                 drawnFolk = 0;
@@ -1663,7 +1661,8 @@ public bundle Agents {
                                 py >= cast<float>(y0) && py < cast<float>(y1)) {
                                 int ord = folkArt.ordOf(GlWorld3D.bodyFor(who.standing()));
                                 if (ord >= 0) {
-                                    tris = tris + folkArt.triCount[ord] + 2;   // + its shadow
+                                    // The body, and its shadow, which is the same silhouette again.
+                                    tris = tris + folkArt.triCount[ord] * 2;
                                 }
                             }
                             slot = chain.after(slot);
@@ -1722,12 +1721,31 @@ public bundle Agents {
                                              + GlWorld3D.BOB_HIGH
                                                * fsin(timeSec * GlWorld3D.BOB_RATE
                                                       + cast<float>(slot) * GlWorld3D.BOB_APART);
-                                        // The shadow goes on the ground and stays there, and draws
-                                        // smaller the higher the body is -- which is the only thing
-                                        // in the picture that says how far up it actually is.
-                                        wv = emitShadow(buf, wv, px * 2.0, py * 2.0, groundZ,
-                                                        GlWorld3D.SHADOW_WIDE
-                                                        * (1.0 - up * 0.35));
+                                        // ITS OWN SILHOUETTE, THROUGH THE SHADOW THIS RENDERER
+                                        // ALREADY HAS. The first version of this was a grey square
+                                        // written by hand: it came out WHITE -- a shadow here is the
+                                        // GROUND's colour dimmed, not a grey, and a flat grey quad
+                                        // facing straight up is lit like a mirror -- it was as wide
+                                        // as two people, and it lay square to the world while every
+                                        // other shadow in the game leans away from the sun.
+                                        //
+                                        // `emitMeshShadowTurned` is all three of those, solved once:
+                                        // the body's own outline, sheared along the sun, laid on the
+                                        // ground cell by cell so it steps down a slope.
+                                        //
+                                        // THE HOVER IS IN IT, which is what makes floating readable:
+                                        // the whole silhouette slides along the sun by the height
+                                        // the body is off the ground, so it drifts away as the body
+                                        // rises and comes back as it falls.
+                                        Rgb under = groundUnder(cell, shadeAt(gx, gy, 1, lvl));
+                                        wv = emitMeshShadowTurned(folkArt, buf, wv, ord,
+                                                                  px * 2.0 - up * 0.368,
+                                                                  py * 2.0 - up * 0.579,
+                                                                  groundZ + 0.012,
+                                                                  GlWorld3D.PERSON_SCALE,
+                                                                  cast<float>(under.r),
+                                                                  cast<float>(under.g),
+                                                                  cast<float>(under.b), true, turn);
                                     }
                                     float topZ = groundZ + up;
                                     wv = emitTurned(folkArt, buf, wv, ord, px * 2.0, py * 2.0, topZ,
@@ -1745,31 +1763,6 @@ public bundle Agents {
                 folk.upload(buf, wv, tris * 27);
                 Allocator.free(buf);
                 return;
-            }
-
-            // A DARK PATCH ON THE GROUND UNDER A FLOATING BODY. Two triangles, flat, facing up.
-            //
-            // IT IS WHAT MAKES FLOATING READ AS FLOATING. A body drawn above the ground with
-            // nothing beneath it is a body drawn at the wrong height -- an eye cannot tell those
-            // apart, and it does not try: it reads the higher one as bigger, or as further away, or
-            // as a bug. The shadow is the only thing in the picture that says how far up it is,
-            // which is why it shrinks as the body rises.
-            //
-            // A HAIR ABOVE THE GROUND, because a dark quad at exactly the ground's height fights
-            // the ground for the same depth and flickers -- which is the one way a shadow can look
-            // worse than none.
-            private method emitShadow(address buf, int w, float wx, float wy, float wz, float half)
-                    returns int {
-                float z = wz + 0.02;
-                float d = GlWorld3D.SHADOW_DARK * 255.0;
-                mutable int p = w;
-                p = wr(buf, p, wx - half, wy - half, z, 0.0, 0.0, 1.0, d, d, d);
-                p = wr(buf, p, wx + half, wy - half, z, 0.0, 0.0, 1.0, d, d, d);
-                p = wr(buf, p, wx + half, wy + half, z, 0.0, 0.0, 1.0, d, d, d);
-                p = wr(buf, p, wx - half, wy - half, z, 0.0, 0.0, 1.0, d, d, d);
-                p = wr(buf, p, wx + half, wy + half, z, 0.0, 0.0, 1.0, d, d, d);
-                p = wr(buf, p, wx - half, wy + half, z, 0.0, 0.0, 1.0, d, d, d);
-                return p;
             }
 
             // WHICH BODY A STANDING IS DRAWN WITH. A `match` over the sealed enum, so the fifth
