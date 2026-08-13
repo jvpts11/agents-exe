@@ -1,0 +1,156 @@
+import System.IO.Console;
+import System.Test.Test;
+import System.Time.Time;
+import Agents.Sim.Crew;
+import Agents.Sim.Shift;
+import Agents.Checks.Counting;
+import Agents.Checks.Grinding;
+program AgentsExe;
+
+// THE CREW: that every part runs, that it runs ONCE, and what a round costs.
+//
+// The last of those is the one the design stands on. The fauna tick is handed to the crew up to
+// three hundred times between two frames at the top gear, so a round that costs ten microseconds to
+// hand out and collect would cost three milliseconds a frame -- half the frame's budget -- to speed
+// up ninety microseconds of work. A round has to cost hundreds of nanoseconds or the whole idea is
+// a loss, and that is measured here rather than assumed.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Crews {
+            // Sum of 0..n-1, which is what a correct crew must produce however it splits the work.
+            private static method sumTo(int n) returns long {
+                return cast<long>(n) * cast<long>(n - 1) / cast<long>(2);
+            }
+
+            [Tag(name: "crew")]
+            [Test]
+            public static method every_part_runs_exactly_once() returns void {
+                // Six hands, and a share each of a hundred thousand numbers. Every part running
+                // twice, or one of them not running at all, changes the total.
+                Crew* crew = new Crew(6) on heap;
+                crew.start();
+                Counting* job = new Counting(6, 100000, 1) on heap;
+                crew.work(job);
+                Test.assertEqualLong(job.total(), Crews.sumTo(100000));
+                delete job;
+                delete crew;
+                return;
+            }
+
+            // AND THE ANSWER DOES NOT DEPEND ON HOW MANY HANDS THERE WERE, which is the property
+            // everything else rests on: a world simulated by six threads has to be the world one
+            // thread would have produced, or every measurement taken off it is about a different
+            // world.
+            [Tag(name: "crew")]
+            [Test]
+            public static method one_hand_and_many_agree() returns void {
+                for (int hands in 1..9) {
+                    Crew* crew = new Crew(hands) on heap;
+                    crew.start();
+                    Counting* job = new Counting(hands, 50000, 1) on heap;
+                    crew.work(job);
+                    Test.assertEqualLong(job.total(), Crews.sumTo(50000));
+                    delete job;
+                    delete crew;
+                }
+                return;
+            }
+
+            // A CREW OF ONE IS NOT A SPECIAL CASE, it is a machine with one core -- and the setting
+            // the whole world can be run under to compare against.
+            [Tag(name: "crew")]
+            [Test]
+            public static method a_crew_of_one_starts_no_threads_and_still_works() returns void {
+                Crew* crew = new Crew(1) on heap;
+                crew.start();
+                Test.assertEqual(crew.howManyHands(), 1);
+                Counting* job = new Counting(1, 10000, 1) on heap;
+                crew.work(job);
+                Test.assertEqualLong(job.total(), Crews.sumTo(10000));
+                delete job;
+                delete crew;
+                return;
+            }
+
+            // WHAT A ROUND COSTS, WITH NOTHING IN IT. The job does one addition per hand, so what is
+            // being timed is handing the work out and getting it back: one atomic increment, six
+            // threads noticing, and one counter read until it lands.
+            //
+            // Asserted loosely and printed exactly. The number that matters is in the printout --
+            // the assertion is only there to catch the design failing outright, which would be a
+            // round costing tens of microseconds because the hands went through the operating
+            // system to wake up.
+            [Tag(name: "crew")]
+            [Test]
+            public static method a_round_costs_a_fraction_of_a_microsecond() returns void {
+                Crew* crew = new Crew(6) on heap;
+                crew.start();
+                Counting* job = new Counting(6, 6, 1) on heap;
+                // A first round warms the hands: the very first one pays for six threads noticing
+                // they have work for the first time, which is not what a tick pays.
+                for (int warm in 0..100) {
+                    crew.work(job);
+                }
+                int rounds = 20000;
+                long began = Time.nanos();
+                for (int r in 0..rounds) {
+                    crew.work(job);
+                }
+                long spent = Time.nanos() - began;
+                long each = spent / cast<long>(rounds);
+                System.IO.Console.println($"crew: a round of six hands costs {each} ns");
+                // Ten microseconds is the failure this is here to catch: a round that goes through
+                // the scheduler. A tick at the top gear is handed out three hundred times a frame.
+                Test.assertTrue(each < cast<long>(10000));
+                delete job;
+                delete crew;
+                return;
+            }
+
+            // AND SIX HANDS ARE FASTER THAN ONE at work worth splitting.
+            //
+            // BOTH CREWS ARE WARMED FIRST, and that is not a nicety. A crew's first round is where
+            // its threads notice they exist at all, which is tens of microseconds of operating
+            // system paid once in the life of a world -- and timing the first round measured that
+            // instead of the work, and reported six hands as slower than one.
+            [Tag(name: "crew")]
+            [Test]
+            public static method many_hands_beat_one_at_work_worth_splitting() returns void {
+                Crew* alone = new Crew(1) on heap;
+                alone.start();
+                Crew* many = new Crew(6) on heap;
+                many.start();
+                Grinding* warm = new Grinding(6, 600, 4) on heap;
+                for (int w in 0..50) {
+                    many.work(warm);
+                }
+
+                Grinding* solo = new Grinding(1, 200000, 8) on heap;
+                long beganAlone = Time.nanos();
+                alone.work(solo);
+                long spentAlone = Time.nanos() - beganAlone;
+
+                Grinding* shared = new Grinding(6, 200000, 8) on heap;
+                long beganMany = Time.nanos();
+                many.work(shared);
+                long spentMany = Time.nanos() - beganMany;
+
+                // The same answer, whoever did it. This is the property the fauna's own crew rests
+                // on, checked here on work whose answer is arithmetic rather than a world.
+                Test.assertEqualLong(solo.total(), shared.total());
+                System.IO.Console.println($"crew: one hand {spentAlone / cast<long>(1000)} us, six hands {spentMany / cast<long>(1000)} us");
+                // Six hands on six cores, so anything short of twice as fast means the crew is not
+                // sharing the work at all -- deliberately far below the six it should approach, so
+                // this fails for a broken crew and not for a busy machine.
+                Test.assertTrue(spentMany * cast<long>(2) < spentAlone);
+                delete shared;
+                delete solo;
+                delete warm;
+                delete many;
+                delete alone;
+                return;
+            }
+        }
+    }
+}

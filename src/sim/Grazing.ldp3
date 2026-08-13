@@ -10,6 +10,8 @@ import Agents.Sim.BlockChain;
 import Agents.Sim.Nearby;
 import Agents.Sim.Prowl;
 import Agents.Sim.Chronicle;
+import Agents.Sim.Crew;
+import Agents.Sim.Stir;
 import Agents.World.Grid;
 import Agents.World.BlockGrid;
 import Agents.World.Species;
@@ -182,8 +184,6 @@ public bundle Agents {
 
             public static method tick(Wild* wild, Grid* g, long at, Rng* rng, Chronicle* log)
                     returns void {
-                // Which fifteenth of the world's animals comes up this tick.
-                int phase = cast<int>(at % cast<long>(Grazing.STIR_EVERY));
                 Grazing.beastTicks = Grazing.beastTicks + cast<long>(wild.count());
                 mutable long mark = Time.nanos();
 
@@ -250,8 +250,23 @@ public bundle Agents {
                 Grazing.thinkNs = Grazing.thinkNs + (now - mark);
                 mark = now;
 
-                // THREE: a fifteenth of the animals take their step.
-                Grazing.stirGrazers(wild, g, phase, at);
+                // THREE: every grazing animal takes its step, and the crew takes them together.
+                //
+                // THE ONLY PASS THAT IS SHARED OUT, and it is the one worth sharing: it touches every
+                // animal on every tick and is two thirds of the tick. The other three are a walk of
+                // the herds that are moving, a sixtieth of the herds thinking, and a sixtieth of the
+                // animals ageing -- all of which write herds, rosters, births and deaths, which is
+                // shared state everywhere rather than in one place. See `Stir` for what makes this
+                // one different and `Crew` for why the hands are not made here.
+                // Started on the first tick that wants them rather than when the world was made: a
+                // check that builds a world and never ticks it should never have started a thread.
+                Crew* crew = wild.crew();
+                Stir* pass = wild.stir();
+                crew.start();
+                pass.ready(wild, g, cast<int>(at / cast<long>(Grazing.HOLD_COURSE)) * 668265263,
+                           cast<float>(Grazing.STIR_EVERY));
+                crew.work(pass);
+                pass.settle();
                 now = Time.nanos();
                 Grazing.stirNs = Grazing.stirNs + (now - mark);
                 mark = now;
@@ -553,71 +568,9 @@ public bundle Agents {
                 return;
             }
 
-            // A FIFTEENTH OF THE GRAZING ANIMALS TAKE A STEP -- see STIR_EVERY for why a fifteenth.
-            //
-            // THE ANIMAL ALREADY KNOWS EVERYTHING THIS PASS NEEDS, and that is the whole of why it is
-            // cheap. It carries its own `state`, so "am I grazing?" is a read of the twenty bytes the
-            // walk is already reading -- no herd, no roster, no pointer chased anywhere.
-            //
-            // Two earlier shapes, both measured and both worse:
-            //   * by SLOT with a herd lookup -- one scattered `Herd` object dereferenced per animal,
-            //     24 ns each;
-            //   * by HERD through the roster -- the herd read once for four animals, but a roster is
-            //     a linked list through a shared pool, so every animal is a DEPENDENT load the
-            //     processor cannot start until the one before it has landed. No better.
-            //
-            // What is given up is the pull back toward the herd's centre, which needed the centre.
-            // It moves to the herd's own decision, once a second, where the centre is already in
-            // hand and the roster is already being walked -- and a straggler that spends a second
-            // out of place is a straggler nobody can see, at the size an animal is drawn.
-            private static method stirGrazers(Wild* wild, Grid* g, int phase, long at) returns void {
-                int n = wild.count();
-                // THE COURSE IS HELD, not redrawn every tick. `at / HOLD_COURSE` changes three
-                // quarters of a second at a time, so an animal ambles in one direction and then
-                // picks another -- where hashing the raw tick would give it a new direction sixty
-                // times a second, which is not wandering, it is vibrating.
-                int spun = cast<int>(at / cast<long>(Grazing.HOLD_COURSE)) * 668265263;
-                mutable int slot = phase;
-                while (slot < n) {
-                    BeastId b = cast<BeastId>(slot);
-                    int here = slot;
-                    slot = slot + Grazing.STIR_EVERY;
-                    // Its own state, and nothing else asked. Anything crossing ground, running,
-                    // stalking or feeding is owned by another pass this tick.
-                    if (cast<int>(wild.stateOf(b)) != cast<int>(BeastState.Grazing)) {
-                        continue;
-                    }
-                    // GRAZING IS ALSO GETTING ITS WIND BACK. An animal that ran itself out and then
-                    // never recovered would be caught by the next wolf whatever it did, so the herd
-                    // would die out for a reason nobody wrote.
-                    int wind = wild.staminaOf(b);
-                    if (wind < 1000) {
-                        wild.setStaminaOf(b, wind + Grazing.RECOVER);
-                    }
-                    float bx = wild.xOf(b);
-                    float by = wild.yOf(b);
-                    // How far it wanders is its species', read off the table by its own species --
-                    // one small array that stays in cache, rather than an object per herd.
-                    float hop = Beasts.paceATick(cast<int>(wild.speciesOf(b)))
-                                * cast<float>(Grazing.STIR_EVERY);
-                    // A STEP IN A DIRECTION OF ITS OWN, hashed from the animal's slot and the tick
-                    // rather than drawn. Ten thousand random numbers a tick is a cost paid for
-                    // something nobody can see; a hash of two numbers already in hand is not. And it
-                    // has to include the TICK: hashed from the slot alone, every animal walks in one
-                    // fixed direction forever and the herd ends up as a ring around its own edge.
-                    //
-                    // MASKS AND NOT REMAINDERS. `% 21` is an integer division, and two of them per
-                    // animal in the pass that costs forty per cent of the tick is two divisions in
-                    // the hottest loop in the game. Sixteen directions off four bits read exactly
-                    // the same on screen as twenty-one do.
-                    mutable int k = here * 374761393 + spun;
-                    k = k ^ (k >> 13);
-                    float wx = cast<float>((k & 15) - 8) * 0.125;
-                    float wy = cast<float>(((k >> 8) & 15) - 8) * 0.125;
-                    Grazing.tryStep(wild, g, b, bx, by, bx + wx * hop, by + wy * hop);
-                }
-                return;
-            }
+            // (The pass that steps every grazing animal lives in `Stir`, because it is the one pass
+            // the crew shares out and it needs a place to keep each hand's deferred crossings. What
+            // it does and why it is shaped that way is written there.)
 
             // MOVE IT THERE IF IT MAY STAND THERE. It may not walk off the map or onto ground it
             // cannot live on -- except while migrating, which is the named exception and the reason

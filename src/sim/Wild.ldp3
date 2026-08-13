@@ -6,6 +6,8 @@ import Agents.Sim.HerdId;
 import Agents.Sim.BeastState;
 import Agents.Sim.HerdMood;
 import Agents.Sim.BlockChain;
+import Agents.Sim.Crew;
+import Agents.Sim.Stir;
 import Agents.Sim.Vanished;
 import Agents.Sim.Chronicle;
 import Agents.World.Species;
@@ -50,6 +52,16 @@ public bundle Agents {
             // there is nothing to tell. `indexAgrees` is the check that keeps that honest.
             private mutable BlockChain* blocks;
 
+            // THE HANDS THIS LAYER'S TICK IS SHARED BETWEEN, and the room they need to share it.
+            //
+            // BORN WITH ONE HAND, which is not a placeholder: a world built by a check ticks a few
+            // hundred times and should never start a thread, and one hand is also the setting the
+            // bit-identical check runs against. A world a game is played in is told how many the
+            // machine has (`shareBetween`), and the hands do not actually start until the first tick
+            // that wants them.
+            private mutable Crew* hands;
+            private mutable Stir* stirring;
+
             // The ground is this big, and the index is cut to fit it. A Wild belongs to a world.
             public constructor Wild(int width, int height) {
                 room = 1024;
@@ -72,9 +84,18 @@ public bundle Agents {
                 born = 0;
                 chasesLost = 0;
                 lost = 0;
+                hands = new Crew(1) on heap;
+                stirring = new Stir(1) on heap;
             }
 
             public destructor ~Wild() returns void {
+                // THE HANDS GO HOME BEFORE THE ANIMALS DO. A hand that is still spinning when the
+                // beast array is freed is a hand reading freed memory -- which is the one way this
+                // design can fail catastrophically rather than merely wrongly, so it is the first
+                // line of the destructor and not the last.
+                hands.close();
+                delete hands;
+                delete stirring;
                 for (int i in 0..herdCount) {
                     delete herds[i];
                 }
@@ -86,6 +107,29 @@ public bundle Agents {
                 delete causes;
                 delete gone;
                 return;
+            }
+
+            // SHARE THE TICK BETWEEN THIS MANY HANDS -- told to a world once, by whoever knows how
+            // much machine there is to use. One means no threads at all.
+            public method shareBetween(int many) returns void {
+                if (many == hands.howManyHands()) {
+                    return;
+                }
+                hands.close();
+                delete hands;
+                delete stirring;
+                hands = new Crew(many) on heap;
+                stirring = new Stir(hands.howManyHands()) on heap;
+                return;
+            }
+
+            // The crew and the stir this layer ticks with. Borrowed: they die with the Wild.
+            public method crew() returns Crew* {
+                return hands;
+            }
+
+            public method stir() returns Stir* {
+                return stirring;
             }
 
             public method count() returns int {

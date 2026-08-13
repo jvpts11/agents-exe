@@ -243,6 +243,70 @@ public bundle Agents {
                 return;
             }
 
+            // A WORLD RUN BY SIX HANDS IS THE WORLD ONE HAND MAKES, animal for animal.
+            //
+            // THIS IS THE CHECK THE WHOLE PARALLEL TICK STANDS ON, and there is no weaker version of
+            // it worth having. "About the same number of animals" would pass with a pass that loses
+            // a move every few thousand ticks; what is asked here is that after two thousand ticks
+            // every animal is in the same slot, at the same coordinates to the last bit, in the same
+            // state, with the same wind. If the two worlds have drifted at all, they have drifted for
+            // a reason -- an animal moved twice, a crossing applied out of order, two hands writing
+            // the same word -- and every one of those reasons is a defect that would otherwise show
+            // up months later as behaviour nobody can explain.
+            //
+            // EXACT EQUALITY OF FLOATS, deliberately. The arithmetic is the same arithmetic in the
+            // same order; nothing here is an average or a sum over animals, where a different order
+            // would round differently. A tolerance would be admitting the two worlds are allowed to
+            // differ, which is the opposite of the claim.
+            [Tag(name: "fauna")]
+            [Test]
+            public static method a_world_run_by_six_hands_is_the_world_one_hand_makes() returns void {
+                mutable Grid* g = Herding.pasture();
+                Wild* one = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                Wild* many = new Wild(Herding.SIDE, Herding.SIDE) on heap;
+                many.shareBetween(6);
+                Test.assertEqual(many.crew().howManyHands(), 6);
+                mutable Rng* diceOne = new Rng(11) on heap;
+                mutable Rng* diceMany = new Rng(11) on heap;
+                mutable Chronicle* logOne = new Chronicle() on heap;
+                mutable Chronicle* logMany = new Chronicle() on heap;
+                // The same four herds in both worlds, sown identically.
+                for (int k in 0..4) {
+                    float cx = 20.5 + cast<float>(k % 2) * 40.0;
+                    float cy = 20.5 + cast<float>(k / 2) * 40.0;
+                    Herd* a = one.gather(Species.Bison, cx, cy, 8.0);
+                    Herd* b = many.gather(Species.Bison, cx, cy, 8.0);
+                    for (int i in 0..12) {
+                        float x = cx + cast<float>(i) * 0.5;
+                        a.admit(one.bear(Species.Bison, x, cy));
+                        b.admit(many.bear(Species.Bison, x, cy));
+                    }
+                }
+                for (int t in 0..2000) {
+                    Grazing.tick(one, g, cast<long>(t + 1), diceOne, logOne);
+                    Grazing.tick(many, g, cast<long>(t + 1), diceMany, logMany);
+                }
+                Test.assertEqual(many.count(), one.count());
+                for (int i in 0..one.count()) {
+                    BeastId b = cast<BeastId>(i);
+                    Test.assertTrue(one.xOf(b) == many.xOf(b));
+                    Test.assertTrue(one.yOf(b) == many.yOf(b));
+                    Test.assertEqual(cast<int>(many.stateOf(b)), cast<int>(one.stateOf(b)));
+                    Test.assertEqual(many.staminaOf(b), one.staminaOf(b));
+                }
+                // And both indexes still agree with their own animals.
+                Test.assertEqual(one.indexAgrees(), 0);
+                Test.assertEqual(many.indexAgrees(), 0);
+                delete logMany;
+                delete logOne;
+                delete diceMany;
+                delete diceOne;
+                delete many;
+                delete one;
+                delete g;
+                return;
+            }
+
             // NOTHING WALKS INTO THE SEA. The habitat rule holds for every animal on every tick, and
             // the ONE exception is an animal crossing to somewhere else, which is why that state has
             // a name of its own.

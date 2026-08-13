@@ -1,0 +1,210 @@
+import System.Math.Math;
+import Agents.Sim.Shift;
+import Agents.Sim.Crossing;
+import Agents.Sim.Wild;
+import Agents.Sim.BeastId;
+import Agents.Sim.BeastState;
+import Agents.World.Grid;
+import Agents.World.Beasts;
+program AgentsExe;
+
+// EVERY GRAZING ANIMAL TAKES ITS STEP, and six hands take them at once.
+//
+// This is the pass the whole tick is: it touches every animal on every tick and is two thirds of
+// what a tick costs, so it is the one worth sharing out. What makes it shareable is what an animal
+// actually writes when it takes a step -- its own two coordinates and its own wind, in its own
+// twenty bytes, which no other animal reads. Give each hand a stretch of the array and no two of
+// them ever touch the same word.
+//
+// EXCEPT ONE THING, and it is worth being exact about it because everything rests on it: an animal
+// that leaves its CELL has to be moved in the block index, and the index is chains that every animal
+// shares. That is one animal in about twenty. Those are not done here -- they are written down as
+// `Crossing`s, each hand into its own stretch of one list, and made afterwards by the thread that
+// handed the work out, in slot order. See `Crossing`.
+//
+// SO THE WORLD IS THE SAME WORLD. Nothing in this pass reads the block index -- an animal's step
+// depends on its own position, its own species and the ground under it, and the ground does not
+// change -- so deferring the filing changes no decision inside the pass, and applying the deferred
+// moves in slot order is the order they happen in when one hand does everything. That is not an
+// argument to be trusted: `a_world_run_by_six_hands_is_the_world_one_hand_makes` runs both and
+// compares the animals one by one.
+//
+// THE ANIMAL ALREADY KNOWS EVERYTHING THIS PASS NEEDS, and that is why it is cheap enough to be
+// worth sharing rather than skipping. It carries its own `state`, so "am I grazing?" is a read of
+// the twenty bytes the walk is already reading -- no herd, no roster, no pointer chased anywhere.
+//
+// Two earlier shapes, both measured and both worse:
+//   * by SLOT with a herd lookup -- one scattered `Herd` object dereferenced per animal, 24 ns each;
+//   * by HERD through the roster -- the herd read once for four animals, but a roster is a linked
+//     list through a shared pool, so every animal is a DEPENDENT load the processor cannot start
+//     until the one before it has landed. No better -- and it could not have been shared out at all,
+//     because a linked list cannot be cut into six stretches.
+//
+// What is given up is the pull back toward the herd's centre, which needed the centre. It moves to
+// the herd's own decision, once a second, where the centre is already in hand and the roster is
+// already being walked -- and a straggler that spends a second out of place is a straggler nobody
+// can see, at the size an animal is drawn.
+public bundle Agents {
+    public namespace Sim {
+
+        public class Stir implements Shift {
+            private mutable Wild* wild;
+            private mutable Grid* ground;
+            // The tick's own direction seed -- see Grazing.HOLD_COURSE for why it is not the tick.
+            private mutable int spun;
+            private mutable float hopScale;
+            // The moves each hand was not allowed to make, in one list divided into a stretch per
+            // hand, and how many of the stretch each filled.
+            private mutable Crossing[] pending;
+            private mutable int[] filled;
+            private mutable int hands;
+            private mutable int room;      // slots in each hand's stretch
+
+            public constructor Stir(int hands) {
+                mutable int many = hands;
+                if (many < 1) {
+                    many = 1;
+                }
+                this.hands = many;
+                wild = 0 as Wild*;
+                ground = 0 as Grid*;
+                spun = 0;
+                hopScale = 1.0;
+                room = 64;
+                pending = new Crossing[many * room]();
+                filled = new int[many]();
+            }
+
+            public destructor ~Stir() returns void {
+                delete pending;
+                delete filled;
+                return;
+            }
+
+            // WHAT THIS ROUND IS ABOUT, set before the crew is given the job. Also makes room: every
+            // animal in a hand's stretch could cross at once -- a herd setting off does exactly that
+            // -- so the stretch is as long as the stretch of animals, and a crossing is never lost
+            // for want of somewhere to write it.
+            public method ready(Wild* w, Grid* g, int spun, float hopScale) returns void {
+                wild = w;
+                ground = g;
+                this.spun = spun;
+                this.hopScale = hopScale;
+                int need = wild.count() / hands + 2;
+                if (need > room) {
+                    delete pending;
+                    room = need * 2;      // doubled, so a growing world does not reallocate every tick
+                    pending = new Crossing[hands * room]();
+                }
+                for (int h in 0..hands) {
+                    filled[h] = 0;
+                }
+                return;
+            }
+
+            public override method part(int mine, int parts) returns void {
+                // THE ROUND'S FACTS, TAKEN OUT OF THE OBJECT AND INTO REGISTERS, and this is not a
+                // flourish: it is worth more than the threads are.
+                //
+                // A field is reached through `this`, and inside this loop every iteration calls
+                // something -- `wild.slide`, `Beasts.paceATick` -- which for all the optimiser knows
+                // could write to the object the fields live in. So `wild`, `ground` and the rest are
+                // FETCHED AGAIN on every animal, on every tick. Measured: as fields, the pass cost
+                // 35.5 nanoseconds an animal with no threads at all, against 15.1 for the same code
+                // when those were parameters. Held in locals, the loop is the loop it was.
+                Wild* w = wild;
+                Grid* g = ground;
+                int seed = spun;
+                float scale = hopScale;
+                int n = w.count();
+                int from = n * mine / parts;
+                int upTo = n * (mine + 1) / parts;
+                int mineAt = mine * room;
+                float edgeX = cast<float>(g.width());
+                float edgeY = cast<float>(g.height());
+                int grazing = cast<int>(BeastState.Grazing);
+                int migrating = cast<int>(BeastState.Migrating);
+                mutable int got = 0;
+                for (int slot in from..upTo) {
+                    BeastId b = cast<BeastId>(slot);
+                    // Its own state, and nothing else asked. Anything crossing ground, running,
+                    // stalking or feeding is owned by another pass this tick.
+                    if (cast<int>(w.stateOf(b)) != grazing) {
+                        continue;
+                    }
+                    // GRAZING IS ALSO GETTING ITS WIND BACK. An animal that ran itself out and then
+                    // never recovered would be caught by the next wolf whatever it did, so the herd
+                    // would die out for a reason nobody wrote.
+                    int wind = w.staminaOf(b);
+                    if (wind < 1000) {
+                        w.setStaminaOf(b, wind + Stir.RECOVER);
+                    }
+                    float bx = w.xOf(b);
+                    float by = w.yOf(b);
+                    // How far it wanders is its species', read off the table by its own species --
+                    // one small array that stays in cache, rather than an object per herd.
+                    float hop = Beasts.paceATick(cast<int>(w.speciesOf(b))) * scale;
+                    // A STEP IN A DIRECTION OF ITS OWN, hashed from the animal's slot and the tick
+                    // rather than drawn. Ten thousand random numbers a tick is a cost paid for
+                    // something nobody can see; a hash of two numbers already in hand is not. And it
+                    // has to include the TICK: hashed from the slot alone, every animal walks in one
+                    // fixed direction forever and the herd ends up as a ring around its own edge.
+                    //
+                    // MASKS AND NOT REMAINDERS. `% 21` is an integer division, and two of them per
+                    // animal in the pass that costs two thirds of the tick is two divisions in the
+                    // hottest loop in the game. Sixteen directions off four bits read exactly the
+                    // same on screen as twenty-one do.
+                    mutable int k = slot * 374761393 + seed;
+                    k = k ^ (k >> 13);
+                    float wx = cast<float>((k & 15) - 8) * 0.125;
+                    float wy = cast<float>(((k >> 8) & 15) - 8) * 0.125;
+                    float nx = bx + wx * hop;
+                    float ny = by + wy * hop;
+                    // GROUND IT HAS NOT LEFT CANNOT HAVE CHANGED, asked WITHOUT CONVERTING ANYTHING.
+                    // This is the one line every animal runs every tick, so what it costs is what the
+                    // tick costs -- and `cast<int>(float)` here is a saturating, range-checked
+                    // conversion, which is right and is not cheap. `floor` is one instruction.
+                    if (Math.floor(nx) == Math.floor(bx) && Math.floor(ny) == Math.floor(by)) {
+                        w.slide(b, nx, ny);
+                        continue;
+                    }
+                    // It crossed. The decision still belongs here -- the map edge and the habitat
+                    // rule are reads, and reads are what hands may share -- and only the filing is
+                    // handed on.
+                    if (nx < 0.0 || ny < 0.0 || nx >= edgeX || ny >= edgeY) {
+                        continue;
+                    }
+                    if (cast<int>(w.stateOf(b)) != migrating) {
+                        if (!Beasts.livesIn(cast<int>(w.speciesOf(b)),
+                                            g.biomeAt(cast<int>(nx), cast<int>(ny)))) {
+                            continue;
+                        }
+                    }
+                    pending[mineAt + got].slot = slot;
+                    pending[mineAt + got].x = nx;
+                    pending[mineAt + got].y = ny;
+                    got = got + 1;
+                }
+                filled[mine] = got;
+                return;
+            }
+
+            // THE MOVES NOBODY WAS ALLOWED TO MAKE, MADE. Called by the thread that handed the work
+            // out, once every hand is back, lowest slot first.
+            public method settle() returns void {
+                for (int h in 0..hands) {
+                    int at = h * room;
+                    int many = filled[h];
+                    for (int i in 0..many) {
+                        wild.placeAt(cast<BeastId>(pending[at + i].slot),
+                                     pending[at + i].x, pending[at + i].y);
+                    }
+                }
+                return;
+            }
+
+            // How much wind a grazing animal gets back per tick, out of the thousand it starts with.
+            public static fixed int RECOVER = 15;
+        }
+    }
+}

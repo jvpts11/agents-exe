@@ -1,5 +1,6 @@
 import System.IO.Console;
 import System.Time.Time;
+import System.Os.Machine;
 import Agents.World.Grid;
 import Agents.World.WorldGen;
 import Agents.World.Rng;
@@ -131,6 +132,33 @@ public bundle Agents {
                 // many rolls the coastline happened to take, so a change to the generator would
                 // silently move every herd in every world.
                 dice = new Rng(seed ^ 0x5EED) on heap;
+                // THE TICK IS SHARED BETWEEN THREE QUARTERS OF THE MACHINE, and the quarter left over
+                // is not politeness -- it is the renderer, the graphics driver and the operating
+                // system, which are running at the same time and need somewhere to run.
+                //
+                // MEASURED ON THE REAL GAME (`game gear=6 for=10 hands=N`), sixteen hardware threads,
+                // twenty-one thousand animals, in ticks a frame at gear 6 against the 300 asked for:
+                //
+                //     hands   1     2     4     6     8    12    16
+                //     ticks  59.3  75.0  76.3  70.4  74.4  92.9  82.3
+                //
+                // Twelve is the top of that curve and sixteen is over it: with a hand on every
+                // hardware thread the renderer is fighting the tick for the machine, and at gear 1
+                // the same run drew 595 frames where twelve hands drew 1,411.
+                //
+                // Three quarters rather than "minus four", so it degrades the right way: a four-core
+                // machine shares between three, a two-core machine keeps its single hand.
+                //
+                // A world built by a check keeps the one hand it is born with -- checks do not open
+                // windows and must not open threads.
+                beasts.shareBetween(Machine.threads() * 3 / 4);
+            }
+
+            // Share the tick between this many hands, overriding what the machine suggested. For
+            // measuring the number the line above chose, on a machine that is not this one.
+            public method shareBetween(int many) returns void {
+                beasts.shareBetween(many);
+                return;
             }
 
             // The animals. Borrowed: they die with the Sim.

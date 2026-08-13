@@ -1,0 +1,191 @@
+import System.Concurrency.Thread;
+import System.Concurrency.atomic;
+import System.Concurrency.Shared;
+import Agents.Sim.Shift;
+program AgentsExe;
+
+// HANDS THAT STAY, and the reason they stay is the whole design.
+//
+// At gear 6 the world is asked to advance three hundred times between two frames. A pass that
+// creates six threads and joins them costs a hundred microseconds of operating system on each of
+// those three hundred rounds, which is thirty milliseconds a frame -- four times the frame -- for
+// work that takes ninety microseconds to do. Threads created per pass do not make a tick faster,
+// they make it slower, and by a lot.
+//
+// So the hands are made ONCE, when the world is, and they never go home until it does. Between
+// rounds they spin on a counter. Handing them a round is one atomic increment; getting them back is
+// reading another until it reaches the number of hands. There is no lock, no queue, no allocation
+// and no system call anywhere in a round -- measured at a few hundred nanoseconds, against the tens
+// of microseconds a round of work takes, which is what makes three hundred rounds a frame payable.
+//
+// THEY SPIN RATHER THAN SLEEP, and that is a real cost stated plainly: a hand waiting for the next
+// round burns its core doing nothing. Waking a sleeping thread is five to fifty microseconds
+// through the operating system's scheduler -- longer than the work -- so a sleeping crew would give
+// the frame back to the kernel three hundred times and arrive after the frame was over. A game that
+// is running is a program using the machine; a crew is opened when the world opens and closed when
+// it closes, so nothing spins while nothing is being simulated.
+//
+// THE CALLER IS ONE OF THE HANDS. With six hands, five threads spin up and the calling thread does
+// the sixth share itself rather than waiting -- otherwise the busiest core in the machine sits idle
+// through every round it started.
+public bundle Agents {
+    public namespace Sim {
+
+        // `implements Shared` is the promise this class makes to the language: several threads may
+        // reach it at once. What it rests on, stated so it can be held to: every field a hand touches
+        // while the world is running is an `atomic<T>`, and the two that are not -- `job` and `hands`
+        // -- are written before the round is released and only read after, so the atomic increment
+        // that releases the round is what publishes them. A hand touches nothing else here.
+        public class Crew implements Shared {
+            // HOW LONG A HAND SPINS BEFORE IT OFFERS THE CORE TO SOMEBODY ELSE.
+            //
+            // Spinning is the right way to wait for something that is about to happen -- a round is
+            // handed out in hundreds of nanoseconds -- and the worst possible way to wait for
+            // something that is not, because a spinner holds a core the machine needs elsewhere.
+            //
+            // MEASURED, NOT CHOSEN, and the measurement was a disaster worth writing down: with a
+            // pure spin and one hand per hardware thread, the fauna tick went from 15 to 102
+            // microseconds an animal -- SEVEN TIMES WORSE than one thread -- because fifteen
+            // spinners on a sixteen-thread machine left nothing for the renderer, the graphics
+            // driver or the operating system, and every round then waited on hands that had been
+            // preempted. A few thousand spins covers the round-to-round case; past that the wait is
+            // for something slow, and taking turns beats holding the core.
+            public static fixed int SPIN_BEFORE_YIELDING = 4000;
+
+            // Which round the hands should be working on. Bumped to release them; a hand that has
+            // finished round N spins until it reads N+1.
+            private mutable atomic<int>* round;
+            // How many hands have finished the round. The caller waits on this.
+            private mutable atomic<int>* landed;
+            // Set when the world is closing, so a spinning hand has a way out.
+            private mutable atomic<int>* closing;
+            // What they are doing this round. Written before the round is released and read after,
+            // so the atomic increment is what publishes it.
+            private mutable Shift* job;
+            private mutable int hands;
+            private mutable Thread*[] crew;
+            private mutable boolean open;
+            // How many rounds were run and how many were run alone, for the report.
+            private mutable long rounds;
+
+            // `hands` counts the calling thread, so 1 means "no threads at all, do it here" -- which
+            // is not a special case bolted on, it is the setting a machine with one core gets, and
+            // the one the bit-identical check runs against.
+            public constructor Crew(int hands) {
+                round = new atomic<int>(0) on heap;
+                landed = new atomic<int>(0) on heap;
+                closing = new atomic<int>(0) on heap;
+                job = 0 as Shift*;
+                rounds = cast<long>(0);
+                mutable int want = hands;
+                if (want < 1) {
+                    want = 1;
+                }
+                this.hands = want;
+                crew = new Thread*[want]();
+                open = false;
+            }
+
+            public destructor ~Crew() returns void {
+                close();
+                delete crew;
+                delete closing;
+                delete landed;
+                delete round;
+                return;
+            }
+
+            // Start the hands. Separate from the constructor because a `Crew` that is never given a
+            // job should never have started a thread -- a test that builds a world and ticks it once
+            // pays nothing.
+            public method start() returns void {
+                if (open || hands < 2) {
+                    open = true;
+                    return;
+                }
+                for (int i in 1..hands) {
+                    Crew* self = this;
+                    int mine = i;
+                    function<void> loop = lambda[captures: byvalue self, byvalue mine]() returns void {
+                        self.serve(mine);
+                    };
+                    Thread* hand = new Thread(loop) on heap;
+                    crew[i] = hand;
+                    hand.start();
+                }
+                open = true;
+                return;
+            }
+
+            // Send the hands home. Idempotent: the destructor calls it, and so may whoever owns it.
+            public method close() returns void {
+                if (!open || hands < 2) {
+                    open = false;
+                    return;
+                }
+                closing.set(1);
+                round.increment();          // wake anyone spinning on the round
+                for (int i in 1..hands) {
+                    crew[i].join();
+                    delete crew[i];
+                }
+                open = false;
+                return;
+            }
+
+            // WHAT A HAND DOES FOR AS LONG AS THE WORLD IS OPEN. One round of the job each time the
+            // counter moves, and nothing at all in between.
+            private method serve(int mine) returns void {
+                mutable int seen = 0;
+                while (true) {
+                    mutable int spins = 0;
+                    while (round.get() == seen) {
+                        if (closing.get() != 0) {
+                            return;
+                        }
+                        spins = spins + 1;
+                        if (spins > Crew.SPIN_BEFORE_YIELDING) {
+                            Thread.yieldNow();
+                        }
+                    }
+                    seen = round.get();
+                    if (closing.get() != 0) {
+                        return;
+                    }
+                    job.part(mine, hands);
+                    landed.increment();
+                }
+            }
+
+            // DO THIS JOB, IN PARTS, AND COME BACK WHEN ALL OF IT IS DONE. The one method the tick
+            // calls. Everything a caller has to know is here: when it returns, every part has run.
+            public method work(Shift* what) returns void {
+                rounds = rounds + cast<long>(1);
+                if (hands < 2 || !open) {
+                    what.part(0, 1);
+                    return;
+                }
+                job = what;
+                landed.set(0);
+                round.increment();
+                what.part(0, hands);        // the caller's own share, rather than waiting for it
+                mutable int spins = 0;
+                while (landed.get() < hands - 1) {
+                    spins = spins + 1;
+                    if (spins > Crew.SPIN_BEFORE_YIELDING) {
+                        Thread.yieldNow();
+                    }
+                }
+                return;
+            }
+
+            public method howManyHands() returns int {
+                return hands;
+            }
+
+            public method roundsRun() returns long {
+                return rounds;
+            }
+        }
+    }
+}
