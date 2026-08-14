@@ -5,6 +5,7 @@ import opengl.glsl.Shader;
 import opengl.glm.GlMat4;
 import Agents.World.Grid;
 import Agents.World.Nodes;
+import Agents.World.Goods;
 import Agents.World.NodeField;
 import Agents.World.NodeAtlas;
 import Agents.Sim.Meter;
@@ -62,6 +63,8 @@ public bundle Agents {
             // what makes a recruitment visible: the model changes because the array did.
             private mutable MeshBuffer* folk;
             private mutable MeshAtlas* folkArt;
+            // The good in a person's hands, when they have one. Borrowed like every other atlas.
+            private mutable MeshAtlas* itemArt;
             private mutable Population* crowd;
             private mutable int drawnFolk;
             // WHERE EACH BODY WAS DRAWN LAST FRAME, AND WHICH WAY THAT MAKES IT FACE. One for the
@@ -1436,9 +1439,10 @@ public bundle Agents {
 
             // And the people, the same way. Borrowed, both of them: the world owns its crowd and the
             // atlas belongs to whoever loaded it.
-            public method takeFolk(Population* p, MeshAtlas* art) returns void {
+            public method takeFolk(Population* p, MeshAtlas* art, MeshAtlas* held) returns void {
                 crowd = p;
                 folkArt = art;
+                itemArt = held;
                 return;
             }
 
@@ -1624,6 +1628,24 @@ public bundle Agents {
             // rising straight to one at `Courting.OF_AGE` and staying there. Straight and not
             // curved, because the difference a curve would make is a fraction of a pixel at a
             // quarter-tile and the age it reaches full size is the thing that has to be legible.
+            // How big a carried good is drawn against the body carrying it. A third: big enough to
+            // tell berries from a log at this camera, small enough that a person carrying something
+            // still reads as a person and not as a crate with legs.
+            private static fixed float IN_HAND = 0.34;
+
+            // WHICH ITEM MESH THIS PERSON IS HOLDING, or nothing.
+            //
+            // ASKS THE ATLAS BY THE GOOD'S OWN NAME, which is what makes this survive the goods
+            // table growing: a good added in S4 is drawn the day its mesh is authored and needs no
+            // line here. An atlas that has never heard of it answers -1 and the person is drawn
+            // empty-handed, which is the honest picture rather than a missing-mesh cube.
+            private static method itemOrdOf(MeshAtlas* held, Agent* who) returns int {
+                if (held == null || who.inventory.emptyHanded() || who.inventory.howMany < 1) {
+                    return 0 - 1;
+                }
+                return held.ordOf(Goods.name(who.inventory.carrying));
+            }
+
             public static method grownness(int years) returns float {
                 if (years >= Courting.OF_AGE) {
                     return 1.0;
@@ -1704,6 +1726,14 @@ public bundle Agents {
                                     tris = tris + folkArt.triCount[ord];
                                     if (!Biomes.swims(grid.biomeAt(cast<int>(px), cast<int>(py)))) {
                                         tris = tris + folkArt.triCount[ord];
+                                    }
+                                    // AND WHAT THEY CARRY, asked by the SAME method the emit asks,
+                                    // so the two passes cannot answer differently. Written as two
+                                    // conditions that happen to agree, this is ledger S2-21 again
+                                    // and the frame stops on `upload`'s contract.
+                                    int held = GlWorld3D.itemOrdOf(itemArt, who);
+                                    if (held >= 0) {
+                                        tris = tris + itemArt.triCount[held];
                                     }
                                 }
                             }
@@ -1796,6 +1826,22 @@ public bundle Agents {
                                     float topZ = groundZ + up;
                                     wv = emitTurned(folkArt, buf, wv, ord, px * 2.0, py * 2.0, topZ,
                                                     big, shadeAt(gx, gy, 1, lvl), turn);
+                                    // AND WHAT IS IN THEIR HANDS. Above the body and a little
+                                    // smaller: a carried thing is a thing a person is holding, and
+                                    // the one that reads on screen is the berry basket coming home.
+                                    //
+                                    // THE ART HAS BEEN THERE ALL ALONG -- a hundred and twenty-eight
+                                    // goods, authored slice by slice and never once shown, so a
+                                    // world where somebody gathered looked exactly like a world
+                                    // where nobody had.
+                                    int held = GlWorld3D.itemOrdOf(itemArt, who);
+                                    if (held >= 0) {
+                                        wv = emitTurned(itemArt, buf, wv, held, px * 2.0, py * 2.0,
+                                                        topZ + GlWorld3D.A_PERSON * big
+                                                               / GlWorld3D.PERSON_SCALE * 0.55,
+                                                        big * GlWorld3D.IN_HAND,
+                                                        shadeAt(gx, gy, 1, lvl), turn);
+                                    }
                                     drawnFolk = drawnFolk + 1;
                                 }
                             }

@@ -100,6 +100,12 @@ public bundle Agents {
             // How many times `advance` was called -- the divisor that makes `spent` readable. See
             // `report`: without it, the same empty tick reads 178 ns at gear 1 and 2 ns at gear 6.
             private mutable long advances;
+            // WHAT THE PEOPLE COST, whole: nanoseconds across all seven of their passes, and the
+            // person-ticks to divide it by. Static because the fauna's own meter is, and because
+            // the pair are read together in `report` -- two counters that could disagree about which
+            // run they belong to would be worse than none.
+            private static mutable long peopleNs;
+            private static mutable long peopleTicks;
 
             // How long a frame may spend advancing the world, in milliseconds. A frame at sixty a
             // second is about seventeen; half of it to the simulation leaves the other half to draw
@@ -381,7 +387,35 @@ public bundle Agents {
                 if (behind > 0) {
                     System.IO.Console.println($"world: {behind} ticks owed and refused in total -- see the [tick] lines above for when");
                 }
+                // WHAT A PERSON COSTS, AND WHAT AN ANIMAL COSTS, SIDE BY SIDE.
+                //
+                // THE RATIO IS THE POINT, and it is the fauna layout's own bar: **2.5× is the
+                // number to beat** -- an animal may cost up to two and a half times a person and no
+                // more, because the world holds several times as many animals as people and a beast
+                // that costs the same as a person is a beast the world cannot afford in the numbers
+                // it needs. Printed rather than remembered, and printed as a RATIO rather than as
+                // two numbers a reader has to divide, because a bar nobody computes is a bar nobody
+                // notices moving.
+                //
+                // Both halves are whole accounts: every pass of the fauna against every pass of the
+                // people, measured inside the real frame with the window open.
+                if (Sim.peopleTicks > 0 && Grazing.beastTicksSoFar() > 0) {
+                    long person = Sim.peopleNs * 1000 / Sim.peopleTicks;
+                    long animal = Grazing.nanosPerBeastTick() * 1000;
+                    System.IO.Console.println($"the ratio: {person} ps a person a tick, {animal} ps an animal a tick");
+                    if (person > 0) {
+                        System.IO.Console.println($"the ratio: an animal costs {animal * 100 / person} per cent of a person, and the bar is 250");
+                    }
+                }
                 return;
+            }
+
+            // The two halves of the ratio, for a check that wants the numbers rather than the line.
+            public method picosPerPersonTick() returns long {
+                if (Sim.peopleTicks == 0) {
+                    return 0;
+                }
+                return Sim.peopleNs * 1000 / Sim.peopleTicks;
             }
 
             // Nanoseconds a tick has cost on average, for whoever wants the number rather than the
@@ -410,6 +444,17 @@ public bundle Agents {
                     // decides where to go, and everybody who is going takes a step -- in that
                     // order, so a person who sets out this tick starts walking this tick rather
                     // than standing through one.
+                    // AND THE WHOLE OF WHAT A PERSON COSTS IS MEASURED FROM HERE TO THE END OF THE
+                    // PASSES, because this is the only place that sees all seven of them.
+                    //
+                    // THE WHOLE ACCOUNT OR NONE OF IT. `Walking` has metered itself since S2.3 and
+                    // that number is a fifth of the truth -- a partial meter does not merely
+                    // understate a cost, it points at the WRONG one, which this project has already
+                    // paid for twice. S2.9 asks what a person costs against what an animal costs,
+                    // and an answer built out of the one pass that happens to have a stopwatch in it
+                    // would be a number about stopwatches.
+                    long folkBegan = Time.nanos();
+                    peopleTicks = peopleTicks + cast<long>(folk.count());
                     // A YEAR OF BEING ALIVE, on the tick a year turns. Before the walking, so
                     // somebody who dies this year does not take a step first.
                     Living.tick(folk, ticked, log);
@@ -441,6 +486,10 @@ public bundle Agents {
                     Hunting.tick(folk, beasts, ground, ways, ticked, log);
                     Roaming.tick(folk, ground, ways, ticked, dice);
                     Walking.tick(folk, ground, ways, ticked);
+                    // The account closes here: seven passes, one stopwatch. The journal below is a
+                    // run's own instrumentation and is deliberately outside it -- a cost that only
+                    // exists when somebody asked for a log is not what a person costs.
+                    peopleNs = peopleNs + (Time.nanos() - folkBegan);
                     // AND EVERY AGENT'S EVERY FIELD IS WRITTEN DOWN, if a run asked for that. After
                     // the passes, so a row is the world as the tick LEFT it rather than half way
                     // through being decided.
