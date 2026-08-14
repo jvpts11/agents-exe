@@ -4,6 +4,9 @@ import Agents.Sim.BeastId;
 import Agents.Sim.BlockChain;
 import Agents.World.BlockGrid;
 import Agents.World.Beasts;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
 program AgentsExe;
 
 // WHO IS NEAR -- the question the block index was built to answer, asked here in the two forms the
@@ -43,6 +46,53 @@ public bundle Agents {
             // The nearest PREY to this place within `reach` cells, or NONE.
             public static method prey(Wild* wild, float x, float y, float reach) returns int {
                 return Nearby.hunt(wild, x, y, reach, false);
+            }
+
+            // AND THE NEAREST PERSON to this place within `reach` cells, or NONE.
+            //
+            // THE SAME SEARCH OVER THE OTHER CROWD. A person and an animal are the same problem --
+            // a slot, a position, and a block index that answers who is near -- which is why the
+            // people's index IS the animals' `BlockChain`, written slot-shaped and ignorant of what
+            // its integers mean for exactly this day. What a deer runs from is now a hunter, through
+            // the comparison that was already there.
+            //
+            // NO SPECIES TEST, and so no marked-block shortcut: every slot in the people's index is
+            // a person, and there is nothing to skip. That makes this the cheaper of the two.
+            public static method person(Population* folk, float x, float y, float reach)
+                    returns int {
+                BlockChain* chain = folk.standing();
+                BlockGrid* lat = chain.grid();
+                int home = lat.ofCellClamped(cast<int>(x), cast<int>(y));
+                int bx = lat.colOf(home);
+                int by = lat.rowOf(home);
+                mutable int found = Nearby.NONE;
+                mutable float best = reach * reach;
+                mutable int dy = 0 - 1;
+                while (dy <= 1) {
+                    mutable int dx = 0 - 1;
+                    while (dx <= 1) {
+                        if (lat.holds(bx + dx, by + dy)) {
+                            mutable int slot = chain.firstIn(lat.at(bx + dx, by + dy));
+                            while (slot != BlockChain.NONE) {
+                                if (slot < folk.count()) {
+                                    Agent* who = folk.at(cast<AgentId>(slot));
+                                    float ox = who.x() - x;
+                                    float oy = who.y() - y;
+                                    float gap = ox * ox + oy * oy;
+                                    if (gap < best) {
+                                        best = gap;
+                                        found = slot;
+                                    }
+                                }
+                                slot = chain.after(slot);
+                            }
+                        }
+                        dx = dx + 1;
+                    }
+                    dy = dy + 1;
+                }
+                Nearby.lastGap = best;
+                return found;
             }
 
             // The one search both of the above are. `wantPredator` decides which side is being

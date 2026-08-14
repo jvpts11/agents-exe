@@ -1,0 +1,260 @@
+import System.IO.Console;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Activity;
+import Agents.People.Body;
+import Agents.People.Journey;
+import Agents.People.Walking;
+import Agents.Sim.Wild;
+import Agents.Sim.BeastId;
+import Agents.Sim.BeastState;
+import Agents.Sim.Nearby;
+import Agents.Sim.Quarry;
+import Agents.Sim.Chronicle;
+import Agents.World.Beasts;
+import Agents.World.Nodes;
+import Agents.World.ExtractedGood;
+import Agents.World.Grid;
+import Agents.World.Waymap;
+import Agents.World.LandMath;
+program AgentsExe;
+
+// RUNNING SOMETHING DOWN.
+//
+// A CONTEST OF STAMINA AND NOT OF SPEED, which is the fauna spec's line and the only shape in which
+// hunting works at all: a deer is faster than a person and always will be, so a race would mean
+// nobody ever eats meat, and a quarry that did not run would not be hunting.
+//
+// AND THE TWO RULES IT NEEDS WERE ALREADY WRITTEN, in two different slices, for two different
+// reasons. A frightened animal runs at two and a half times its walk and SPENDS STAMINA (S1.5); the
+// one that runs out is `Winded`, manages under half pace, and falls behind. That is all of it. The
+// hunter does not need to be fast, or clever, or to predict anything -- he needs to keep coming.
+// Nobody wrote "the tired one is caught"; it is what those rules do when a person walks into them.
+// The wolves have hunted this way since S1.7 and this class is the same contest with a person on
+// one end (`Prowl`'s note says so in as many words).
+//
+// WHAT IS NEW IS THAT THE HUNTER CAN LOSE. A wolf never tires; a person does, and the spec asks for
+// exactly that failure -- "he gives up, and the failure is counted, with the species and the
+// distance covered". So a chase ends three ways and every one of them is a `Quarry`, which is a
+// type and not a comment: a chase cannot be written here without saying how it stopped.
+public bundle Agents {
+    public namespace People {
+
+        public class Hunting {
+            // How far a hunter will look for something to run down. Wider than a forage ring,
+            // because game moves and a bush does not -- and bounded here, in the line that writes
+            // it, which is the whole lesson of #402.
+            public static fixed float LOOK = 40.0;
+            // How near counts as having it. An arm and a spear.
+            public static fixed float AT_HAND = 1.5;
+            // How far from where the chase BEGAN a hunter will follow before it is a lost cause.
+            // The quarry outrunning this is the third ending, and it is a distance rather than a
+            // tick count so that a fast herd escapes and a slow one does not.
+            public static fixed float GIVE_UP_AT = 220.0;
+            // What a chase costs a body, over a year of doing nothing else. Far more than
+            // gathering: this is the one activity that can end with the hunter on the ground.
+            //
+            // (The number itself lives on `Activity.Hunting`, where every other activity's cost
+            // lives. It is named here because this is the file that explains why it is the largest
+            // one in the table.)
+
+            // One person in this many LOOKS for something to chase per tick, spread by slot. The
+            // chasing itself is every tick, for the reason written on the loop.
+            public static fixed int PRESS_EVERY = 10;
+
+            private static mutable long chases;
+            private static mutable long caught;
+            private static mutable long gaveOut;
+            private static mutable long escaped;
+            private static mutable long meat;
+            // OF THE ONES THAT GAVE OUT, HOW MANY WERE THE BODY AND HOW MANY WERE THE MIND. A
+            // hunter whose legs went is a world where the game is too fast; a hunter who simply
+            // stopped wanting to is a world whose scoring will not hold a chase together. Both read
+            // as "gave out" from outside and they need opposite repairs -- so they are two numbers.
+            private static mutable long dropped;
+            private static mutable long stepsRun;
+
+            public static method report() returns void {
+                long spent = gaveOut - dropped;
+                long far = chases > cast<long>(0) ? stepsRun / chases : cast<long>(0);
+                System.IO.Console.println($"folk hunt: {chases} chases, {caught} run down, {spent} ran themselves out, {dropped} thought better of it, {escaped} lost, {far} cells a chase, {meat} meat and hide taken");
+                return;
+            }
+
+            public static method caughtSoFar() returns long {
+                return caught;
+            }
+
+            public static method chasesSoFar() returns long {
+                return chases;
+            }
+
+            // ---- one tick --------------------------------------------------------------------
+
+            public static method tick(Population* folk, Wild* wild, Grid* g, Waymap* ways, long at,
+                                      Chronicle* log) returns void {
+                int n = folk.count();
+                if (n < 1) {
+                    return;
+                }
+                // EVERY HUNTER, EVERY TICK -- and the LOOKING is what is spread by slot.
+                //
+                // CHASING IS MOTION, AND MOTION IS NOT SLICED. The fauna's own tick says so in as
+                // many words: crossing to another pasture, running from a wolf and closing on a
+                // quarry are the same motion at three speeds, and all three are motion a player
+                // watches. Written with the step spread one-in-ten like everything else, a hunter
+                // advanced at a TENTH of walking pace while the deer fled at two and a half times
+                // its own -- so he could never close on anything, and two thousand chases covered
+                // an average of two cells before he tired out and dropped them.
+                //
+                // It costs nothing: a hunter is one person in two hundred, and this walks the
+                // population once to find them. The looking is the expensive half -- nine blocks of
+                // index per hunter -- and that is the half that is spread.
+                int phase = cast<int>(at % cast<long>(Hunting.PRESS_EVERY));
+                mutable int slot = 0;
+                while (slot < n) {
+                    int mine = slot;
+                    slot = slot + 1;
+                    Agent* one = folk.at(cast<AgentId>(mine));
+                    if (cast<int>(one.activity) != cast<int>(Activity.Hunting)) {
+                        // NOT HUNTING ANY MORE, AND STILL HOLDING A QUARRY. Whatever outscored the
+                        // chase ended it, and a chase that is dropped without being counted is a
+                        // fourth ending nobody named -- which is how a hunt becomes untrackable.
+                        if (one.journey.chase != Journey.NOTHING) {
+                            dropped = dropped + cast<long>(1);
+                            Hunting.give(folk, wild, one, mine, Quarry.HunterGaveOut, at, log);
+                        }
+                        continue;
+                    }
+                    if (one.journey.chase == Journey.NOTHING) {
+                        if (mine % Hunting.PRESS_EVERY == phase) {
+                            Hunting.pick(folk, wild, one, mine);
+                        }
+                        continue;
+                    }
+                    Hunting.press(folk, wild, g, ways, one, mine, at, log);
+                }
+                return;
+            }
+
+            // SOMETHING TO RUN DOWN. The nearest prey animal within `LOOK`, through the index that
+            // the fright rule and the wolves already ask -- there is no third way of finding out
+            // who is near, deliberately.
+            private static method pick(Population* folk, Wild* wild, Agent* one, int mine)
+                    returns void {
+                int game = Nearby.prey(wild, one.x(), one.y(), Hunting.LOOK);
+                if (game == Nearby.NONE) {
+                    return;      // nothing in reach; the score will send him somewhere else
+                }
+                one.journey.chase = game;
+                // WHERE IT BEGAN, kept as the destination of the journey, so `GIVE_UP_AT` measures
+                // from the start of the chase rather than from wherever he happens to be. A bound
+                // measured from the moving end is a bound that moves with it, which is no bound.
+                one.journey.to = vec2(one.x(), one.y());
+                chases = chases + cast<long>(1);
+                return;
+            }
+
+            // AND THE CHASE ITSELF: keep coming, and see which of the three happens.
+            private static method press(Population* folk, Wild* wild, Grid* g, Waymap* ways,
+                                        Agent* one, int mine, long at, Chronicle* log)
+                    returns void {
+                int game = one.journey.chase;
+                if (game >= wild.count()) {
+                    // The beast died of something else, or its slot was reused by the swap-remove.
+                    // Not a kill and not a failure of his: the thing he was following is gone.
+                    Hunting.give(folk, wild, one, mine, Quarry.Escaped, at, log);
+                    return;
+                }
+                BeastId beast = cast<BeastId>(game);
+                float bx = wild.xOf(beast);
+                float by = wild.yOf(beast);
+                float dx = bx - one.x();
+                float dy = by - one.y();
+                float gap = dx * dx + dy * dy;
+                // CAUGHT. Not "the same cell" -- a cell boundary is a thing a walker can stop half a
+                // step on the wrong side of, and this project has paid a whole world for that once
+                // already (ledger S2-20).
+                if (gap <= Hunting.AT_HAND * Hunting.AT_HAND) {
+                    Hunting.take(folk, wild, one, beast, at, log);
+                    Hunting.give(folk, wild, one, mine, Quarry.Caught, at, log);
+                    return;
+                }
+                // OUT OF REACH OF WHERE IT STARTED: the herd has outrun him.
+                float rx = one.x() - one.journey.to.x;
+                float ry = one.y() - one.journey.to.y;
+                if (rx * rx + ry * ry > Hunting.GIVE_UP_AT * Hunting.GIVE_UP_AT) {
+                    Hunting.give(folk, wild, one, mine, Quarry.Escaped, at, log);
+                    return;
+                }
+                // SPENT: he stops, and it is counted as his failure and not the animal's escape.
+                // The two are different worlds -- one says the game is too fast, the other says the
+                // people are too weak -- and a single "failed" count cannot tell them apart.
+                if (one.body.energy.value() <= Body.SPENT) {
+                    Hunting.give(folk, wild, one, mine, Quarry.HunterGaveOut, at, log);
+                    return;
+                }
+                // STILL COMING. Straight at it, and deliberately not around obstacles: a route
+                // search per tick per hunter at a target that moves every tick is the twenty-four
+                // thousand searches of ledger S2-7 with a moving end. The ground's own refusals
+                // catch him, and a hunter stopped by water loses the animal -- which is true.
+                Walking.stepToward(folk, g, ways, cast<AgentId>(mine), bx, by);
+                return;
+            }
+
+            // WHAT COMES OFF IT: meat and hide from the table, into his hands, carried like any
+            // other harvest. No new chain -- the Smokehouse already turns `RawMeat` into
+            // `DriedMeat` and the Tannery already turns `Hide` into `Leather`; this is the bridge
+            // between two ends that both existed.
+            private static method take(Population* folk, Wild* wild, Agent* one, BeastId beast,
+                                       long at, Chronicle* log) returns void {
+                int sp = cast<int>(wild.speciesOf(beast));
+                int got = Beasts.meat(sp);
+                one.inventory.carrying = ExtractedGood.RawMeat.index();
+                one.inventory.howMany = got;
+                meat = meat + cast<long>(got + Beasts.hide(sp));
+                // AND OUT OF THE WORLD, THROUGH THE BURIAL AND NOT THE ARRAY. `bury` is the raw
+                // swap-remove; `hunted` is the death, and it does three more things -- takes the
+                // animal off its herd's roster, keeps the per-species census that extinction is
+                // read from, and records `Vanished.HuntedOut` as the cause. Calling `bury` left
+                // herds naming animals that were not there, and what caught it was the RENDERER's
+                // own contract: `wrote == counted` failed by three hundred and seventy-eight
+                // vertices, which is seven animals counted and not drawn (ledger S2-21).
+                wild.hunted(beast, at, log);
+                return;
+            }
+
+            // AND EVERY CHASE ENDS, ONCE, HERE. One place that clears the quarry and counts the
+            // ending, so there is no arrangement of the code in which a chase stops being a chase
+            // without the world hearing which of the three it was.
+            private static method give(Population* folk, Wild* wild, Agent* one, int mine,
+                                       Quarry how, long at, Chronicle* log) returns void {
+                one.journey.chase = Journey.NOTHING;
+                one.journey.going = false;
+                match (how) {
+                    case Caught {
+                        caught = caught + cast<long>(1);
+                    }
+                    case HunterGaveOut {
+                        gaveOut = gaveOut + cast<long>(1);
+                    }
+                    case Escaped {
+                        escaped = escaped + cast<long>(1);
+                    }
+                }
+                // AND HOW FAR HE RAN, which the spec asks for by name -- "the failure is counted,
+                // with the species and the distance covered". Kept as a total so the report can say
+                // it per chase: a run of long chases that fail and a run of chases that never
+                // started both read as "gave out", and the distance is what tells them apart.
+                float rx = one.x() - one.journey.to.x;
+                float ry = one.y() - one.journey.to.y;
+                stepsRun = stepsRun + cast<long>(LandMath.sqrt(rx * rx + ry * ry));
+                if (log.writing()) {
+                    log.note(at, "hunt", $"somebody {how.said()}");
+                }
+                return;
+            }
+        }
+    }
+}

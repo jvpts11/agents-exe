@@ -9,6 +9,9 @@ import Agents.Sim.BeastId;
 import Agents.Sim.BlockChain;
 import Agents.Sim.Nearby;
 import Agents.Sim.Prowl;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
 import Agents.Sim.Chronicle;
 import Agents.Sim.Crew;
 import Agents.Sim.Stir;
@@ -182,8 +185,13 @@ public bundle Agents {
                 return;
             }
 
-            public static method tick(Wild* wild, Grid* g, long at, Rng* rng, Chronicle* log)
-                    returns void {
+            // TAKES THE PEOPLE AS WELL AS THE ANIMALS, from S2.8. A deer runs from what frightens
+            // it, and until this slice the only frightening thing in the world was a wolf. The
+            // fright rule below was written in S1.6 with a note saying that the hunter would walk
+            // into it rather than get one of his own; this is that, and the only thing it cost was
+            // one more argument.
+            public static method tick(Wild* wild, Population* folk, Grid* g, long at, Rng* rng,
+                                      Chronicle* log) returns void {
                 Grazing.beastTicks = Grazing.beastTicks + cast<long>(wild.count());
                 mutable long mark = Time.nanos();
 
@@ -243,7 +251,7 @@ public bundle Agents {
                 // the slot it points at holds a pointer that has been deleted.
                 mutable int k = cast<int>(at % cast<long>(Grazing.DECIDE_EVERY));
                 while (k < wild.herdsAlive()) {
-                    Grazing.thinkFor(wild.herdAt(k), wild, g, at, rng, log);
+                    Grazing.thinkFor(wild.herdAt(k), wild, folk, g, at, rng, log);
                     k = k + Grazing.DECIDE_EVERY;
                 }
                 now = Time.nanos();
@@ -284,8 +292,8 @@ public bundle Agents {
             //
             // MOVING ON IS NOT HERE, because a herd on the move is not deciding anything -- it is
             // walking, which the first pass of the tick does every tick rather than every fifteenth.
-            private static method thinkFor(Herd* h, Wild* wild, Grid* g, long at, Rng* rng,
-                                           Chronicle* log) returns void {
+            private static method thinkFor(Herd* h, Wild* wild, Population* folk, Grid* g, long at,
+                                           Rng* rng, Chronicle* log) returns void {
                 // OUTGROWING ITSELF IS ABOUT SIZE AND NOT ABOUT DIET, so it is asked of every herd
                 // before anything else is. A pack of wolves that has bred past the number wolves run
                 // in splits by the same rule and for the same reason a herd of deer does.
@@ -309,7 +317,7 @@ public bundle Agents {
                         Grazing.gatherStrays(h, wild, g);
                         // FRIGHT COMES NEXT, because a herd deciding to change pasture while a
                         // wolf is walking into it is a herd that has not noticed the wolf.
-                        if (Grazing.takeFright(h, wild)) {
+                        if (Grazing.takeFright(h, wild, folk)) {
                             return;
                         }
                         // Then breeding, if the ground it stands on has room, and then the draw for
@@ -326,7 +334,7 @@ public bundle Agents {
                         // Running, and the running is pass one's -- but whether there is still
                         // anything to run FROM is asked here, four times a second rather than
                         // sixty, because a wolf does not appear and vanish between two ticks.
-                        if (Grazing.calmAgain(h, wild)) {
+                        if (Grazing.calmAgain(h, wild, folk)) {
                             Grazing.settle(h, wild);
                         }
                     }
@@ -384,33 +392,54 @@ public bundle Agents {
             // ---- fright ----------------------------------------------------------------------------
             //
             // A PERSON WALKING TOWARD DEER SEES THEM GO, and the fauna spec says that single
-            // behaviour is what makes a world feel inhabited rather than decorated. There are no
-            // people yet, so what a deer runs from today is a predator -- the same comparison against
-            // the same `SHY`, and the hunter in S2 walks into a rule that is already here rather than
-            // one written for him.
+            // behaviour is what makes a world feel inhabited rather than decorated. When this was
+            // written in S1.6 there were no people, so what a deer ran from was a predator -- and
+            // the note here said the hunter would walk into this rule rather than get one written
+            // for him. **He does, from S2.8, and it cost one more index to ask.**
             //
-            // ONE COMPARISON, through the block index: nine blocks around the herd, and the nearest
-            // predator in them. Asked on the herd's decision tick and not on every tick, because a
-            // wolf does not appear and vanish between two sixtieths of a second.
+            // NEAREST OF THE TWO, and not "a predator, or else a person". A deer with a wolf at
+            // twelve cells and a hunter at three that runs from the wolf runs INTO the hunter,
+            // which is the same defect as running from the second-closest wolf and is one
+            // comparison to be right.
+            //
+            // ONE COMPARISON EACH, through the block indexes: nine blocks around the herd. Asked on
+            // the herd's decision tick and not on every tick, because neither a wolf nor a man
+            // appears and vanishes between two sixtieths of a second.
             //
             // Answers whether the herd took fright, so a frightened herd does not also decide to
             // change pasture on the same tick.
-            private static method takeFright(Herd* h, Wild* wild) returns boolean {
+            private static method takeFright(Herd* h, Wild* wild, Population* folk)
+                    returns boolean {
                 int sp = cast<int>(h.species());
                 if (!Beasts.isPrey(sp)) {
                     return false;
                 }
                 float shy = Beasts.shy(sp);
+                mutable float fromX = 0.0;
+                mutable float fromY = 0.0;
+                mutable float nearest = shy * shy + 1.0;
                 int wolf = Nearby.predator(wild, h.x(), h.y(), shy);
-                if (wolf == Nearby.NONE) {
+                if (wolf != Nearby.NONE) {
+                    nearest = Nearby.howFar();
+                    BeastId it = cast<BeastId>(wolf);
+                    fromX = wild.xOf(it);
+                    fromY = wild.yOf(it);
+                }
+                int man = Nearby.person(folk, h.x(), h.y(), shy);
+                if (man != Nearby.NONE && Nearby.howFar() < nearest) {
+                    nearest = Nearby.howFar();
+                    Agent* who = folk.at(cast<AgentId>(man));
+                    fromX = who.x();
+                    fromY = who.y();
+                }
+                if (nearest > shy * shy) {
                     return false;
                 }
                 // AWAY FROM IT, three times the distance it was noticed at. Straight away and not
                 // cleverly: an animal that plots a route around its own herd while a wolf closes is
                 // an animal that has been given a thought it does not have.
-                BeastId from = cast<BeastId>(wolf);
-                mutable float dx = h.x() - wild.xOf(from);
-                mutable float dy = h.y() - wild.yOf(from);
+                mutable float dx = h.x() - fromX;
+                mutable float dy = h.y() - fromY;
                 mutable float span = LandMath.sqrt(dx * dx + dy * dy);
                 if (span < 0.001) {
                     // Standing on it. Any direction will do, and this one is free.
@@ -427,10 +456,13 @@ public bundle Agents {
 
             // Whether there is no longer anything within twice this herd's `SHY`. TWICE, and not the
             // same distance, so a herd on the edge of noticing does not flicker between running and
-            // grazing on every decision.
-            private static method calmAgain(Herd* h, Wild* wild) returns boolean {
-                float shy = Beasts.shy(cast<int>(h.species()));
-                return Nearby.predator(wild, h.x(), h.y(), shy * 2.0) == Nearby.NONE;
+            // grazing on every decision. ANYTHING: a herd that settles because the wolf left, while
+            // a hunter is still walking at it, is a herd that stops running in front of the hunter.
+            private static method calmAgain(Herd* h, Wild* wild, Population* folk)
+                    returns boolean {
+                float shy = Beasts.shy(cast<int>(h.species())) * 2.0;
+                return Nearby.predator(wild, h.x(), h.y(), shy) == Nearby.NONE
+                    && Nearby.person(folk, h.x(), h.y(), shy) == Nearby.NONE;
             }
 
             // Back to grazing: the mood, and every animal's state with it -- which is also what

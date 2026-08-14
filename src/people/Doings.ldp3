@@ -9,6 +9,10 @@ import Agents.People.Gauge;
 import Agents.People.Kinship;
 import Agents.People.Courting;
 import Agents.Sim.Clock;
+import Agents.World.Grid;
+import Agents.World.Waymap;
+import Agents.World.Biomes;
+import Agents.People.Walking;
 program AgentsExe;
 
 // THE ONE PLACE THAT DECIDES WHAT ANYBODY IS DOING.
@@ -65,7 +69,11 @@ public bundle Agents {
 
             // ---- one tick ----------------------------------------------------------------------
 
-            public static method tick(Population* folk, long at) returns void {
+            // TAKES THE GROUND, because one of the four activities this class does itself is
+            // walking somewhere: a step has to be allowed by the ground like anybody else's, or
+            // people talk their way across rivers.
+            public static method tick(Population* folk, Grid* g, Waymap* ways, long at)
+                    returns void {
                 int n = folk.count();
                 if (n < 1) {
                     return;
@@ -78,7 +86,7 @@ public bundle Agents {
                     Agent* one = folk.at(cast<AgentId>(mine));
                     Doings.choose(folk, one);
                     Doings.spend(one);
-                    Doings.act(folk, one, mine, at);
+                    Doings.act(folk, g, ways, one, mine, at);
                 }
                 return;
             }
@@ -138,22 +146,32 @@ public bundle Agents {
             // where the body is -- standing still, or standing still next to somebody -- so they
             // live where the choosing lives rather than in a file of their own that would hold one
             // line each.
-            private static method act(Population* folk, Agent* one, int mine, long at)
-                    returns void {
+            private static method act(Population* folk, Grid* g, Waymap* ways, Agent* one, int mine,
+                                      long at) returns void {
                 Activity what = one.activity;
-                if (cast<int>(what) == cast<int>(Activity.Sleeping)
-                    || cast<int>(what) == cast<int>(Activity.Resting)) {
-                    // A BODY THAT IS RESTING IS NOT WALKING. Without this a spent person keeps
-                    // walking to wherever hunger sent them and mends at the same time, which reads
-                    // as somebody sleepwalking and is why the energy gauge never bit before.
+                // A BODY THAT IS ROOTED IS NOT WALKING. Without this a spent person keeps walking
+                // to wherever hunger sent them and mends at the same time, which reads as
+                // sleepwalking. WHICH activities root it is `Activity.rooted`'s to say, and asking
+                // it rather than listing them here is what keeps this in step with `Roaming`, which
+                // asks the same question to decide who may stroll.
+                if (what.rooted()) {
                     one.journey.going = false;
-                    return;
                 }
                 if (cast<int>(what) == cast<int>(Activity.Mating)) {
-                    // Standing still costs nothing here: mating already asks for a spouse within
-                    // arm's reach, so the two of them are together wherever they were going.
-                    one.journey.going = false;
                     Doings.mate(folk, one, mine, at);
+                    return;
+                }
+                // AND SOMEBODY WHO WANTS COMPANY GOES TO IT. Talking used to be a state with no
+                // content at all: it scored, it held, and the body did nothing -- so a fifth of the
+                // world stood in place wanting company it never crossed a cell to reach.
+                //
+                // IT IS ALSO WHAT KEEPS A COUPLE TOGETHER, and that turned out to matter more than
+                // the talking. Mating asks for a spouse within arm's reach; once everybody strolled,
+                // spouses drifted apart and never met again, and the births fell with them. Nobody
+                // needs a rule about married people staying near each other -- a spouse is somebody
+                // you know, and this walks you to whoever you know that is nearest.
+                if (cast<int>(what) == cast<int>(Activity.Socializing)) {
+                    Doings.goToCompany(folk, g, ways, one, mine);
                     return;
                 }
                 // AND TALKING DOES NOT STOP A WALK, which it did, and which quietly starved the
@@ -163,6 +181,51 @@ public bundle Agents {
                 // that took two hundred ticks was cut every thirty and never finished: two million
                 // routes asked, ninety-five per cent of people standing still, and everybody dead
                 // of hunger inside three centuries with food they could always see.
+                return;
+            }
+
+            // THE NEAREST PERSON THIS ONE KNOWS, AND A STEP TOWARD THEM.
+            //
+            // WALKS THE KINSHIP CHAIN AND NOT THE BLOCK, for the same reason `Activity.ifCompany`
+            // does: a person knows tens of people, and the alternative is asking the index for
+            // everybody near and then asking whether each is known -- the same answer by the longer
+            // road. It is the same walk that scored the urge, one tick earlier; doing it twice costs
+            // a few tens of links and saves carrying a slot through the chooser.
+            //
+            // NO ROUTE, ONE STEP. Company is eight cells away at most -- that is what made the urge
+            // fire -- and a route search for eight cells is the twenty-four thousand searches of
+            // ledger S2-7 in a smaller hat.
+            private static method goToCompany(Population* folk, Grid* g, Waymap* ways, Agent* one,
+                                              int mine) returns void {
+                mutable int link = one.kin.first();
+                mutable int nearest = 0 - 1;
+                mutable float best = Activity.WITHIN_REACH * Activity.WITHIN_REACH;
+                while (link >= 0) {
+                    int slot = Kinship.whoOf(one.kin.at(link));
+                    link = one.kin.after(link);
+                    if (slot < 0 || slot >= folk.count() || slot == mine) {
+                        continue;
+                    }
+                    Agent* them = folk.at(cast<AgentId>(slot));
+                    float dx = them.x() - one.x();
+                    float dy = them.y() - one.y();
+                    float gap = dx * dx + dy * dy;
+                    if (gap < best) {
+                        best = gap;
+                        nearest = slot;
+                    }
+                }
+                if (nearest < 0) {
+                    return;
+                }
+                // ARM'S REACH IS NEAR ENOUGH. Walking the last half-cell would have two people
+                // shuffling into each other forever, which is what happens when "together" is
+                // written as a point rather than as a distance.
+                if (best <= Activity.ARM_LENGTH * Activity.ARM_LENGTH) {
+                    return;
+                }
+                Agent* them = folk.at(cast<AgentId>(nearest));
+                Walking.stepToward(folk, g, ways, cast<AgentId>(mine), them.x(), them.y());
                 return;
             }
 
@@ -186,6 +249,70 @@ public bundle Agents {
 
             // ---- what the world says about it ---------------------------------------------------
 
+            // ARE THEY PILING UP AT THE WATER? A number, because a person watching the window said
+            // they were and the honest answer to that is not a guess.
+            //
+            // TWO SHARES, AND ONLY THE COMPARISON MEANS ANYTHING: how much of the walkable ground
+            // touches water, and how many of the people are standing on it. A world whose coast is a
+            // twentieth of its land and whose people are a twentieth at the coast is a world doing
+            // nothing wrong; the same first number with half the people there is a queue.
+            private static method shoreward(Population* folk, Grid* g) returns void {
+                mutable long land = cast<long>(0);
+                mutable long edge = cast<long>(0);
+                // EVERY SIXTEENTH CELL IN EACH DIRECTION -- a sample and not a sweep. The whole grid
+                // is three and a half million cells and this runs at the end of a run; what is
+                // wanted is a share to two figures, and a two-hundredth of the map gives that.
+                mutable int y = 0;
+                while (y < g.height()) {
+                    mutable int x = 0;
+                    while (x < g.width()) {
+                        if (!Biomes.swims(g.biomeAt(x, y))) {
+                            land = land + cast<long>(1);
+                            if (Doings.touchesWater(g, x, y)) {
+                                edge = edge + cast<long>(1);
+                            }
+                        }
+                        x = x + 16;
+                    }
+                    y = y + 16;
+                }
+                mutable long standing = cast<long>(0);
+                mutable long atEdge = cast<long>(0);
+                mutable long inWater = cast<long>(0);
+                for (int i in 0..folk.count()) {
+                    Agent* one = folk.at(cast<AgentId>(i));
+                    int cx = cast<int>(one.x());
+                    int cy = cast<int>(one.y());
+                    standing = standing + cast<long>(1);
+                    if (Biomes.swims(g.biomeAt(cx, cy))) {
+                        inWater = inWater + cast<long>(1);
+                    } else if (Doings.touchesWater(g, cx, cy)) {
+                        atEdge = atEdge + cast<long>(1);
+                    }
+                }
+                long ofLand = land > cast<long>(0) ? edge * cast<long>(100) / land : cast<long>(0);
+                long ofFolk = standing > cast<long>(0)
+                              ? atEdge * cast<long>(100) / standing : cast<long>(0);
+                System.IO.Console.println($"folk shore: {ofLand}% of the land touches water, {ofFolk}% of the people stand on it, {inWater} are in it");
+                return;
+            }
+
+            private static method touchesWater(Grid* g, int x, int y) returns boolean {
+                for (int dy in 0 - 1..2) {
+                    for (int dx in 0 - 1..2) {
+                        int nx = x + dx;
+                        int ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= g.width() || ny >= g.height()) {
+                            continue;
+                        }
+                        if (Biomes.swims(g.biomeAt(nx, ny))) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+
             // WHAT EVERYBODY ALIVE IS DOING, RIGHT NOW, named rather than counted.
             //
             // A count of people says a world is populated; this says whether it is a world. A run
@@ -193,8 +320,9 @@ public bundle Agents {
             // gathering is a world that cannot feed itself, and neither of those is visible in any
             // other number the game prints. One sweep, at the end of a run, which is the one place a
             // sweep of the population is not a defect.
-            public static method census(Population* folk) returns void {
+            public static method census(Population* folk, Grid* g) returns void {
                 int n = folk.count();
+                Doings.shoreward(folk, g);
                 mutable int[] many = new int[Activity.values().length()]();
                 for (int i in 0..n) {
                     int what = cast<int>(folk.at(cast<AgentId>(i)).activity);

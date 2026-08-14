@@ -5,6 +5,7 @@ import Agents.People.Population;
 import Agents.People.Body;
 import Agents.People.Whereabouts;
 import Agents.People.Kinship;
+import Agents.People.Journey;
 import Agents.People.Courting;
 program AgentsExe;
 
@@ -103,6 +104,47 @@ public bundle Agents {
                 return mayBeCut;
             }
 
+            // AND WHETHER IT PINS THE BODY WHERE IT STANDS.
+            //
+            // A FIFTH QUESTION, and the layout names four. It is here because leaving it out made a
+            // world of statues: a person watching the window saw people standing still for whole
+            // minutes and piling up along the rivers, and the census said why -- of fifteen thousand
+            // people, FOUR were idling, and idling is the only activity anything ever gave a
+            // destination to. The other 14,996 were talking, courting, eating and mating, none of
+            // which had anywhere to be, so wherever the last walk left them is where they stayed --
+            // and a walk that meets water slides along the bank, which is why the banks filled up.
+            //
+            // What was wrong was the assumption underneath, not the numbers: an activity says what
+            // somebody is DOING, and only a few of them say anything about whether their feet work.
+            // Talking while walking is what people do; sleeping while walking is not.
+            public method rooted() returns boolean {
+                return match (this) {
+                    case Sleeping -> true;       // lying down
+                    case Resting -> true;        // sitting
+                    case Mating -> true;         // already within arm's reach of somebody
+                    case Convalescing -> true;   // being mended
+                    case Worship -> true;        // at the altar
+                    case Learning -> true;       // at the desk
+                    case Working -> true;        // at the bench
+                    case Idle -> false;
+                    case GoingToSleep -> false;
+                    case Socializing -> false;
+                    case Wandering -> false;
+                    case Exploring -> false;
+                    case Prospecting -> false;
+                    case Marching -> false;
+                    case Fighting -> true;        // toe to toe
+                    case Managing -> false;
+                    case Eating -> false;
+                    case Gathering -> false;
+                    case Fetching -> false;
+                    case Hauling -> false;
+                    case Travelling -> false;
+                    case Courting -> false;
+                    case Hunting -> false;
+                };
+            }
+
             // WHAT IT COSTS A BODY OVER A YEAR OF DOING IT. Negative gives energy back: sleeping,
             // resting and convalescing are the three that mend rather than spend.
             //
@@ -194,9 +236,63 @@ public bundle Agents {
                     case Learning -> 0.0;
                     case Convalescing -> 0.0;
                     case Worship -> 0.0;
-                    // AND FOLLOWING SOMETHING THAT MOVES, which is the chase and is S2.8.
-                    case Hunting -> 0.0;
+                    // AND FOLLOWING SOMETHING THAT MOVES. Wanted for the same reason gathering is
+                    // -- a body with nothing in it -- and scaled by BOLDNESS, which is the axis
+                    // whose own description is "who leaves: goes far from home, TAKES THE RISK".
+                    //
+                    // WRITTEN FIRST AS "WANTED LESS THAN GATHERING", and that produced a world with
+                    // no hunting in it at all: there are a hundred and seventy thousand bushes on
+                    // the ground, so gathering is always available and always scored higher, and
+                    // nobody ran anything down in forty-two years. A rule of the form "B only when
+                    // A is impossible" makes B dead code the moment A is plentiful. What separates
+                    // them is not scarcity, it is WHO: about one person in twelve is bold enough
+                    // that chasing a deer beats picking berries, and the other eleven never are.
+                    //
+                    // AND WANTED MUCH MORE ONCE IT HAS BEGUN. A chase that can be outscored halfway
+                    // is a chase that is always halfway: the hunter walks two hundred cells, passes
+                    // a cousin, stops to talk, and the animal is gone. `interruptible` is the wrong
+                    // tool -- mating may not be cut short because it is over in a moment, and a
+                    // chase can last a year of world and MUST be droppable when the body gives out.
+                    // What holds it together is that having a quarry is worth more than not having
+                    // one, which is also true.
+                    case Hunting -> Activity.chasing(one, Activity.boldly(one,
+                                                          Activity.hungrily(one, 1.35)));
                 };
+            }
+
+            // Already after something, and that is worth holding on to.
+            //
+            // AND A BODY WITH NO LEGS IN IT DOES NOT START ONE. Chasing is the one activity whose
+            // whole content is keeping going, so wanting it while already weary is wanting a thing
+            // that ends on the first step -- which is exactly what happened: the urge was written
+            // high enough to outrank SLEEPING, so a starving spent body chose the chase over lying
+            // down, gave out immediately, and chose it again. **Seventy-nine thousand chases, a
+            // hundred and sixty-five kills, and an average distance covered of ZERO cells** -- the
+            // number that said so, and the reason the report counts the two ways of giving out
+            // apart.
+            //
+            // Nothing else needs a rule: above `WEARY` sleeping scores nothing at all, so the two
+            // never compete, and a hunter who tires mid-chase gives out and then goes to sleep --
+            // which is the ending the spec asks for by name.
+            private static method chasing(Agent* one, float much) returns float {
+                // ONE IN HAND HOLDS, whatever the legs say. Ending a chase is `Hunting`'s to do and
+                // its to COUNT -- written here as well, the two thresholds contradicted each other:
+                // this dropped the activity at `WEARY` while the chase gave up at `SPENT`, so the
+                // hunter could never reach the second, and the spec's named failure -- "he gives up,
+                // and the failure is counted" -- was recorded as "thought better of it" instead.
+                // Two rules for one thing, and the quieter one won.
+                if (one.journey.chase != Journey.NOTHING) {
+                    return much + 0.5;
+                }
+                // BUT A TIRED BODY DOES NOT START ONE. Chasing is the one activity whose whole
+                // content is keeping going, so wanting it while already weary is wanting a thing
+                // that ends on the first step -- which is what happened when the urge was written
+                // high enough to outrank SLEEPING: seventy-nine thousand chases, a hundred and
+                // sixty-five kills, and an average distance covered of ZERO cells.
+                if (one.body.energy.value() <= Body.WEARY) {
+                    return 0.0;
+                }
+                return much;
             }
 
             // ---- the questions the urges ask, each in one place ---------------------------------
@@ -325,6 +421,10 @@ public bundle Agents {
 
             private static method sociably(Agent* one, float much) returns float {
                 return much * cast<float>(cast<int>(one.identity.nature.sociability)) / 255.0;
+            }
+
+            private static method boldly(Agent* one, float much) returns float {
+                return much * cast<float>(cast<int>(one.identity.nature.boldness)) / 255.0;
             }
 
             private static method curiously(Agent* one, float much) returns float {

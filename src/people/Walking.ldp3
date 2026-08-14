@@ -153,34 +153,7 @@ public bundle Agents {
                             wy = one.journey.waypoint.y - py;
                         }
                     }
-                    float span = LandMath.sqrt(wx * wx + wy * wy);
-                    if (span < 0.0001) {
-                        continue;
-                    }
-                    // THE GROUND UNDER ITS FEET SETS THE PACE. Rough ground is slow, sea ice is
-                    // quick, and swimming is its own speed -- all of it read from the one table.
-                    float hop = Walking.PACE * Biomes.pace(g.biomeAt(cast<int>(px), cast<int>(py)));
-                    float nx = px + wx / span * hop;
-                    float ny = py + wy / span * hop;
-                    if (Walking.mayStand(ways,nx, ny)) {
-                        folk.placeAt(who, nx, ny);
-                        one.whereabouts.facing = vec2(wx / span, wy / span);
-                        one.journey.balked = 0;
-                        continue;
-                    }
-                    // REFUSED. Walk along the edge rather than into it -- the same repair the fauna
-                    // needed, and for the same reason: a body that keeps trying the one direction it
-                    // cannot go stands still against nothing.
-                    refusals = refusals + cast<long>(1);
-                    if (Walking.mayStand(ways,px + wx / span * hop, py)) {
-                        folk.placeAt(who, px + wx / span * hop, py);
-                        one.whereabouts.facing = vec2(wx / span, 0.0);
-                        one.journey.balked = 0;
-                        continue;
-                    }
-                    if (Walking.mayStand(ways,px, py + wy / span * hop)) {
-                        folk.placeAt(who, px, py + wy / span * hop);
-                        one.whereabouts.facing = vec2(0.0, wy / span);
+                    if (Walking.stepToward(folk, g, ways, who, px + wx, py + wy)) {
                         one.journey.balked = 0;
                         continue;
                     }
@@ -201,6 +174,53 @@ public bundle Agents {
                 // The stepping is what is left when the routing is taken out of the whole pass.
                 stepNs = stepNs + (Time.nanos() - began) - thinkNs + thoughtBefore;
                 return;
+            }
+
+            // ONE STEP, STRAIGHT AT A PLACE, WITH THE GROUND ALLOWED TO REFUSE IT. Answers whether
+            // the body moved at all.
+            //
+            // LIFTED OUT OF THE WALK RATHER THAN WRITTEN AGAIN, because the hunt needs exactly this
+            // and nothing else: a chase has no waypoints -- its destination moves every tick, so a
+            // route search per tick per hunter is ledger S2-7 with a moving end. What a hunter needs
+            // is to keep coming, and to be stopped by water like anybody else. Written twice, the
+            // slide along an obstacle would have been in one copy and not the other, which is how
+            // the fauna got a repair the people did not (S1-23, then S2-6).
+            public static method stepToward(Population* folk, Grid* g, Waymap* ways, AgentId who,
+                                            float tx, float ty) returns boolean {
+                Agent* one = folk.at(who);
+                float px = one.x();
+                float py = one.y();
+                float wx = tx - px;
+                float wy = ty - py;
+                float span = LandMath.sqrt(wx * wx + wy * wy);
+                if (span < 0.0001) {
+                    return true;      // already standing on it
+                }
+                // THE GROUND UNDER ITS FEET SETS THE PACE. Rough ground is slow, sea ice is quick,
+                // and swimming is its own speed -- all of it read from the one table.
+                float hop = Walking.PACE * Biomes.pace(g.biomeAt(cast<int>(px), cast<int>(py)));
+                float sx = wx / span * hop;
+                float sy = wy / span * hop;
+                if (Walking.mayStand(ways, px + sx, py + sy)) {
+                    folk.placeAt(who, px + sx, py + sy);
+                    one.whereabouts.facing = vec2(wx / span, wy / span);
+                    return true;
+                }
+                // REFUSED. Walk along the edge rather than into it -- the same repair the fauna
+                // needed, and for the same reason: a body that keeps trying the one direction it
+                // cannot go stands still against nothing.
+                refusals = refusals + cast<long>(1);
+                if (Walking.mayStand(ways, px + sx, py)) {
+                    folk.placeAt(who, px + sx, py);
+                    one.whereabouts.facing = vec2(wx / span, 0.0);
+                    return true;
+                }
+                if (Walking.mayStand(ways, px, py + sy)) {
+                    folk.placeAt(who, px, py + sy);
+                    one.whereabouts.facing = vec2(0.0, wy / span);
+                    return true;
+                }
+                return false;
             }
 
             // WHERE THE NEXT FEW STEPS GO. Two searches, coarse then fine, and each answers what

@@ -1,4 +1,4 @@
-import System.Test.Test;
+﻿import System.Test.Test;
 import Agents.People.Population;
 import Agents.People.Agent;
 import Agents.People.AgentId;
@@ -10,6 +10,9 @@ import Agents.People.Doings;
 import Agents.People.Sex;
 import Agents.People.Orientation;
 import Agents.People.Body;
+import Agents.World.Grid;
+import Agents.World.Biome;
+import Agents.World.Waymap;
 program AgentsExe;
 
 // FAMILIES, AND THE TWO WAYS THEY GO WRONG SILENTLY.
@@ -44,12 +47,25 @@ public bundle Agents {
             // first, because whether somebody is looking for a spouse at all is now an activity
             // scored against everything else they might be doing (S2.7). `Courting` decides who
             // would have whom; it stopped deciding that anybody is looking.
-            private static method court(Population* folk) returns void {
+            private static method court(Population* folk, Grid* g, Waymap* ways) returns void {
                 for (int t in 0..Courting.LOOK_EVERY) {
-                    Doings.tick(folk, cast<long>(t));
+                    Doings.tick(folk, g, ways, cast<long>(t));
                     Courting.tick(folk, cast<long>(t));
                 }
                 return;
+            }
+
+            // Ground anybody can walk on, everywhere: these checks are about who would have whom,
+            // and a coastline is never allowed to be the reason one of them fails.
+            private static method pasture() returns Grid* {
+                mutable Grid* g = new Grid(Kin.SIDE, Kin.SIDE) on heap;
+                for (int y in 0..Kin.SIDE) {
+                    for (int x in 0..Kin.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.Prairie));
+                    }
+                }
+                g.labelMasses();
+                return g;
             }
 
             // ---- the bookkeeping ---------------------------------------------------------------
@@ -59,6 +75,8 @@ public bundle Agents {
             [Test]
             public static method a_tie_is_written_at_both_ends() returns void {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                mutable Grid* g = Kin.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 folk.bear(10.5, 10.5);
                 folk.bear(10.5, 10.5);
                 Kindred.bind(folk, 0, 1, Relation.Parent, Kindred.BLOOD);
@@ -71,7 +89,9 @@ public bundle Agents {
                 // And both directions are blood, so neither may marry the other.
                 Test.assertTrue(mine.isBloodOf(1));
                 Test.assertTrue(theirs.isBloodOf(0));
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -82,6 +102,8 @@ public bundle Agents {
             [Test]
             public static method a_death_does_not_marry_the_widow_to_the_mover() returns void {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                mutable Grid* g = Kin.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 folk.bear(10.5, 10.5);      // 0: the wife
                 folk.bear(10.5, 10.5);      // 1: the husband, who dies
                 folk.bear(10.5, 10.5);      // 2: a stranger, who will move into slot 1
@@ -93,7 +115,9 @@ public bundle Agents {
                 Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
                 Test.assertFalse(folk.at(cast<AgentId>(0)).kin.knows(1));
                 Test.assertFalse(folk.at(cast<AgentId>(1)).kin.knows(0));
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -103,6 +127,8 @@ public bundle Agents {
             [Test]
             public static method a_tie_follows_whoever_changes_slot() returns void {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                mutable Grid* g = Kin.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 folk.bear(10.5, 10.5);      // 0: the wife
                 folk.bear(10.5, 10.5);      // 1: a stranger, who dies
                 folk.bear(10.5, 10.5);      // 2: the husband, who moves into slot 1
@@ -114,7 +140,9 @@ public bundle Agents {
                 Kinship* his = folk.at(cast<AgentId>(1)).kin;
                 Test.assertEqual(his.whose(), 1);
                 Test.assertEqual(his.spouse(), 0);
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -125,12 +153,16 @@ public bundle Agents {
             [Test]
             public static method a_man_and_a_woman_who_meet_marry() returns void {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                mutable Grid* g = Kin.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Kin.someone(folk, Sex.Female, 25);
                 Kin.someone(folk, Sex.Male, 27);
-                Kin.court(folk);
+                Kin.court(folk, g, ways);
                 Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), 1);
                 Test.assertEqual(folk.at(cast<AgentId>(1)).kin.spouse(), 0);
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -139,12 +171,16 @@ public bundle Agents {
             [Test]
             public static method nobody_marries_a_child() returns void {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                mutable Grid* g = Kin.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Kin.someone(folk, Sex.Female, Courting.OF_AGE - 1);
                 Kin.someone(folk, Sex.Male, 30);
-                Kin.court(folk);
+                Kin.court(folk, g, ways);
                 Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
                 Test.assertEqual(folk.at(cast<AgentId>(1)).kin.spouse(), Kinship.NOBODY);
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -154,12 +190,16 @@ public bundle Agents {
             [Test]
             public static method nobody_marries_their_blood() returns void {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                mutable Grid* g = Kin.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Kin.someone(folk, Sex.Female, 25);
                 Kin.someone(folk, Sex.Male, 27);
                 Kindred.bind(folk, 0, 1, Relation.Sibling, Kindred.BLOOD);
-                Kin.court(folk);
+                Kin.court(folk, g, ways);
                 Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -170,17 +210,21 @@ public bundle Agents {
             [Test]
             public static method both_have_to_want_it() returns void {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                mutable Grid* g = Kin.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Kin.someone(folk, Sex.Female, 25);
                 Kin.someone(folk, Sex.Female, 27);
                 // She would have a woman; the other would not.
                 folk.at(cast<AgentId>(0)).identity.orientation = Orientation.Gay;
-                Kin.court(folk);
+                Kin.court(folk, g, ways);
                 Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
                 // Both willing, and it happens.
                 folk.at(cast<AgentId>(1)).identity.orientation = Orientation.Gay;
-                Kin.court(folk);
+                Kin.court(folk, g, ways);
                 Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), 1);
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -191,6 +235,8 @@ public bundle Agents {
             [Test]
             public static method a_child_holds_both_parents_nations() returns void {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                mutable Grid* g = Kin.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 AgentId mum = Kin.someone(folk, Sex.Female, 25);
                 AgentId dad = Kin.someone(folk, Sex.Male, 27);
                 Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
@@ -216,7 +262,9 @@ public bundle Agents {
                 Test.assertEqual(cast<int>(folk.at(dad).kin.howTied(2)), cast<int>(Relation.Child));
                 // It is born with no pregnancy left behind it.
                 Test.assertEqual(folk.at(mum).body.carrying, Body.NOT_CARRYING);
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -226,6 +274,8 @@ public bundle Agents {
             [Test]
             public static method a_child_takes_after_both_of_them() returns void {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                mutable Grid* g = Kin.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 AgentId mum = Kin.someone(folk, Sex.Female, 25);
                 AgentId dad = Kin.someone(folk, Sex.Male, 27);
                 Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
@@ -237,7 +287,9 @@ public bundle Agents {
                                                - (Courting.TERM % Courting.LOOK_EVERY)));
                 Test.assertEqual(folk.count(), 3);
                 Test.assertEqual(cast<int>(folk.at(cast<AgentId>(2)).identity.nature.boldness), 150);
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -248,19 +300,23 @@ public bundle Agents {
             [Test]
             public static method a_conception_needs_the_two_it_needs() returns void {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
+                mutable Grid* g = Kin.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Kin.someone(folk, Sex.Female, 25);
                 Kin.someone(folk, Sex.Female, 27);
                 Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
                 // Standing together, wanting each other, for four years: everything a conception
                 // needs except the one thing it needs.
                 for (int t in 0..4800) {
-                    Doings.tick(folk, cast<long>(t));
+                    Doings.tick(folk, g, ways, cast<long>(t));
                 }
                 Test.assertTrue(Doings.togetherSoFar() > cast<long>(0));
                 Test.assertEqual(folk.count(), 2);
                 Test.assertEqual(folk.at(cast<AgentId>(0)).body.carrying, Body.NOT_CARRYING);
                 Test.assertEqual(folk.at(cast<AgentId>(1)).body.carrying, Body.NOT_CARRYING);
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
         }

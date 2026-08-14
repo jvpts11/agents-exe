@@ -1,4 +1,4 @@
-import System.Test.Test;
+﻿import System.Test.Test;
 import Agents.People.Population;
 import Agents.People.Agent;
 import Agents.People.AgentId;
@@ -12,6 +12,9 @@ import Agents.People.Orientation;
 import Agents.People.Kindred;
 import Agents.People.Relation;
 import Agents.Sim.Clock;
+import Agents.World.Grid;
+import Agents.World.Biome;
+import Agents.World.Waymap;
 program AgentsExe;
 
 // WHAT SOMEBODY IS DOING, AND WHY THAT AND NOT SOMETHING ELSE.
@@ -25,6 +28,19 @@ public bundle Agents {
 
         public class Doing {
             public static fixed int SIDE = 64;
+
+            // Ground anybody can walk on, everywhere. These checks are about what somebody CHOOSES,
+            // so the ground must never be the reason a step did not happen.
+            private static method pasture() returns Grid* {
+                mutable Grid* g = new Grid(Doing.SIDE, Doing.SIDE) on heap;
+                for (int y in 0..Doing.SIDE) {
+                    for (int x in 0..Doing.SIDE) {
+                        g.setBiome(x, y, cast<int>(Biome.Prairie));
+                    }
+                }
+                g.labelMasses();
+                return g;
+            }
 
             private static method someone(Population* folk) returns Agent* {
                 AgentId who = folk.bear(10.5, 10.5);
@@ -44,11 +60,15 @@ public bundle Agents {
             [Test]
             public static method somebody_with_nothing_pressing_is_idle() returns void {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable Grid* g = Doing.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Agent* one = Doing.someone(folk);
                 one.identity.nature.sociability = cast<ubyte>(0);
-                Doings.tick(folk, cast<long>(0));
+                Doings.tick(folk, g, ways, cast<long>(0));
                 Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Idle));
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -58,9 +78,13 @@ public bundle Agents {
             [Test]
             public static method a_person_is_doing_something_from_the_first_tick() returns void {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable Grid* g = Doing.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 AgentId who = folk.bear(10.5, 10.5);
                 Test.assertEqual(cast<int>(folk.at(who).activity), cast<int>(Activity.Idle));
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -71,12 +95,16 @@ public bundle Agents {
             [Test]
             public static method hunger_outweighs_company_long_before_it_is_fatal() returns void {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable Grid* g = Doing.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Agent* one = Doing.someone(folk);
                 // Half full: not an emergency by any threshold anybody would write.
                 one.body.fed = new Gauge(Body.FULL / 2, 0, Body.FULL);
-                Doings.tick(folk, cast<long>(0));
+                Doings.tick(folk, g, ways, cast<long>(0));
                 Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Gathering));
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -86,13 +114,17 @@ public bundle Agents {
             [Test]
             public static method food_in_hand_beats_food_in_the_ground() returns void {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable Grid* g = Doing.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Agent* one = Doing.someone(folk);
                 one.body.fed = new Gauge(Body.FULL / 2, 0, Body.FULL);
                 one.inventory.carrying = 3;
                 one.inventory.howMany = 5;
-                Doings.tick(folk, cast<long>(0));
+                Doings.tick(folk, g, ways, cast<long>(0));
                 Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Eating));
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -102,12 +134,16 @@ public bundle Agents {
             [Test]
             public static method an_empty_body_sleeps_before_anything_else() returns void {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable Grid* g = Doing.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Agent* one = Doing.someone(folk);
                 one.body.fed = new Gauge(1, 0, Body.FULL);        // all but starving
                 one.body.energy = new Gauge(1, 0, Body.RESTED);   // and all but spent
-                Doings.tick(folk, cast<long>(0));
+                Doings.tick(folk, g, ways, cast<long>(0));
                 Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Sleeping));
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -124,18 +160,22 @@ public bundle Agents {
             [Test]
             public static method a_body_mends_faster_than_it_wears_out() returns void {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable Grid* g = Doing.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Agent* one = Doing.someone(folk);
                 one.body.energy = new Gauge(1, 0, Body.RESTED);
                 mutable int slept = 0;
                 while (one.body.energy.value() <= Body.WEARY && slept < Clock.TICKS_A_YEAR) {
-                    Doings.tick(folk, cast<long>(slept));
+                    Doings.tick(folk, g, ways, cast<long>(slept));
                     slept = slept + 1;
                 }
                 // Out of danger from nothing, in well under a quarter of a year. The bar is
                 // deliberately loose: what it is written against is TWO YEARS, not a tick count.
                 Test.assertTrue(one.body.energy.value() > Body.WEARY);
                 Test.assertTrue(slept < Clock.TICKS_A_YEAR / 4);
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -164,10 +204,14 @@ public bundle Agents {
             [Test]
             public static method a_new_person_has_no_job_and_no_home() returns void {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable Grid* g = Doing.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 AgentId who = folk.bear(10.5, 10.5);
                 Test.assertTrue(folk.at(who).whereabouts.jobless());
                 Test.assertTrue(folk.at(who).whereabouts.homeless());
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -178,6 +222,8 @@ public bundle Agents {
             [Test]
             public static method a_new_person_faces_somewhere() returns void {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable Grid* g = Doing.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 mutable boolean varies = false;
                 mutable float firstX = 0.0;
                 for (int i in 0..20) {
@@ -192,7 +238,9 @@ public bundle Agents {
                     }
                 }
                 Test.assertTrue(varies);              // and not all the same one
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -203,23 +251,27 @@ public bundle Agents {
             [Test]
             public static method mating_holds_until_it_has_worked() returns void {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable Grid* g = Doing.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Agent* her = Doing.someone(folk);
                 Agent* him = Doing.someone(folk);
                 him.identity.sex = Sex.Male;
                 Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
-                Doings.tick(folk, cast<long>(0));
+                Doings.tick(folk, g, ways, cast<long>(0));
                 Test.assertEqual(cast<int>(her.activity), cast<int>(Activity.Mating));
                 Test.assertFalse(Activity.Mating.interruptible());
                 // Starving does not shift her out of it...
                 her.body.fed = new Gauge(0, 0, Body.FULL);
-                Doings.tick(folk, cast<long>(Doings.CHOOSE_EVERY));
+                Doings.tick(folk, g, ways, cast<long>(Doings.CHOOSE_EVERY));
                 Test.assertEqual(cast<int>(her.activity), cast<int>(Activity.Mating));
                 // ...but a child on the way does, because then she no longer wants it.
                 her.body.carrying = 0;
                 her.body.expecting = cast<byte>(1);
-                Doings.tick(folk, cast<long>(Doings.CHOOSE_EVERY * 2));
+                Doings.tick(folk, g, ways, cast<long>(Doings.CHOOSE_EVERY * 2));
                 Test.assertEqual(cast<int>(her.activity), cast<int>(Activity.Gathering));
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
 
@@ -230,18 +282,22 @@ public bundle Agents {
             [Test]
             public static method being_together_is_what_makes_a_child() returns void {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable Grid* g = Doing.pasture();
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Agent* her = Doing.someone(folk);
                 Agent* him = Doing.someone(folk);
                 him.identity.sex = Sex.Male;
                 Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
                 mutable int spent = 0;
                 while (her.body.carrying == Body.NOT_CARRYING && spent < 20 * Clock.TICKS_A_YEAR) {
-                    Doings.tick(folk, cast<long>(spent));
+                    Doings.tick(folk, g, ways, cast<long>(spent));
                     spent = spent + 1;
                 }
                 Test.assertTrue(her.body.carrying != Body.NOT_CARRYING);
                 Test.assertBetween(cast<int>(her.body.expecting), 1, 5);
+                delete ways;
                 delete folk;
+                delete g;
                 return;
             }
         }

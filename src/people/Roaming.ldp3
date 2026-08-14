@@ -1,10 +1,12 @@
-import System.IO.Console;
+﻿import System.IO.Console;
 import Agents.People.Population;
 import Agents.People.Agent;
 import Agents.People.AgentId;
 import Agents.People.Walking;
 import Agents.People.Body;
 import Agents.People.Activity;
+import Agents.People.Journey;
+import Agents.People.Kinship;
 import Agents.World.Grid;
 import Agents.World.Biomes;
 import Agents.World.Waymap;
@@ -31,14 +33,75 @@ public bundle Agents {
         // How far a wander goes, in cells. Far enough to cross a few blocks -- so the route search
         // is genuinely searching -- and near enough that the band stays a band.
         public class Roaming {
-            public static fixed float WANDER = 40.0;
-            // One person decides per this many ticks, so a band of two dozen sets somebody off
-            // about twice a second at gear one and nobody moves in lockstep.
-            public static fixed int DECIDE_EVERY = 30;
+            // HOW FAR A STROLL GOES, in cells. TWELVE AND NOT FORTY, and the two constants below
+            // are one decision: a stroll is a stroll and not an expedition.
+            //
+            // WHEN EVERYBODY'S FEET WERE FREED (see the tick), the old numbers turned every person
+            // in the world into a navigator: fifteen thousand of them asking for a forty-cell route
+            // twice a second took the walk from 8,600 picoseconds a person-tick to 110,000, with
+            // sixty-four per cent of it inside the route search. The world moved and nothing else
+            // fitted in the frame.
+            //
+            // A short walk is also a cheap one -- the coarse block search barely runs over twelve
+            // cells -- and it is what milling about actually looks like. Somebody with a REASON to
+            // cross a continent gets a real route from `Foraging`; this is the walk of a person with
+            // nowhere in particular to be.
+            public static fixed float WANDER = 12.0;
+            // And each person decides about once a quarter-year rather than twice a second. Spread
+            // by slot, so the world sets off a steady trickle instead of a tide.
+            public static fixed int DECIDE_EVERY = 300;
             // How many places to try before giving up this tick. Bounded: the ground may be a
             // peninsula, and a loop that searches until it succeeds is the defect this whole slice
             // is written against.
             public static fixed int TRIES = 6;
+
+            // How far away somebody still counts as the person you are keeping near. Wider than a
+            // stroll, so a walker who has drifted off comes back rather than settling where they
+            // landed; narrower than the world, so a family that really has split stays split.
+            public static fixed float KEEPING_NEAR = 48.0;
+
+            // WHO THIS PERSON IS ORBITING, or themselves if they know nobody in reach. Two methods
+            // and not one returning a pair, because a `vec2` out of a method that also has to say
+            // "nobody" would need a sentinel position, and there is no position that cannot be a
+            // real one.
+            private static method nearKinX(Population* folk, Agent* one, int mine) returns float {
+                int who = Roaming.nearestKin(folk, one, mine);
+                if (who < 0) {
+                    return one.x();
+                }
+                return folk.at(cast<AgentId>(who)).x();
+            }
+
+            private static method nearKinY(Population* folk, Agent* one, int mine) returns float {
+                int who = Roaming.nearestKin(folk, one, mine);
+                if (who < 0) {
+                    return one.y();
+                }
+                return folk.at(cast<AgentId>(who)).y();
+            }
+
+            // Walks the kinship chain, which is tens of links and not the population.
+            private static method nearestKin(Population* folk, Agent* one, int mine) returns int {
+                mutable int link = one.kin.first();
+                mutable int found = 0 - 1;
+                mutable float best = Roaming.KEEPING_NEAR * Roaming.KEEPING_NEAR;
+                while (link >= 0) {
+                    int slot = Kinship.whoOf(one.kin.at(link));
+                    link = one.kin.after(link);
+                    if (slot < 0 || slot >= folk.count() || slot == mine) {
+                        continue;
+                    }
+                    Agent* them = folk.at(cast<AgentId>(slot));
+                    float dx = them.x() - one.x();
+                    float dy = them.y() - one.y();
+                    float gap = dx * dx + dy * dy;
+                    if (gap < best) {
+                        best = gap;
+                        found = slot;
+                    }
+                }
+                return found;
+            }
 
             public static method tick(Population* folk, Grid* g, Waymap* ways, long at, Rng* rng)
                     returns void {
@@ -66,23 +129,53 @@ public bundle Agents {
                     if (one.journey.going) {
                         continue;
                     }
-                    // A STROLL IS WHAT IDLING LOOKS LIKE, AND NOTHING ELSE COMES THROUGH HERE.
-                    //
-                    // This used to read "a hungry person is not wandering", and explain that
-                    // foraging had already dealt with them -- one of four classes deciding what
-                    // anybody was doing, each carrying an `if` about the others' business. The
-                    // scoring decides now, and a hungry person is not idle because food outscores
-                    // idling, which is a reason rather than an exception (S2.7).
-                    if (cast<int>(one.activity) != cast<int>(Activity.Idle)) {
+                    // AND NOBODY WHO IS AFTER SOMETHING. A hunter walks himself, straight at a
+                    // moving animal, and keeps the place the chase BEGAN in `journey.to` so his
+                    // give-up distance measures from there. A stroll handed to him overwrites it --
+                    // and then his chase reads as having covered a cell before it ends. Three
+                    // thousand chases, an average distance of ONE cell, and the reason was that
+                    // this loop and the hunt were both writing the same field.
+                    if (one.journey.chase != Journey.NOTHING) {
                         continue;
                     }
+                    // ANYBODY WHOSE FEET ARE FREE, and not only the idle.
+                    //
+                    // WRITTEN AS "ONLY THE IDLE" FOR ONE SLICE, and it made a world of statues. Of
+                    // fifteen thousand people, FOUR were idling: everybody else was talking,
+                    // courting, eating or mating, all of which outscore idling and none of which
+                    // ever gave anybody a destination. So nobody moved -- a person watching the
+                    // window saw them standing for whole minutes and heaping up along the rivers,
+                    // because wherever the last walk left them was where they stayed, and a walk
+                    // that meets water slides along the bank (ledger S2-22).
+                    //
+                    // Talking while walking is what people do. What an activity says is what
+                    // somebody is DOING; only a few of them say anything about whether their feet
+                    // work, and `Activity.rooted` is where that is said -- for this and for
+                    // `Doings.act`, one question with two readers.
+                    if (one.activity.rooted()) {
+                        continue;
+                    }
+                    // AROUND SOMEBODY THEY KNOW, IF THERE IS ANYBODY. A stroll centred on where the
+                    // walker already stands is a random walk, and a random walk of twelve cells
+                    // every quarter-year dissolves a band: over fifty years it spreads a family a
+                    // hundred and sixty cells apart, and then nobody is in anybody's block, nobody
+                    // marries and nobody meets their own spouse again. The births fell from thirteen
+                    // thousand children to two thousand the moment everybody's feet were freed, and
+                    // this is why -- not the walking, the AIMLESSNESS of it.
+                    //
+                    // Nobody needs a rule about bands holding together. A person wanders near the
+                    // people they know; the people they know wander near them; that is a band, and
+                    // it is also what makes the world look like it has villages in it rather than a
+                    // fog of people.
+                    float aboutX = Roaming.nearKinX(folk, one, cast<int>(who));
+                    float aboutY = Roaming.nearKinY(folk, one, cast<int>(who));
                     mutable int tries = 0;
                     while (tries < Roaming.TRIES) {
                         tries = tries + 1;
                         float ang = rng.unit() * 6.2831853;
                         float far = rng.unit() * Roaming.WANDER;
-                        float tx = one.x() + LandMath.cos(ang) * far;
-                        float ty = one.y() + LandMath.sin(ang) * far;
+                        float tx = aboutX + LandMath.cos(ang) * far;
+                        float ty = aboutY + LandMath.sin(ang) * far;
                         if (tx < 1.0 || ty < 1.0 || tx >= cast<float>(g.width()) - 1.0
                             || ty >= cast<float>(g.height()) - 1.0) {
                             continue;
