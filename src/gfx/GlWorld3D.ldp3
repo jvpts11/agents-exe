@@ -14,6 +14,7 @@ import Agents.People.Population;
 import Agents.People.Agent;
 import Agents.People.AgentId;
 import Agents.People.AgentClass;
+import Agents.People.Courting;
 import System.Collections.Iterator;
 import System.Memory.Allocator;
 import System.Memory.Raw;
@@ -1609,6 +1610,31 @@ public bundle Agents {
             // they are standing on, small enough that a band of them is a band and not a wall.
             private static fixed float A_PERSON = 0.5;
             private static fixed float PERSON_SCALE = 0.3125;   // 1.60 authored -> 0.50 drawn
+            // AND A CHILD IS SMALLER. Half at birth, full size at the age the world already calls
+            // grown -- eighteen, which is `Courting.OF_AGE` and the only age this model names, so
+            // the size a body is drawn at and the age it may marry at cannot drift apart.
+            //
+            // A RATIO AND NOT A SECOND SCALE: everything about a person's size goes on coming from
+            // `PERSON_SCALE`, and this multiplies it. Two independent numbers would mean a person
+            // resized once and their shadow resized never, which is the shape of the last three
+            // defects in this renderer.
+            private static fixed float A_NEWBORN = 0.5;
+
+            // How much of its full size a body of this age is drawn at: `A_NEWBORN` at birth,
+            // rising straight to one at `Courting.OF_AGE` and staying there. Straight and not
+            // curved, because the difference a curve would make is a fraction of a pixel at a
+            // quarter-tile and the age it reaches full size is the thing that has to be legible.
+            public static method grownness(int years) returns float {
+                if (years >= Courting.OF_AGE) {
+                    return 1.0;
+                }
+                if (years <= 0) {
+                    return GlWorld3D.A_NEWBORN;
+                }
+                return GlWorld3D.A_NEWBORN
+                       + (1.0 - GlWorld3D.A_NEWBORN)
+                         * cast<float>(years) / cast<float>(Courting.OF_AGE);
+            }
             // AND THEY FLOAT. They do not walk the ground, they hover a little over it -- which is
             // the look this world is being built in, and it also stops a cube from being buried in
             // a slope it happens to be standing on.
@@ -1707,6 +1733,10 @@ public bundle Agents {
                                 int ord = folkArt.ordOf(GlWorld3D.bodyFor(who.standing()));
                                 if (ord >= 0) {
                                     Turn turn = folkTracks.follow(slot, px, py);
+                                    // HOW BIG THIS ONE IS. Read once and used by both the body and
+                                    // its shadow, so a child cannot end up under an adult's.
+                                    float big = GlWorld3D.PERSON_SCALE
+                                                * GlWorld3D.grownness(who.body.age);
                                     int gx = cast<int>(px);
                                     int gy = cast<int>(py);
                                     int cell = grid.biomeAt(gx, gy);
@@ -1758,15 +1788,14 @@ public bundle Agents {
                                                                   px * 2.0 - up * 0.368,
                                                                   py * 2.0 - up * 0.579,
                                                                   groundZ + 0.012,
-                                                                  GlWorld3D.PERSON_SCALE,
+                                                                  big,
                                                                   cast<float>(under.r),
                                                                   cast<float>(under.g),
                                                                   cast<float>(under.b), true, turn);
                                     }
                                     float topZ = groundZ + up;
                                     wv = emitTurned(folkArt, buf, wv, ord, px * 2.0, py * 2.0, topZ,
-                                                    GlWorld3D.PERSON_SCALE,
-                                                    shadeAt(gx, gy, 1, lvl), turn);
+                                                    big, shadeAt(gx, gy, 1, lvl), turn);
                                     drawnFolk = drawnFolk + 1;
                                 }
                             }

@@ -245,6 +245,43 @@ public bundle Agents {
                 return;
             }
 
+            // A RIVER IS LAND, AND THE REAL ONES ARE A FLAG.
+            //
+            // The check above uses `Biome.River`, and that is a biome THE GENERATOR HAS NEVER ONCE
+            // PAINTED: hydrology lays `Grid.setRiver` over whatever land biome was already there and
+            // never touches the biome. So the catalogue forbidding building on `Biome.River` was
+            // forbidding it on nothing, while every real river cell said yes -- which nobody could
+            // see, because nothing is built until S3.
+            //
+            // Four claims, and the fourth is the one that was false: walked, targetable, counted as
+            // land, never built in (João, 2026-08-14).
+            [Tag(name: "people")]
+            [Test]
+            public static method a_river_is_land_that_cannot_be_built_in() returns void {
+                mutable Grid* g = Walks.plain();
+                for (int x in 10..30) {
+                    g.setRiver(x, 20);
+                }
+                g.labelMasses();
+                Population* folk = new Population(Walks.SIDE, Walks.SIDE) on heap;
+                Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
+                // WALKED, and counted as land: the biome underneath is what it always was.
+                Test.assertTrue(ways.mayBeAt(20, 20));
+                Test.assertFalse(Biomes.swims(g.biomeAt(20, 20)));
+                Test.assertTrue(Biomes.walkable(g.biomeAt(20, 20)));
+                // A DESTINATION, which is the second claim and needs the walk to accept it.
+                AgentId who = folk.bear(20.5, 10.5);
+                Test.assertTrue(Walking.setOut(folk, g, ways, who, 20.5, 20.5));
+                // AND NEVER BUILT IN -- the cell says no where its biome says yes.
+                Test.assertTrue(Biomes.buildable(g.biomeAt(20, 20)));
+                Test.assertFalse(g.mayBuildAt(20, 20));
+                Test.assertTrue(g.mayBuildAt(20, 19));   // the bank beside it is fine
+                delete ways;
+                delete folk;
+                delete g;
+                return;
+            }
+
             // ROUGH GROUND IS GONE AROUND when going round is cheaper, which is the model's sentence
             // about mountains -- and it is arithmetic here rather than a rule: the search is by cost,
             // and a mountain costs more per block than the meadow beside it.
