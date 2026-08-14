@@ -7,6 +7,7 @@ import Agents.People.Kindred;
 import Agents.People.Relation;
 import Agents.People.Sex;
 import Agents.People.Body;
+import Agents.People.Activity;
 import Agents.Sim.BlockChain;
 import Agents.Sim.Clock;
 program AgentsExe;
@@ -41,11 +42,6 @@ public bundle Agents {
             // How many come of one, at most. The model says one to five, and flags the number as
             // the one that compounds -- so it is written where it can be found and changed.
             public static fixed int MOST_BORN = 5;
-            // And how often a year that comes round at all. THE NUMBER THAT DECIDES WHETHER THE
-            // WORLD FILLS OR EMPTIES, which is why it is a named constant on its own line rather
-            // than a literal inside the condition it governs.
-            public static fixed int IN_A_HUNDRED_YEARS = 55;
-
             // HOW MANY COME OF ONE PREGNANCY, out of a hundred. One, nearly always; five, almost
             // never; and never nought, which is what a bare `nextInt(MOST_BORN)` would have given
             // one time in five.
@@ -101,6 +97,14 @@ public bundle Agents {
                     // A woman is visited every sixtieth tick, so a child arrives at most a minute
                     // of world late, out of nine months.
                     Courting.deliver(folk, one, mine, at);
+                    // AND LOOKING IS AN ACTIVITY. Whether this person wants a spouse enough to be
+                    // looking for one right now is `Activity.Courting`'s question, scored against
+                    // everything else they might be doing -- so a starving twenty-year-old goes for
+                    // food and does not court on the way. This class decides WHO would have whom;
+                    // it stopped deciding whether anybody is looking at all (S2.7).
+                    if (cast<int>(one.activity) != cast<int>(Activity.Courting)) {
+                        continue;
+                    }
                     if (!Courting.mayMarry(one) || one.kin.spouse() != Kinship.NOBODY) {
                         continue;
                     }
@@ -148,6 +152,36 @@ public bundle Agents {
 
             // ---- children --------------------------------------------------------------------
 
+            // WHETHER A CHILD COULD START HERE AT ALL. Asked of the WIFE, because she is the one who
+            // would carry it, and that is also what stops a couple rolling twice for the same child:
+            // the husband cannot pass this.
+            //
+            // A CONCEPTION NEEDS THE TWO THE MODEL SAYS IT NEEDS. `deliver` once read "has a spouse"
+            // as "has a husband", so two women married to each other each bore the other's children
+            // (ledger S2-10) -- the question lives here now, where the one caller cannot forget it.
+            public static method mayConceive(Population* folk, Agent* her, int mine)
+                    returns boolean {
+                if (cast<int>(her.identity.sex) != cast<int>(Sex.Female)
+                    || her.body.carrying != Body.NOT_CARRYING
+                    || her.body.age > Courting.PAST_IT) {
+                    return false;
+                }
+                int man = her.kin.spouse();
+                if (man == Kinship.NOBODY || man >= folk.count()) {
+                    return false;
+                }
+                return cast<int>(folk.at(cast<AgentId>(man)).identity.sex) == cast<int>(Sex.Male);
+            }
+
+            // AND ONE STARTS. How many are coming is rolled now rather than at the birth, because a
+            // body carrying twins is carrying twins the whole nine months and something will want to
+            // know before they arrive.
+            public static method conceive(Population* folk, Agent* her, long at) returns void {
+                her.body.carrying = cast<int>(at);
+                her.body.expecting = Courting.howManyCome(folk.roll(100));
+                return;
+            }
+
             // A MARRIED WOMAN CARRIES, AND NINE MONTHS LATER THERE ARE CHILDREN.
             //
             // PREGNANCY IS NOT A STATE, and the model is explicit: a pregnant person goes on
@@ -171,18 +205,7 @@ public bundle Agents {
                     return;
                 }
                 if (her.body.carrying == Body.NOT_CARRYING) {
-                    // HER TURN COMES ROUND ONCE A YEAR, spread across the year by slot so the world
-                    // does not deliver a whole generation on one afternoon -- and when it comes it
-                    // is a CHANCE and not an appointment. Written as a certainty, every married
-                    // woman of age bore a child every single year of her life, which is not a
-                    // family, it is a clock.
-                    if (at % cast<long>(Clock.TICKS_A_YEAR) == cast<long>(i % Clock.TICKS_A_YEAR)
-                        && her.body.age <= Courting.PAST_IT
-                        && folk.roll(100) < Courting.IN_A_HUNDRED_YEARS) {
-                        her.body.carrying = cast<int>(at);
-                        her.body.expecting = Courting.howManyCome(folk.roll(100));
-                    }
-                    return;
+                    return;      // nothing coming; whether one starts is `Activity.Mating`'s
                 }
                 if (at - cast<long>(her.body.carrying) < cast<long>(Courting.TERM)) {
                     return;

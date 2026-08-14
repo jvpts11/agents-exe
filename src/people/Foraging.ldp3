@@ -5,6 +5,7 @@ import Agents.People.AgentId;
 import Agents.People.Body;
 import Agents.People.Gauge;
 import Agents.People.Inventory;
+import Agents.People.Activity;
 import Agents.People.Walking;
 import Agents.World.Grid;
 import Agents.World.BlockGrid;
@@ -51,6 +52,12 @@ public bundle Agents {
             private static mutable long gathered;
             private static mutable long meals;
             private static mutable long noneFound;
+            // A HARVEST THAT CAME UP EMPTY, which nothing counted. `noneFound` says "no bush within
+            // reach"; this says "a bush, reached, with nothing left on it" -- and those are the
+            // opposite diagnosis. A run read 0 found nothing in reach while everybody starved,
+            // which said the food was there and told nothing about whether it was still on it.
+            private static mutable long reached;
+            private static mutable long dry;
 
             // The same counters the run prints, for the checks to read -- a test that keeps its own
             // tally is a test that can pass while the number a person sees is wrong.
@@ -66,8 +73,37 @@ public bundle Agents {
                 return noneFound;
             }
 
+            // THE NODE SOMEBODY CAN TOUCH FROM WHERE THEY STAND: their own cell first, then the
+            // eight around it, nearest kept. `AT_HAND` bounds it, so "reach" is a distance and not
+            // a cell boundary -- a boundary is a thing a walker can stop half a step on the wrong
+            // side of, and it did.
+            private static method nodeInReach(NodeField* nodes, float x, float y, int forage)
+                    returns int {
+                int cx = cast<int>(x);
+                int cy = cast<int>(y);
+                mutable int best = 0 - 1;
+                mutable float bestGap = Foraging.AT_HAND * Foraging.AT_HAND;
+                for (int dy in 0 - 1..2) {
+                    for (int dx in 0 - 1..2) {
+                        int at = nodes.nodeAt(cx + dx, cy + dy, forage);
+                        if (at < 0) {
+                            continue;
+                        }
+                        // A node sits in the middle of its cell, not on its corner.
+                        float gx = cast<float>(nodes.xAt(at)) + 0.5 - x;
+                        float gy = cast<float>(nodes.yAt(at)) + 0.5 - y;
+                        float gap = gx * gx + gy * gy;
+                        if (gap <= bestGap) {
+                            bestGap = gap;
+                            best = at;
+                        }
+                    }
+                }
+                return best;
+            }
+
             public static method report() returns void {
-                System.IO.Console.println($"folk food: {gathered} gathered, {meals} eaten, {noneFound} found nothing in reach");
+                System.IO.Console.println($"folk food: {gathered} gathered, {meals} eaten, {noneFound} found nothing in reach, {reached} bushes reached of which {dry} bare");
                 return;
             }
 
@@ -86,6 +122,18 @@ public bundle Agents {
                     AgentId who = cast<AgentId>(slot);
                     Agent* one = folk.at(who);
                     slot = slot + Foraging.LOOK_EVERY;
+                    // AND THE ACTIVITY IS WHAT SAYS SO. This class used to decide for itself that a
+                    // hungry person goes for food, which made it one of four places that decided
+                    // what anybody was doing and left `Roaming` explaining in a comment why it stays
+                    // out of the way. The scoring decides; this does the eating and the gathering
+                    // (S2.7). Note that BOTH activities come through here: eating is what you do
+                    // with a full hand and gathering is what you do with an empty one, and the
+                    // scoring already told them apart.
+                    int doing = cast<int>(one.activity);
+                    if (doing != cast<int>(Activity.Eating)
+                        && doing != cast<int>(Activity.Gathering)) {
+                        continue;
+                    }
                     // EAT FIRST, AND OUT OF ITS OWN HANDS. Somebody carrying food and going hungry
                     // is the one thing here that would be absurd to watch.
                     if (one.body.fed.value() < Body.FULL - Foraging.A_MEAL
@@ -98,13 +146,28 @@ public bundle Agents {
                         meals = meals + cast<long>(1);
                         continue;
                     }
-                    if (one.body.fed.value() > Body.PECKISH || !one.inventory.emptyHanded()) {
-                        continue;   // not hungry, or already carrying what it needs
+                    if (!one.inventory.emptyHanded()) {
+                        continue;   // already carrying what it needs
                     }
-                    // AT THE FOOD? Take some. A node it is standing on is a node it can pick from.
-                    int here = nodes.nodeAt(cast<int>(one.x()), cast<int>(one.y()), forage);
+                    // AT THE FOOD? Take some. A node WITHIN ARM'S REACH is a node it can pick from,
+                    // and that is what `AT_HAND` was declared for -- it had never once been read.
+                    //
+                    // THIS IS WHAT KILLED THE WORLD. A walker stops within half a cell of where it
+                    // was sent, which is right; the harvest asked for the node in the cell the
+                    // walker's position TRUNCATES into, which is not the same cell whenever the
+                    // approach came from below. So half of everybody arrived at a bush, found
+                    // nothing, set out again for the same bush, arrived instantly because they were
+                    // already there, and did it again -- for the rest of their lives. Two million
+                    // routes asked, twelve thousand harvests, fourteen hundred people permanently
+                    // "gathering", not one bare bush in the world, and everybody dead of hunger
+                    // standing on food.
+                    int here = Foraging.nodeInReach(nodes, one.x(), one.y(), forage);
                     if (here >= 0) {
+                        reached = reached + cast<long>(1);
                         int took = nodes.harvest(here, Foraging.TAKE);
+                        if (took < 1) {
+                            dry = dry + cast<long>(1);
+                        }
                         if (took > 0) {
                             one.inventory.carrying = Nodes.gives(nodes.kindAt(here));
                             one.inventory.howMany = took;
@@ -122,7 +185,11 @@ public bundle Agents {
                         noneFound = noneFound + cast<long>(1);
                         continue;
                     }
-                    Walking.setOut(folk, g, ways, who, nodes.xAt(found), nodes.yAt(found));
+                    // THE MIDDLE OF THE BUSH'S CELL, not its corner: a walker stops within half a
+                    // cell of where it was sent, and half a cell from a corner is the cell next
+                    // door as often as it is this one.
+                    Walking.setOut(folk, g, ways, who, cast<float>(nodes.xAt(found)) + 0.5,
+                                   cast<float>(nodes.yAt(found)) + 0.5);
                 }
                 return;
             }

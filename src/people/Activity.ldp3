@@ -1,0 +1,344 @@
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.AgentClass;
+import Agents.People.Population;
+import Agents.People.Body;
+import Agents.People.Whereabouts;
+import Agents.People.Kinship;
+import Agents.People.Courting;
+program AgentsExe;
+
+// WHAT A PERSON IS DOING, AND WHY THAT ONE AND NOT ANOTHER.
+//
+// THE TWENTY-THREE, and every one of them answers the same four questions. A twenty-fourth cannot
+// arrive without answering them, which is the whole reason this is one closed type and not a field
+// somebody sets to whatever they were thinking about at the time.
+//
+// A SEALED ENUM AND NOT A CATALOG. The layout design declares `Activity` a catalog on one line and
+// a sealed enum with an exhaustive `match` on another, and its own audit calls that a wording snag
+// worth one word (B7). This is the word. A catalog buys families -- four kinds of resource node,
+// each its own enum, sharing a contract -- and there are no families here: the twenty-three are one
+// list, and WHO may enter one is a question each of them answers rather than a division between
+// them. Sealed buys the exhaustive `match`, which is what the feature table asked for and what makes
+// a forgotten twenty-fourth a compile error instead of a silent nothing.
+//
+// CHOOSING IS A SCORE, NOT A PRIORITY LIST, and that is the design's line rather than a preference.
+// A priority list means every agent whose `fed` crosses twenty eats on the same tick -- a shared
+// threshold in different clothes, which this project has already paid for once as a whole population
+// moving as one. `urge` is a number, the highest wins, and two people in the same state can still
+// want different things because their natures scale it differently.
+//
+// FOURTEEN OF THE TWENTY-THREE SCORE ZERO TODAY, and not one of them is a stub. Working asks whether
+// this person has a workplace; Learning asks whether there is a building to learn at; Marching asks
+// whether this is a soldier. The answers are all no because the world has no posts, no buildings and
+// no soldiers yet -- and every one of those questions is the same code that will answer yes the day
+// S3 and S4 build the thing it asks about. A precondition that is false is not a hole.
+public bundle Agents {
+    public namespace People {
+
+        // WHO MAY ENTER, as bits over `AgentClass`: Worker 1, Soldier 2, Scout 4, Protagonist 8.
+        // Written as literals in the list below because a constant list cannot name its own type's
+        // statics; `mayBeEntered` spells them out again in words.
+        //
+        // WHAT IT COSTS, as energy A YEAR, and NOT energy a tick as the layout says. A year is 1200
+        // ticks and a full body holds 1000 energy, so every activity in this world costs less than
+        // one energy a tick -- which as an integer is nought, and as a float is a rounding error
+        // added twelve hundred times. Every other rate the world has is a year rate (`Living`'s
+        // hunger, its healing, the walk that wore a body out) and this joins them. Ledger S2-12.
+        public sealed enum Activity {
+            //         who  a year  may be cut  what it says
+            Idle(       15,     40,      true,  "idling"),
+            Working(    15,    260,      true,  "working"),
+            Sleeping(   15, 0 - 3000,    true,  "sleeping"),
+            GoingToSleep(15,   120,      true,  "going to sleep"),
+            Socializing(15,     60,      true,  "talking"),
+            Mating(     15,    150,     false,  "mating"),
+            Resting(    15, 0 - 1200,    true,  "resting"),
+            Wandering(   4,    200,      true,  "wandering"),
+            Exploring(   4,    260,      true,  "exploring"),
+            Prospecting( 4,    260,      true,  "prospecting"),
+            Marching(    2,    300,      true,  "marching"),
+            Fighting(    2,    600,     false,  "fighting"),
+            Managing(    8,    120,      true,  "managing"),
+            Eating(     15,     20,      true,  "eating"),
+            Gathering(   1,    300,      true,  "gathering"),
+            Fetching(   15,    240,      true,  "fetching"),
+            Hauling(    15,    320,      true,  "hauling"),
+            Travelling( 15,    280,      true,  "travelling"),
+            Courting(   15,    100,      true,  "courting"),
+            Learning(   15,     80,      true,  "learning"),
+            Convalescing(15, 0 - 600,    true,  "convalescing"),
+            Worship(    15,     60,      true,  "at worship"),
+            Hunting(     1,    420,      true,  "hunting");
+
+            // How near somebody has to be to be company: the layout's own eight tiles.
+            public static fixed float WITHIN_REACH = 8.0;
+            // And how near to be touching, which is what mating asks and talking does not.
+            public static fixed float ARM_LENGTH = 2.0;
+
+            private int who;
+            private int cost;
+            private boolean mayBeCut;
+            private String said;
+
+            public constructor Activity(int who, int cost, boolean mayBeCut, String said) {
+                this.who = who;
+                this.cost = cost;
+                this.mayBeCut = mayBeCut;
+                this.said = said;
+            }
+
+            // ---- the four questions ------------------------------------------------------------
+
+            // WHETHER THIS STANDING MAY DO THIS AT ALL. Nine of the twenty-three belong to a standing
+            // nobody holds yet, and this is the whole of why they never happen -- not a flag, not a
+            // slice marker, the same question that will let a scout wander the day there is a scout.
+            public method mayBeEntered(AgentClass by) returns boolean {
+                return (who & (1 << cast<int>(by))) != 0;
+            }
+
+            // WHETHER IT MAY BE CUT SHORT. Mating and fighting may not, which is the difference
+            // between a world where things finish and one where everybody flickers.
+            public method interruptible() returns boolean {
+                return mayBeCut;
+            }
+
+            // WHAT IT COSTS A BODY OVER A YEAR OF DOING IT. Negative gives energy back: sleeping,
+            // resting and convalescing are the three that mend rather than spend.
+            //
+            // MENDING IS FOUR TIMES FASTER THAN SPENDING, on purpose. At the first numbers written
+            // here, resting gave back exactly what gathering took, so a body spent half its life
+            // standing still -- two whole YEARS to go from weary to rested -- and half the world
+            // was asleep instead of eating. This world has no day and no night (see `Clock`), so
+            // there is no nightfall to bound a sleep; what bounds it is that recovering is quick
+            // and wearing out is slow, which is also what it looks like from outside.
+            public method drainsAYear() returns int {
+                return cost;
+            }
+
+            // What the game says about somebody doing this.
+            public method label() returns String {
+                return said;
+            }
+
+            // HOW HARD THIS PULLS ON THIS PERSON, RIGHT NOW: nought to one.
+            //
+            // IT TAKES THE POPULATION, and the layout's signature does not. Half of what pulls a
+            // person is where somebody ELSE is standing -- a spouse within arm's reach, a friend
+            // within eight tiles -- and a slot number is not a position. An urge computed from the
+            // agent alone can only ever score the things a body does by itself, which is nine of
+            // these twenty-three. Ledger S2-13.
+            //
+            // AN EXHAUSTIVE MATCH AND NO DEFAULT, so the twenty-fourth cannot be added without a
+            // line here saying when anybody would want it.
+            public method urge(Population* folk, Agent* one) returns float {
+                return match (this) {
+                    // NOTHING PULLING IS ITSELF A PULL, and a small constant one. It is the floor
+                    // that guarantees the chooser always has an answer -- somebody whose every other
+                    // urge is nought is idle, rather than in no activity at all, which is a state
+                    // with no pose, no drain and no name.
+                    //
+                    // AND IN A WORLD WITH NO CITIES, IDLING IS THE ROAM. The layout's Idle is
+                    // "inside the city's territory" and its Wandering is the scout's leave to go
+                    // outside one. There is no territory yet, so a band with nothing pressing on it
+                    // strolls -- which is what idling looks like on the ground, and is the same
+                    // activity the day a territory exists to keep it inside.
+                    case Idle -> 0.05;
+                    // A POST TO GO TO. Nobody has one until S4 gives the world its buildings.
+                    case Working -> Activity.ifPosted(one, 0.45);
+                    // A BODY THAT IS SPENT LIES DOWN WHERE IT IS. Rises from nothing at `WEARY` to
+                    // past everything else at nought, because somebody who will not sleep is
+                    // somebody who dies of not sleeping.
+                    case Sleeping -> Activity.belowWeary(one, 1.05);
+                    // AND WALKS HOME FIRST IF IT HAS ONE, which nobody does until S3 builds houses.
+                    case GoingToSleep -> Activity.ifHoused(one) * Activity.belowWeary(one, 1.10);
+                    // SOMEBODY KNOWN, WITHIN EIGHT TILES. Scaled by how much this person wants
+                    // company at all -- the whole point of a temperament is that two people in the
+                    // same street do not both stop to talk.
+                    case Socializing -> Activity.ifCompany(folk, one)
+                                        * Activity.sociably(one, 0.30);
+                    // A SPOUSE WITHIN ARM'S REACH, AND NEITHER OF THEM ALREADY EXPECTING. Not
+                    // interruptible, and what ends it is that it worked: a wife who conceives stops
+                    // wanting it, and so does her husband, so the pair goes back to the world.
+                    case Mating -> Activity.ifSpouseHere(folk, one, 0.55);
+                    // TIRED, NOT SPENT. The mild half of sleeping, and what stops a walk from
+                    // running a body to nothing between one meal and the next.
+                    case Resting -> Activity.belowRested(one, 0.35);
+                    // THE SCOUT'S THREE. `mayBeEntered` already refuses these to everybody alive
+                    // today; the urges are here because the day a ruler appoints a scout, this is
+                    // what makes one behave like a scout rather than like a worker who may roam.
+                    case Wandering -> Activity.curiously(one, 0.20);
+                    case Exploring -> Activity.curiously(one, 0.35);
+                    case Prospecting -> Activity.curiously(one, 0.30);
+                    // THE SOLDIER'S TWO, which need a war (S5) before either can be wanted.
+                    case Marching -> 0.0;
+                    case Fighting -> 0.0;
+                    // AND THE PROTAGONIST'S ONE, which needs a city to manage (S3).
+                    case Managing -> 0.40;
+                    // FOOD IN ITS OWN HANDS. Beats gathering by design: somebody carrying a meal and
+                    // walking off to find another one is the single most absurd thing to watch.
+                    case Eating -> Activity.ifHolding(one, 0.90);
+                    // AND HUNGRY WITH EMPTY HANDS. Rises as the body empties, past everything except
+                    // sleep at its worst.
+                    case Gathering -> Activity.hungrily(one, 0.95);
+                    // THE TWO HALVES OF AN ERRAND, which need a post to be running one for (S4).
+                    case Fetching -> Activity.ifPosted(one, 0.35);
+                    case Hauling -> Activity.ifPosted(one, 0.40);
+                    // MOVING FOR GOOD rather than walking about: a colonist, or a spouse changing
+                    // city. Both need cities (S3).
+                    case Travelling -> 0.0;
+                    // LOOKING FOR SOMEBODY TO MARRY. Of age, unwed, and as sociable as they are.
+                    case Courting -> Activity.courtably(one, 0.45);
+                    // THE THREE THAT NEED A BUILDING TO DO THEM AT (S4): a `Lettering` house, a
+                    // `Healing` house, a `Priest` house. The question is the building, in all three.
+                    case Learning -> 0.0;
+                    case Convalescing -> 0.0;
+                    case Worship -> 0.0;
+                    // AND FOLLOWING SOMETHING THAT MOVES, which is the chase and is S2.8.
+                    case Hunting -> 0.0;
+                };
+            }
+
+            // ---- the questions the urges ask, each in one place ---------------------------------
+            //
+            // Written out rather than inlined because several urges ask the same one, and a
+            // threshold spelled twice is a threshold that will differ once.
+
+            // `jobless` and `homeless` are `Whereabouts`' own questions, and asking them by hand
+            // here is how the sentinel got spelled out in a second place -- which is a second place
+            // for it to be wrong.
+            private static method ifPosted(Agent* one, float much) returns float {
+                if (one.whereabouts.jobless()) {
+                    return 0.0;
+                }
+                return much;
+            }
+
+            private static method ifHoused(Agent* one) returns float {
+                if (one.whereabouts.homeless()) {
+                    return 0.0;
+                }
+                return 1.0;
+            }
+
+            // Nought above `WEARY`, rising to `much` at nothing left.
+            private static method belowWeary(Agent* one, float much) returns float {
+                int left = one.body.energy.value();
+                if (left >= Body.WEARY) {
+                    return 0.0;
+                }
+                return much * (1.0 - cast<float>(left) / cast<float>(Body.WEARY));
+            }
+
+            // Nought at full, rising to `much` at `WEARY` and no further -- sleeping takes over.
+            private static method belowRested(Agent* one, float much) returns float {
+                int left = one.body.energy.value();
+                if (left >= Body.RESTED) {
+                    return 0.0;
+                }
+                if (left <= Body.WEARY) {
+                    return much;
+                }
+                return much * (1.0 - cast<float>(left - Body.WEARY)
+                                     / cast<float>(Body.RESTED - Body.WEARY));
+            }
+
+            // Carrying something to eat, and room to eat it.
+            private static method ifHolding(Agent* one, float much) returns float {
+                if (one.inventory.emptyHanded() || one.body.fed.value() >= Body.FULL) {
+                    return 0.0;
+                }
+                return much * (1.0 - cast<float>(one.body.fed.value()) / cast<float>(Body.FULL));
+            }
+
+            // RISING FROM THE FIRST MOUTHFUL MISSING, to `much` at nothing left.
+            //
+            // IT USED TO RAMP FROM `PECKISH`, and that is a threshold wearing a score's clothes: at
+            // one point above twenty it pulled at nought, at one point below it pulled at 0.05 --
+            // less than courting, less than talking. So a body went on courting until it was three
+            // quarters of the way from peckish to dead, and then had under a year to find food,
+            // walk to it and eat. Starvation per person nearly tripled and the run still read
+            // healthy, because plenty was gathered and plenty was eaten; there was simply never
+            // enough time left when the looking started.
+            //
+            // `PECKISH` is not a switch any more, and never should have been one here. It is what
+            // its own comment always said it was -- the point where a body is noticeably hungry --
+            // and what the score does is make that felt earlier and harder than wanting company,
+            // which is the only ordering a body actually has.
+            private static method hungrily(Agent* one, float much) returns float {
+                if (!one.inventory.emptyHanded()) {
+                    return 0.0;      // it has food; eating is the answer, not looking for more
+                }
+                int fed = one.body.fed.value();
+                if (fed >= Body.FULL) {
+                    return 0.0;
+                }
+                return much * (1.0 - cast<float>(fed) / cast<float>(Body.FULL));
+            }
+
+            // A SPOUSE WITHIN ARM'S REACH AND NO CHILD ALREADY COMING. Both halves matter: the first
+            // is why a marriage has to be lived rather than declared, and the second is what gives an
+            // activity that may not be interrupted a way to end.
+            private static method ifSpouseHere(Population* folk, Agent* one, float much)
+                    returns float {
+                int wed = one.kin.spouse();
+                if (wed == Kinship.NOBODY || wed >= folk.count()
+                    || one.body.age < Courting.OF_AGE) {
+                    return 0.0;
+                }
+                Agent* other = folk.at(cast<AgentId>(wed));
+                if (one.body.carrying != Body.NOT_CARRYING
+                    || other.body.carrying != Body.NOT_CARRYING) {
+                    return 0.0;
+                }
+                if (!Activity.within(one, other, Activity.ARM_LENGTH)) {
+                    return 0.0;
+                }
+                return much;
+            }
+
+            // ANYBODY THIS PERSON KNOWS, STANDING WITHIN EIGHT TILES. Walks the kinship chain and
+            // not the population: a person knows tens of people, and the alternative is asking the
+            // block index for everybody near and then asking whether each is known, which is the
+            // same answer by the longer road.
+            private static method ifCompany(Population* folk, Agent* one) returns float {
+                mutable int link = one.kin.first();
+                while (link >= 0) {
+                    int slot = Kinship.whoOf(one.kin.at(link));
+                    link = one.kin.after(link);
+                    if (slot < 0 || slot >= folk.count()) {
+                        continue;
+                    }
+                    if (Activity.within(one, folk.at(cast<AgentId>(slot)),
+                                        Activity.WITHIN_REACH)) {
+                        return 1.0;
+                    }
+                }
+                return 0.0;
+            }
+
+            private static method within(Agent* one, Agent* other, float reach) returns boolean {
+                float dx = other.x() - one.x();
+                float dy = other.y() - one.y();
+                return dx * dx + dy * dy <= reach * reach;
+            }
+
+            private static method sociably(Agent* one, float much) returns float {
+                return much * cast<float>(cast<int>(one.identity.nature.sociability)) / 255.0;
+            }
+
+            private static method curiously(Agent* one, float much) returns float {
+                return much * cast<float>(cast<int>(one.identity.nature.curiosity)) / 255.0;
+            }
+
+            // Of age, unwed, and as much as they care for company.
+            private static method courtably(Agent* one, float much) returns float {
+                if (one.kin.spouse() != Kinship.NOBODY || one.body.age < Courting.OF_AGE
+                    || one.body.age > Courting.PAST_IT) {
+                    return 0.0;
+                }
+                return Activity.sociably(one, much);
+            }
+        }
+    }
+}

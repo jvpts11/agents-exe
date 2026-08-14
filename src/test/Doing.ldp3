@@ -1,0 +1,249 @@
+import System.Test.Test;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.AgentClass;
+import Agents.People.Activity;
+import Agents.People.Doings;
+import Agents.People.Body;
+import Agents.People.Gauge;
+import Agents.People.Sex;
+import Agents.People.Orientation;
+import Agents.People.Kindred;
+import Agents.People.Relation;
+import Agents.Sim.Clock;
+program AgentsExe;
+
+// WHAT SOMEBODY IS DOING, AND WHY THAT AND NOT SOMETHING ELSE.
+//
+// THE FAILURE THESE ARE WRITTEN AGAINST is not a crash. Every defect this slice found looked like a
+// healthy run: five thousand people "working" at buildings that do not exist, then everybody in
+// "eating" while they starved to death. The counts were fine, the tick was fine, and the world was
+// dead. So these checks ask what nothing else can ask -- that the score puts the right thing first.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Doing {
+            public static fixed int SIDE = 64;
+
+            private static method someone(Population* folk) returns Agent* {
+                AgentId who = folk.bear(10.5, 10.5);
+                Agent* one = folk.at(who);
+                one.body.age = 25;
+                one.identity.sex = Sex.Female;
+                one.identity.orientation = Orientation.Straight;
+                one.identity.nature.sociability = cast<ubyte>(128);
+                one.identity.nature.curiosity = cast<ubyte>(128);
+                return one;
+            }
+
+            // NOBODY IS IN NO ACTIVITY. `Idle` is the floor of the scoring for exactly this reason:
+            // an agent whose every other urge is nought has to be doing SOMETHING, or it has no
+            // pose, no drain and no name.
+            [Tag(name: "people")]
+            [Test]
+            public static method somebody_with_nothing_pressing_is_idle() returns void {
+                Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                Agent* one = Doing.someone(folk);
+                one.identity.nature.sociability = cast<ubyte>(0);
+                Doings.tick(folk, cast<long>(0));
+                Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Idle));
+                delete folk;
+                return;
+            }
+
+            // AND NOBODY IS BORN INTO NOTHING EITHER, which is a different claim: the field is
+            // written in the constructor rather than trusted to be the zeroth constant.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_person_is_doing_something_from_the_first_tick() returns void {
+                Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                AgentId who = folk.bear(10.5, 10.5);
+                Test.assertEqual(cast<int>(folk.at(who).activity), cast<int>(Activity.Idle));
+                delete folk;
+                return;
+            }
+
+            // A HUNGRY PERSON GOES FOR FOOD RATHER THAN COURTING, and the margin is the point: it
+            // used to be that hunger scored nothing at all until a body was three quarters of the
+            // way from peckish to dead, so people courted while they starved.
+            [Tag(name: "people")]
+            [Test]
+            public static method hunger_outweighs_company_long_before_it_is_fatal() returns void {
+                Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                Agent* one = Doing.someone(folk);
+                // Half full: not an emergency by any threshold anybody would write.
+                one.body.fed = new Gauge(Body.FULL / 2, 0, Body.FULL);
+                Doings.tick(folk, cast<long>(0));
+                Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Gathering));
+                delete folk;
+                return;
+            }
+
+            // AND SOMEBODY CARRYING FOOD EATS IT INSTEAD OF LOOKING FOR MORE. Somebody with a meal
+            // in hand walking off to find another one is the single most absurd thing to watch.
+            [Tag(name: "people")]
+            [Test]
+            public static method food_in_hand_beats_food_in_the_ground() returns void {
+                Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                Agent* one = Doing.someone(folk);
+                one.body.fed = new Gauge(Body.FULL / 2, 0, Body.FULL);
+                one.inventory.carrying = 3;
+                one.inventory.howMany = 5;
+                Doings.tick(folk, cast<long>(0));
+                Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Eating));
+                delete folk;
+                return;
+            }
+
+            // A SPENT BODY LIES DOWN, and it beats hunger: somebody who will not sleep is somebody
+            // who dies of not sleeping, and no other urge may outrank that.
+            [Tag(name: "people")]
+            [Test]
+            public static method an_empty_body_sleeps_before_anything_else() returns void {
+                Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                Agent* one = Doing.someone(folk);
+                one.body.fed = new Gauge(1, 0, Body.FULL);        // all but starving
+                one.body.energy = new Gauge(1, 0, Body.RESTED);   // and all but spent
+                Doings.tick(folk, cast<long>(0));
+                Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Sleeping));
+                delete folk;
+                return;
+            }
+
+            // AND SLEEPING MENDS IT, in a while and not in a lifetime. The first numbers written
+            // here gave back exactly what work took, so a body spent TWO YEARS standing still to go
+            // from weary to rested and half the world was asleep instead of eating.
+            //
+            // NOT TO FULL, AND THAT IS THE DESIGN RATHER THAN A SHORTFALL. Nothing here says "sleep
+            // until the gauge is at its maximum" -- sleeping stops when something else is worth
+            // more, which for a body already out of danger is nearly anything. A body that slept to
+            // the brim every time would be a priority list wearing a score's clothes, which is the
+            // one shape this whole file exists to keep out.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_body_mends_faster_than_it_wears_out() returns void {
+                Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                Agent* one = Doing.someone(folk);
+                one.body.energy = new Gauge(1, 0, Body.RESTED);
+                mutable int slept = 0;
+                while (one.body.energy.value() <= Body.WEARY && slept < Clock.TICKS_A_YEAR) {
+                    Doings.tick(folk, cast<long>(slept));
+                    slept = slept + 1;
+                }
+                // Out of danger from nothing, in well under a quarter of a year. The bar is
+                // deliberately loose: what it is written against is TWO YEARS, not a tick count.
+                Test.assertTrue(one.body.energy.value() > Body.WEARY);
+                Test.assertTrue(slept < Clock.TICKS_A_YEAR / 4);
+                delete folk;
+                return;
+            }
+
+            // NOBODY DOES WHAT THEIR STANDING FORBIDS. Nine of the twenty-three belong to standings
+            // nobody holds yet, and `mayBeEntered` is the whole of why they never happen -- not a
+            // flag, not a slice marker, the same question that lets a scout wander the day there is
+            // a scout.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_worker_may_not_do_a_scouts_work() returns void {
+                Test.assertTrue(Activity.Gathering.mayBeEntered(AgentClass.Worker));
+                Test.assertFalse(Activity.Exploring.mayBeEntered(AgentClass.Worker));
+                Test.assertTrue(Activity.Exploring.mayBeEntered(AgentClass.Scout));
+                Test.assertFalse(Activity.Marching.mayBeEntered(AgentClass.Worker));
+                Test.assertTrue(Activity.Marching.mayBeEntered(AgentClass.Soldier));
+                // And idling is everybody's, which is what makes it the floor.
+                Test.assertTrue(Activity.Idle.mayBeEntered(AgentClass.Worker));
+                Test.assertTrue(Activity.Idle.mayBeEntered(AgentClass.Protagonist));
+                return;
+            }
+
+            // AND NOBODY WORKS WITHOUT A POST. This is the one that killed a world: `NOWHERE` is
+            // minus one and a fresh field is nought, so every person alive claimed building nought
+            // and stood in a field working at it until they starved.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_new_person_has_no_job_and_no_home() returns void {
+                Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                AgentId who = folk.bear(10.5, 10.5);
+                Test.assertTrue(folk.at(who).whereabouts.jobless());
+                Test.assertTrue(folk.at(who).whereabouts.homeless());
+                delete folk;
+                return;
+            }
+
+            // AND EVERYBODY IS BORN FACING SOMEWHERE. A zeroed `vec2` is a direction of no length,
+            // which nothing can turn a body by -- invisible while everybody walks, and half the
+            // drawn world pointing at the same nothing the moment an activity means standing still.
+            [Tag(name: "people")]
+            [Test]
+            public static method a_new_person_faces_somewhere() returns void {
+                Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                mutable boolean varies = false;
+                mutable float firstX = 0.0;
+                for (int i in 0..20) {
+                    AgentId who = folk.bear(10.5, 10.5);
+                    vec2 way = folk.at(who).whereabouts.facing;
+                    float span = way.x * way.x + way.y * way.y;
+                    Test.assertTrue(span > 0.5);      // a real direction, not the origin
+                    if (i == 0) {
+                        firstX = way.x;
+                    } else if (way.x != firstX) {
+                        varies = true;
+                    }
+                }
+                Test.assertTrue(varies);              // and not all the same one
+                delete folk;
+                return;
+            }
+
+            // WHAT MAY NOT BE CUT SHORT, IS NOT -- and it still has a way to end. An
+            // uninterruptible activity with no way to stop wanting itself is a person frozen for
+            // life, which is why the two that carry the flag both have one.
+            [Tag(name: "people")]
+            [Test]
+            public static method mating_holds_until_it_has_worked() returns void {
+                Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                Agent* her = Doing.someone(folk);
+                Agent* him = Doing.someone(folk);
+                him.identity.sex = Sex.Male;
+                Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
+                Doings.tick(folk, cast<long>(0));
+                Test.assertEqual(cast<int>(her.activity), cast<int>(Activity.Mating));
+                Test.assertFalse(Activity.Mating.interruptible());
+                // Starving does not shift her out of it...
+                her.body.fed = new Gauge(0, 0, Body.FULL);
+                Doings.tick(folk, cast<long>(Doings.CHOOSE_EVERY));
+                Test.assertEqual(cast<int>(her.activity), cast<int>(Activity.Mating));
+                // ...but a child on the way does, because then she no longer wants it.
+                her.body.carrying = 0;
+                her.body.expecting = cast<byte>(1);
+                Doings.tick(folk, cast<long>(Doings.CHOOSE_EVERY * 2));
+                Test.assertEqual(cast<int>(her.activity), cast<int>(Activity.Gathering));
+                delete folk;
+                return;
+            }
+
+            // AND A COUPLE WHO ARE TOGETHER MAKE CHILDREN OF IT, which is what moved conception off
+            // the calendar: it used to be a yearly appointment every married woman kept whether or
+            // not she had seen her husband that century.
+            [Tag(name: "people")]
+            [Test]
+            public static method being_together_is_what_makes_a_child() returns void {
+                Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
+                Agent* her = Doing.someone(folk);
+                Agent* him = Doing.someone(folk);
+                him.identity.sex = Sex.Male;
+                Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
+                mutable int spent = 0;
+                while (her.body.carrying == Body.NOT_CARRYING && spent < 20 * Clock.TICKS_A_YEAR) {
+                    Doings.tick(folk, cast<long>(spent));
+                    spent = spent + 1;
+                }
+                Test.assertTrue(her.body.carrying != Body.NOT_CARRYING);
+                Test.assertBetween(cast<int>(her.body.expecting), 1, 5);
+                delete folk;
+                return;
+            }
+        }
+    }
+}

@@ -1,0 +1,253 @@
+import System.IO.Console;
+import System.Text.StringBuilder;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Activity;
+import Agents.People.Body;
+import Agents.People.Gauge;
+import Agents.People.Kinship;
+import Agents.People.Courting;
+import Agents.Sim.Clock;
+program AgentsExe;
+
+// THE ONE PLACE THAT DECIDES WHAT ANYBODY IS DOING.
+//
+// IT WAS FOUR PLACES. `Foraging` decided that a hungry person goes for food, `Roaming` decided that
+// somebody who is neither hungry nor already walking takes a stroll, `Courting` decided that an
+// unwed adult looks for a spouse, and each of them carried an `if` about the others' business to
+// keep out of the way -- `Roaming` still explains, in its own comment, that it skips the hungry
+// because foraging has already dealt with them. That works with three deciders and stops working at
+// the fourth, and it cannot answer the one question that matters when a world misbehaves: WHY is
+// this person doing this. Now there is a score, one winner, and a line that can be printed about
+// anybody at any moment.
+//
+// DECIDING IS SPREAD BY SLOT, like everything else here. Twenty-three urges over eighteen thousand
+// people is four hundred thousand scorings a tick if everybody chooses every tick; at one in thirty
+// it is fourteen thousand, and nobody notices half a second of world.
+//
+// AND THE DRAIN IS CHARGED HERE TOO, on the same visit, because what an activity costs is a
+// property of the activity. `Living` used to hold a yearly guess -- gain four hundred if you are
+// spent or standing still, lose two hundred otherwise -- which is a stand-in for exactly this and
+// could not tell sleeping from sitting.
+public bundle Agents {
+    public namespace People {
+
+        public class Doings {
+            // One person in this many chooses on each tick, so everybody chooses twice a second of
+            // world and no two people in lockstep.
+            public static fixed int CHOOSE_EVERY = 30;
+            // WHAT STAYING PUT IS WORTH. Added to the activity somebody is already in, so two
+            // near-equal urges do not flap them back and forth every half second -- the layout's
+            // own bonus, and the difference between a person and a strobe.
+            public static fixed float STAYING = 0.06;
+            // The chance, out of a THOUSAND, that a couple who are together make a child of it.
+            //
+            // THE NUMBER THAT DECIDES WHETHER THE WORLD FILLS OR EMPTIES, so it is named -- and it
+            // is per visit rather than per year, because a couple who are never in the same place
+            // never have one, which is the whole reason mating is an activity and not an
+            // appointment. Out of a thousand and not a hundred because a couple together comes up
+            // forty times a year: at one in a hundred that is a certainty, and the first run with
+            // it bore a thousand children in the world's first year.
+            public static fixed int IN_A_THOUSAND = 30;
+
+            private static mutable long changes;
+            private static mutable long together;
+
+            public static method report() returns void {
+                System.IO.Console.println($"folk doing: {changes} changes of mind, {together} times a couple was together");
+                return;
+            }
+
+            public static method togetherSoFar() returns long {
+                return together;
+            }
+
+            // ---- one tick ----------------------------------------------------------------------
+
+            public static method tick(Population* folk, long at) returns void {
+                int n = folk.count();
+                if (n < 1) {
+                    return;
+                }
+                int phase = cast<int>(at % cast<long>(Doings.CHOOSE_EVERY));
+                mutable int slot = phase;
+                while (slot < n) {
+                    int mine = slot;
+                    slot = slot + Doings.CHOOSE_EVERY;
+                    Agent* one = folk.at(cast<AgentId>(mine));
+                    Doings.choose(folk, one);
+                    Doings.spend(one);
+                    Doings.act(folk, one, mine, at);
+                }
+                return;
+            }
+
+            // WHAT THIS PERSON WANTS MOST, out of everything their standing allows them to want.
+            //
+            // AN ACTIVITY THAT MAY NOT BE CUT SHORT HOLDS, and holds only while it is still WANTED:
+            // mating stops the moment a child is on the way, fighting when there is nobody left to
+            // fight. An uninterruptible activity with no way to stop wanting itself is a person
+            // frozen forever, which is why the two that carry the flag both have one.
+            private static method choose(Population* folk, Agent* one) returns void {
+                Activity was = one.activity;
+                if (!was.interruptible() && was.urge(folk, one) > 0.0) {
+                    return;
+                }
+                mutable Activity best = Activity.Idle;
+                mutable float most = 0.0 - 1.0;
+                for (Activity what in Activity.values()) {
+                    if (!what.mayBeEntered(one.standing())) {
+                        continue;
+                    }
+                    mutable float pull = what.urge(folk, one);
+                    if (cast<int>(what) == cast<int>(was)) {
+                        pull = pull + Doings.STAYING;
+                    }
+                    if (pull > most) {
+                        most = pull;
+                        best = what;
+                    }
+                }
+                if (cast<int>(best) != cast<int>(was)) {
+                    one.activity = best;
+                    changes = changes + cast<long>(1);
+                }
+                return;
+            }
+
+            // WHAT IT COST TO HAVE BEEN DOING THAT. Charged for the whole window since this person
+            // last came up, which is `CHOOSE_EVERY` ticks: somebody who changed their mind halfway
+            // through pays the new rate for the old half, and half a second of world is not worth a
+            // field on every agent to be exact about.
+            private static method spend(Agent* one) returns void {
+                int aYear = one.activity.drainsAYear();
+                int cost = aYear * Doings.CHOOSE_EVERY / Clock.TICKS_A_YEAR;
+                if (cost > 0) {
+                    one.body.energy = one.body.energy - cost;
+                } else if (cost < 0) {
+                    one.body.energy = one.body.energy + (0 - cost);
+                }
+                return;
+            }
+
+            // AND THE FOUR THIS CLASS DOES ITSELF.
+            //
+            // The others have a doer already: gathering and eating are `Foraging`, idling is
+            // `Roaming`, courting is `Courting`. These four are the ones whose whole content is
+            // where the body is -- standing still, or standing still next to somebody -- so they
+            // live where the choosing lives rather than in a file of their own that would hold one
+            // line each.
+            private static method act(Population* folk, Agent* one, int mine, long at)
+                    returns void {
+                Activity what = one.activity;
+                if (cast<int>(what) == cast<int>(Activity.Sleeping)
+                    || cast<int>(what) == cast<int>(Activity.Resting)) {
+                    // A BODY THAT IS RESTING IS NOT WALKING. Without this a spent person keeps
+                    // walking to wherever hunger sent them and mends at the same time, which reads
+                    // as somebody sleepwalking and is why the energy gauge never bit before.
+                    one.journey.going = false;
+                    return;
+                }
+                if (cast<int>(what) == cast<int>(Activity.Mating)) {
+                    // Standing still costs nothing here: mating already asks for a spouse within
+                    // arm's reach, so the two of them are together wherever they were going.
+                    one.journey.going = false;
+                    Doings.mate(folk, one, mine, at);
+                    return;
+                }
+                // AND TALKING DOES NOT STOP A WALK, which it did, and which quietly starved the
+                // world. Somebody walking to a bush who passed a cousin dropped the journey, talked
+                // for half a second, then wanted food again and asked for a WHOLE NEW ROUTE from
+                // where they now stood. With families grown there is always a cousin, so a walk
+                // that took two hundred ticks was cut every thirty and never finished: two million
+                // routes asked, ninety-five per cent of people standing still, and everybody dead
+                // of hunger inside three centuries with food they could always see.
+                return;
+            }
+
+            // A COUPLE WHO ARE TOGETHER, AND THE CHANCE THAT COMES OF IT.
+            //
+            // ROLLED BY THE WIFE ONLY, once per couple per visit -- the husband entering the same
+            // activity is not a second chance at the same child. Which of the two rolls is decided
+            // by who can carry one, so it needs no rule of its own.
+            private static method mate(Population* folk, Agent* one, int mine, long at)
+                    returns void {
+                together = together + cast<long>(1);
+                if (!Courting.mayConceive(folk, one, mine)) {
+                    return;
+                }
+                if (folk.roll(1000) >= Doings.IN_A_THOUSAND) {
+                    return;
+                }
+                Courting.conceive(folk, one, at);
+                return;
+            }
+
+            // ---- what the world says about it ---------------------------------------------------
+
+            // WHAT EVERYBODY ALIVE IS DOING, RIGHT NOW, named rather than counted.
+            //
+            // A count of people says a world is populated; this says whether it is a world. A run
+            // where everybody is idling is a scoring that never fires, a run where everybody is
+            // gathering is a world that cannot feed itself, and neither of those is visible in any
+            // other number the game prints. One sweep, at the end of a run, which is the one place a
+            // sweep of the population is not a defect.
+            public static method census(Population* folk) returns void {
+                int n = folk.count();
+                mutable int[] many = new int[Activity.values().length()]();
+                for (int i in 0..n) {
+                    int what = cast<int>(folk.at(cast<AgentId>(i)).activity);
+                    many[what] = many[what] + 1;
+                }
+                mutable StringBuilder* line = new StringBuilder() on heap;
+                line.append($"folk doing now: {n} alive --");
+                mutable boolean any = false;
+                for (Activity what in Activity.values()) {
+                    int count = many[cast<int>(what)];
+                    if (count < 1) {
+                        continue;    // an activity nobody is in is not worth a column
+                    }
+                    line.append($" {count} {what.label()},");
+                    any = true;
+                }
+                if (!any) {
+                    line.append(" nobody");
+                }
+                System.IO.Console.println(line.toString());
+                delete line;
+                delete many;
+                return;
+            }
+
+            // THE LINE THE GAME CAN PRINT ABOUT ANYBODY: "eating 0.81 beat gathering 0.40".
+            //
+            // The layout asks for this by name and gives the reason: after a northward tide and a
+            // wall-follower, both invisible because nothing could say WHY, a scoring that cannot be
+            // read back is a priority list with extra arithmetic.
+            public static method why(Population* folk, int mine) returns String {
+                Agent* one = folk.at(cast<AgentId>(mine));
+                mutable Activity best = Activity.Idle;
+                mutable Activity next = Activity.Idle;
+                mutable float most = 0.0 - 1.0;
+                mutable float second = 0.0 - 1.0;
+                for (Activity what in Activity.values()) {
+                    if (!what.mayBeEntered(one.standing())) {
+                        continue;
+                    }
+                    float pull = what.urge(folk, one);
+                    if (pull > most) {
+                        second = most;
+                        next = best;
+                        most = pull;
+                        best = what;
+                    } else if (pull > second) {
+                        second = pull;
+                        next = what;
+                    }
+                }
+                return $"{best.label()} {most} beat {next.label()} {second}";
+            }
+        }
+    }
+}
