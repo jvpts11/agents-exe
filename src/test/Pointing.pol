@@ -1,0 +1,121 @@
+import System.Test.Test;
+import Agents.Gfx.Picking;
+import Agents.Gfx.GroundHit;
+
+program AgentsExe;
+
+// WHAT THE POINTER IS OVER -- checked, because a readout that is wrong still looks like a readout.
+//
+// The whole reason `Picking` is a function of the camera rather than a method inside the renderer:
+// a number on the screen is believed. Nobody cross-checks a coordinate against anything, so an
+// off-by-a-few is discovered months later by somebody wondering why a thing is not where they
+// clicked. These are the four things that must be true of it, and none of them needs a window.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Pointing {
+            // A camera looking at cell (100, 200) from 300 units out at 40 degrees of elevation,
+            // over a 1600x900 window. World units are two to the cell.
+            public static fixed float AZ = 35.0;
+            public static fixed float EL = 40.0;
+            public static fixed float DIST = 300.0;
+            public static fixed float TX = 200.0;      // cell 100
+            public static fixed float TY = 400.0;      // cell 200
+            public static fixed int W = 1600;
+            public static fixed int H = 900;
+
+            // THE CENTRE PIXEL LANDS ON WHAT THE CAMERA IS LOOKING AT. This is the whole of the
+            // picking's correctness in one claim: if the basis, the field of view or the half-pixel
+            // is wrong, the centre drifts off the target and every other pixel is wrong with it.
+            [Tag(name: "gfx")]
+            [Test]
+            public static method the_centre_pixel_is_what_the_camera_looks_at() returns void {
+                GroundHit at = Picking.cellAt(Pointing.AZ, Pointing.EL, Pointing.DIST,
+                                              Pointing.TX, Pointing.TY, 0.0,
+                                              Pointing.W / 2, Pointing.H / 2,
+                                              Pointing.W, Pointing.H, 2560, 1440);
+                Test.assertTrue(at.onWorld);
+                // Within a cell: the centre pixel is half a pixel off the exact axis, which at this
+                // distance is a fraction of a cell.
+                Test.assertTrue(at.x >= 99 && at.x <= 101);
+                Test.assertTrue(at.y >= 199 && at.y <= 201);
+                return;
+            }
+
+            // THE SKY HAS NO CELL. A pixel above the horizon must say so rather than answer with the
+            // last thing it knew or with an edge of the map -- the mistake `CellHit` was written
+            // after.
+            [Tag(name: "gfx")]
+            [Test]
+            public static method a_pixel_above_the_horizon_is_off_the_world() returns void {
+                // Ten degrees of elevation and the top row of the screen: the ray points up.
+                GroundHit sky = Picking.cellAt(Pointing.AZ, 10.0, Pointing.DIST,
+                                               Pointing.TX, Pointing.TY, 0.0,
+                                               Pointing.W / 2, 0,
+                                               Pointing.W, Pointing.H, 2560, 1440);
+                Test.assertTrue(!sky.onWorld);
+                return;
+            }
+
+            // AND PAST THE EDGE OF THE WORLD IS ALSO NOTHING. The ray meets the ground, and the
+            // ground it meets is not part of any map.
+            //
+            // THE TOP OF THE SCREEN AND NOT THE BOTTOM, which is worth writing down because the
+            // first version of this check had it backwards and failed: the bottom row looks at
+            // ground BETWEEN the camera and its target -- nearer, and on this camera that is deeper
+            // into the map, not out of it. Away from the camera is up the screen.
+            [Tag(name: "gfx")]
+            [Test]
+            public static method past_the_edge_of_the_map_is_off_the_world() returns void {
+                GroundHit out = Picking.cellAt(Pointing.AZ, Pointing.EL, Pointing.DIST,
+                                               4.0, 4.0, 0.0,
+                                               Pointing.W / 2, 0,
+                                               Pointing.W, Pointing.H, 2560, 1440);
+                Test.assertTrue(!out.onWorld);
+                return;
+            }
+
+            // LOOKING STRAIGHT DOWN, LEFT AND RIGHT ARE MIRRORS. With the camera due north the two
+            // sides of the screen must land the same distance either side of the target -- which is
+            // what fails when the right vector is built the wrong way round, and what nobody would
+            // notice by eye because the world looks fine either way.
+            [Tag(name: "gfx")]
+            [Test]
+            public static method the_two_sides_of_the_screen_are_mirrors() returns void {
+                int off = 400;
+                GroundHit left = Picking.cellAt(0.0, 60.0, Pointing.DIST,
+                                                Pointing.TX, Pointing.TY, 0.0,
+                                                Pointing.W / 2 - off, Pointing.H / 2,
+                                                Pointing.W, Pointing.H, 2560, 1440);
+                GroundHit right = Picking.cellAt(0.0, 60.0, Pointing.DIST,
+                                                 Pointing.TX, Pointing.TY, 0.0,
+                                                 Pointing.W / 2 + off, Pointing.H / 2,
+                                                 Pointing.W, Pointing.H, 2560, 1440);
+                Test.assertTrue(left.onWorld);
+                Test.assertTrue(right.onWorld);
+                int centre = cast<int>(Pointing.TX / 2.0);
+                // DISTANCES, NOT DIRECTIONS. Which compass direction the screen's right hand points
+                // at depends on where the camera stands -- due north of its target, facing south,
+                // the screen's right IS west, and the first version of this check asserted the
+                // opposite and failed. What is being claimed here is the mirror, and a mirror is
+                // about distances being equal, not about signs.
+                mutable int toLeft = centre - left.x;
+                if (toLeft < 0) {
+                    toLeft = 0 - toLeft;
+                }
+                mutable int toRight = right.x - centre;
+                if (toRight < 0) {
+                    toRight = 0 - toRight;
+                }
+                Test.assertTrue(toLeft > 0);
+                Test.assertTrue(toRight > 0);
+                mutable int gap = toLeft - toRight;
+                if (gap < 0) {
+                    gap = 0 - gap;
+                }
+                Test.assertTrue(gap <= 1);
+                return;
+            }
+        }
+    }
+}

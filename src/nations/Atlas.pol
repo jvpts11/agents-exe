@@ -35,12 +35,38 @@ public bundle Agents {
             private mutable int divisions;
             // One counter per refusal, indexed by the enum's ordinal. See `noteRefusal`.
             private mutable int[] refusals;
+            // WHO HOLDS EVERY CELL IN THE WORLD -- a city's number plus one, or zero for nobody.
+            //
+            // ON THE ATLAS AND NOT ON THE GROUND, for the reason the layout gives about ruins: who
+            // owns a tile is a political fact and not a property of the earth. A `Grid` that carried
+            // it would answer a question about nations while claiming to be the terrain.
+            //
+            // ONE MAP, because a cell has one owner. Every city's `Territory` writes its own cells
+            // into this one array, so "who holds this" is one read rather than a walk of every city
+            // -- which is what the border draw and the growth both do per cell.
+            private mutable int[] owner;
 
-            public constructor Atlas() {
+            public constructor Atlas(int cells) {
                 this.nations = new ArrayList<Nation*>() on heap;
                 this.founded = 0;
                 this.divisions = 0;
                 this.refusals = new int[Refusal.count()]();
+                this.owner = new int[cells]();
+            }
+
+            // Who holds a cell: a city's number, or -1 for nobody. The map stores number+1 so that
+            // an array that arrives zeroed already reads as unowned.
+            public method ownerAt(int cell) returns int {
+                if (cell < 0 || cell >= owner.length()) {
+                    return 0 - 1;
+                }
+                return owner[cell] - 1;
+            }
+
+            // The map itself, for the part that holds ground. Borrowed: the Atlas owns it, and a
+            // `Territory` writes its own cells into it.
+            public method ownerMap() returns int[] {
+                return owner;
             }
 
             public method nationCount() returns int {
@@ -89,7 +115,7 @@ public bundle Agents {
                     home.take(made);
                     where = made;
                 }
-                City* one = new City(founded, centreX, centreY, storeX, storeY) on heap;
+                City* one = new City(founded, centreX, centreY, storeX, storeY, owner) on heap;
                 where.take(one);
                 if (cast<int>(home.capitalCity()) == Nation.NO_CAPITAL) {
                     home.setCapital(cast<CityId>(founded));
@@ -153,6 +179,7 @@ public bundle Agents {
                 }
                 delete nations;
                 delete refusals;
+                delete owner;
                 return;
             }
         }

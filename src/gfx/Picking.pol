@@ -1,0 +1,97 @@
+import Agents.Gfx.GroundHit;
+import Agents.Gfx.Newton;
+
+program AgentsExe;
+
+// WHICH CELL A SCREEN PIXEL IS OVER -- the arithmetic of it, with no window in the room.
+//
+// IT IS HERE AND NOT IN THE RENDERER because it is the one part of the answer that can be WRONG in
+// a way nobody sees: a readout that is off by a few cells still looks like a readout, and the
+// person reading it believes it. A renderer needs a GL context to exist, so anything living inside
+// it can only be judged by looking at the screen -- and "looks about right" is exactly the standard
+// this project keeps paying for. As a pure function of the camera it is checkable: the centre pixel
+// must land on what the camera is looking at, the two halves of the screen must be mirror images,
+// and the sky must miss.
+//
+// The camera is orbital: it sits at a distance and an angle from a target on the ground and looks
+// at it, +Z up, with a 42-degree vertical field. Those numbers arrive as arguments rather than being
+// read from anywhere, which is what makes this a function.
+public bundle Agents {
+    public namespace Gfx {
+
+        public class Picking {
+            // Half of the vertical field of view, as a tangent. The renderer builds its projection
+            // with 42 degrees; half of that is 21, and tan(21 degrees) is this.
+            public static fixed float TAN_HALF_FOV = 0.38386;
+            // World units to the cell. Every mesh is emitted at cell * 2.
+            public static fixed float PER_CELL = 2.0;
+
+            // The cell under a pixel, or a miss. `az`/`el` in degrees, as the camera keeps them.
+            public static method cellAt(float az, float el, float dist, float tx, float ty,
+                                        float groundZ, int mx, int my, int fbW, int fbH,
+                                        int worldW, int worldH) returns GroundHit {
+                if (fbW <= 0 || fbH <= 0) {
+                    return new GroundHit(false, 0, 0);
+                }
+                float pi = 3.14159265;
+                float a = az * pi / 180.0;
+                float e = el * pi / 180.0;
+                float ce = Newton.cos(e);
+                // Where the eye is: the same expression the frame's own `lookAt` is built from.
+                float ex = tx + dist * ce * Newton.sin(a);
+                float ey = ty + dist * ce * Newton.cos(a);
+                float ez = groundZ + dist * Newton.sin(e);
+                // The way it looks, normalised.
+                float fx = tx - ex;
+                float fy = ty - ey;
+                float fz = groundZ - ez;
+                float flen = Newton.sqrt(fx * fx + fy * fy + fz * fz);
+                if (flen <= 0.0) {
+                    return new GroundHit(false, 0, 0);
+                }
+                float nfx = fx / flen;
+                float nfy = fy / flen;
+                float nfz = fz / flen;
+                // right = forward x up, with up = +Z; then screen-up = right x forward.
+                float rx = nfy;
+                float ry = 0.0 - nfx;
+                float rlen = Newton.sqrt(rx * rx + ry * ry);
+                if (rlen <= 0.0) {
+                    return new GroundHit(false, 0, 0);   // straight down the up axis
+                }
+                float nrx = rx / rlen;
+                float nry = ry / rlen;
+                float ux = nry * nfz;
+                float uy = 0.0 - nrx * nfz;
+                float uz = nrx * nfy - nry * nfx;
+                // The pixel, in the frustum's own units. The half-pixel is what makes the CENTRE
+                // pixel of an even-width screen land on the centre of the view rather than half a
+                // pixel off it -- which is the difference the first check below would catch.
+                float aspect = cast<float>(fbW) / cast<float>(fbH);
+                float ndcX = 2.0 * (cast<float>(mx) + 0.5) / cast<float>(fbW) - 1.0;
+                float ndcY = 1.0 - 2.0 * (cast<float>(my) + 0.5) / cast<float>(fbH);
+                float dx = nfx + nrx * ndcX * Picking.TAN_HALF_FOV * aspect
+                         + ux * ndcY * Picking.TAN_HALF_FOV;
+                float dy = nfy + nry * ndcX * Picking.TAN_HALF_FOV * aspect
+                         + uy * ndcY * Picking.TAN_HALF_FOV;
+                float dz = nfz + uz * ndcY * Picking.TAN_HALF_FOV;
+                // A ray that is not going down never meets the ground: that is the sky, and the sky
+                // has no cell. Said rather than clamped -- a readout that keeps showing the last
+                // cell it knew is a readout that lies exactly when you look away.
+                if (dz >= 0.0 - 0.00001) {
+                    return new GroundHit(false, 0, 0);
+                }
+                float t = (groundZ - ez) / dz;
+                if (t <= 0.0) {
+                    return new GroundHit(false, 0, 0);
+                }
+                int cx = cast<int>((ex + dx * t) / Picking.PER_CELL);
+                int cy = cast<int>((ey + dy * t) / Picking.PER_CELL);
+                if (cx < 0 || cy < 0 || cx >= worldW || cy >= worldH) {
+                    return new GroundHit(false, 0, 0);   // past the edge of the world
+                }
+                return new GroundHit(true, cx, cy);
+            }
+        }
+    }
+}

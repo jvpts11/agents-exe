@@ -17,6 +17,10 @@ public bundle Agents {
     public namespace Checks {
 
         public class Country {
+            // A world just big enough for the coordinates these checks use. The Atlas sizes its
+            // owner map from it, and a test that asked for the real 3.6 million would be measuring
+            // the allocator rather than the tree.
+            public static fixed int CELLS = 4096;
 
             // THE FIRST CITY MAKES THE COUNTRY, and it makes all three layers at once: a city needs
             // a subdivision to sit in and a subdivision needs a nation. Founding on an empty Atlas
@@ -24,7 +28,7 @@ public bundle Agents {
             [Tag(name: "nations")]
             [Test]
             public static method the_first_city_makes_the_nation_and_its_subdivision() returns void {
-                Atlas* atlas = new Atlas() on heap;
+                Atlas* atlas = new Atlas(Country.CELLS) on heap;
                 Test.assertEqual(atlas.nationCount(), 0);
                 Result<City*, Refusal> made = atlas.found(100, 200, 102, 200, 5);
                 Test.assertTrue(made.isOk());
@@ -49,7 +53,7 @@ public bundle Agents {
             [Tag(name: "nations")]
             [Test]
             public static method a_full_subdivision_refuses_rather_than_growing_one() returns void {
-                Atlas* atlas = new Atlas() on heap;
+                Atlas* atlas = new Atlas(Country.CELLS) on heap;
                 // Room for two, then three cities: the third has nowhere to go.
                 Result<City*, Refusal> a = atlas.found(10, 10, 12, 10, 2);
                 Result<City*, Refusal> b = atlas.found(20, 20, 22, 20, 2);
@@ -72,7 +76,7 @@ public bundle Agents {
             [Tag(name: "nations")]
             [Test]
             public static method population_is_summed_up_the_tree_and_never_stored() returns void {
-                Atlas* atlas = new Atlas() on heap;
+                Atlas* atlas = new Atlas(Country.CELLS) on heap;
                 Result<City*, Refusal> one = atlas.found(10, 10, 12, 10, 4);
                 Result<City*, Refusal> two = atlas.found(40, 40, 42, 40, 4);
                 City* first = one.valueOr(0 as City*);
@@ -102,7 +106,7 @@ public bundle Agents {
             [Tag(name: "nations")]
             [Test]
             public static method generals_are_ceil_of_half_the_cities() returns void {
-                Atlas* atlas = new Atlas() on heap;
+                Atlas* atlas = new Atlas(Country.CELLS) on heap;
                 Result<City*, Refusal> a = atlas.found(10, 10, 12, 10, 8);
                 Test.assertEqual(atlas.nationAt(0).generals(), 1);     // 1 city  -> 1
                 Result<City*, Refusal> b = atlas.found(20, 20, 22, 20, 8);
@@ -116,6 +120,66 @@ public bundle Agents {
                 return;
             }
 
+            // THE GROUND A CITY HOLDS, and the two facts that must never disagree: the cells it
+            // lists and the world's map of who owns what are written together or not at all.
+            [Tag(name: "nations")]
+            [Test]
+            public static method claiming_writes_the_list_and_the_map_together() returns void {
+                Atlas* atlas = new Atlas(Country.CELLS) on heap;
+                Result<City*, Refusal> made = atlas.found(10, 10, 12, 10, 4);
+                City* one = made.valueOr(0 as City*);
+                Test.assertEqual(one.area(), 0);
+                Test.assertEqual(atlas.ownerAt(64), 0 - 1);      // nobody, before anybody claims
+
+                Test.assertTrue(one.claim(64));
+                Test.assertEqual(one.area(), 1);
+                Test.assertTrue(one.owns(64));
+                Test.assertEqual(atlas.ownerAt(64), 0);          // city number 0, in the world's map
+                Test.assertEqual(one.cellAt(0), 64);
+
+                // Claiming what is already held changes nothing -- not the list, not the map. A
+                // second entry would make `area` a lie without any other symptom.
+                Test.assertTrue(!one.claim(64));
+                Test.assertEqual(one.area(), 1);
+
+                // AND GIVING IT BACK CLEARS BOTH. The ground goes to nobody, which is model 9: a
+                // place that ends releases what it held, and nothing inherits it.
+                one.release();
+                Test.assertEqual(one.area(), 0);
+                Test.assertTrue(!one.owns(64));
+                Test.assertEqual(atlas.ownerAt(64), 0 - 1);
+                delete made;
+                delete atlas;
+                return;
+            }
+
+            // TWO CITIES NEVER HOLD ONE CELL. The map is the only truth about who owns what, so the
+            // second claim is refused rather than overwriting -- which is the merge rule arriving
+            // through the back door.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_cell_has_one_owner_and_the_second_claim_is_refused() returns void {
+                Atlas* atlas = new Atlas(Country.CELLS) on heap;
+                Result<City*, Refusal> one = atlas.found(10, 10, 12, 10, 4);
+                Result<City*, Refusal> two = atlas.found(40, 40, 42, 40, 4);
+                City* first = one.valueOr(0 as City*);
+                City* second = two.valueOr(0 as City*);
+                Test.assertTrue(first.claim(500));
+                Test.assertTrue(!second.claim(500));
+                Test.assertTrue(first.owns(500));
+                Test.assertTrue(!second.owns(500));
+                Test.assertEqual(atlas.ownerAt(500), 0);
+                // And when the first gives it up, the second may have it -- the ground was free,
+                // not transferred.
+                first.release();
+                Test.assertTrue(second.claim(500));
+                Test.assertEqual(atlas.ownerAt(500), 1);
+                delete one;
+                delete two;
+                delete atlas;
+                return;
+            }
+
             // A WORLD WITH NO CITY MUST SAY WHICH REFUSAL IT WAS. The counting is by ordinal so a
             // seventh reason counts itself; the sentence is a `match` with no default, so a seventh
             // reason does not compile until it has one. This checks the half that can be checked at
@@ -123,7 +187,7 @@ public bundle Agents {
             [Tag(name: "nations")]
             [Test]
             public static method a_world_with_no_city_says_which_refusal_it_was() returns void {
-                Atlas* atlas = new Atlas() on heap;
+                Atlas* atlas = new Atlas(Country.CELLS) on heap;
                 Test.assertEqual(atlas.refusedFor(Refusal.NobodyLeft), 0);
                 atlas.noteRefusal(Refusal.NobodyLeft);
                 atlas.noteRefusal(Refusal.NobodyLeft);

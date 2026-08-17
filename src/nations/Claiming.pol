@@ -1,0 +1,222 @@
+import Agents.Nations.Atlas;
+import Agents.Nations.Nation;
+import Agents.Nations.Subdivision;
+import Agents.Nations.City;
+import Agents.World.Grid;
+import Agents.World.Biomes;
+
+program AgentsExe;
+
+// HOW A CITY'S LAND GROWS, and the rules the ground puts on it.
+//
+// The bookkeeping is `Territory`'s -- the cells and the map, written together. WHICH cell may be
+// taken is a question about the world, so it is here, in a pass, beside the other passes that read
+// the world every so often. A `Territory` that knew about coastlines would be a part that stopped
+// meaning anything on its own, which is the test the layout applies to it.
+//
+// THE SHAPE THE MODEL ASKS FOR, and how each rule falls out:
+//
+//   * "the initial territory is a circle of a radius of 8 tiles" -- `sow` claims that disc, and it
+//     is the only place a claim is not adjacent to what is already held.
+//   * "never leaving unfilled places and holes" -- growth only ever takes a cell that touches one
+//     we already hold, so the region cannot grow a hole. It is not a rule that is checked; it is a
+//     rule that cannot be broken.
+//   * "should not grow in a circle-shaped form, instead irregular" -- the frontier is scored, not
+//     swept: the cheapest cell wins, and what makes a cell cheap is the ground under it. A coast, a
+//     mountain and a river bend all bend the border, which is where the irregularity comes from --
+//     the map's own shape rather than a random number pretending to be one.
+//   * "can own mountainous territory or shallow sea, but never build there" -- claimable, and the
+//     building code asks `mayBuildAt` separately. Two questions, two answers.
+//   * "up to 4 tiles from the coast" -- SEAWARD (audit C8, João): water may be claimed only within
+//     four cells of land.
+//   * "a city should never cover an entire continent" -- a ceiling, and it is a number the model
+//     does not give. `MOST_LAND` is ours, written down as a choice rather than smuggled in as a
+//     fact: sixty-four times the founding disc, which is "tens of times the original size".
+public bundle Agents {
+    public namespace Nations {
+
+        public class Claiming {
+            // The founding disc, in cells. The model's number.
+            public static fixed int FIRST_RADIUS = 8;
+            // How far into the water a claim may reach from the nearest land. The model's number,
+            // read seaward (audit C8).
+            public static fixed int SEA_REACH = 4;
+            // How many cells a city may ever hold. OURS, not the model's: it says "tens of times"
+            // the founding size and never gives a figure. The founding disc is about 200 cells.
+            public static fixed int MOST_LAND = 12800;
+            // How many cells a city takes per growth step, and how often a step happens. Also ours:
+            // the model says the territory grows "as the time goes" and gives no rate. One cell a
+            // step, one step a year, so a century of a city is a border that has moved a hundred
+            // cells -- slow enough to watch, fast enough to matter within a run.
+            public static fixed int PER_STEP = 1;
+
+            // The ground a city is founded on: the disc of radius 8 around its centre, minus what
+            // the world refuses. Claimed once, at founding.
+            public static method sow(City* one, Grid* g) returns int {
+                mutable int took = 0;
+                int cx = one.x();
+                int cy = one.y();
+                int r = Claiming.FIRST_RADIUS;
+                for (int dy in (0 - r)..=r) {
+                    for (int dx in (0 - r)..=r) {
+                        if (dx * dx + dy * dy > r * r) {
+                            continue;                 // a disc, not a square
+                        }
+                        int x = cx + dx;
+                        int y = cy + dy;
+                        if (!Claiming.mayHold(g, x, y)) {
+                            continue;
+                        }
+                        if (one.claim(g.idx(x, y))) {
+                            took = took + 1;
+                        }
+                    }
+                }
+                return took;
+            }
+
+            // One growth step for one city: the best cell on its frontier, taken. Answers how many
+            // it took, which is zero when the city is boxed in or full -- and that is a real state,
+            // not a failure.
+            //
+            // THE FRONTIER IS WALKED RATHER THAN KEPT. A frontier list would be a third structure to
+            // hold true beside the cells and the map, and it would have to be corrected every time a
+            // neighbour claimed something -- which is the shape of the bug this whole layer is
+            // written against. Walking the city's own cells is O(area) once a year: at the ceiling
+            // that is twelve thousand reads, a fraction of one tick of one person's route search.
+            public static method grow(City* one, Grid* g) returns int {
+                if (one.area() >= Claiming.MOST_LAND) {
+                    return 0;
+                }
+                mutable int bestCell = 0 - 1;
+                mutable int bestScore = 0;
+                int held = one.area();
+                for (int i in 0..held) {
+                    int cell = one.cellAt(i);
+                    int x = cell % g.width();
+                    int y = cell / g.width();
+                    // The four neighbours, and only the four: a diagonal-only join is a corner
+                    // touch, and a border that grows through corners grows spikes.
+                    for (int k in 0..4) {
+                        mutable int nx = x;
+                        mutable int ny = y;
+                        if (k == 0) {
+                            nx = x + 1;
+                        } else if (k == 1) {
+                            nx = x - 1;
+                        } else if (k == 2) {
+                            ny = y + 1;
+                        } else {
+                            ny = y - 1;
+                        }
+                        int worth = Claiming.weigh(one, g, nx, ny);
+                        if (worth > bestScore) {
+                            bestScore = worth;
+                            bestCell = g.idx(nx, ny);
+                        }
+                    }
+                }
+                if (bestCell < 0) {
+                    return 0;
+                }
+                if (one.claim(bestCell)) {
+                    return 1;
+                }
+                return 0;
+            }
+
+            // What a candidate cell is worth, or zero when it is worth nothing at all. Higher is
+            // better, and what makes a cell good is that a city can USE it: ground it can build on
+            // beats ground it can only own, and near beats far.
+            //
+            // Zero for "no" rather than a negative: the caller starts at zero, so a cell that cannot
+            // be taken can never win, and there is no sentinel to remember.
+            private static method weigh(City* one, Grid* g, int x, int y) returns int {
+                if (!Claiming.mayHold(g, x, y)) {
+                    return 0;
+                }
+                int cell = g.idx(x, y);
+                if (one.owns(cell)) {
+                    return 0;
+                }
+                mutable int score = 100;
+                if (g.mayBuildAt(x, y)) {
+                    score = score + 60;               // land a city can stand on
+                }
+                if (g.hasRiver(x, y)) {
+                    score = score + 25;               // a border follows a river, as they do
+                }
+                // Far from the centre is worth less, so a city fills near ground before reaching.
+                int dx = x - one.x();
+                int dy = y - one.y();
+                int far = dx * dx + dy * dy;
+                score = score - far / 64;
+                if (score < 1) {
+                    score = 1;                        // reachable, and barely worth having
+                }
+                return score;
+            }
+
+            // May anybody hold this cell at all: on the map, and -- for water -- within four cells
+            // of land, which is the seaward reach the model gives.
+            private static method mayHold(Grid* g, int x, int y) returns boolean {
+                if (x < 0 || y < 0 || x >= g.width() || y >= g.height()) {
+                    return false;
+                }
+                if (g.mayBuildAt(x, y)) {
+                    return true;                      // land, and buildable: always holdable
+                }
+                // Mountain and shallow sea are both ownable and both unbuildable, and they are told
+                // apart by what the biome IS rather than by height: water is what is swum, plus the
+                // two oceans, which are neither swum nor walked.
+                if (!Claiming.isWater(g, x, y)) {
+                    return true;                      // mountain, glacier, anything standing dry
+                }
+                int r = Claiming.SEA_REACH;
+                for (int dy in (0 - r)..=r) {
+                    for (int dx in (0 - r)..=r) {
+                        int nx = x + dx;
+                        int ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= g.width() || ny >= g.height()) {
+                            continue;
+                        }
+                        if (!Claiming.isWater(g, nx, ny)) {
+                            return true;              // land within reach: this water may be held
+                        }
+                    }
+                }
+                return false;
+            }
+
+            // Water: what is swum (shallow sea, reef, lake, oasis) and what is neither swum nor
+            // walked (the two oceans). Mountain is walked, slowly, so it is not water -- which is
+            // what makes it ownable without a reach.
+            private static method isWater(Grid* g, int x, int y) returns boolean {
+                int b = g.biomeAt(x, y);
+                return Biomes.swims(b) || !Biomes.walkable(b);
+            }
+
+            // Every city grows a step. Called once a year -- a border that moves every tick is a
+            // border nobody can watch and a cost nobody asked for.
+            public static method tick(Atlas* atlas, Grid* g) returns int {
+                mutable int took = 0;
+                for (int n in 0..atlas.nationCount()) {
+                    Nation* who = atlas.nationAt(n);
+                    for (int s in 0..who.subdivisionCount()) {
+                        Subdivision* part = who.subdivisionAt(s);
+                        for (int c in 0..part.cityCount()) {
+                            // Not `step`: that word is the language's, for a range's stride and for
+                            // the unit suffixes it would collide with.
+                            mutable int taken = 0;
+                            while (taken < Claiming.PER_STEP) {
+                                took = took + Claiming.grow(part.cityAt(c), g);
+                                taken = taken + 1;
+                            }
+                        }
+                    }
+                }
+                return took;
+            }
+        }
+    }
+}

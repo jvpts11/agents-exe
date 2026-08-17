@@ -1,0 +1,102 @@
+import System.Test.Test;
+import System.Errors.Result;
+import Agents.Nations.Atlas;
+import Agents.Nations.City;
+import Agents.Nations.Claiming;
+import Agents.Nations.Refusal;
+import Agents.World.Grid;
+import Agents.World.WorldGen;
+import Agents.Checks.WorldShape;
+
+program AgentsExe;
+
+// HOW A CLAIM GROWS, on the real world rather than on a fixture. The rules are about coastlines,
+// mountains and rivers, so a flat invented grid would check the arithmetic and none of the meaning
+// -- the same reason `DefaultWorld` exists for the terrain's own checks.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Borders {
+            private static mutable Grid* world;
+            // Where the first city of the default world stands. Not a guess: it is what `Settling`
+            // chooses in the real game, printed by every run.
+            public static fixed int SEAT_X = 712;
+            public static fixed int SEAT_Y = 1160;
+
+            [BeforeAll]
+            public static method buildTheWorld() returns void {
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Borders.world = gen.generate(WorldShape.WIDTH(), WorldShape.HEIGHT());
+                return;
+            }
+
+            [AfterAll]
+            public static method dropTheWorld() returns void {
+                delete Borders.world;
+                return;
+            }
+
+            // THE FOUNDING DISC IS A DISC. Radius eight, which is 197 lattice points -- and the
+            // number matters because it is the one the run prints: a city that reports 197 is a
+            // city that was founded and has not grown, and one that reports 200 has grown three
+            // times. Without the exact figure those two are the same observation.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_founding_claims_the_disc_the_model_asks_for() returns void {
+                Atlas* atlas = new Atlas(Borders.world.width() * Borders.world.height()) on heap;
+                Result<City*, Refusal> made =
+                    atlas.found(Borders.SEAT_X, Borders.SEAT_Y, Borders.SEAT_X + 2, Borders.SEAT_Y, 8);
+                City* one = made.valueOr(0 as City*);
+                int took = Claiming.sow(one, Borders.world);
+                Test.assertEqual(took, one.area());
+                // At most the whole disc, and enough of it to be a city rather than a shoreline.
+                Test.assertTrue(one.area() <= 197);
+                Test.assertTrue(one.area() > 150);
+                // The centre is held, which is where the town hall stands.
+                Test.assertTrue(one.owns(Borders.world.idx(Borders.SEAT_X, Borders.SEAT_Y)));
+                delete made;
+                delete atlas;
+                return;
+            }
+
+            // AND IT GROWS BY ONE, AND THE ONE IS ATTACHED. Growth that could take a cell anywhere
+            // would put holes in a territory the model says has none -- so what is checked is not
+            // only that the count rose, but that what it took touches what was already held.
+            [Tag(name: "nations")]
+            [Test]
+            public static method growth_takes_one_cell_and_it_touches_the_claim() returns void {
+                Atlas* atlas = new Atlas(Borders.world.width() * Borders.world.height()) on heap;
+                Result<City*, Refusal> made =
+                    atlas.found(Borders.SEAT_X, Borders.SEAT_Y, Borders.SEAT_X + 2, Borders.SEAT_Y, 8);
+                City* one = made.valueOr(0 as City*);
+                Claiming.sow(one, Borders.world);
+                int before = one.area();
+                int took = Claiming.grow(one, Borders.world);
+                Test.assertEqual(took, 1);
+                Test.assertEqual(one.area(), before + 1);
+                // The cell it took is the last one in the list, and one of its four neighbours is
+                // ours -- which is the whole of "no holes", checked rather than asserted.
+                int fresh = one.cellAt(one.area() - 1);
+                int w = Borders.world.width();
+                int fx = fresh % w;
+                int fy = fresh / w;
+                boolean touching = one.owns(Borders.world.idx(fx + 1, fy))
+                                || one.owns(Borders.world.idx(fx - 1, fy))
+                                || one.owns(Borders.world.idx(fx, fy + 1))
+                                || one.owns(Borders.world.idx(fx, fy - 1));
+                Test.assertTrue(touching);
+                // Ten more, and every one of them lands: a city on open ground is never boxed in.
+                mutable int more = 0;
+                for (int i in 0..10) {
+                    more = more + Claiming.grow(one, Borders.world);
+                }
+                Test.assertEqual(more, 10);
+                Test.assertEqual(one.area(), before + 11);
+                delete made;
+                delete atlas;
+                return;
+            }
+        }
+    }
+}

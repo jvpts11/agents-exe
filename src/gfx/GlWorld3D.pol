@@ -16,6 +16,8 @@ import Agents.People.Agent;
 import Agents.People.AgentId;
 import Agents.People.AgentClass;
 import Agents.People.Courting;
+import Agents.Gfx.GroundHit;
+import Agents.Gfx.Picking;
 import Agents.Nations.Atlas;
 import Agents.Nations.Nation;
 import Agents.Nations.Subdivision;
@@ -71,6 +73,10 @@ public bundle Agents {
             private mutable MeshAtlas* cityArt;
             private mutable nullable Atlas* realm;
             private mutable int drawnBuildings;
+            // How many border edges went into the buffer this frame. Counted rather than assumed,
+            // for the reason every other drawn count here is: a territory that exists in the Atlas
+            // and not on the screen is the failure this project has already met once.
+            private mutable int drawnBorder;
             // The people, drawn the same way through the same index. One mesh per STANDING, which is
             // what makes a recruitment visible: the model changes because the array did.
             private mutable MeshBuffer* folk;
@@ -178,6 +184,7 @@ public bundle Agents {
                 town = new MeshBuffer(gl) on heap;
                 realm = null;
                 drawnBuildings = 0;
+                drawnBorder = 0;
                 // Where each body is DRAWN and which way it points. Grown to fit the crowd; a slot
                 // nobody has drawn yet is snapped on its first frame, so what was in it before never
                 // matters. Named, because two of these print two reports and a reader has to be able
@@ -1706,6 +1713,7 @@ public bundle Agents {
             // the same block window the crowd and the fauna do, which is what that index is for.
             private method bakeTown() returns void {
                 drawnBuildings = 0;
+                drawnBorder = 0;
                 if (realm == null || cityArt == null || !window.showing()) {
                     town.upload(cast<address>(0), 0, 0);
                     return;
@@ -1725,7 +1733,20 @@ public bundle Agents {
                     town.upload(cast<address>(0), 0, 0);
                     return;
                 }
-                address buf = Allocator.alloc(cast<long>(many * perCity * 27 * 4 + 4));
+                // AND THE BORDER. Two triangles per edge where a held cell meets ground the city
+                // does not hold -- so what is drawn is the claim's outline rather than a wash over
+                // it, and a player can see the land and the border at once.
+                mutable int edges = 0;
+                for (int n in 0..atlas.nationCount()) {
+                    Nation* who = atlas.nationAt(n);
+                    for (int s in 0..who.subdivisionCount()) {
+                        Subdivision* part = who.subdivisionAt(s);
+                        for (int c in 0..part.cityCount()) {
+                            edges = edges + borderEdgesOf(part.cityAt(c));
+                        }
+                    }
+                }
+                address buf = Allocator.alloc(cast<long>((many * perCity + edges * 2) * 27 * 4 + 4));
                 mutable int wv = 0;
                 for (int n in 0..atlas.nationCount()) {
                     Nation* who = atlas.nationAt(n);
@@ -1740,12 +1761,87 @@ public bundle Agents {
                                                   here.storeAtX(), here.storeAtY());
                                 drawnBuildings = drawnBuildings + 1;
                             }
+                            drawnBorder = drawnBorder + borderEdgesOf(here);
+                            wv = emitBorder(buf, wv, here);
                         }
                     }
                 }
-                town.upload(buf, wv, many * perCity * 27);
+                town.upload(buf, wv, (many * perCity + edges * 2) * 27);
                 Allocator.free(buf);
                 return;
+            }
+
+            // HOW MANY EDGES A CITY'S BORDER HAS: one per held cell per side whose neighbour is not
+            // held. Counted before it is drawn, because the buffer is sized by the count -- a guess
+            // either wastes or overruns, and the overrun is the one that corrupts the frame.
+            private method borderEdgesOf(City* here) returns int {
+                mutable int edges = 0;
+                int held = here.area();
+                for (int i in 0..held) {
+                    int cell = here.cellAt(i);
+                    int x = cell % grid.width();
+                    int y = cell / grid.width();
+                    if (!heldAt(here, x + 1, y)) { edges = edges + 1; }
+                    if (!heldAt(here, x - 1, y)) { edges = edges + 1; }
+                    if (!heldAt(here, x, y + 1)) { edges = edges + 1; }
+                    if (!heldAt(here, x, y - 1)) { edges = edges + 1; }
+                }
+                return edges;
+            }
+
+            private method heldAt(City* here, int x, int y) returns boolean {
+                if (x < 0 || y < 0 || x >= grid.width() || y >= grid.height()) {
+                    return false;
+                }
+                return here.owns(grid.idx(x, y));
+            }
+
+            // THE BORDER ITSELF: a strip laid on the ground along each edge where the city's land
+            // stops. Drawn a little above the surface so it reads as a line painted on the world
+            // rather than as a fence standing in it -- and at the height the ground is actually
+            // drawn at, by the same expression everything else here stands on.
+            private method emitBorder(address buf, int w, City* here) returns int {
+                mutable int p = w;
+                float thick = 0.34;                  // in world units; a cell is two
+                int held = here.area();
+                for (int i in 0..held) {
+                    int cell = here.cellAt(i);
+                    int x = cell % grid.width();
+                    int y = cell / grid.width();
+                    int biome = grid.biomeAt(x, y);
+                    int lvl = stackLvl(biome, x, y);
+                    float z = terrainLook[biome].top + cast<float>(lvl) * stepH
+                              + terrainLook[biome].lift + 0.06;
+                    float wx = cast<float>(x) * 2.0;
+                    float wy = cast<float>(y) * 2.0;
+                    // The cell's own square, in world units, and the four strips inside its edges.
+                    float x0 = wx - 1.0;
+                    float x1 = wx + 1.0;
+                    float y0 = wy - 1.0;
+                    float y1 = wy + 1.0;
+                    if (!heldAt(here, x + 1, y)) {
+                        p = emitStrip(buf, p, x1 - thick, y0, x1, y1, z);
+                    }
+                    if (!heldAt(here, x - 1, y)) {
+                        p = emitStrip(buf, p, x0, y0, x0 + thick, y1, z);
+                    }
+                    if (!heldAt(here, x, y + 1)) {
+                        p = emitStrip(buf, p, x0, y1 - thick, x1, y1, z);
+                    }
+                    if (!heldAt(here, x, y - 1)) {
+                        p = emitStrip(buf, p, x0, y0, x1, y0 + thick, z);
+                    }
+                }
+                return p;
+            }
+
+            // One flat strip of border, lying on the ground. The colour is the brand's amber, which
+            // is the one colour in this world nothing natural is: a border has to read as drawn BY
+            // somebody rather than as something growing there.
+            private method emitStrip(address buf, int w, float x0, float y0, float x1, float y1,
+                                     float z) returns int {
+                return emitQuad(buf, w, x0, y0, z, x1, y0, z, x1, y1, z, x0, y1, z,
+                                0.0, 0.0, 1.0, 0.918, 0.706, 0.392);
             }
 
             // One building, standing on the ground that is actually drawn. The height expression is
@@ -1762,6 +1858,27 @@ public bundle Agents {
                                 topZ, 1.0, shadeAt(cx, cy, 1, lvl));
             }
 
+            // WHICH CELL A SCREEN PIXEL IS OVER -- the answer a person wants when they point at
+            // something and ask "where is that".
+            //
+            // A RAY THROUGH THE PIXEL, MET WITH THE GROUND PLANE, and not a depth-buffer read. The
+            // depth would give the height of whatever mesh happens to be under the cursor -- a
+            // rooftop, a deer's back -- and the question is which CELL is there, which is a question
+            // about the ground. So the ray is built from the camera the frame was drawn with (the
+            // same eye, the same 42-degree field, the same aspect) and met with z = groundHeight.
+            //
+            // What that costs in truth: over a mountain the reported cell is the one the FLAT ground
+            // is under the cursor, which is a cell or two downhill of the peak the eye sees. Every
+            // other reading of this is worse -- a hill's own height would make the cursor name a
+            // different cell than the one the picking of anything else would use.
+            //
+            // A pixel above the horizon meets nothing, and says so rather than clamping to an edge.
+            public method cellUnder(int mx, int my, int fbW, int fbH) returns GroundHit {
+                return Picking.cellAt(camera.az(), camera.el(), camera.curDist(),
+                                      camera.tx(), camera.ty(), camera.groundHeight(),
+                                      mx, my, fbW, fbH, grid.width(), grid.height());
+            }
+
             // The countries, and the art their buildings are drawn from. Borrowed, both: the world
             // owns its Atlas and the atlas belongs to whoever loaded it.
             public method takeAtlas(Atlas* a, MeshAtlas* art) returns void {
@@ -1772,6 +1889,10 @@ public bundle Agents {
 
             public method buildingsDrawn() returns int {
                 return drawnBuildings;
+            }
+
+            public method borderDrawn() returns int {
+                return drawnBorder;
             }
 
             private method bakeFolk() returns void {

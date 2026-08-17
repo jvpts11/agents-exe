@@ -1,0 +1,93 @@
+import System.Collections.ArrayList;
+import Agents.Nations.Landholder;
+
+program AgentsExe;
+
+// THE CELLS A CITY HOLDS -- the one part of the game that holds ground at all.
+//
+// TWO STRUCTURES, ONE WRITER, AND THAT IS WHY THEY CANNOT DRIFT. A list of the cells is what lets a
+// city walk its own land (to draw it, to grow it, to give it back); the world's owner map is what
+// lets ANY question about a cell be answered without walking every city. Both are written inside
+// `claim` and `release` and nowhere else, which is the same rule the kinship ties are kept by: two
+// halves of one fact, written at one call site, never in two passes.
+//
+// The map is BORROWED from the Atlas. The world has exactly one of it -- a cell has one owner, and
+// two maps would be two answers.
+//
+// A CELL IS AN INDEX AND NOT A PAIR, on purpose: it is what the map is indexed by, and the pair is
+// one multiplication away when a caller wants it. The alternative -- storing x and y -- doubles the
+// list and puts the multiplication in the inner loop instead.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Territory implements Landholder {
+            // Nobody's. Written into the map where no city holds a cell, so that a fresh map -- which
+            // arrives zeroed -- reads as unowned without anybody filling it in.
+            public static fixed int NOBODY = 0;
+
+            // The world's cell -> owner map, borrowed from the Atlas. Holds `mine` where this city
+            // holds the cell and somebody else's mark, or NOBODY, everywhere else.
+            private mutable int[] owner;
+            // What this city writes into the map. A city's number plus one, so that zero can mean
+            // nobody without a city having to be numbered from one.
+            private mutable int mine;
+            // The cells, in the order they were taken. The order is not meaningless: the first is
+            // the centre, and growth reads outward from what is already held.
+            private mutable ArrayList<int>* cells;
+
+            public constructor Territory(int[] owner, int cityNumber) {
+                this.owner = owner;
+                this.mine = cityNumber + 1;
+                this.cells = new ArrayList<int>() on heap;
+            }
+
+            public override method owns(int cell) returns boolean {
+                if (cell < 0 || cell >= owner.length()) {
+                    return false;
+                }
+                return owner[cell] == mine;
+            }
+
+            public override method area() returns int {
+                return cells.size();
+            }
+
+            // TAKING A CELL WRITES BOTH HALVES. Refused when anybody holds it -- including us, so a
+            // double claim cannot put one cell in the list twice and make `area` a lie.
+            public override method claim(int cell) returns boolean {
+                if (cell < 0 || cell >= owner.length()) {
+                    return false;
+                }
+                if (owner[cell] != Territory.NOBODY) {
+                    return false;
+                }
+                owner[cell] = mine;
+                cells.add(cell);
+                return true;
+            }
+
+            // AND GIVING IT BACK CLEARS BOTH. The ground goes to nobody rather than to a neighbour:
+            // model §9, and the reason there is no merge in this program.
+            public override method release() returns void {
+                for (var cell in cells.toArray()) {
+                    if (cell >= 0 && cell < owner.length() && owner[cell] == mine) {
+                        owner[cell] = Territory.NOBODY;
+                    }
+                }
+                cells.clear();
+                return;
+            }
+
+            // The cell taken `i`th. For whoever walks this city's land -- the renderer draws its
+            // border, the growth reads outward from it.
+            public override method cellAt(int i) returns int {
+                return cells.get(i);
+            }
+
+            public destructor ~Territory() returns void {
+                delete cells;
+                return;
+            }
+        }
+    }
+}
