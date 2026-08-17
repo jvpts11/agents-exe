@@ -51,7 +51,12 @@ public bundle Agents {
 
         public class Stir implements Shift {
             private mutable Wild* wild;
-            private mutable Grid* ground;
+            // THE GROUND IS OBSERVED, NOT HELD. The pass belongs to the Wild, which is one of the
+            // things standing on the ground rather than the thing that owns it -- so nothing in the
+            // program says which of the two dies first, and a raw pointer here would be a promise
+            // neither of them made. `weak` says the true thing instead: the slot is emptied the
+            // moment the ground goes, so this cannot become a pointer into freed land.
+            private mutable weak nullable Grid* ground;
             // The tick's own direction seed -- see Grazing.HOLD_COURSE for why it is not the tick.
             private mutable int spun;
             private mutable float hopScale;
@@ -69,7 +74,7 @@ public bundle Agents {
                 }
                 this.hands = many;
                 wild = 0 as Wild*;
-                ground = 0 as Grid*;
+                ground = null;
                 spun = 0;
                 hopScale = 1.0;
                 room = 64;
@@ -115,7 +120,14 @@ public bundle Agents {
                 // 35.5 nanoseconds an animal with no threads at all, against 15.1 for the same code
                 // when those were parameters. Held in locals, the loop is the loop it was.
                 Wild* w = wild;
-                Grid* g = ground;
+                // The weak slot is read ONCE, here, and the whole pass runs on the pointer it gave.
+                // Empty means the ground went while a round was being handed out, and then there is
+                // no step for anyone to take.
+                nullable Grid* held = ground;
+                if (held == null) {
+                    return;
+                }
+                Grid* g = held;
                 int seed = spun;
                 float scale = hopScale;
                 int n = w.count();
