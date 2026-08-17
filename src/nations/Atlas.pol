@@ -4,9 +4,13 @@ import System.Errors.Ok;
 import System.Errors.Err;
 import Agents.Nations.Nation;
 import Agents.Nations.Subdivision;
+import Agents.Nations.Building;
 import Agents.Nations.City;
 import Agents.Nations.Refusal;
+import Agents.People.BuildingId;
 import Agents.People.CityId;
+import Agents.People.Population;
+import Agents.People.Whereabouts;
 
 program AgentsExe;
 
@@ -90,13 +94,56 @@ public bundle Agents {
                 return total;
             }
 
+            // THE CITY WITH THAT NAME, or none. A walk of the tree rather than an index beside it:
+            // an agent asks this when it wants to go home, which is a handful of times in a life,
+            // and a second structure holding the same cities is the second place they can disagree.
+            // If cities ever number in the thousands and this is asked every tick, that is the
+            // moment to keep one -- and not before, on a measurement rather than a guess.
+            public method cityNamed(CityId which) returns nullable City* {
+                int want = cast<int>(which);
+                for (int n in 0..nations.size()) {
+                    Nation* who = nations.get(n);
+                    for (int s in 0..who.subdivisionCount()) {
+                        Subdivision* part = who.subdivisionAt(s);
+                        for (int c in 0..part.cityCount()) {
+                            City* one = part.cityAt(c);
+                            if (one.nameOf() == want) {
+                                return one;
+                            }
+                        }
+                    }
+                }
+                return null;
+            }
+
+            // THE BUILDING SOMEBODY SLEEPS IN, or none -- for the two questions an agent asks about
+            // its bed: whether it is worth walking to one, and where. Both go through here so they
+            // cannot answer differently, which is the same rule the seam itself is kept by.
+            public method homeOf(CityId city, BuildingId which) returns nullable Building* {
+                int at = cast<int>(which);
+                if (at == Whereabouts.NOWHERE) {
+                    return null;
+                }
+                nullable City* town = cityNamed(city);
+                if (town == null) {
+                    return null;
+                }
+                if (at < 0 || at >= town.buildingCount()) {
+                    return null;
+                }
+                return town.buildingAt(at);
+            }
+
             // THE FIRST CITY MAKES THE COUNTRY. A city needs a subdivision to sit in and a
             // subdivision needs a nation, so founding on an empty Atlas builds all three -- and the
             // city that did it is the capital. Every later city finds a subdivision with room, and
             // is refused when there is none rather than growing one nobody asked for.
             //
             // `dice` decides the subdivision's room, once, when one is made.
-            public method found(int centreX, int centreY, int storeX, int storeY,
+            // `folk` is handed straight through rather than held: the Atlas asks the population
+            // nothing, but every city it makes must reach it -- a resident's `homeCity` is written
+            // by the city's own enrolment socket, which is the only place that field is written.
+            public method found(Population* folk, int centreX, int centreY, int storeX, int storeY,
                                 int room) returns Result<City*, Refusal> {
                 mutable Nation* home = 0 as Nation*;
                 if (nations.size() == 0) {
@@ -115,7 +162,7 @@ public bundle Agents {
                     home.take(made);
                     where = made;
                 }
-                City* one = new City(founded, centreX, centreY, storeX, storeY, owner) on heap;
+                City* one = new City(folk, founded, centreX, centreY, storeX, storeY, owner) on heap;
                 where.take(one);
                 if (cast<int>(home.capitalCity()) == Nation.NO_CAPITAL) {
                     home.setCapital(cast<CityId>(founded));

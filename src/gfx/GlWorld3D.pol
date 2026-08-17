@@ -22,6 +22,7 @@ import Agents.Nations.Atlas;
 import Agents.Nations.Nation;
 import Agents.Nations.Subdivision;
 import Agents.Nations.City;
+import Agents.Nations.Building;
 import System.Collections.Iterator;
 import System.Memory.Allocator;
 import System.Memory.Raw;
@@ -1733,6 +1734,11 @@ public bundle Agents {
                     town.upload(cast<address>(0), 0, 0);
                     return;
                 }
+                // AND THE HOUSES, which are not a fixed cost per city: a settlement puts up as many
+                // as its band needs, and a hut, a tent and a longhouse are three different meshes
+                // with three different triangle counts. So the roofs are counted one by one in the
+                // same walk that will draw them.
+                mutable int roofTris = 0;
                 // AND THE BORDER. Two triangles per edge where a held cell meets ground the city
                 // does not hold -- so what is drawn is the claim's outline rather than a wash over
                 // it, and a player can see the land and the border at once.
@@ -1742,11 +1748,19 @@ public bundle Agents {
                     for (int s in 0..who.subdivisionCount()) {
                         Subdivision* part = who.subdivisionAt(s);
                         for (int c in 0..part.cityCount()) {
-                            edges = edges + borderEdgesOf(part.cityAt(c));
+                            City* here = part.cityAt(c);
+                            edges = edges + borderEdgesOf(here);
+                            for (int b in 0..here.buildingCount()) {
+                                int ord = cityArt.ordOf(here.buildingAt(b).kind().mesh());
+                                if (ord >= 0) {
+                                    roofTris = roofTris + cityArt.triCount[ord];
+                                }
+                            }
                         }
                     }
                 }
-                address buf = Allocator.alloc(cast<long>((many * perCity + edges * 2) * 27 * 4 + 4));
+                int tris = many * perCity + roofTris + edges * 2;
+                address buf = Allocator.alloc(cast<long>(tris * 27 * 4 + 4));
                 mutable int wv = 0;
                 for (int n in 0..atlas.nationCount()) {
                     Nation* who = atlas.nationAt(n);
@@ -1761,12 +1775,24 @@ public bundle Agents {
                                                   here.storeAtX(), here.storeAtY());
                                 drawnBuildings = drawnBuildings + 1;
                             }
+                            // AND THE ROOFS, each drawn as the kind it is. A settlement of huts
+                            // around a hall is what a founding looks like from the air, and it is
+                            // the first thing in this game that shows a city GROWING rather than
+                            // standing where it was put.
+                            for (int b in 0..here.buildingCount()) {
+                                Building* house = here.buildingAt(b);
+                                int ord = cityArt.ordOf(house.kind().mesh());
+                                if (ord >= 0) {
+                                    wv = emitBuilding(cityArt, buf, wv, ord, house.x(), house.y());
+                                    drawnBuildings = drawnBuildings + 1;
+                                }
+                            }
                             drawnBorder = drawnBorder + borderEdgesOf(here);
                             wv = emitBorder(buf, wv, here);
                         }
                     }
                 }
-                town.upload(buf, wv, (many * perCity + edges * 2) * 27);
+                town.upload(buf, wv, tris * 27);
                 Allocator.free(buf);
                 return;
             }

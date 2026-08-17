@@ -1,6 +1,13 @@
 import System.Collections.ArrayList;
 import Agents.People.AgentId;
+import Agents.People.CityId;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.Whereabouts;
 import Agents.Sim.Chain;
+import Agents.Sim.TEnroller;
+import Agents.Nations.Building;
+import Agents.World.BuildingKind;
 import Agents.Nations.Landholder;
 import Agents.Nations.Territory;
 
@@ -13,10 +20,9 @@ program AgentsExe;
 // subdivisions', so both are computed and neither is stored. That is what stops the churn the old
 // model had, where three layers each kept their own idea of who owned a tile and drifted apart.
 //
-// WHAT IS HERE, AND WHAT IS NOT. The centre, the two buildings a founding places, and the people who
-// live here. Not the territory: the claim, how it grows and how it rots is S3.2, and a radius stored
-// today would be a number nothing reads. Not the storehouse, not the era, not the arrived
-// technologies -- each arrives with the item that gives it a reader.
+// WHAT IS HERE, AND WHAT IS NOT. The centre, the two buildings a founding places, what has since
+// been raised, and the people who live here. Not the era, not the arrived technologies -- each
+// arrives with the item that gives it a reader.
 //
 // THE RESIDENTS ARE IDS AND NOT POINTERS, and that is the seam rule rather than a preference: agents
 // die and their slot is reused, so a pointer held by a city would one day name somebody else's
@@ -24,7 +30,7 @@ program AgentsExe;
 public bundle Agents {
     public namespace Nations {
 
-        public class City implements Landholder {
+        public class City implements Landholder applies TEnroller {
             // Its number, which is its name until there is a table of names to draw one from. An int
             // because the model says an int, and because a city that is called "3" reads honestly as
             // a city nobody has named yet.
@@ -36,15 +42,19 @@ public bundle Agents {
             // on the centre, and beside it the storehouse of the nation's era, "this way, a city
             // always have a way to storage things".
             //
-            // TWO CELLS AND NOT TWO `Building`s, deliberately. The `Building` class belongs to the
-            // building layout and arrives with the item that raises one (S4.3); these two are placed
-            // by founding and drawn from the moment they exist, and when `standing` arrives they
-            // become its first two entries. A `Building` invented here would be a class with one
-            // field and no reader.
+            // STILL TWO CELLS AND NOT TWO `Building`s. `standing` now exists and these two could
+            // move into it -- but a town hall with a roof of nought and no posts would be an entry
+            // that answers no question the two ints do not, and the entry that DOES answer one (who
+            // works there) arrives with the work layer. They join the list when they have a reason
+            // to be in it.
             private mutable int storeX;
             private mutable int storeY;
-            // Who lives here. Ids, in the shared pool -- see the note above.
-            private mutable Chain<AgentId>* residents;
+            // WHAT IS UP. Owned: a city that goes takes its buildings with it. Houses today; the
+            // workshops, the walls and the rest arrive with raising (S4.3).
+            private mutable ArrayList<Building*>* standing;
+            // The people this city's residents are drawn from, so the enrolment socket can reach
+            // them. Borrowed -- the population outlives every city in the world.
+            private mutable Population* folk;
             // THE GROUND, AND THE CITY ANSWERS LIKE IT. A delegate rather than a transformer, on the
             // layout's own test: a territory is a thing in its own right -- it has cells, you can
             // ask it what it holds, it would still mean something if no city existed. So the city
@@ -53,15 +63,19 @@ public bundle Agents {
             // carry a field -- and this is not that.
             private delegate Territory territory;
 
-            public constructor City(int name, int centreX, int centreY, int storeX, int storeY,
-                                    int[] owner) {
+            public constructor City(Population* folk, int name, int centreX, int centreY,
+                                    int storeX, int storeY, int[] owner) {
+                this.folk = folk;
                 this.name = name;
                 this.centreX = centreX;
                 this.centreY = centreY;
                 this.storeX = storeX;
                 this.storeY = storeY;
-                this.residents = new Chain<AgentId>() on heap;
+                this.standing = new ArrayList<Building*>() on heap;
                 this.territory = new Territory(owner, name) on stack;
+                // THE APPLIED FIELD IS THE OWNER'S TO MAKE. `TEnroller` has no constructor and
+                // cannot fill this; the compiler refuses the class until this line exists.
+                this.roll = new Chain<AgentId>() on heap;
             }
 
             public method nameOf() returns int {
@@ -80,26 +94,84 @@ public bundle Agents {
                 return storeY;
             }
 
-            // Somebody lives here now. The agent's own `homeCity` is written by the caller: the two
-            // halves of the seam are set together, at one call site, which is the rule the kinship
-            // ties are kept by and for the same reason.
-            public method admit(AgentId who) returns void {
-                residents.add(who);
+            // THE ENROLMENT SOCKETS. A resident points back with `whereabouts.homeCity`, and this
+            // is the only place in the game that field is written -- which is the difference between
+            // this and the comment that used to stand here asking the caller to remember.
+            protected procedure bindBack(AgentId who) returns void {
+                Agent* body = folk.at(who);
+                body.whereabouts.homeCity = cast<CityId>(name);
                 return;
             }
 
-            public method holds(AgentId who) returns boolean {
-                return residents.has(who);
+            protected procedure unbindBack(AgentId who) returns void {
+                Agent* body = folk.at(who);
+                body.whereabouts.homeCity = cast<CityId>(Whereabouts.NOWHERE);
+                return;
             }
 
-            // How many people this city has. A walk of the chain, and the reason it is not a counter
-            // beside it: two facts about one thing are two facts that can disagree.
-            public method population() returns int {
-                return residents.size();
+            // ---- what is standing here -------------------------------------------------------
+
+            // PUT ONE UP. The city makes its own buildings, and that is not ceremony: a building's
+            // id IS its index here, and anything that could hold one before the city named it could
+            // also admit a dweller and write "nowhere" into them. Made and named in one breath,
+            // there is no such moment.
+            public method raise(BuildingKind what, int cx, int cy) returns Building* {
+                Building* one = new Building(folk, standing.size(), what, cx, cy) on heap;
+                standing.add(one);
+                return one;
+            }
+
+            public method buildingCount() returns int {
+                return standing.size();
+            }
+
+            public method buildingAt(int at) returns Building* {
+                return standing.get(at);
+            }
+
+            // How many people this city can put a roof over, counting every roofed building it has.
+            public method roofs() returns int {
+                mutable int total = 0;
+                for (int b in 0..standing.size()) {
+                    total = total + standing.get(b).capacity();
+                }
+                return total;
+            }
+
+            // Whether one of its people has nowhere to sleep. Asked of the agent, which is the far
+            // end of `THouser` and therefore the same fact the buildings' chains hold.
+            public method unroofed(AgentId who) returns boolean {
+                return folk.at(who).whereabouts.homeless();
+            }
+
+            // HOW MANY OF ITS PEOPLE HAVE NOWHERE TO SLEEP. Walked rather than counted, for the
+            // reason the population is: two facts about one thing are two facts that can disagree.
+            //
+            // This is one of the two inputs to the lower engine of colonisation -- "no house, too
+            // many people for the houses there are" -- and until this slice it was a number the
+            // model asked for and nobody computed.
+            public method homeless() returns int {
+                mutable int many = 0;
+                mutable int link = firstResident();
+                while (link >= 0) {
+                    if (folk.at(residentAt(link)).whereabouts.homeless()) {
+                        many = many + 1;
+                    }
+                    link = afterResident(link);
+                }
+                return many;
             }
 
             public destructor ~City() returns void {
-                delete residents;
+                // Everybody out of the roll and the links back to the pool, then the roll itself --
+                // the applied field is the city's to free, and the compiler names it if this is
+                // forgotten.
+                dissolve();
+                delete roll;
+                for (int b in 0..standing.size()) {
+                    delete standing.get(b);
+                }
+                delete standing;
                 return;
             }
         }

@@ -7,6 +7,8 @@ import Agents.People.Whereabouts;
 import Agents.People.Kinship;
 import Agents.People.Journey;
 import Agents.People.Courting;
+import Agents.Nations.Atlas;
+import Agents.Nations.Building;
 program AgentsExe;
 
 // WHAT A PERSON IS DOING, AND WHY THAT ONE AND NOT ANOTHER.
@@ -173,7 +175,11 @@ public bundle Agents {
             //
             // AN EXHAUSTIVE MATCH AND NO DEFAULT, so the twenty-fourth cannot be added without a
             // line here saying when anybody would want it.
-            public method urge(Population* folk, Agent* one) returns float {
+            // `realm` is here for one arm -- walking home needs to know where home IS, and only the
+            // Atlas can turn a `BuildingId` into a cell. It is passed rather than reached for
+            // because an urge is a pure question about this person and this world, and a static
+            // pointing at the world is how that stops being true.
+            public method urge(Population* folk, Atlas* realm, Agent* one) returns float {
                 return match (this) {
                     // NOTHING PULLING IS ITSELF A PULL, and a small constant one. It is the floor
                     // that guarantees the chooser always has an answer -- somebody whose every other
@@ -192,8 +198,11 @@ public bundle Agents {
                     // past everything else at nought, because somebody who will not sleep is
                     // somebody who dies of not sleeping.
                     case Sleeping -> Activity.belowWeary(one, 1.05);
-                    // AND WALKS HOME FIRST IF IT HAS ONE, which nobody does until S3 builds houses.
-                    case GoingToSleep -> Activity.ifHoused(one) * Activity.belowWeary(one, 1.10);
+                    // AND WALKS HOME FIRST IF IT HAS ONE -- which, from S3.3, somebody does. The
+                    // 1.10 against sleeping's 1.05 is what makes a tired person with a bed set off
+                    // for it instead of lying down where it stands; `ifHoused` falling to nought on
+                    // arrival is what lets them finally sleep.
+                    case GoingToSleep -> Activity.ifHoused(realm, one) * Activity.belowWeary(one, 1.10);
                     // SOMEBODY KNOWN, WITHIN EIGHT TILES. Scaled by how much this person wants
                     // company at all -- the whole point of a temperament is that two people in the
                     // same street do not both stop to talk.
@@ -310,8 +319,26 @@ public bundle Agents {
                 return much;
             }
 
-            private static method ifHoused(Agent* one) returns float {
-                if (one.whereabouts.homeless()) {
+            // A BED WORTH WALKING TO: one that exists, and that this person is not already at.
+            //
+            // THE SECOND HALF IS WHAT ENDS THE WALK, and leaving it out is a person who arrives at
+            // their own door and sets off again. `GoingToSleep` outranks `Sleeping` on purpose -- a
+            // tired person with a bed goes to it rather than lying down in the road -- so the only
+            // thing that can hand the turn over to `Sleeping` is this urge falling to nought on
+            // arrival. Same shape as `goToCompany`'s arm's-length rule, and for the same reason:
+            // "there" written as a point is two people shuffling into each other for ever.
+            private static method ifHoused(Atlas* realm, Agent* one) returns float {
+                if (realm == null || one.whereabouts.homeless()) {
+                    return 0.0;
+                }
+                nullable Building* bed = realm.homeOf(one.whereabouts.homeCity,
+                                                      one.whereabouts.home);
+                if (bed == null) {
+                    return 0.0;
+                }
+                float dx = cast<float>(bed.x()) + 0.5 - one.x();
+                float dy = cast<float>(bed.y()) + 0.5 - one.y();
+                if (dx * dx + dy * dy <= Activity.ARM_LENGTH * Activity.ARM_LENGTH) {
                     return 0.0;
                 }
                 return 1.0;

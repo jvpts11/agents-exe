@@ -7,6 +7,9 @@ import Agents.People.Gauge;
 import Agents.People.Ending;
 import Agents.Sim.Clock;
 import Agents.Sim.Chronicle;
+import Agents.Nations.Atlas;
+import Agents.Nations.Building;
+import Agents.Nations.City;
 program AgentsExe;
 
 // GETTING OLDER, GETTING HUNGRY, GETTING TIRED, AND DYING OF ANY OF THE THREE.
@@ -64,7 +67,10 @@ public bundle Agents {
 
             // ONE YEAR OF BEING ALIVE, FOR EVERYBODY. Does nothing on a tick that is not the turn of
             // a year, so the tick may call it every time without knowing that.
-            public static method tick(Population* folk, long at, Chronicle* log) returns void {
+            // `realm` may be null -- the fauna's checks and every world before the first founding
+            // have no country at all -- and a person who belongs to no city asks it nothing.
+            public static method tick(Population* folk, Atlas* realm, long at, Chronicle* log)
+                    returns void {
                 if (!Clock.turnsYear(at)) {
                     return;
                 }
@@ -80,7 +86,7 @@ public bundle Agents {
                     one.body.age = one.body.age + 1;
                     // OLD AGE. `diesAt` was rolled when it was born.
                     if (one.body.age >= one.body.diesAt && one.body.age >= Living.GROWN) {
-                        Living.bury(folk, log, at, i, Ending.OldAge);
+                        Living.bury(folk, realm, log, at, i, Ending.OldAge);
                         ofAge = ofAge + cast<long>(1);
                         continue;
                     }
@@ -90,7 +96,7 @@ public bundle Agents {
                     if (one.body.fed.value() <= Body.STARVING) {
                         one.body.health = one.body.health - Living.STARVED_A_YEAR;
                         if (one.body.health.value() <= 0) {
-                            Living.bury(folk, log, at, i, Ending.Hunger);
+                            Living.bury(folk, realm, log, at, i, Ending.Hunger);
                             ofHunger = ofHunger + cast<long>(1);
                             continue;
                         }
@@ -111,13 +117,76 @@ public bundle Agents {
             // A DEATH, WITH WHAT KILLED IT. Chronicled rather than counted, because the count cannot
             // say which of them it was, and the difference between a world that ages out and a world
             // that starves is the whole question this slice asks.
-            private static method bury(Population* folk, Chronicle* log, long at, int slot,
-                                       Ending how) returns void {
+            // PUBLIC, because ageing and hunger are not the only ways to die. A fight, a drowning
+            // and an expedition that never arrived all end here, and each of them lives in another
+            // file -- so the one body that takes somebody out of the world has to be reachable from
+            // them. It is also what lets a check kill a chosen person rather than waiting a century
+            // for the right one to starve.
+            public static method bury(Population* folk, Atlas* realm, Chronicle* log, long at,
+                                      int slot, Ending how) returns void {
                 Agent* who = folk.at(cast<AgentId>(slot));
                 if (folk.count() <= Living.SAY_UNDER) {
                     log.note(at, "people", $"somebody {how.said()} at {who.body.age}, {folk.count() - 1} left");
                 }
+                // THE DEAD LEAVE THEIR CITY AND THEIR BED, and they leave them HERE, while both they
+                // and everybody else are still where they were.
+                //
+                // WITHOUT THIS THE RELATION ROTS RATHER THAN BREAKING, which is worse: the gate's
+                // first run of this slice reported "3 of 15 sleeping out" in a city with fifteen
+                // beds and fifteen people. Three settlers had died, their beds were still held by
+                // their numbers, and those numbers had since been handed to strangers who had never
+                // been to the city -- so the city counted people who had never lived there and the
+                // houses were full of nobody. Nothing crashed. Nothing counted wrong. It was three
+                // numbers in a report, and only because the report walks both ends.
+                Living.unlink(folk, realm, cast<AgentId>(slot));
+                int last = folk.count() - 1;
                 folk.bury(cast<AgentId>(slot));
+                // AND THE PERSON WHO WAS MOVED INTO THE GRAVE KEEPS THEIR HOME. A swap-remove hands
+                // the last person the dead one's number, so every chain naming the old one is stale
+                // -- the same trap `kin.renumber` exists for, one layer out.
+                if (last != slot) {
+                    Living.renumber(folk, realm, cast<AgentId>(last), cast<AgentId>(slot));
+                }
+                return;
+            }
+
+            // Both ends of both relations, cleared for somebody who is about to stop existing.
+            private static method unlink(Population* folk, Atlas* realm, AgentId who) returns void {
+                if (realm == null) {
+                    return;
+                }
+                Agent* one = folk.at(who);
+                nullable Building* bed = realm.homeOf(one.whereabouts.homeCity,
+                                                      one.whereabouts.home);
+                if (bed != null) {
+                    bed.evict(who);
+                }
+                nullable City* town = realm.cityNamed(one.whereabouts.homeCity);
+                if (town != null) {
+                    town.expel(who);
+                }
+                return;
+            }
+
+            // The same person under a new number. Their own fields are already right -- they did not
+            // move city or house -- so only the chains that name them are corrected, which is why
+            // this goes through `renumber` and not through leaving and re-joining.
+            private static method renumber(Population* folk, Atlas* realm, AgentId from,
+                                           AgentId to) returns void {
+                if (realm == null) {
+                    return;
+                }
+                Agent* one = folk.at(to);
+                nullable City* town = realm.cityNamed(one.whereabouts.homeCity);
+                if (town == null) {
+                    return;
+                }
+                town.renumber(from, to);
+                nullable Building* bed = realm.homeOf(one.whereabouts.homeCity,
+                                                      one.whereabouts.home);
+                if (bed != null) {
+                    bed.renumber(from, to);
+                }
                 return;
             }
 

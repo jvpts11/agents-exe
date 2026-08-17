@@ -1,0 +1,103 @@
+import Agents.Sim.Chain;
+import Agents.People.AgentId;
+program AgentsExe;
+
+// WHAT A BUILDING GAINS BY HAVING A ROOF: the dwellers under it, and the code that keeps both ends
+// of that true -- plus the one thing the other three relations do not have, a CEILING.
+//
+// The third of the five two-sided links (building layout §3). Same shape as `TRoster` and
+// `TEnroller`, same failure prevented, and one difference that earns its own socket: a herd takes
+// any number of animals and a city takes any number of people, but a hut holds six. The catalogue
+// already says how many -- `BuildingKind.roof()` reads the `shelters(...)` column, which was
+// written for the whole ladder from a tent up -- so the cap is read and never invented here.
+//
+// AND SO `admit` ANSWERS. The layout's sketch had it return void; a cap that cannot refuse is not a
+// cap, and the caller looking for somewhere to put a person has to learn that this roof is full in
+// order to try the next one. The answer is the difference between housing a city and looping.
+//
+// WHY A TRANSFORMER AND NOT A GENERIC: `Membership<Owner, Member>` cannot write a private field on
+// either side, and `Membership<Building, Agent>` cannot even say WHICH of the two relations a
+// building has with an agent it means -- a bed is not a post. `Building applies THouser, TEmployer`
+// says it on the class line, and the compiler holds the two apart. See `TRoster` for the long form.
+public bundle Agents {
+    public namespace Sim {
+
+        public explicit transformer THouser {
+            // THE APPLIED FIELD: this building's dwellers, in the one pool every chain in the game
+            // shares. The owner makes it and the owner frees it.
+            protected mutable Chain<AgentId>* beds;
+
+            // Somebody moves in, and both ends are written here. Answers false when the roof is
+            // full -- which is a fact about this building, not an error, and the caller's cue to
+            // look at the next one.
+            public procedure admit(AgentId who) returns boolean {
+                if (beds.size() >= roof()) {
+                    return false;
+                }
+                beds.add(who);
+                bindBack(who);
+                return true;
+            }
+
+            // And somebody moves out, clearing both. A death, or a colonist leaving for a founding.
+            public procedure evict(AgentId who) returns void {
+                beds.remove(who);
+                unbindBack(who);
+                return;
+            }
+
+            public procedure shelters(AgentId who) returns boolean {
+                return beds.has(who);
+            }
+
+            public procedure dwellers() returns int {
+                return beds.size();
+            }
+
+            // Room left under this roof. The number `Housing` looks for and the reason the cap is
+            // asked of the catalogue rather than stored: a hut that becomes a house keeps its
+            // dwellers and gains room, and nothing has to be rewritten for that to be true.
+            public procedure spare() returns int {
+                return roof() - beds.size();
+            }
+
+            public procedure firstDweller() returns int {
+                return beds.head();
+            }
+
+            public procedure afterDweller(int link) returns int {
+                return beds.next(link);
+            }
+
+            public procedure dwellerAt(int link) returns AgentId {
+                return beds.at(link);
+            }
+
+            // THE SAME SLEEPER, UNDER A NEW NUMBER -- see `TEnroller.renumber`. A swap-remove moves
+            // somebody into a dead person's slot; they did not move house, so only the chain's idea
+            // of their number changes and the socket is deliberately not called.
+            //
+            // Not `evict` then `admit`: those write the far end, and the far end is already right.
+            // Going through them would also have to pass the roof test to get back into the house it
+            // never left.
+            public procedure renumber(AgentId from, AgentId to) returns void {
+                if (beds.remove(from)) {
+                    beds.add(to);
+                }
+                return;
+            }
+
+            // Everybody out, and the links back to the pool. A building that falls calls this.
+            public procedure empty() returns void {
+                beds.clear();
+                return;
+            }
+
+            // THE SOCKETS. Two of them are the line that differs between owners; the third is this
+            // relation's own -- how many fit, which only the owner's kind can answer.
+            protected procedure bindBack(AgentId who) returns void;
+            protected procedure unbindBack(AgentId who) returns void;
+            protected procedure roof() returns int;
+        }
+    }
+}

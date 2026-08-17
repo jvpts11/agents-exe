@@ -1,0 +1,183 @@
+import Agents.Nations.Building;
+import Agents.Nations.City;
+import Agents.People.AgentId;
+import Agents.People.Population;
+import Agents.World.BuildingKind;
+import Agents.World.Grid;
+import Agents.World.Rng;
+
+program AgentsExe;
+
+// WHERE A CITY'S HOUSES GO, AND WHO SLEEPS IN THEM. The rules; `Building` and `THouser` are the
+// parts. Kept apart for the reason `Claiming` is kept apart from `Territory`: a house is a thing in
+// its own right and would still be one if nobody had written a policy for placing it.
+//
+// WHERE THE HOUSES COME FROM, which the model does not say and this slice had to decide (João,
+// 2026-08-17). The nation model specifies what a founding places -- the town hall and, beside it,
+// the storehouse -- and then leaves "what should this city build next" open, in as many words,
+// because raising with materials and builders is the work layer (S4.3).
+//
+// So: THE FOUNDING RAISES THE HOUSES ITS SETTLERS NEED, and after that the number is fixed until
+// something in the world knows how to build. That is not a placeholder standing in for construction
+// -- it is a band arriving somewhere and putting up its huts, which is what founding a settlement
+// is -- and it is what makes `city.homeless` a real number that MOVES: every child born after the
+// founding has nowhere to sleep, which is precisely the pressure the model's lower engine of
+// colonisation reads ("no house, too many people for the houses there are").
+//
+// The alternative -- a free house the instant anybody is unroofed -- would have kept that number at
+// nought for ever and left the engine reading a constant.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Housing {
+            // WHAT A BAND PUTS UP. The catalogue's era-I roof ladder, densest first: a longhouse
+            // shelters twelve, a hut six, a tent three. Founding fills with longhouses while a
+            // whole one is worth raising and finishes with the smaller kinds, so a band of fifteen
+            // gets a longhouse and a hut rather than five tents -- which is what "a settlement"
+            // looks like and, not incidentally, one draw call's worth of buildings instead of five.
+            //
+            // The numbers are the catalogue's own. Nothing here invents a capacity.
+
+            // How far out from the centre houses may be scattered, in cells. The model: buildings
+            // sit "scattered along the territory of the city, but more concentrated at the center".
+            // Eight is the founding claim's radius, so a house is always on ground the city holds.
+            public static fixed int SCATTER = 8;
+            // The model's own rule, in cells: "the minimum distance that buildings can be placed is
+            // 2 tiles from each other".
+            public static fixed int APART = 2;
+            // How many placements to try before giving up on a house. A disc of radius eight has
+            // 197 cells and a founding wants a handful of them, so this is loose; what it prevents
+            // is the unbounded search this project has already paid for twice.
+            public static fixed int TRIES = 64;
+
+            // Raise what the settlers need, and move them in. Answers how many buildings went up.
+            //
+            // Called by the founding, once, with the people it just enrolled.
+            public static method settle(City* town, Population* folk, Grid* g,
+                                        Rng* dice) returns int {
+                mutable int raised = 0;
+                // Everybody who lives here needs a bed; the loop asks the city rather than counting
+                // for itself, so a person enrolled after this line is not missed by arithmetic done
+                // before it.
+                while (town.homeless() > 0) {
+                    int need = town.homeless();
+                    BuildingKind what = Housing.kindFor(need);
+                    int where = Housing.spotFor(town, g, dice);
+                    if (where < 0) {
+                        // NO GROUND LEFT TO BUILD ON, and the loop must end. A city wedged onto a
+                        // headland with two buildable cells houses whom it can and the rest sleep
+                        // out -- which is a fact about the site, and the kind of thing the model
+                        // wants counted rather than worked around.
+                        return raised;
+                    }
+                    Building* one = town.raise(what, where % g.width(), where / g.width());
+                    raised = raised + 1;
+                    Housing.moveIn(town, one);
+                }
+                return raised;
+            }
+
+            // WHICH KIND FOR HOW MANY LEFT. Largest first while it would be filled, so a founding
+            // does not put up a longhouse for one person.
+            private static method kindFor(int need) returns BuildingKind {
+                if (need >= BuildingKind.Longhouse.roof()) {
+                    return BuildingKind.Longhouse;
+                }
+                if (need > BuildingKind.Tent.roof()) {
+                    return BuildingKind.Hut;
+                }
+                return BuildingKind.Tent;
+            }
+
+            // A CELL FOR A HOUSE: buildable, held by this city, and at least `APART` from anything
+            // already standing. Scattered by the dice and pulled toward the middle -- the model asks
+            // for "more concentrated at the center", and the nearer of two rolls is the cheapest
+            // honest way to say that: it makes the centre twice as likely as the rim without a
+            // distribution nobody can check.
+            private static method spotFor(City* town, Grid* g, Rng* dice) returns int {
+                for (int t in 0..Housing.TRIES) {
+                    int dx1 = dice.range(0 - Housing.SCATTER, Housing.SCATTER + 1);
+                    int dy1 = dice.range(0 - Housing.SCATTER, Housing.SCATTER + 1);
+                    int dx2 = dice.range(0 - Housing.SCATTER, Housing.SCATTER + 1);
+                    int dy2 = dice.range(0 - Housing.SCATTER, Housing.SCATTER + 1);
+                    mutable int dx = dx1;
+                    mutable int dy = dy1;
+                    if (dx2 * dx2 + dy2 * dy2 < dx1 * dx1 + dy1 * dy1) {
+                        dx = dx2;
+                        dy = dy2;
+                    }
+                    int cx = town.x() + dx;
+                    int cy = town.y() + dy;
+                    if (cx < 0 || cy < 0 || cx >= g.width() || cy >= g.height()) {
+                        continue;
+                    }
+                    if (!g.mayBuildAt(cx, cy)) {
+                        continue;
+                    }
+                    if (!town.owns(g.idx(cx, cy))) {
+                        continue;
+                    }
+                    if (Housing.crowded(town, cx, cy)) {
+                        continue;
+                    }
+                    return g.idx(cx, cy);
+                }
+                return 0 - 1;
+            }
+
+            // Whether anything already up is nearer than the model allows. The town hall and the
+            // storehouse count: they are on the ground whether or not they are in the list yet.
+            private static method crowded(City* town, int cx, int cy) returns boolean {
+                if (Housing.within(cx, cy, town.x(), town.y())) {
+                    return true;
+                }
+                if (Housing.within(cx, cy, town.storeAtX(), town.storeAtY())) {
+                    return true;
+                }
+                for (int b in 0..town.buildingCount()) {
+                    Building* one = town.buildingAt(b);
+                    if (Housing.within(cx, cy, one.x(), one.y())) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            // Chebyshev, because the grid is squares and a diagonal neighbour is a neighbour: two
+            // apart means two cells of clear ground in every direction, which is what the model's
+            // sentence looks like on the map.
+            private static method within(int ax, int ay, int bx, int by) returns boolean {
+                mutable int dx = ax - bx;
+                mutable int dy = ay - by;
+                if (dx < 0) {
+                    dx = 0 - dx;
+                }
+                if (dy < 0) {
+                    dy = 0 - dy;
+                }
+                mutable int far = dx;
+                if (dy > far) {
+                    far = dy;
+                }
+                return far < Housing.APART;
+            }
+
+            // Fill a new house from the city's unroofed. `admit` writes both ends and answers when
+            // the roof is full, which is what ends this loop -- the cap is the building's, read
+            // from the catalogue, and nothing here repeats it.
+            private static method moveIn(City* town, Building* one) returns void {
+                mutable int link = town.firstResident();
+                while (link >= 0) {
+                    AgentId who = town.residentAt(link);
+                    if (town.unroofed(who)) {
+                        if (!one.admit(who)) {
+                            return;
+                        }
+                    }
+                    link = town.afterResident(link);
+                }
+                return;
+            }
+        }
+    }
+}

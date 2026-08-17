@@ -1,0 +1,124 @@
+import Agents.Sim.Chain;
+import Agents.Sim.THouser;
+import Agents.People.AgentId;
+import Agents.People.BuildingId;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.Whereabouts;
+import Agents.World.BuildingKind;
+
+program AgentsExe;
+
+// A BUILDING THAT IS UP. Its kind, the cell it stands on, and -- if it has a roof -- who sleeps
+// under it.
+//
+// A CLASS AND NOT A VALUE STRUCT, which the building layout states as a correction to the nation
+// layout that came before it: a building has identity (an agent holds a `BuildingId` and walks to
+// it), mutable state, and a lifecycle. A value struct copied in and out of a generic collection is
+// the shape that cost this project four compiler bugs in a month, and it is the wrong shape for a
+// thing that is pointed at.
+//
+// WHAT IS HERE AND WHAT IS NOT. The kind, the cell, the city, the dwellers. Not `posts` -- who
+// works here is the work layer and arrives with `Employment` (S4.2). Not a phase: raising, sites
+// and ruins are S4.3, and a `phase` field today would be a number with one legal value. Not goods,
+// ever: the layout's own rule is that a building holds none, because a fourth place for goods to
+// sit is a fourth place for them to vanish.
+//
+// `applies THouser` is where the dwellers live, and it is the whole reason this class can be sure
+// that a person under this roof agrees that it lives here. See that file.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Building applies THouser {
+            private mutable BuildingKind what;
+            // The cell it stands on. One cell: the model places buildings at least two tiles apart
+            // and says nothing about footprints, so a building is where it is and the spacing is
+            // the rule that keeps them from sharing ground.
+            private mutable int cellX;
+            private mutable int cellY;
+            // Its own id, which is its index in the city's `standing` list.
+            //
+            // GIVEN AT BIRTH, AND THERE IS NO OTHER WAY TO GET ONE. A herd learns its index from the
+            // world after it is made, and copying that here opened a window with teeth: a building
+            // that has not been taken yet has id -1, so `admit` wrote -1 into the dweller's `home`
+            // -- which is the sentinel for HOMELESS. The chain held them, the agent said it slept
+            // nowhere, and both were written by the one body that exists so they cannot disagree.
+            //
+            // So the city makes its buildings (`City.raise`) and names them in the same breath.
+            // A thing whose identity is part of its meaning should not exist without one.
+            private mutable int mine;
+            // The people this building's dwellers live among, so the sockets can reach them.
+            // Borrowed -- the population outlives every building in the world, and a building that
+            // owned people would be the wrong tree entirely.
+            private mutable Population* folk;
+
+            public constructor Building(Population* folk, int mine, BuildingKind what,
+                                        int x, int y) {
+                this.folk = folk;
+                this.mine = mine;
+                this.what = what;
+                cellX = x;
+                cellY = y;
+                // THE APPLIED FIELD IS THE OWNER'S TO MAKE. The transformer has no constructor and
+                // cannot fill it; the compiler refuses this class until this line exists.
+                beds = new Chain<AgentId>() on heap;
+            }
+
+            public destructor ~Building() returns void {
+                // Everybody out, then the chain itself. Forgetting either is a leak per building
+                // that falls, and buildings fall.
+                empty();
+                delete beds;
+                return;
+            }
+
+            public method kind() returns BuildingKind {
+                return what;
+            }
+            public method x() returns int {
+                return cellX;
+            }
+            public method y() returns int {
+                return cellY;
+            }
+
+            public method id() returns BuildingId {
+                return cast<BuildingId>(mine);
+            }
+
+            // Whether anybody can live here at all. A kiln has a roof value of nought and is not a
+            // house; the catalogue is the only place that distinction is written.
+            public method roofed() returns boolean {
+                return what.roof() > 0;
+            }
+
+            // How many fit, for anyone outside. The socket below is `protected` -- it is the
+            // transformer's own question and not the world's -- so the city asks through this.
+            public method capacity() returns int {
+                return what.roof();
+            }
+
+            // THE SOCKETS. A dweller points back with `whereabouts.home`, and this is the only
+            // place that field is written -- so the two ends cannot disagree unless this line is
+            // wrong.
+            protected procedure bindBack(AgentId who) returns void {
+                Agent* body = folk.at(who);
+                body.whereabouts.home = id();
+                return;
+            }
+
+            protected procedure unbindBack(AgentId who) returns void {
+                Agent* body = folk.at(who);
+                body.whereabouts.home = cast<BuildingId>(Whereabouts.NOWHERE);
+                return;
+            }
+
+            // HOW MANY FIT, ASKED OF THE CATALOGUE. A tent is three, a hut six, a longhouse twelve
+            // -- written once in `Builds` with the rest of the kind's row, so a building that
+            // becomes a better building gains room without a line here changing.
+            protected procedure roof() returns int {
+                return what.roof();
+            }
+        }
+    }
+}

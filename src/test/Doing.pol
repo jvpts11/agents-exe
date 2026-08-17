@@ -17,6 +17,8 @@ import Agents.World.Biome;
 import Agents.World.Waymap;
 import Agents.People.Courting;
 import Agents.Gfx.GlWorld3D;
+import Agents.Nations.Atlas;
+import Agents.People.BuildingId;
 program AgentsExe;
 
 // WHAT SOMEBODY IS DOING, AND WHY THAT AND NOT SOMETHING ELSE.
@@ -66,7 +68,7 @@ public bundle Agents {
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 Agent* one = Doing.someone(folk);
                 one.identity.nature.sociability = cast<ubyte>(0);
-                Doings.tick(folk, g, ways, cast<long>(0));
+                Doings.tick(folk, 0 as Atlas*, g, ways, cast<long>(0));
                 Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Idle));
                 delete ways;
                 delete folk;
@@ -102,7 +104,7 @@ public bundle Agents {
                 Agent* one = Doing.someone(folk);
                 // Half full: not an emergency by any threshold anybody would write.
                 one.body.fed = new Gauge(Body.FULL / 2, 0, Body.FULL);
-                Doings.tick(folk, g, ways, cast<long>(0));
+                Doings.tick(folk, 0 as Atlas*, g, ways, cast<long>(0));
                 Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Gathering));
                 delete ways;
                 delete folk;
@@ -122,7 +124,7 @@ public bundle Agents {
                 one.body.fed = new Gauge(Body.FULL / 2, 0, Body.FULL);
                 one.inventory.carrying = 3;
                 one.inventory.howMany = 5;
-                Doings.tick(folk, g, ways, cast<long>(0));
+                Doings.tick(folk, 0 as Atlas*, g, ways, cast<long>(0));
                 Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Eating));
                 delete ways;
                 delete folk;
@@ -141,7 +143,7 @@ public bundle Agents {
                 Agent* one = Doing.someone(folk);
                 one.body.fed = new Gauge(1, 0, Body.FULL);        // all but starving
                 one.body.energy = new Gauge(1, 0, Body.RESTED);   // and all but spent
-                Doings.tick(folk, g, ways, cast<long>(0));
+                Doings.tick(folk, 0 as Atlas*, g, ways, cast<long>(0));
                 Test.assertEqual(cast<int>(one.activity), cast<int>(Activity.Sleeping));
                 delete ways;
                 delete folk;
@@ -164,17 +166,39 @@ public bundle Agents {
                 Population* folk = new Population(Doing.SIDE, Doing.SIDE) on heap;
                 mutable Grid* g = Doing.pasture();
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
-                Agent* one = Doing.someone(folk);
-                one.body.energy = new Gauge(1, 0, Body.RESTED);
+                // TWO BODIES, AND THE ONLY DIFFERENCE IS A ROOF. Both start spent, both lie down --
+                // one in a bed, one where it stands. `home` is written straight onto the far end of
+                // the seam here because what is being measured is the arithmetic of mending, not
+                // the linking; `Roofs` checks the linking.
+                Agent* housed = Doing.someone(folk);
+                Agent* rough = Doing.someone(folk);
+                housed.whereabouts.home = cast<BuildingId>(0);
+                housed.body.energy = new Gauge(1, 0, Body.RESTED);
+                rough.body.energy = new Gauge(1, 0, Body.RESTED);
                 mutable int slept = 0;
-                while (one.body.energy.value() <= Body.WEARY && slept < Clock.TICKS_A_YEAR) {
-                    Doings.tick(folk, g, ways, cast<long>(slept));
+                mutable int inBed = 0;
+                mutable int outside = 0;
+                while (outside == 0 && slept < Clock.TICKS_A_YEAR) {
+                    Doings.tick(folk, 0 as Atlas*, g, ways, cast<long>(slept));
                     slept = slept + 1;
+                    if (inBed == 0 && housed.body.energy.value() > Body.WEARY) {
+                        inBed = slept;
+                    }
+                    if (rough.body.energy.value() > Body.WEARY) {
+                        outside = slept;
+                    }
                 }
                 // Out of danger from nothing, in well under a quarter of a year. The bar is
                 // deliberately loose: what it is written against is TWO YEARS, not a tick count.
-                Test.assertTrue(one.body.energy.value() > Body.WEARY);
-                Test.assertTrue(slept < Clock.TICKS_A_YEAR / 4);
+                Test.assertTrue(inBed > 0);
+                Test.assertTrue(inBed < Clock.TICKS_A_YEAR / 4);
+                // AND SLEEPING ROUGH IS WORTH HALF A BED -- the whole mechanical difference a house
+                // makes, and the reason a city that has outgrown its houses is visibly tireder.
+                // Checked as a band rather than exactly 2x: the two bodies are charged on the same
+                // `CHOOSE_EVERY` window but not on the same tick within it.
+                Test.assertTrue(outside > inBed);
+                Test.assertTrue(outside >= inBed * 2 - Doings.CHOOSE_EVERY);
+                Test.assertTrue(outside <= inBed * 2 + Doings.CHOOSE_EVERY);
                 delete ways;
                 delete folk;
                 delete g;
@@ -259,17 +283,17 @@ public bundle Agents {
                 Agent* him = Doing.someone(folk);
                 him.identity.sex = Sex.Male;
                 Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
-                Doings.tick(folk, g, ways, cast<long>(0));
+                Doings.tick(folk, 0 as Atlas*, g, ways, cast<long>(0));
                 Test.assertEqual(cast<int>(her.activity), cast<int>(Activity.Mating));
                 Test.assertFalse(Activity.Mating.interruptible());
                 // Starving does not shift her out of it...
                 her.body.fed = new Gauge(0, 0, Body.FULL);
-                Doings.tick(folk, g, ways, cast<long>(Doings.CHOOSE_EVERY));
+                Doings.tick(folk, 0 as Atlas*, g, ways, cast<long>(Doings.CHOOSE_EVERY));
                 Test.assertEqual(cast<int>(her.activity), cast<int>(Activity.Mating));
                 // ...but a child on the way does, because then she no longer wants it.
                 her.body.carrying = 0;
                 her.body.expecting = cast<byte>(1);
-                Doings.tick(folk, g, ways, cast<long>(Doings.CHOOSE_EVERY * 2));
+                Doings.tick(folk, 0 as Atlas*, g, ways, cast<long>(Doings.CHOOSE_EVERY * 2));
                 Test.assertEqual(cast<int>(her.activity), cast<int>(Activity.Gathering));
                 delete ways;
                 delete folk;
@@ -320,7 +344,7 @@ public bundle Agents {
                 Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
                 mutable int spent = 0;
                 while (her.body.carrying == Body.NOT_CARRYING && spent < 20 * Clock.TICKS_A_YEAR) {
-                    Doings.tick(folk, g, ways, cast<long>(spent));
+                    Doings.tick(folk, 0 as Atlas*, g, ways, cast<long>(spent));
                     spent = spent + 1;
                 }
                 Test.assertTrue(her.body.carrying != Body.NOT_CARRYING);

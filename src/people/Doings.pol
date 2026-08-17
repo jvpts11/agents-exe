@@ -14,6 +14,8 @@ import Agents.World.Waymap;
 import Agents.World.Biomes;
 import Agents.World.Biome;
 import Agents.People.Walking;
+import Agents.Nations.Atlas;
+import Agents.Nations.Building;
 program AgentsExe;
 
 // THE ONE PLACE THAT DECIDES WHAT ANYBODY IS DOING.
@@ -73,7 +75,10 @@ public bundle Agents {
             // TAKES THE GROUND, because one of the four activities this class does itself is
             // walking somewhere: a step has to be allowed by the ground like anybody else's, or
             // people talk their way across rivers.
-            public static method tick(Population* folk, Grid* g, Waymap* ways, long at)
+            // `realm` is the country the crowd lives in, and it may be null: the fauna checks and
+            // every world before the first founding run with no Atlas at all, and a person with no
+            // city has nothing to ask it.
+            public static method tick(Population* folk, Atlas* realm, Grid* g, Waymap* ways, long at)
                     returns void {
                 int n = folk.count();
                 if (n < 1) {
@@ -85,9 +90,9 @@ public bundle Agents {
                     int mine = slot;
                     slot = slot + Doings.CHOOSE_EVERY;
                     Agent* one = folk.at(cast<AgentId>(mine));
-                    Doings.choose(folk, one);
+                    Doings.choose(folk, realm, one);
                     Doings.spend(one);
-                    Doings.act(folk, g, ways, one, mine, at);
+                    Doings.act(folk, realm, g, ways, one, mine, at);
                 }
                 return;
             }
@@ -98,9 +103,9 @@ public bundle Agents {
             // mating stops the moment a child is on the way, fighting when there is nobody left to
             // fight. An uninterruptible activity with no way to stop wanting itself is a person
             // frozen forever, which is why the two that carry the flag both have one.
-            private static method choose(Population* folk, Agent* one) returns void {
+            private static method choose(Population* folk, Atlas* realm, Agent* one) returns void {
                 Activity was = one.activity;
-                if (!was.interruptible() && was.urge(folk, one) > 0.0) {
+                if (!was.interruptible() && was.urge(folk, realm, one) > 0.0) {
                     return;
                 }
                 mutable Activity best = Activity.Idle;
@@ -109,7 +114,7 @@ public bundle Agents {
                     if (!what.mayBeEntered(one.standing())) {
                         continue;
                     }
-                    mutable float pull = what.urge(folk, one);
+                    mutable float pull = what.urge(folk, realm, one);
                     if (cast<int>(what) == cast<int>(was)) {
                         pull = pull + Doings.STAYING;
                     }
@@ -135,7 +140,16 @@ public bundle Agents {
                 if (cost > 0) {
                     one.body.energy = one.body.energy - cost;
                 } else if (cost < 0) {
-                    one.body.energy = one.body.energy + (0 - cost);
+                    mutable int given = 0 - cost;
+                    // SLEEPING ROUGH IS WORTH HALF A BED, which is the whole mechanical difference
+                    // a house makes (building layout §3). Not a gate on sleeping: an agent with
+                    // nowhere to sleep still sleeps, where it stands -- it just wakes less rested,
+                    // so a city that has outgrown its houses is visibly tireder than one that has
+                    // not, without anybody being forbidden anything.
+                    if (one.activity == Activity.Sleeping && one.whereabouts.homeless()) {
+                        given = given / 2;
+                    }
+                    one.body.energy = one.body.energy + given;
                 }
                 return;
             }
@@ -147,8 +161,8 @@ public bundle Agents {
             // where the body is -- standing still, or standing still next to somebody -- so they
             // live where the choosing lives rather than in a file of their own that would hold one
             // line each.
-            private static method act(Population* folk, Grid* g, Waymap* ways, Agent* one, int mine,
-                                      long at) returns void {
+            private static method act(Population* folk, Atlas* realm, Grid* g, Waymap* ways,
+                                      Agent* one, int mine, long at) returns void {
                 Activity what = one.activity;
                 // A BODY THAT IS ROOTED IS NOT WALKING. Without this a spent person keeps walking
                 // to wherever hunger sent them and mends at the same time, which reads as
@@ -175,6 +189,15 @@ public bundle Agents {
                     Doings.goToCompany(folk, g, ways, one, mine);
                     return;
                 }
+                // AND SOMEBODY WITH A BED WALKS TO IT. `GoingToSleep` had scored since S2 and had
+                // no doer at all: it outranks sleeping, so whoever chose it stood still spending
+                // energy and never lay down. Nobody noticed because it was gated on having a CITY
+                // and, until the first founding, nobody had one -- so the day a city existed its
+                // fifteen citizens quietly stopped sleeping.
+                if (cast<int>(what) == cast<int>(Activity.GoingToSleep)) {
+                    Doings.goHome(folk, realm, g, ways, one, mine);
+                    return;
+                }
                 // AND TALKING DOES NOT STOP A WALK, which it did, and which quietly starved the
                 // world. Somebody walking to a bush who passed a cousin dropped the journey, talked
                 // for half a second, then wanted food again and asked for a WHOLE NEW ROUTE from
@@ -182,6 +205,29 @@ public bundle Agents {
                 // that took two hundred ticks was cut every thirty and never finished: two million
                 // routes asked, ninety-five per cent of people standing still, and everybody dead
                 // of hunger inside three centuries with food they could always see.
+                return;
+            }
+
+            // A STEP TOWARD THE BED. The Atlas is the only thing that can turn the `BuildingId` an
+            // agent carries into a cell, and it is asked through the one method that answers it --
+            // the same one the urge asked to decide this was worth doing, so the walk and the wanting
+            // cannot disagree about where home is.
+            //
+            // A ROUTE AND NOT A STEP, unlike company: a bed can be sixteen cells away across a
+            // stream, and eight of these people converge on the same doorway from every direction.
+            // That is what the waymap is for.
+            private static method goHome(Population* folk, Atlas* realm, Grid* g, Waymap* ways,
+                                         Agent* one, int mine) returns void {
+                if (realm == null) {
+                    return;
+                }
+                nullable Building* bed = realm.homeOf(one.whereabouts.homeCity,
+                                                      one.whereabouts.home);
+                if (bed == null) {
+                    return;
+                }
+                Walking.stepToward(folk, g, ways, cast<AgentId>(mine),
+                                   cast<float>(bed.x()) + 0.5, cast<float>(bed.y()) + 0.5);
                 return;
             }
 
@@ -369,7 +415,7 @@ public bundle Agents {
             // The layout asks for this by name and gives the reason: after a northward tide and a
             // wall-follower, both invisible because nothing could say WHY, a scoring that cannot be
             // read back is a priority list with extra arithmetic.
-            public static method why(Population* folk, int mine) returns String {
+            public static method why(Population* folk, Atlas* realm, int mine) returns String {
                 Agent* one = folk.at(cast<AgentId>(mine));
                 mutable Activity best = Activity.Idle;
                 mutable Activity next = Activity.Idle;
@@ -379,7 +425,7 @@ public bundle Agents {
                     if (!what.mayBeEntered(one.standing())) {
                         continue;
                     }
-                    float pull = what.urge(folk, one);
+                    float pull = what.urge(folk, realm, one);
                     if (pull > most) {
                         second = most;
                         next = best;

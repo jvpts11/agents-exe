@@ -4,6 +4,7 @@ import System.Errors.Err;
 import Agents.Nations.Atlas;
 import Agents.Nations.City;
 import Agents.Nations.Claiming;
+import Agents.Nations.Housing;
 import Agents.Nations.Refusal;
 import Agents.People.Population;
 import Agents.People.Agent;
@@ -103,7 +104,8 @@ public bundle Agents {
                 }
 
                 Result<City*, Refusal> made =
-                    atlas.found(hallX, hallY, storeX, storeY, dice.range(Atlas.LEAST_ROOM, Atlas.MOST_ROOM));
+                    atlas.found(folk, hallX, hallY, storeX, storeY,
+                                dice.range(Atlas.LEAST_ROOM, Atlas.MOST_ROOM));
                 if (made.isErr()) {
                     return made;
                 }
@@ -113,18 +115,25 @@ public bundle Agents {
                 // is a different kind of thing from its second.
                 Claiming.sow(one, g);
 
-                // EVERYBODY WHO WAS STANDING THERE LIVES THERE, and both halves of the seam are
-                // written at this one call site -- the city takes the id, the agent takes the city.
-                // Split across two passes, they are two facts that drift.
-                CityId which = cast<CityId>(one.nameOf());
+                // EVERYBODY WHO WAS STANDING THERE LIVES THERE. One call, and both halves of the
+                // seam are written inside it -- the city takes the id and the agent takes the city,
+                // in `TEnroller`'s one body.
+                //
+                // THIS USED TO BE TWO LINES AND A COMMENT asking the next caller to remember the
+                // second. It was honoured here and would have been forgotten at the fourth site
+                // (a birth, a death, a colonist leaving), which is the failure the building layout
+                // predicted for exactly this relation. There is no second line to forget now.
                 mutable int slot = filed.firstIn(bestBlock);
                 while (slot >= 0) {
-                    AgentId who = cast<AgentId>(slot);
-                    Agent* body = folk.at(who);
-                    one.admit(who);
-                    body.whereabouts.homeCity = which;
+                    one.enrol(cast<AgentId>(slot));
                     slot = filed.after(slot);
                 }
+
+                // AND THE ROOFS THEY PUT UP ON ARRIVING. A band that settles builds its huts; after
+                // this the count is fixed until something knows how to raise a building (S4.3), so
+                // every child born here is born homeless -- which is the pressure the model's lower
+                // engine of colonisation reads, and a number that was asked for and never computed.
+                Housing.settle(one, folk, g, dice);
                 return made;
             }
 

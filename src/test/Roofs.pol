@@ -1,0 +1,310 @@
+import System.Test.Test;
+import System.Errors.Result;
+import Agents.Nations.Atlas;
+import Agents.Nations.Building;
+import Agents.Nations.City;
+import Agents.Nations.Claiming;
+import Agents.Nations.Housing;
+import Agents.Nations.Refusal;
+import Agents.People.AgentId;
+import Agents.People.Population;
+import Agents.People.Whereabouts;
+import Agents.People.Living;
+import Agents.People.Ending;
+import Agents.Sim.Chronicle;
+import Agents.World.BuildingKind;
+import Agents.World.Grid;
+import Agents.World.Rng;
+import Agents.World.WorldGen;
+import Agents.Checks.WorldShape;
+
+program AgentsExe;
+
+// WHO SLEEPS WHERE, and the thing a window cannot show: that the two ends of it agree.
+//
+// A HALF-LINKED RELATION LOOKS LIKE NOTHING. A building whose chain holds somebody who says they
+// live elsewhere draws exactly like a correct one, counts exactly like one, and only shows up as
+// behaviour nobody can explain -- which is the most expensive kind of defect this project has met,
+// four times. So what these check is not that housing HAPPENS but that it cannot come apart.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Roofs {
+            private static mutable Grid* world;
+            // The real world's first seat, which is what `Settling` chooses in the game -- so the
+            // ground these checks build on is the ground the game builds on.
+            public static fixed int SEAT_X = 712;
+            public static fixed int SEAT_Y = 1160;
+
+            [BeforeAll]
+            public static method buildTheWorld() returns void {
+                WorldGen gen = new WorldGen(42) on stack;
+                gen.setWorld(0, 0.0 - 1.0);
+                Roofs.world = gen.generate(WorldShape.WIDTH(), WorldShape.HEIGHT());
+                return;
+            }
+
+            [AfterAll]
+            public static method dropTheWorld() returns void {
+                delete Roofs.world;
+                return;
+            }
+
+            // A city on the real ground, with `many` people already enrolled in it.
+            private static method town(Atlas* atlas, Population* folk, int many) returns City* {
+                Result<City*, Refusal> made =
+                    atlas.found(folk, Roofs.SEAT_X, Roofs.SEAT_Y, Roofs.SEAT_X + 2, Roofs.SEAT_Y, 8);
+                City* one = made.valueOr(0 as City*);
+                Claiming.sow(one, Roofs.world);
+                for (int i in 0..many) {
+                    one.enrol(folk.bear(cast<float>(Roofs.SEAT_X) + 0.5,
+                                        cast<float>(Roofs.SEAT_Y) + 0.5));
+                }
+                delete made;
+                return one;
+            }
+
+            // THE BAND THAT SETTLES SLEEPS UNDER A ROOF. Not "houses were built" -- that a house
+            // exists proves nothing about whether anybody is in it.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_founding_puts_a_roof_over_the_band_that_settled() returns void {
+                Atlas* atlas = new Atlas(Roofs.world.width() * Roofs.world.height()) on heap;
+                Population* folk = new Population(Roofs.world.width(), Roofs.world.height()) on heap;
+                Rng* dice = new Rng(7) on heap;
+                City* one = Roofs.town(atlas, folk, 15);
+                int raised = Housing.settle(one, folk, Roofs.world, dice);
+                Test.assertTrue(raised > 0);
+                Test.assertEqual(one.homeless(), 0);
+                // And the roofs it raised are enough for the people it has, which is the arithmetic
+                // the placement is driven by.
+                Test.assertTrue(one.roofs() >= one.population());
+                delete dice;
+                delete atlas;
+                delete folk;
+                return;
+            }
+
+            // THE TWO ENDS SAY THE SAME THING. Walked from both directions, because a check that
+            // walks one of them proves only that one of them exists.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_dweller_and_its_house_agree_in_both_directions() returns void {
+                Atlas* atlas = new Atlas(Roofs.world.width() * Roofs.world.height()) on heap;
+                Population* folk = new Population(Roofs.world.width(), Roofs.world.height()) on heap;
+                Rng* dice = new Rng(11) on heap;
+                City* one = Roofs.town(atlas, folk, 15);
+                Housing.settle(one, folk, Roofs.world, dice);
+                // From the buildings: everybody in a chain names that very building.
+                mutable int counted = 0;
+                for (int b in 0..one.buildingCount()) {
+                    Building* house = one.buildingAt(b);
+                    mutable int link = house.firstDweller();
+                    while (link >= 0) {
+                        AgentId who = house.dwellerAt(link);
+                        Test.assertEqual(cast<int>(folk.at(who).whereabouts.home), b);
+                        counted = counted + 1;
+                        link = house.afterDweller(link);
+                    }
+                }
+                // From the people: everybody who names a building is in that building's chain.
+                mutable int link = one.firstResident();
+                mutable int named = 0;
+                while (link >= 0) {
+                    AgentId who = one.residentAt(link);
+                    int at = cast<int>(folk.at(who).whereabouts.home);
+                    if (at != Whereabouts.NOWHERE) {
+                        Test.assertTrue(one.buildingAt(at).shelters(who));
+                        named = named + 1;
+                    }
+                    link = one.afterResident(link);
+                }
+                Test.assertEqual(counted, named);
+                Test.assertEqual(counted, one.population());
+                delete dice;
+                delete atlas;
+                delete folk;
+                return;
+            }
+
+            // A ROOF IS A CEILING, and the number is the catalogue's. `admit` answering false is
+            // what stops a hut holding a village, and it is the answer the placement loop reads.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_roof_refuses_the_person_it_has_no_room_for() returns void {
+                Atlas* atlas = new Atlas(Roofs.world.width() * Roofs.world.height()) on heap;
+                Population* folk = new Population(Roofs.world.width(), Roofs.world.height()) on heap;
+                City* one = Roofs.town(atlas, folk, 0);
+                Building* hut = one.raise(BuildingKind.Hut, Roofs.SEAT_X, Roofs.SEAT_Y);
+                int roof = BuildingKind.Hut.roof();
+                Test.assertTrue(roof > 0);
+                for (int i in 0..roof) {
+                    Test.assertTrue(hut.admit(folk.bear(10.5, 10.5)));
+                }
+                Test.assertEqual(hut.dwellers(), roof);
+                Test.assertEqual(hut.spare(), 0);
+                // One more, and the hut says no rather than growing.
+                AgentId spare = folk.bear(10.5, 10.5);
+                Test.assertFalse(hut.admit(spare));
+                Test.assertEqual(hut.dwellers(), roof);
+                // The refused person's far end was never written either, which is the half-link
+                // this whole shape exists to make impossible.
+                Test.assertTrue(folk.at(spare).whereabouts.homeless());
+                // The hut belongs to the city now, so the city frees it -- which is the ownership
+                // this slice put in one place and is worth a check not writing around.
+                delete atlas;
+                delete folk;
+                return;
+            }
+
+            // AND LETTING SOMEBODY OUT CLEARS BOTH ENDS. A death, or a colonist leaving.
+            [Tag(name: "nations")]
+            [Test]
+            public static method eviction_clears_the_chain_and_the_field_together() returns void {
+                Atlas* atlas = new Atlas(Roofs.world.width() * Roofs.world.height()) on heap;
+                Population* folk = new Population(Roofs.world.width(), Roofs.world.height()) on heap;
+                City* one = Roofs.town(atlas, folk, 0);
+                Building* hut = one.raise(BuildingKind.Hut, Roofs.SEAT_X, Roofs.SEAT_Y);
+                AgentId who = folk.bear(10.5, 10.5);
+                hut.admit(who);
+                Test.assertTrue(hut.shelters(who));
+                Test.assertFalse(folk.at(who).whereabouts.homeless());
+                hut.evict(who);
+                Test.assertFalse(hut.shelters(who));
+                Test.assertTrue(folk.at(who).whereabouts.homeless());
+                // The hut belongs to the city now, so the city frees it -- which is the ownership
+                // this slice put in one place and is worth a check not writing around.
+                delete atlas;
+                delete folk;
+                return;
+            }
+
+            // WHERE THEY STAND. The model gives two rules and both are checkable: buildings sit on
+            // ground the city holds and may be built on, and no two are nearer than two tiles.
+            [Tag(name: "nations")]
+            [Test]
+            public static method houses_stand_apart_on_ground_the_city_holds() returns void {
+                Atlas* atlas = new Atlas(Roofs.world.width() * Roofs.world.height()) on heap;
+                Population* folk = new Population(Roofs.world.width(), Roofs.world.height()) on heap;
+                Rng* dice = new Rng(23) on heap;
+                City* one = Roofs.town(atlas, folk, 30);
+                Housing.settle(one, folk, Roofs.world, dice);
+                Test.assertTrue(one.buildingCount() > 1);
+                for (int a in 0..one.buildingCount()) {
+                    Building* house = one.buildingAt(a);
+                    Test.assertTrue(Roofs.world.mayBuildAt(house.x(), house.y()));
+                    Test.assertTrue(one.owns(Roofs.world.idx(house.x(), house.y())));
+                    // Not on the hall and not on the storehouse.
+                    Test.assertTrue(house.x() != one.x() || house.y() != one.y());
+                    for (int b in 0..one.buildingCount()) {
+                        if (a == b) {
+                            continue;
+                        }
+                        Building* other = one.buildingAt(b);
+                        mutable int dx = house.x() - other.x();
+                        mutable int dy = house.y() - other.y();
+                        if (dx < 0) {
+                            dx = 0 - dx;
+                        }
+                        if (dy < 0) {
+                            dy = 0 - dy;
+                        }
+                        mutable int far = dx;
+                        if (dy > far) {
+                            far = dy;
+                        }
+                        Test.assertTrue(far >= Housing.APART);
+                    }
+                }
+                delete dice;
+                delete atlas;
+                delete folk;
+                return;
+            }
+
+            // A DEATH TAKES THE DEAD OUT OF BOTH, AND LEAVES EVERYBODY ELSE WHERE THEY WERE.
+            //
+            // THIS IS THE ONE THE REAL RUN FOUND. The gate's first green on this slice reported
+            // "3 of 15 sleeping out" in a city with fifteen beds and fifteen people: three settlers
+            // had died, their beds were still held by their numbers, and a swap-remove had since
+            // handed those numbers to strangers who had never seen the city. Nothing crashed,
+            // nothing counted wrong, and every line involved was correct on its own.
+            //
+            // So this kills somebody in the middle of the roll -- which forces the swap -- and then
+            // asks BOTH ends about everybody left.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_death_leaves_the_house_and_the_roll_true() returns void {
+                Atlas* atlas = new Atlas(Roofs.world.width() * Roofs.world.height()) on heap;
+                Population* folk = new Population(Roofs.world.width(), Roofs.world.height()) on heap;
+                Rng* dice = new Rng(3) on heap;
+                City* one = Roofs.town(atlas, folk, 8);
+                Housing.settle(one, folk, Roofs.world, dice);
+                Test.assertEqual(one.homeless(), 0);
+                int before = one.population();
+                // The first citizen dies. The LAST person in the crowd takes their number, which is
+                // the swap this is written against.
+                Chronicle* log = new Chronicle() on heap;
+                Living.bury(folk, atlas, log, cast<long>(0), 0, Ending.OldAge);
+                delete log;
+                Test.assertEqual(one.population(), before - 1);
+                // Nobody is left claiming a bed that is not theirs, and no bed holds a stranger.
+                mutable int link = one.firstResident();
+                mutable int housed = 0;
+                while (link >= 0) {
+                    AgentId who = one.residentAt(link);
+                    int at = cast<int>(folk.at(who).whereabouts.home);
+                    if (at != Whereabouts.NOWHERE) {
+                        Test.assertTrue(one.buildingAt(at).shelters(who));
+                        housed = housed + 1;
+                    }
+                    link = one.afterResident(link);
+                }
+                mutable int inBeds = 0;
+                for (int b in 0..one.buildingCount()) {
+                    Building* house = one.buildingAt(b);
+                    mutable int seat = house.firstDweller();
+                    while (seat >= 0) {
+                        AgentId who = house.dwellerAt(seat);
+                        // Everybody in a bed is a citizen of this city and names this very house.
+                        Test.assertTrue(one.enrolled(who));
+                        Test.assertEqual(cast<int>(folk.at(who).whereabouts.home), b);
+                        inBeds = inBeds + 1;
+                        seat = house.afterDweller(seat);
+                    }
+                }
+                Test.assertEqual(housed, inBeds);
+                Test.assertEqual(one.homeless(), 0);
+                delete dice;
+                delete atlas;
+                delete folk;
+                return;
+            }
+
+            // AND THE CITY OUTGROWS ITS HOUSES, which is the number the model's engine of
+            // colonisation reads and the thing the founding rule was chosen to make real: nothing
+            // raises a second house, so every person enrolled after the founding sleeps out.
+            [Tag(name: "nations")]
+            [Test]
+            public static method people_born_after_the_founding_have_nowhere_to_sleep() returns void {
+                Atlas* atlas = new Atlas(Roofs.world.width() * Roofs.world.height()) on heap;
+                Population* folk = new Population(Roofs.world.width(), Roofs.world.height()) on heap;
+                Rng* dice = new Rng(5) on heap;
+                City* one = Roofs.town(atlas, folk, 15);
+                Housing.settle(one, folk, Roofs.world, dice);
+                Test.assertEqual(one.homeless(), 0);
+                int spare = one.roofs() - one.population();
+                // Enough newcomers to fill whatever room was left over and then some.
+                for (int i in 0..(spare + 4)) {
+                    one.enrol(folk.bear(cast<float>(Roofs.SEAT_X) + 0.5,
+                                        cast<float>(Roofs.SEAT_Y) + 0.5));
+                }
+                Test.assertEqual(one.homeless(), spare + 4);
+                delete dice;
+                delete atlas;
+                delete folk;
+                return;
+            }
+        }
+    }
+}

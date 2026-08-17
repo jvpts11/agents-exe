@@ -6,6 +6,8 @@ import Agents.Nations.Subdivision;
 import Agents.Nations.City;
 import Agents.Nations.Refusal;
 import Agents.People.CityId;
+import Agents.People.AgentId;
+import Agents.People.Population;
 
 program AgentsExe;
 
@@ -21,6 +23,10 @@ public bundle Agents {
             // owner map from it, and a test that asked for the real 3.6 million would be measuring
             // the allocator rather than the tree.
             public static fixed int CELLS = 4096;
+            // The same world as a side, for the crowd the cities enrol from. A city's enrolment
+            // socket writes the agent's `homeCity`, so a check that enrols has to enrol somebody
+            // who exists -- which is the seam being real rather than a pair of numbers agreeing.
+            public static fixed int SIDE = 64;
 
             // THE FIRST CITY MAKES THE COUNTRY, and it makes all three layers at once: a city needs
             // a subdivision to sit in and a subdivision needs a nation. Founding on an empty Atlas
@@ -29,8 +35,9 @@ public bundle Agents {
             [Test]
             public static method the_first_city_makes_the_nation_and_its_subdivision() returns void {
                 Atlas* atlas = new Atlas(Country.CELLS) on heap;
+                Population* folk = new Population(Country.SIDE, Country.SIDE) on heap;
                 Test.assertEqual(atlas.nationCount(), 0);
-                Result<City*, Refusal> made = atlas.found(100, 200, 102, 200, 5);
+                Result<City*, Refusal> made = atlas.found(folk,100, 200, 102, 200, 5);
                 Test.assertTrue(made.isOk());
                 Test.assertEqual(atlas.nationCount(), 1);
                 Nation* who = atlas.nationAt(0);
@@ -45,6 +52,7 @@ public bundle Agents {
                 Test.assertEqual(seat.storeAtX(), 102);
                 delete made;
                 delete atlas;
+                delete folk;
                 return;
             }
 
@@ -54,10 +62,11 @@ public bundle Agents {
             [Test]
             public static method a_full_subdivision_refuses_rather_than_growing_one() returns void {
                 Atlas* atlas = new Atlas(Country.CELLS) on heap;
+                Population* folk = new Population(Country.SIDE, Country.SIDE) on heap;
                 // Room for two, then three cities: the third has nowhere to go.
-                Result<City*, Refusal> a = atlas.found(10, 10, 12, 10, 2);
-                Result<City*, Refusal> b = atlas.found(20, 20, 22, 20, 2);
-                Result<City*, Refusal> c = atlas.found(30, 30, 32, 30, 2);
+                Result<City*, Refusal> a = atlas.found(folk,10, 10, 12, 10, 2);
+                Result<City*, Refusal> b = atlas.found(folk,20, 20, 22, 20, 2);
+                Result<City*, Refusal> c = atlas.found(folk,30, 30, 32, 30, 2);
                 Test.assertTrue(a.isOk());
                 Test.assertTrue(b.isOk());
                 Test.assertTrue(c.isErr());
@@ -68,6 +77,7 @@ public bundle Agents {
                 delete b;
                 delete c;
                 delete atlas;
+                delete folk;
                 return;
             }
 
@@ -77,14 +87,18 @@ public bundle Agents {
             [Test]
             public static method population_is_summed_up_the_tree_and_never_stored() returns void {
                 Atlas* atlas = new Atlas(Country.CELLS) on heap;
-                Result<City*, Refusal> one = atlas.found(10, 10, 12, 10, 4);
-                Result<City*, Refusal> two = atlas.found(40, 40, 42, 40, 4);
+                Population* folk = new Population(Country.SIDE, Country.SIDE) on heap;
+                Result<City*, Refusal> one = atlas.found(folk,10, 10, 12, 10, 4);
+                Result<City*, Refusal> two = atlas.found(folk,40, 40, 42, 40, 4);
                 City* first = one.valueOr(0 as City*);
                 City* second = two.valueOr(0 as City*);
                 Test.assertEqual(atlas.population(), 0);
-                first.admit(cast<AgentId>(1));
-                first.admit(cast<AgentId>(2));
-                second.admit(cast<AgentId>(3));
+                AgentId a1 = folk.bear(10.5, 10.5);
+                AgentId a2 = folk.bear(11.5, 10.5);
+                AgentId a3 = folk.bear(40.5, 40.5);
+                first.enrol(a1);
+                first.enrol(a2);
+                second.enrol(a3);
                 Test.assertEqual(first.population(), 2);
                 Test.assertEqual(second.population(), 1);
                 Nation* who = atlas.nationAt(0);
@@ -92,11 +106,20 @@ public bundle Agents {
                 Test.assertEqual(who.population(), 3);
                 Test.assertEqual(atlas.population(), 3);
                 // And the city knows who lives in it, which is what the seam's id half is for.
-                Test.assertTrue(first.holds(cast<AgentId>(2)));
-                Test.assertTrue(!first.holds(cast<AgentId>(3)));
+                Test.assertTrue(first.enrolled(a2));
+                Test.assertTrue(!first.enrolled(a3));
+                // AND THE FAR END SAYS THE SAME, which is the whole point of the transformer: one
+                // body wrote both, so there is no arrangement of calls that leaves them disagreeing.
+                Test.assertEqual(cast<int>(folk.at(a2).whereabouts.homeCity), first.nameOf());
+                Test.assertEqual(cast<int>(folk.at(a3).whereabouts.homeCity), second.nameOf());
+                // And letting go clears both ends too.
+                first.expel(a1);
+                Test.assertEqual(first.population(), 1);
+                Test.assertTrue(folk.at(a1).whereabouts.cityless());
                 delete one;
                 delete two;
                 delete atlas;
+                delete folk;
                 return;
             }
 
@@ -107,16 +130,18 @@ public bundle Agents {
             [Test]
             public static method generals_are_ceil_of_half_the_cities() returns void {
                 Atlas* atlas = new Atlas(Country.CELLS) on heap;
-                Result<City*, Refusal> a = atlas.found(10, 10, 12, 10, 8);
+                Population* folk = new Population(Country.SIDE, Country.SIDE) on heap;
+                Result<City*, Refusal> a = atlas.found(folk,10, 10, 12, 10, 8);
                 Test.assertEqual(atlas.nationAt(0).generals(), 1);     // 1 city  -> 1
-                Result<City*, Refusal> b = atlas.found(20, 20, 22, 20, 8);
+                Result<City*, Refusal> b = atlas.found(folk,20, 20, 22, 20, 8);
                 Test.assertEqual(atlas.nationAt(0).generals(), 1);     // 2 cities -> 1
-                Result<City*, Refusal> c = atlas.found(30, 30, 32, 30, 8);
+                Result<City*, Refusal> c = atlas.found(folk,30, 30, 32, 30, 8);
                 Test.assertEqual(atlas.nationAt(0).generals(), 2);     // 3 cities -> 2
                 delete a;
                 delete b;
                 delete c;
                 delete atlas;
+                delete folk;
                 return;
             }
 
@@ -126,7 +151,8 @@ public bundle Agents {
             [Test]
             public static method claiming_writes_the_list_and_the_map_together() returns void {
                 Atlas* atlas = new Atlas(Country.CELLS) on heap;
-                Result<City*, Refusal> made = atlas.found(10, 10, 12, 10, 4);
+                Population* folk = new Population(Country.SIDE, Country.SIDE) on heap;
+                Result<City*, Refusal> made = atlas.found(folk,10, 10, 12, 10, 4);
                 City* one = made.valueOr(0 as City*);
                 Test.assertEqual(one.area(), 0);
                 Test.assertEqual(atlas.ownerAt(64), 0 - 1);      // nobody, before anybody claims
@@ -150,6 +176,7 @@ public bundle Agents {
                 Test.assertEqual(atlas.ownerAt(64), 0 - 1);
                 delete made;
                 delete atlas;
+                delete folk;
                 return;
             }
 
@@ -160,8 +187,9 @@ public bundle Agents {
             [Test]
             public static method a_cell_has_one_owner_and_the_second_claim_is_refused() returns void {
                 Atlas* atlas = new Atlas(Country.CELLS) on heap;
-                Result<City*, Refusal> one = atlas.found(10, 10, 12, 10, 4);
-                Result<City*, Refusal> two = atlas.found(40, 40, 42, 40, 4);
+                Population* folk = new Population(Country.SIDE, Country.SIDE) on heap;
+                Result<City*, Refusal> one = atlas.found(folk,10, 10, 12, 10, 4);
+                Result<City*, Refusal> two = atlas.found(folk,40, 40, 42, 40, 4);
                 City* first = one.valueOr(0 as City*);
                 City* second = two.valueOr(0 as City*);
                 Test.assertTrue(first.claim(500));
@@ -177,6 +205,7 @@ public bundle Agents {
                 delete one;
                 delete two;
                 delete atlas;
+                delete folk;
                 return;
             }
 
@@ -188,6 +217,7 @@ public bundle Agents {
             [Test]
             public static method a_world_with_no_city_says_which_refusal_it_was() returns void {
                 Atlas* atlas = new Atlas(Country.CELLS) on heap;
+                Population* folk = new Population(Country.SIDE, Country.SIDE) on heap;
                 Test.assertEqual(atlas.refusedFor(Refusal.NobodyLeft), 0);
                 atlas.noteRefusal(Refusal.NobodyLeft);
                 atlas.noteRefusal(Refusal.NobodyLeft);
@@ -200,10 +230,11 @@ public bundle Agents {
                 Test.assertTrue(said.contains("no reachable ground x1"));
                 // And once there IS a country, the sentence is empty: it answers "why is there no
                 // city", not "what went wrong on the way".
-                Result<City*, Refusal> made = atlas.found(5, 5, 7, 5, 4);
+                Result<City*, Refusal> made = atlas.found(folk,5, 5, 7, 5, 4);
                 Test.assertEqual(atlas.whyNoCity().length(), 0);
                 delete made;
                 delete atlas;
+                delete folk;
                 return;
             }
         }

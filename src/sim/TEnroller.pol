@@ -1,0 +1,102 @@
+import Agents.Sim.Chain;
+import Agents.People.AgentId;
+program AgentsExe;
+
+// WHAT A CITY GAINS BY HAVING RESIDENTS: the roll, and the code that keeps both ends of it true.
+//
+// The second of the five two-sided links (building layout §3), and the first of them to already
+// exist in this game as a hand-written pair. The city held a chain and a comment said the rest:
+//
+//     // Somebody lives here now. The agent's own `homeCity` is written by the caller.
+//     public method admit(AgentId who) returns void { residents.add(who); }
+//
+// That is the failure the layout predicted, written down and shipped: the obligation to write the
+// far side lived in prose, and prose is not checked. One call site honoured it. A second one --
+// birth, death, a colonist leaving, a city falling -- would have been written by somebody reading
+// `admit` and not the comment above it, and the city would then hold a resident who says it lives
+// somewhere else. Half-linked reads as neither a crash nor a wrong number: it reads as behaviour
+// nobody can explain.
+//
+// NAMED FOR WHAT THE OWNER DOES, per the layout's own convention: the city enrols, so `TEnroller`.
+// `TResident` would be the wrong way round -- the resident is the member, and the type applying
+// this is the city.
+//
+// `explicit`, so this always appears on the class line: it puts a field and a release obligation
+// inside whoever applies it, and a grep for `applies TEnroller` finds every owner there will be.
+public bundle Agents {
+    public namespace Sim {
+
+        public explicit transformer TEnroller {
+            // THE APPLIED FIELD. Each city gets its own roll; the transformer is a mould for state
+            // and never holds any. The owner makes it and the owner frees it -- the compiler says
+            // so at the constructor and at the destructor, by name.
+            protected mutable Chain<AgentId>* roll;
+
+            // Take somebody in, writing BOTH ends. This is the whole point: there is one body, and
+            // no call site anywhere can do half of it.
+            public procedure enrol(AgentId who) returns void {
+                roll.add(who);
+                bindBack(who);
+                return;
+            }
+
+            // And let somebody go, clearing both. A colonist who leaves, a person who dies.
+            public procedure expel(AgentId who) returns void {
+                roll.remove(who);
+                unbindBack(who);
+                return;
+            }
+
+            public procedure enrolled(AgentId who) returns boolean {
+                return roll.has(who);
+            }
+
+            // How many people belong here. A walk of the chain rather than a counter beside it:
+            // two facts about one thing are two facts that can disagree.
+            public procedure population() returns int {
+                return roll.size();
+            }
+
+            // Walk the roll without handing out the links.
+            public procedure firstResident() returns int {
+                return roll.head();
+            }
+
+            public procedure afterResident(int link) returns int {
+                return roll.next(link);
+            }
+
+            public procedure residentAt(int link) returns AgentId {
+                return roll.at(link);
+            }
+
+            // THE SAME PERSON, UNDER A NEW NUMBER. A death is a swap-remove, so the last person in
+            // the crowd moves into the grave's slot and every chain that held their old number is
+            // now naming somebody else -- or nobody.
+            //
+            // NO SOCKET HERE, AND THAT IS THE POINT: this person did not move city. Their own
+            // `homeCity` is already right and rewriting it through `bindBack` would reach for an id
+            // that no longer exists. What changed is the roll's idea of their number, and nothing
+            // else, so this is the one operation on the relation that touches exactly one end.
+            public procedure renumber(AgentId from, AgentId to) returns void {
+                if (roll.remove(from)) {
+                    roll.add(to);
+                }
+                return;
+            }
+
+            // Every link back to the shared pool. A city that dies calls this; forgetting it is a
+            // leak that grows with every city that falls.
+            public procedure dissolve() returns void {
+                roll.clear();
+                return;
+            }
+
+            // THE SOCKETS: how the member points back, which is the one line that differs between
+            // owners and the exact line that was being written elsewhere. A missing one is an error
+            // on the `applies` clause naming what is absent.
+            protected procedure bindBack(AgentId who) returns void;
+            protected procedure unbindBack(AgentId who) returns void;
+        }
+    }
+}
