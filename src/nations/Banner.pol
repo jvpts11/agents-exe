@@ -1,0 +1,93 @@
+import Agents.Gfx.Rgb;
+program AgentsExe;
+
+// A NATION'S COLOUR, AND WHERE IT COMES FROM.
+//
+// The art already says which PARTS take it. Every agent body and every building's colourable
+// surfaces are authored pure white (255, 255, 255) with their fixed details in their own colours --
+// the agent's blue visor, a hut's thatch, a hall's timber. So "the colourable parts" is not a
+// judgement the renderer makes: it is a fact in the mesh, and this class only says what colour to
+// put there.
+//
+// DERIVED FROM THE NUMBER, NOT PICKED FROM A LIST. A palette of twelve is a world that repeats on
+// its thirteenth nation, and nothing in this game says how many there will be. So the hue walks the
+// circle by the golden angle -- 137.5 degrees, the same step a sunflower uses -- which is the one
+// sequence that keeps every prefix of itself far apart: two nations founded in a row are on
+// opposite sides of the wheel, and so are the tenth and the eleventh.
+//
+// HELD AT ONE SATURATION AND ONE VALUE, both high. A nation whose colour is nearly the grass is a
+// nation nobody can find on the map, and the whole point of the tint is telling two of them apart
+// at a glance across a continent.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Banner {
+            // The golden angle, over a full turn: 0.381966 of the circle.
+            public static fixed double STEP = 0.3819660112501051;
+            // Bright and strong. Not full saturation: a pure hue against the cel-shaded terrain
+            // reads as a UI element sitting on top of the world rather than as paint on a thing in
+            // it, which is the difference between a banner and a highlight.
+            public static fixed double SAT = 0.72;
+            public static fixed double VAL = 0.92;
+
+            // The colour of the nation with that number.
+            public static method of(int nation) returns Rgb {
+                mutable double hue = cast<double>(nation) * Banner.STEP;
+                hue = hue - cast<double>(cast<int>(hue));      // the fractional turn
+                return Banner.fromHue(hue);
+            }
+
+            // HSV to RGB at fixed saturation and value, written out for the one case this needs
+            // rather than pulled in as a general conversion: six branches, no table, no library.
+            private static method fromHue(double hue) returns Rgb {
+                double h = hue * 6.0;
+                int sector = cast<int>(h);
+                double f = h - cast<double>(sector);
+                double p = Banner.VAL * (1.0 - Banner.SAT);
+                double q = Banner.VAL * (1.0 - Banner.SAT * f);
+                double t = Banner.VAL * (1.0 - Banner.SAT * (1.0 - f));
+                if (sector == 0) {
+                    return new Rgb(Banner.VAL, t, p);
+                }
+                if (sector == 1) {
+                    return new Rgb(q, Banner.VAL, p);
+                }
+                if (sector == 2) {
+                    return new Rgb(p, Banner.VAL, t);
+                }
+                if (sector == 3) {
+                    return new Rgb(p, q, Banner.VAL);
+                }
+                if (sector == 4) {
+                    return new Rgb(t, p, Banner.VAL);
+                }
+                return new Rgb(Banner.VAL, p, q);
+            }
+
+            // A CITY'S OWN COLOUR: its nation's hue, at its own lightness.
+            //
+            // The model asks for "city borders, one colour per city" and, separately, for a nation
+            // border around the union of them. Two unrelated colours would answer the first and
+            // destroy the second -- a country's cities have to read as kin. So the hue is the
+            // nation's, unchanged, and only the lightness steps: near-white for the capital, down
+            // through its daughters, wrapping before it reaches anything that could be mistaken for
+            // another nation's hue.
+            public static fixed double CITY_STEP = 0.14;
+            public static fixed int CITY_SHADES = 4;
+
+            public static method ofCity(int nation, int city) returns Rgb {
+                Rgb base = Banner.of(nation);
+                int rung = city % Banner.CITY_SHADES;
+                double lift = 1.0 - cast<double>(rung) * Banner.CITY_STEP;
+                return base * lift;
+            }
+
+            // WHETHER A PAINTED TRIANGLE IS ONE OF THE COLOURABLE PARTS. White is the art's own way
+            // of saying "this belongs to whoever owns me" -- see the note at the top. Asked of the
+            // bytes as they came out of the mesh, so nothing has to agree with anything.
+            public static method tintable(int r, int g, int b) returns boolean {
+                return r == 255 && g == 255 && b == 255;
+            }
+        }
+    }
+}

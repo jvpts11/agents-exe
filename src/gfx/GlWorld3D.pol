@@ -23,6 +23,9 @@ import Agents.Nations.Nation;
 import Agents.Nations.Subdivision;
 import Agents.Nations.City;
 import Agents.Nations.Building;
+import Agents.Nations.Banner;
+import Agents.People.CityId;
+import Agents.People.Whereabouts;
 import System.Collections.Iterator;
 import System.Memory.Allocator;
 import System.Memory.Raw;
@@ -1270,6 +1273,46 @@ public bundle Agents {
             private method emitTurned(MeshAtlas* a, address buf, int w, int pord, float wx,
                                       float wy, float wz, float scale, float shade,
                                       Turn turn) returns int {
+                // White is the identity of the tint below, so "no owner" needs no second path.
+                return emitTinted(a, buf, w, pord, wx, wy, wz, scale, shade, turn,
+                                  new Rgb(1.0, 1.0, 1.0));
+            }
+
+            // WHOSE COLOURS A CITIZEN OF THAT CITY WEARS. White for nobody's, which is the identity
+            // of the tint and the honest answer for the great majority of this world's people.
+            //
+            // The city's number is walked to its nation rather than stored beside it: a city knows
+            // its own name and the tree knows who owns it, and a colour cached on the agent would be
+            // a third place for the same fact -- the one this slice spent its afternoon removing.
+            private method bannerOf(CityId which) returns Rgb {
+                if (realm == null || cast<int>(which) == Whereabouts.NOWHERE) {
+                    return new Rgb(1.0, 1.0, 1.0);
+                }
+                Atlas* atlas = cast<Atlas*>(realm);
+                for (int n in 0..atlas.nationCount()) {
+                    Nation* who = atlas.nationAt(n);
+                    for (int s in 0..who.subdivisionCount()) {
+                        Subdivision* part = who.subdivisionAt(s);
+                        for (int c in 0..part.cityCount()) {
+                            if (part.cityAt(c).nameOf() == cast<int>(which)) {
+                                return Banner.of(who.nameOf());
+                            }
+                        }
+                    }
+                }
+                return new Rgb(1.0, 1.0, 1.0);
+            }
+
+            // THE SAME MESH, IN SOMEBODY'S COLOURS.
+            //
+            // WHICH PARTS TAKE THE COLOUR IS A FACT IN THE ART, not a judgement here: every agent
+            // body and every building's colourable surfaces are authored pure white, with their
+            // fixed details in their own paint -- the agent's blue visor, a hut's thatch, a hall's
+            // timber, a storehouse which has no white at all and therefore never wears a banner.
+            // `Banner.tintable` asks the mesh's own bytes, so nothing has to be kept in agreement.
+            private method emitTinted(MeshAtlas* a, address buf, int w, int pord, float wx,
+                                      float wy, float wz, float scale, float shade,
+                                      Turn turn, Rgb banner) returns int {
                 int t0 = a.triStart[pord];
                 int tn = a.triCount[pord];
                 mutable int p = w;
@@ -1277,7 +1320,10 @@ public bundle Agents {
                 while (t < tn) {
                     int tri = t0 + t;
                     int vb = tri * 3;
-                    Rgb c = a.colourOf(tri) * shade;
+                    mutable Rgb c = a.colourOf(tri) * shade;
+                    if (Banner.tintable(a.cr[tri], a.cg[tri], a.cb[tri])) {
+                        c = banner * cast<double>(shade);
+                    }
                     float r = cast<float>(c.r);
                     float g = cast<float>(c.g);
                     float b = cast<float>(c.b);
@@ -1728,7 +1774,11 @@ public bundle Agents {
                 }
                 // Count first, then emit -- the same rule the other two bakes follow, and for the
                 // same reason: a buffer sized by a guess either wastes or overruns.
-                int perCity = cityArt.triCount[hallOrd] + cityArt.triCount[storeOrd];
+                // TWICE, because every building now throws a shadow: the same silhouette laid on the
+                // ground. Counted here rather than remembered, since the count and the emit
+                // disagreeing is this renderer's named recurring defect and the reason `upload`
+                // carries a contract at all.
+                int perCity = (cityArt.triCount[hallOrd] + cityArt.triCount[storeOrd]) * 2;
                 int many = atlas.cityCount();
                 if (many == 0 || perCity == 0) {
                     town.upload(cast<address>(0), 0, 0);
@@ -1753,7 +1803,7 @@ public bundle Agents {
                             for (int b in 0..here.buildingCount()) {
                                 int ord = cityArt.ordOf(here.buildingAt(b).kind().mesh());
                                 if (ord >= 0) {
-                                    roofTris = roofTris + cityArt.triCount[ord];
+                                    roofTris = roofTris + cityArt.triCount[ord] * 2;
                                 }
                             }
                         }
@@ -1768,11 +1818,16 @@ public bundle Agents {
                         Subdivision* part = who.subdivisionAt(s);
                         for (int c in 0..part.cityCount()) {
                             City* here = part.cityAt(c);
-                            wv = emitBuilding(cityArt, buf, wv, hallOrd, here.x(), here.y());
+                            // THE NATION'S COLOUR, ONCE PER CITY. The model asks for it in as many
+                            // words -- "buildings also have in their colorable parts, the colour of
+                            // it's nation" -- and the art was authored for it: the white surfaces
+                            // take this and the timber, thatch and stone keep their own.
+                            Rgb flag = Banner.of(who.nameOf());
+                            wv = emitBuilding(cityArt, buf, wv, hallOrd, here.x(), here.y(), flag);
                             drawnBuildings = drawnBuildings + 1;
                             if (here.storeAtX() != here.x() || here.storeAtY() != here.y()) {
                                 wv = emitBuilding(cityArt, buf, wv, storeOrd,
-                                                  here.storeAtX(), here.storeAtY());
+                                                  here.storeAtX(), here.storeAtY(), flag);
                                 drawnBuildings = drawnBuildings + 1;
                             }
                             // AND THE ROOFS, each drawn as the kind it is. A settlement of huts
@@ -1783,12 +1838,17 @@ public bundle Agents {
                                 Building* house = here.buildingAt(b);
                                 int ord = cityArt.ordOf(house.kind().mesh());
                                 if (ord >= 0) {
-                                    wv = emitBuilding(cityArt, buf, wv, ord, house.x(), house.y());
+                                    wv = emitBuilding(cityArt, buf, wv, ord, house.x(), house.y(),
+                                                      flag);
                                     drawnBuildings = drawnBuildings + 1;
                                 }
                             }
+                            // AND ITS BORDER, IN ITS OWN COLOUR. One per city, as the model asks,
+                            // and each city's is its nation's hue at its own lightness -- so two
+                            // cities of one country read as kin at a glance and two countries never
+                            // do, which is the whole job of the line.
                             drawnBorder = drawnBorder + borderEdgesOf(here);
-                            wv = emitBorder(buf, wv, here);
+                            wv = emitBorder(buf, wv, here, Banner.ofCity(who.nameOf(), c));
                         }
                     }
                 }
@@ -1826,9 +1886,9 @@ public bundle Agents {
             // stops. Drawn a little above the surface so it reads as a line painted on the world
             // rather than as a fence standing in it -- and at the height the ground is actually
             // drawn at, by the same expression everything else here stands on.
-            private method emitBorder(address buf, int w, City* here) returns int {
+            private method emitBorder(address buf, int w, City* here, Rgb ink) returns int {
                 mutable int p = w;
-                float thick = 0.34;                  // in world units; a cell is two
+                float thick = borderThickness();
                 int held = here.area();
                 for (int i in 0..held) {
                     int cell = here.cellAt(i);
@@ -1846,28 +1906,58 @@ public bundle Agents {
                     float y0 = wy - 1.0;
                     float y1 = wy + 1.0;
                     if (!heldAt(here, x + 1, y)) {
-                        p = emitStrip(buf, p, x1 - thick, y0, x1, y1, z);
+                        p = emitStrip(buf, p, x1 - thick, y0, x1, y1, z, ink);
                     }
                     if (!heldAt(here, x - 1, y)) {
-                        p = emitStrip(buf, p, x0, y0, x0 + thick, y1, z);
+                        p = emitStrip(buf, p, x0, y0, x0 + thick, y1, z, ink);
                     }
                     if (!heldAt(here, x, y + 1)) {
-                        p = emitStrip(buf, p, x0, y1 - thick, x1, y1, z);
+                        p = emitStrip(buf, p, x0, y1 - thick, x1, y1, z, ink);
                     }
                     if (!heldAt(here, x, y - 1)) {
-                        p = emitStrip(buf, p, x0, y0, x1, y0 + thick, z);
+                        p = emitStrip(buf, p, x0, y0, x1, y0 + thick, z, ink);
                     }
                 }
                 return p;
             }
 
-            // One flat strip of border, lying on the ground. The colour is the brand's amber, which
-            // is the one colour in this world nothing natural is: a border has to read as drawn BY
-            // somebody rather than as something growing there.
+            // One flat strip of border, lying on the ground, in whoever's colour it belongs to.
+            //
+            // IT USED TO BE ONE FIXED AMBER for every border in the world, chosen because nothing
+            // natural in a green-and-blue world is amber. That reasoning was right about the
+            // COLOUR and wrong about the number of them: the model asks for "city borders, one
+            // colour per city" and "nation borders, the outline of the union of its cities", and a
+            // single colour cannot say which of two nations a line belongs to -- which is the one
+            // thing a border on a map is for.
             private method emitStrip(address buf, int w, float x0, float y0, float x1, float y1,
-                                     float z) returns int {
+                                     float z, Rgb ink) returns int {
                 return emitQuad(buf, w, x0, y0, z, x1, y0, z, x1, y1, z, x0, y1, z,
-                                0.0, 0.0, 1.0, 0.918, 0.706, 0.392);
+                                0.0, 0.0, 1.0, cast<float>(ink.r), cast<float>(ink.g),
+                                cast<float>(ink.b));
+            }
+
+            // HOW WIDE A BORDER HAS TO BE TO STILL BE A BORDER, which is a question about the
+            // CAMERA and not about the land.
+            //
+            // A third of a world unit is a sixth of a cell: right when the eye is among the houses,
+            // and invisible the moment the view pulls back -- at the whole map a cell is half a
+            // pixel, so the line was a fraction of one and the territory a player had just watched
+            // being claimed simply was not there. A border that only exists close up is a border
+            // for somebody who already knows where to look.
+            //
+            // So it grows with the camera's distance, and is CAPPED at a whole cell: at that width
+            // the four strips meet and the claim reads as a solid patch of the nation's colour,
+            // which is what a map view wants and is exactly as far as the paint may spread without
+            // covering ground the city does not hold.
+            private method borderThickness() returns float {
+                float far = curDist() * 0.006;
+                if (far < 0.34) {
+                    return 0.34;
+                }
+                if (far > 2.0) {
+                    return 2.0;
+                }
+                return far;
             }
 
             // One building, standing on the ground that is actually drawn. The height expression is
@@ -1875,13 +1965,28 @@ public bundle Agents {
             // ends up floating over a hill or sunk into it, and this is a house rather than a deer,
             // so it would be the first thing anybody sees.
             private method emitBuilding(MeshAtlas* art, address buf, int w, int ord,
-                                        int cx, int cy) returns int {
+                                        int cx, int cy, Rgb banner) returns int {
                 int cell = grid.biomeAt(cx, cy);
                 int lvl = stackLvl(cell, cx, cy);
                 float zOff = cast<float>(lvl) * stepH + terrainLook[cell].lift + 0.8;
                 float topZ = terrainLook[cell].top + zOff;
-                return emitMesh(art, buf, w, ord, cast<float>(cx) * 2.0, cast<float>(cy) * 2.0,
-                                topZ, 1.0, shadeAt(cx, cy, 1, lvl));
+                // ITS SHADOW FIRST, then the building on top of it. Every person and every animal in
+                // this world has thrown one since the crowd was drawn; the buildings never did, and
+                // a hall with no shadow sits ON the map rather than IN the world -- which is exactly
+                // how the first city read from the air.
+                //
+                // The same silhouette, laid on the ground and offset by the light, which is what
+                // `emitMeshShadowTurned` is: the shape is the building's own, so nothing has to be
+                // kept in agreement with the model it belongs to.
+                Rgb under = groundUnder(cell, shadeAt(cx, cy, 1, lvl));
+                mutable int p = emitMeshShadowTurned(art, buf, w, ord,
+                                                     cast<float>(cx) * 2.0 - zOff * 0.368,
+                                                     cast<float>(cy) * 2.0 - zOff * 0.579,
+                                                     terrainLook[cell].top + 0.012, 1.0,
+                                                     cast<float>(under.r), cast<float>(under.g),
+                                                     cast<float>(under.b), true, Turn.none());
+                return emitTinted(art, buf, p, ord, cast<float>(cx) * 2.0, cast<float>(cy) * 2.0,
+                                  topZ, 1.0, shadeAt(cx, cy, 1, lvl), Turn.none(), banner);
             }
 
             // WHICH CELL A SCREEN PIXEL IS OVER -- the answer a person wants when they point at
@@ -2009,7 +2114,26 @@ public bundle Agents {
                                 py >= cast<float>(y0) && py < cast<float>(y1)) {
                                 int ord = folkArt.ordOf(GlWorld3D.bodyFor(who.standing()));
                                 if (ord >= 0) {
-                                    Turn turn = folkTracks.follow(slot, px, py);
+                                    // WHICH WAY THIS PERSON IS POINTED IS THE PERSON'S OWN ANSWER.
+                                    //
+                                    // It used to be the renderer's: `Tracks.follow` measured how far
+                                    // the body had moved since the last FRAME and pointed it along
+                                    // that. Nothing was interpolated -- the position drawn is the
+                                    // true one and the direction was snapped, not blended -- but it
+                                    // was a SECOND answer to a question `Walking` already answers,
+                                    // and it was the worse of the two: a frame's displacement is a
+                                    // frame behind the decision, it is thrown away entirely below
+                                    // `Tracks.STILL`, and at low gears a step is small enough to
+                                    // land there. So somebody who turned kept facing the old way
+                                    // until they had walked far enough to prove it, which is what
+                                    // a person watching the window reads as a lazy, smoothed turn.
+                                    //
+                                    // The animals still use `Tracks`, and rightly: a `Beast` is
+                                    // twenty bytes of value and carries no facing, so for them the
+                                    // path travelled is the only answer there is.
+                                    vec2 look = who.whereabouts.facing;
+                                    folkTracks.followFacing(slot, px, py, look.x, look.y);
+                                    Turn turn = Turn.facing(look.x, look.y);
                                     // HOW BIG THIS ONE IS. Read once and used by both the body and
                                     // its shadow, so a child cannot end up under an adult's.
                                     float big = GlWorld3D.PERSON_SCALE
@@ -2071,8 +2195,19 @@ public bundle Agents {
                                                                   cast<float>(under.b), true, turn);
                                     }
                                     float topZ = groundZ + up;
-                                    wv = emitTurned(folkArt, buf, wv, ord, px * 2.0, py * 2.0, topZ,
-                                                    big, shadeAt(gx, gy, 1, lvl), turn);
+                                    // IN THEIR NATION'S COLOURS. The body is authored white for
+                                    // exactly this, and until now every person in the world was
+                                    // drawn the same blank white -- so a citizen and a stranger,
+                                    // two nations' armies, and a city's own people among a crowd
+                                    // were all one colour, which is the question the tint exists to
+                                    // answer at a glance.
+                                    //
+                                    // Belonging to no city is white, and that is the truthful
+                                    // answer rather than a fallback: most of this world's people
+                                    // are citizens of nothing, and they should look like it.
+                                    wv = emitTinted(folkArt, buf, wv, ord, px * 2.0, py * 2.0, topZ,
+                                                    big, shadeAt(gx, gy, 1, lvl), turn,
+                                                    bannerOf(who.whereabouts.homeCity));
                                     // AND WHAT IS IN THEIR HANDS. Above the body and a little
                                     // smaller: a carried thing is a thing a person is holding, and
                                     // the one that reads on screen is the berry basket coming home.

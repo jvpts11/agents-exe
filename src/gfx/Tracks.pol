@@ -85,8 +85,46 @@ public bundle Agents {
                 return;
             }
 
-            // WHERE THE EYE SHOULD SEE THIS SLOT, and which way it is pointed. The one method.
+            // A BODY THAT BRINGS ITS OWN FACING, so only the walk is measured here.
+            //
+            // People carry `whereabouts.facing`, written by `Walking` at the step that decided it,
+            // and that is what gets drawn. What is still worth following is the POSITION: whether a
+            // body glided, snapped or stood is the question this class was built to answer, and it
+            // is about movement rather than about pointing. The count of "pointed somewhere of its
+            // own" is then taken from the direction actually used, so the report describes what the
+            // eye saw and not a second facing nobody drew.
+            public method followFacing(int slot, float px, float py, float fx, float fy)
+                    returns void {
+                walk(slot, px, py);
+                if (fx != 0.0 || fy != 0.0) {
+                    turned = turned + 1;
+                }
+                return;
+            }
+
+            // WHERE THE EYE SHOULD SEE THIS SLOT, and which way it is pointed -- for a body with no
+            // facing of its own. An animal is twenty bytes of value with nowhere to keep one, so
+            // the way it came is the only answer there is.
             public method follow(int slot, float px, float py) returns Turn {
+                walk(slot, px, py);
+                // A cosine and a sine is what a `Turn` is, and a unit direction already is one, so
+                // nothing here calls a trigonometric function. A body that has never moved keeps the
+                // zero it was born with, which reads as no rotation at all.
+                if (faceX[slot] == 0.0 && faceY[slot] == 0.0) {
+                    return Turn.none();
+                }
+                // COUNTED, because "they all face south" is a thing a person had to notice by
+                // looking, twice, and a number that says how many are pointed somewhere of their own
+                // is a thing a gate can notice instead.
+                turned = turned + 1;
+                return Turn.facing(faceX[slot], faceY[slot]);
+            }
+
+            // THE WALK ITSELF, which both callers need and neither should copy: where this slot was
+            // last frame, how far it came, and which of the three things that was. The derived
+            // facing is kept here too -- an animal reads it back, a person overwrites it with its
+            // own, and neither pays for the other.
+            private method walk(int slot, float px, float py) returns void {
                 if (slot >= room) {
                     growTo(slot + 1);
                 }
@@ -106,17 +144,7 @@ public bundle Agents {
                 } else {
                     stood = stood + cast<long>(1);
                 }
-                // A cosine and a sine is what a `Turn` is, and a unit direction already is one, so
-                // nothing here calls a trigonometric function. A body that has never moved keeps the
-                // zero it was born with, which reads as no rotation at all.
-                if (faceX[slot] == 0.0 && faceY[slot] == 0.0) {
-                    return Turn.none();
-                }
-                // COUNTED, because "they all face south" is a thing a person had to notice by
-                // looking, twice, and a number that says how many are pointed somewhere of their own
-                // is a thing a gate can notice instead.
-                turned = turned + 1;
-                return Turn.facing(faceX[slot], faceY[slot]);
+                return;
             }
 
             private method growTo(int want) returns void {
