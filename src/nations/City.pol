@@ -1,0 +1,96 @@
+import System.Collections.ArrayList;
+import Agents.People.AgentId;
+import Agents.Sim.Chain;
+
+program AgentsExe;
+
+// A CITY: THE ONLY THING IN THE GAME THAT HOLDS GROUND.
+//
+// A nation and a subdivision own nothing. The nation model is explicit about it -- the territory of
+// a subdivision is the sum of its cities' and the territory of a nation is the sum of its
+// subdivisions', so both are computed and neither is stored. That is what stops the churn the old
+// model had, where three layers each kept their own idea of who owned a tile and drifted apart.
+//
+// WHAT IS HERE, AND WHAT IS NOT. The centre, the two buildings a founding places, and the people who
+// live here. Not the territory: the claim, how it grows and how it rots is S3.2, and a radius stored
+// today would be a number nothing reads. Not the storehouse, not the era, not the arrived
+// technologies -- each arrives with the item that gives it a reader.
+//
+// THE RESIDENTS ARE IDS AND NOT POINTERS, and that is the seam rule rather than a preference: agents
+// die and their slot is reused, so a pointer held by a city would one day name somebody else's
+// person. The chain lives in the same pool every other chain in the game does.
+public bundle Agents {
+    public namespace Nations {
+
+        public class City {
+            // Its number, which is its name until there is a table of names to draw one from. An int
+            // because the model says an int, and because a city that is called "3" reads honestly as
+            // a city nobody has named yet.
+            private mutable int name;
+            // The founding cell. Growth starts here and the town hall stands on it.
+            private mutable int centreX;
+            private mutable int centreY;
+            // Where the storage building went. The model's founding places two things: the town hall
+            // on the centre, and beside it the storehouse of the nation's era, "this way, a city
+            // always have a way to storage things".
+            //
+            // TWO CELLS AND NOT TWO `Building`s, deliberately. The `Building` class belongs to the
+            // building layout and arrives with the item that raises one (S4.3); these two are placed
+            // by founding and drawn from the moment they exist, and when `standing` arrives they
+            // become its first two entries. A `Building` invented here would be a class with one
+            // field and no reader.
+            private mutable int storeX;
+            private mutable int storeY;
+            // Who lives here. Ids, in the shared pool -- see the note above.
+            private mutable Chain<AgentId>* residents;
+
+            public constructor City(int name, int centreX, int centreY, int storeX, int storeY) {
+                this.name = name;
+                this.centreX = centreX;
+                this.centreY = centreY;
+                this.storeX = storeX;
+                this.storeY = storeY;
+                this.residents = new Chain<AgentId>() on heap;
+            }
+
+            public method nameOf() returns int {
+                return name;
+            }
+            public method x() returns int {
+                return centreX;
+            }
+            public method y() returns int {
+                return centreY;
+            }
+            public method storeAtX() returns int {
+                return storeX;
+            }
+            public method storeAtY() returns int {
+                return storeY;
+            }
+
+            // Somebody lives here now. The agent's own `homeCity` is written by the caller: the two
+            // halves of the seam are set together, at one call site, which is the rule the kinship
+            // ties are kept by and for the same reason.
+            public method admit(AgentId who) returns void {
+                residents.add(who);
+                return;
+            }
+
+            public method holds(AgentId who) returns boolean {
+                return residents.has(who);
+            }
+
+            // How many people this city has. A walk of the chain, and the reason it is not a counter
+            // beside it: two facts about one thing are two facts that can disagree.
+            public method population() returns int {
+                return residents.size();
+            }
+
+            public destructor ~City() returns void {
+                delete residents;
+                return;
+            }
+        }
+    }
+}

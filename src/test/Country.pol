@@ -1,0 +1,147 @@
+import System.Test.Test;
+import System.Errors.Result;
+import Agents.Nations.Atlas;
+import Agents.Nations.Nation;
+import Agents.Nations.Subdivision;
+import Agents.Nations.City;
+import Agents.Nations.Refusal;
+import Agents.People.CityId;
+
+program AgentsExe;
+
+// THE TERRITORIAL TREE, AND THE ARITHMETIC OVER IT -- which is what a window cannot show. Whether a
+// city LOOKS right where it stands is judged by running the game; that founding builds the three
+// layers, that only the city holds anything, and that the sums over the tree are sums, is judged
+// here.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Country {
+
+            // THE FIRST CITY MAKES THE COUNTRY, and it makes all three layers at once: a city needs
+            // a subdivision to sit in and a subdivision needs a nation. Founding on an empty Atlas
+            // is the only moment that is true, so it is the first thing checked.
+            [Tag(name: "nations")]
+            [Test]
+            public static method the_first_city_makes_the_nation_and_its_subdivision() returns void {
+                Atlas* atlas = new Atlas() on heap;
+                Test.assertEqual(atlas.nationCount(), 0);
+                Result<City*, Refusal> made = atlas.found(100, 200, 102, 200, 5);
+                Test.assertTrue(made.isOk());
+                Test.assertEqual(atlas.nationCount(), 1);
+                Nation* who = atlas.nationAt(0);
+                Test.assertEqual(who.subdivisionCount(), 1);
+                Test.assertEqual(who.cityCount(), 1);
+                // And the city that did it is the capital, because a country with cities and no
+                // capital is a state nothing in the model describes.
+                Test.assertEqual(cast<int>(who.capitalCity()), 0);
+                City* seat = who.subdivisionAt(0).cityAt(0);
+                Test.assertEqual(seat.x(), 100);
+                Test.assertEqual(seat.y(), 200);
+                Test.assertEqual(seat.storeAtX(), 102);
+                delete made;
+                delete atlas;
+                return;
+            }
+
+            // A SUBDIVISION FILLS UP AND THEN REFUSES. It does not quietly grow a second one: the
+            // model's refusal exists precisely so that a nation which cannot place a city says so.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_full_subdivision_refuses_rather_than_growing_one() returns void {
+                Atlas* atlas = new Atlas() on heap;
+                // Room for two, then three cities: the third has nowhere to go.
+                Result<City*, Refusal> a = atlas.found(10, 10, 12, 10, 2);
+                Result<City*, Refusal> b = atlas.found(20, 20, 22, 20, 2);
+                Result<City*, Refusal> c = atlas.found(30, 30, 32, 30, 2);
+                Test.assertTrue(a.isOk());
+                Test.assertTrue(b.isOk());
+                Test.assertTrue(c.isErr());
+                Test.assertEqual(cast<int>(c.errorOr(Refusal.NobodyLeft)),
+                                 cast<int>(Refusal.NoRoomInSubdivision));
+                Test.assertEqual(atlas.cityCount(), 2);
+                delete a;
+                delete b;
+                delete c;
+                delete atlas;
+                return;
+            }
+
+            // EVERY POPULATION IS A SUM, never a stored number. Two facts about one thing are two
+            // facts that can disagree, and the layout says this one is computed at all three layers.
+            [Tag(name: "nations")]
+            [Test]
+            public static method population_is_summed_up_the_tree_and_never_stored() returns void {
+                Atlas* atlas = new Atlas() on heap;
+                Result<City*, Refusal> one = atlas.found(10, 10, 12, 10, 4);
+                Result<City*, Refusal> two = atlas.found(40, 40, 42, 40, 4);
+                City* first = one.valueOr(0 as City*);
+                City* second = two.valueOr(0 as City*);
+                Test.assertEqual(atlas.population(), 0);
+                first.admit(cast<AgentId>(1));
+                first.admit(cast<AgentId>(2));
+                second.admit(cast<AgentId>(3));
+                Test.assertEqual(first.population(), 2);
+                Test.assertEqual(second.population(), 1);
+                Nation* who = atlas.nationAt(0);
+                Test.assertEqual(who.subdivisionAt(0).population(), 3);
+                Test.assertEqual(who.population(), 3);
+                Test.assertEqual(atlas.population(), 3);
+                // And the city knows who lives in it, which is what the seam's id half is for.
+                Test.assertTrue(first.holds(cast<AgentId>(2)));
+                Test.assertTrue(!first.holds(cast<AgentId>(3)));
+                delete one;
+                delete two;
+                delete atlas;
+                return;
+            }
+
+            // HOW MANY ARMIES A COUNTRY MAY FIELD comes out of the territorial tree and nowhere else:
+            // one general per army, `ceil(cities / 2)` per subdivision (war design 7b). Checked here
+            // because it is arithmetic over this tree, and because S5 will read it as a fact.
+            [Tag(name: "nations")]
+            [Test]
+            public static method generals_are_ceil_of_half_the_cities() returns void {
+                Atlas* atlas = new Atlas() on heap;
+                Result<City*, Refusal> a = atlas.found(10, 10, 12, 10, 8);
+                Test.assertEqual(atlas.nationAt(0).generals(), 1);     // 1 city  -> 1
+                Result<City*, Refusal> b = atlas.found(20, 20, 22, 20, 8);
+                Test.assertEqual(atlas.nationAt(0).generals(), 1);     // 2 cities -> 1
+                Result<City*, Refusal> c = atlas.found(30, 30, 32, 30, 8);
+                Test.assertEqual(atlas.nationAt(0).generals(), 2);     // 3 cities -> 2
+                delete a;
+                delete b;
+                delete c;
+                delete atlas;
+                return;
+            }
+
+            // A WORLD WITH NO CITY MUST SAY WHICH REFUSAL IT WAS. The counting is by ordinal so a
+            // seventh reason counts itself; the sentence is a `match` with no default, so a seventh
+            // reason does not compile until it has one. This checks the half that can be checked at
+            // runtime: what was counted comes back out, and the line names it.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_world_with_no_city_says_which_refusal_it_was() returns void {
+                Atlas* atlas = new Atlas() on heap;
+                Test.assertEqual(atlas.refusedFor(Refusal.NobodyLeft), 0);
+                atlas.noteRefusal(Refusal.NobodyLeft);
+                atlas.noteRefusal(Refusal.NobodyLeft);
+                atlas.noteRefusal(Refusal.NoReachableGround);
+                Test.assertEqual(atlas.refusedFor(Refusal.NobodyLeft), 2);
+                Test.assertEqual(atlas.refusedFor(Refusal.NoReachableGround), 1);
+                Test.assertEqual(atlas.refusedFor(Refusal.TooClose), 0);
+                String said = atlas.whyNoCity();
+                Test.assertTrue(said.contains("nobody left x2"));
+                Test.assertTrue(said.contains("no reachable ground x1"));
+                // And once there IS a country, the sentence is empty: it answers "why is there no
+                // city", not "what went wrong on the way".
+                Result<City*, Refusal> made = atlas.found(5, 5, 7, 5, 4);
+                Test.assertEqual(atlas.whyNoCity().length(), 0);
+                delete made;
+                delete atlas;
+                return;
+            }
+        }
+    }
+}

@@ -16,6 +16,10 @@ import Agents.People.Agent;
 import Agents.People.AgentId;
 import Agents.People.AgentClass;
 import Agents.People.Courting;
+import Agents.Nations.Atlas;
+import Agents.Nations.Nation;
+import Agents.Nations.Subdivision;
+import Agents.Nations.City;
 import System.Collections.Iterator;
 import System.Memory.Allocator;
 import System.Memory.Raw;
@@ -59,6 +63,14 @@ public bundle Agents {
             private mutable MeshAtlas* beastArt;
             private mutable Wild* herds;
             private mutable int drawnBeasts;
+            // WHAT THE COUNTRY HAS BUILT. Its own buffer for the same reason the fauna has one: a
+            // city is founded, grows and one day ends, so what stands is not something to bake into
+            // the ground once. It is rebuilt each frame from the Atlas, which today is two meshes --
+            // a town hall on the founding cell and the storehouse beside it.
+            private mutable MeshBuffer* town;
+            private mutable MeshAtlas* cityArt;
+            private mutable nullable Atlas* realm;
+            private mutable int drawnBuildings;
             // The people, drawn the same way through the same index. One mesh per STANDING, which is
             // what makes a recruitment visible: the model changes because the array did.
             private mutable MeshBuffer* folk;
@@ -163,6 +175,9 @@ public bundle Agents {
                 hint = new MeshBuffer(gl) on heap;
                 fauna = new MeshBuffer(gl) on heap;
                 folk = new MeshBuffer(gl) on heap;
+                town = new MeshBuffer(gl) on heap;
+                realm = null;
+                drawnBuildings = 0;
                 // Where each body is DRAWN and which way it points. Grown to fit the crowd; a slot
                 // nobody has drawn yet is snapped on its first frame, so what was in it before never
                 // matters. Named, because two of these print two reports and a reader has to be able
@@ -213,6 +228,7 @@ public bundle Agents {
                 delete hint;
                 delete fauna;
                 delete folk;
+                delete town;
                 delete beastTracks;
                 delete folkTracks;
                 delete post;
@@ -1674,6 +1690,90 @@ public bundle Agents {
             // renderer already casts. See the call in `bakeFolk` for what a hand-written one got
             // wrong -- three things, all of them visible from the first frame.)
 
+            // ---- what the country has built, rebuilt every frame ------------------------------------
+            //
+            // THE PHASE THE ENUM HAS BEEN HOLDING OPEN. `Town` was one of the nine counters left
+            // behind by the deleted simulation, and the note beside them says each comes back when
+            // its pass does, one at a time. This is the first of them to come back, and it comes
+            // back with something real behind it: a city the world founded, at the cell it chose.
+            //
+            // TWO MESHES TODAY, and no apology for that being few: founding places a town hall on
+            // the centre and the storehouse beside it, and those are the two things a city HAS in
+            // S3.1. When `standing` arrives with the buildings that fill a city, this walks that
+            // list instead -- the shape of the loop is already right.
+            //
+            // No window test on the count: there is one city. When there are hundreds, this reads
+            // the same block window the crowd and the fauna do, which is what that index is for.
+            private method bakeTown() returns void {
+                drawnBuildings = 0;
+                if (realm == null || cityArt == null || !window.showing()) {
+                    town.upload(cast<address>(0), 0, 0);
+                    return;
+                }
+                Atlas* atlas = cast<Atlas*>(realm);
+                int hallOrd = cityArt.ordOf("TownHall");
+                int storeOrd = cityArt.ordOf("StoragePit");
+                if (hallOrd < 0 || storeOrd < 0) {
+                    town.upload(cast<address>(0), 0, 0);
+                    return;
+                }
+                // Count first, then emit -- the same rule the other two bakes follow, and for the
+                // same reason: a buffer sized by a guess either wastes or overruns.
+                int perCity = cityArt.triCount[hallOrd] + cityArt.triCount[storeOrd];
+                int many = atlas.cityCount();
+                if (many == 0 || perCity == 0) {
+                    town.upload(cast<address>(0), 0, 0);
+                    return;
+                }
+                address buf = Allocator.alloc(cast<long>(many * perCity * 27 * 4 + 4));
+                mutable int wv = 0;
+                for (int n in 0..atlas.nationCount()) {
+                    Nation* who = atlas.nationAt(n);
+                    for (int s in 0..who.subdivisionCount()) {
+                        Subdivision* part = who.subdivisionAt(s);
+                        for (int c in 0..part.cityCount()) {
+                            City* here = part.cityAt(c);
+                            wv = emitBuilding(cityArt, buf, wv, hallOrd, here.x(), here.y());
+                            drawnBuildings = drawnBuildings + 1;
+                            if (here.storeAtX() != here.x() || here.storeAtY() != here.y()) {
+                                wv = emitBuilding(cityArt, buf, wv, storeOrd,
+                                                  here.storeAtX(), here.storeAtY());
+                                drawnBuildings = drawnBuildings + 1;
+                            }
+                        }
+                    }
+                }
+                town.upload(buf, wv, many * perCity * 27);
+                Allocator.free(buf);
+                return;
+            }
+
+            // One building, standing on the ground that is actually drawn. The height expression is
+            // the animals' own -- copied from a constant that happened to look right is how a thing
+            // ends up floating over a hill or sunk into it, and this is a house rather than a deer,
+            // so it would be the first thing anybody sees.
+            private method emitBuilding(MeshAtlas* art, address buf, int w, int ord,
+                                        int cx, int cy) returns int {
+                int cell = grid.biomeAt(cx, cy);
+                int lvl = stackLvl(cell, cx, cy);
+                float zOff = cast<float>(lvl) * stepH + terrainLook[cell].lift + 0.8;
+                float topZ = terrainLook[cell].top + zOff;
+                return emitMesh(art, buf, w, ord, cast<float>(cx) * 2.0, cast<float>(cy) * 2.0,
+                                topZ, 1.0, shadeAt(cx, cy, 1, lvl));
+            }
+
+            // The countries, and the art their buildings are drawn from. Borrowed, both: the world
+            // owns its Atlas and the atlas belongs to whoever loaded it.
+            public method takeAtlas(Atlas* a, MeshAtlas* art) returns void {
+                realm = a;
+                cityArt = art;
+                return;
+            }
+
+            public method buildingsDrawn() returns int {
+                return drawnBuildings;
+            }
+
             private method bakeFolk() returns void {
                 drawnFolk = 0;
                 folkTracks.openFrame();
@@ -2368,6 +2468,11 @@ public bundle Agents {
                 // counter that can only read zero.
                 bakeFolk();
                 gauge.lap(cast<int>(Phase.People));
+                // AND WHAT THE COUNTRY HAS BUILT. The second of the nine held-open phases to come
+                // back, and it comes back the way the note below asks for: one at a time, with a
+                // pass behind it.
+                bakeTown();
+                gauge.lap(cast<int>(Phase.Town));
                 // The people, fauna, town and border bakes stood here. All four fed off a
                 // simulation that has been taken out, and drawing a thing the world no longer
                 // knows about is how a picture starts lying about what is behind it. Their phases
@@ -2413,6 +2518,7 @@ public bundle Agents {
                 // above, from where they are this frame.
                 fauna.draw();
                 folk.draw();
+                town.draw();
                 gl.bindVertexArray(0);
                 gauge.lap(cast<int>(Phase.Draw));
 

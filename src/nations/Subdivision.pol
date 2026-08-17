@@ -1,0 +1,93 @@
+import System.Collections.ArrayList;
+import Agents.Nations.City;
+
+program AgentsExe;
+
+// THE LAYER THAT OWNS NO GROUND AT ALL, and has two jobs anyway.
+//
+// It exists because a nation of forty cities with one ruler is a nation where nothing local is
+// decided by anybody, and because two later rules hang off it: a subdivision sponsors expeditions
+// (S3.8), and it supports `ceil(cities / 2)` generals -- which is what decides how many armies a
+// country may field (war design §7b). Both are reasons to keep a layer that owns nothing.
+//
+// `capacity` is rolled once, when the subdivision is created, and never changes: it is how many
+// cities this one may hold before a new subdivision is needed. Rolled rather than fixed so that two
+// nations of the same size are not the same shape.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Subdivision {
+            public static fixed int NOBODY = 0 - 1;
+            // The narrowest and widest a subdivision may be. From the nation model's field table.
+            public static fixed int LEAST_ROOM = 4;
+            public static fixed int MOST_ROOM = 8;
+
+            // Its number, as with a city.
+            private mutable int name;
+            // The agent who rules it. DECLARED AND INERT until S3.5 gives rulers to the three layers
+            // -- an empty structure is honest, and this one is what the layer exists for, so leaving
+            // it out would hide the shape of what is coming.
+            private mutable int ruler;
+            // How many cities it may hold. 4..8, rolled once.
+            private mutable int capacity;
+            // The cities, which it owns: a subdivision that ends takes its cities with it (S3.9), and
+            // nothing is ever merged into another.
+            private mutable ArrayList<City*>* cities;
+
+            public constructor Subdivision(int name, int capacity) {
+                this.name = name;
+                this.ruler = Subdivision.NOBODY;
+                this.capacity = capacity;
+                this.cities = new ArrayList<City*>() on heap;
+            }
+
+            public method nameOf() returns int {
+                return name;
+            }
+            public method roomFor() returns int {
+                return capacity;
+            }
+            public method cityCount() returns int {
+                return cities.size();
+            }
+            public method cityAt(int i) returns City* {
+                return cities.get(i);
+            }
+            public method isFull() returns boolean {
+                return cities.size() >= capacity;
+            }
+
+            // Take a city. The subdivision owns it from here.
+            public method take(City* one) returns void {
+                cities.add(one);
+                return;
+            }
+
+            // How many generals this subdivision supports: `ceil(cities / 2)`, war design §7b. It is
+            // here rather than in the war code because it is a fact about this layer, and because a
+            // number the military reads out of the territorial tree is exactly the tie the design
+            // wanted -- a nation grows in armies by growing in cities.
+            public method generals() returns int {
+                return (cities.size() + 1) / 2;
+            }
+
+            // Everybody who lives in it, summed rather than stored. See `City`: two facts about one
+            // thing are two facts that can disagree.
+            public method population() returns int {
+                mutable int total = 0;
+                for (var one in cities.toArray()) {
+                    total = total + one.population();
+                }
+                return total;
+            }
+
+            public destructor ~Subdivision() returns void {
+                for (var one in cities.toArray()) {
+                    delete one;
+                }
+                delete cities;
+                return;
+            }
+        }
+    }
+}

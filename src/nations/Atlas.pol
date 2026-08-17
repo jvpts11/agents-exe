@@ -1,0 +1,160 @@
+import System.Collections.ArrayList;
+import System.Errors.Result;
+import System.Errors.Ok;
+import System.Errors.Err;
+import Agents.Nations.Nation;
+import Agents.Nations.Subdivision;
+import Agents.Nations.City;
+import Agents.Nations.Refusal;
+import Agents.People.CityId;
+
+program AgentsExe;
+
+// THE NATIONS AND WHAT THEY HOLD -- the other half of the world, beside `Population`.
+//
+// The Sim's own note said this arrives the way the crowd did, adding one line to the tick, and this
+// is that. What it ticks today is one question: is there a country yet, and if not, why not.
+//
+// WHY THE REFUSALS ARE COUNTED HERE. The nation model requires a world that never founds a city to
+// say which of six reasons it was. That answer has to survive to the end of a run, and the thing
+// that lives that long is this. `match` over the sealed `Refusal` is what makes the tally complete
+// by construction: a seventh reason does not compile until it has an arm here.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Atlas {
+            // One roll of the subdivision's room, so a nation is not the same shape every run.
+            public static fixed int LEAST_ROOM = 4;
+            public static fixed int MOST_ROOM = 8;
+
+            // The countries. Owned: an Atlas that goes takes the whole tree with it.
+            private mutable ArrayList<Nation*>* nations;
+            // How many cities have ever been founded, which is also the next city's name.
+            private mutable int founded;
+            // How many subdivisions have ever been made, likewise.
+            private mutable int divisions;
+            // One counter per refusal, indexed by the enum's ordinal. See `noteRefusal`.
+            private mutable int[] refusals;
+
+            public constructor Atlas() {
+                this.nations = new ArrayList<Nation*>() on heap;
+                this.founded = 0;
+                this.divisions = 0;
+                this.refusals = new int[Refusal.count()]();
+            }
+
+            public method nationCount() returns int {
+                return nations.size();
+            }
+            public method nationAt(int i) returns Nation* {
+                return nations.get(i);
+            }
+            public method cityCount() returns int {
+                mutable int total = 0;
+                for (var one in nations.toArray()) {
+                    total = total + one.cityCount();
+                }
+                return total;
+            }
+            public method population() returns int {
+                mutable int total = 0;
+                for (var one in nations.toArray()) {
+                    total = total + one.population();
+                }
+                return total;
+            }
+
+            // THE FIRST CITY MAKES THE COUNTRY. A city needs a subdivision to sit in and a
+            // subdivision needs a nation, so founding on an empty Atlas builds all three -- and the
+            // city that did it is the capital. Every later city finds a subdivision with room, and
+            // is refused when there is none rather than growing one nobody asked for.
+            //
+            // `dice` decides the subdivision's room, once, when one is made.
+            public method found(int centreX, int centreY, int storeX, int storeY,
+                                int room) returns Result<City*, Refusal> {
+                mutable Nation* home = 0 as Nation*;
+                if (nations.size() == 0) {
+                    home = new Nation(0) on heap;
+                    nations.add(home);
+                } else {
+                    home = nations.get(0);
+                }
+                mutable nullable Subdivision* where = home.roomy();
+                if (where == null && home.subdivisionCount() > 0) {
+                    return new Err<City*, Refusal>(Refusal.NoRoomInSubdivision) on heap;
+                }
+                if (where == null) {
+                    Subdivision* made = new Subdivision(divisions, room) on heap;
+                    divisions = divisions + 1;
+                    home.take(made);
+                    where = made;
+                }
+                City* one = new City(founded, centreX, centreY, storeX, storeY) on heap;
+                where.take(one);
+                if (cast<int>(home.capitalCity()) == Nation.NO_CAPITAL) {
+                    home.setCapital(cast<CityId>(founded));
+                }
+                founded = founded + 1;
+                return new Ok<City*, Refusal>(one) on heap;
+            }
+
+            // WHY A CITY WAS NOT FOUNDED, counted so the end of a run can say it. Indexed by the
+            // constant's own ordinal, over an array the enum sizes -- so a seventh refusal is
+            // counted the day it is declared, with nothing here to remember.
+            public method noteRefusal(Refusal why) returns void {
+                int slot = cast<int>(why);
+                refusals[slot] = refusals[slot] + 1;
+                return;
+            }
+
+            public method refusedFor(Refusal why) returns int {
+                return refusals[cast<int>(why)];
+            }
+
+            // WHAT TO CALL A REFUSAL, and the one place a seventh one stops the build.
+            //
+            // The counting above cannot fail to include a new constant, and that is exactly why it
+            // is not where the guarantee lives: a counter nobody prints is a counter nobody reads.
+            // This `match` has no `default` and no fall-through, so the compiler names the constant
+            // that has no sentence here -- and the run says all six reasons or does not build.
+            private static method sentence(Refusal why) returns String {
+                match (why) {
+                    case NobodyLeft { return "nobody left"; }
+                    case NoReachableGround { return "no reachable ground"; }
+                    case TooClose { return "too close to another claim"; }
+                    case NoRoomInSubdivision { return "no room in any subdivision"; }
+                    case DiedOnTheRoad { return "died on the road"; }
+                    case ArrivedWithoutTrades { return "arrived without trades"; }
+                }
+                return "";
+            }
+
+            // WHY THIS WORLD HAS NO COUNTRY, in one line, or "" when it has one. This is the
+            // sentence the nation model demands: a world that never founds a city must say which of
+            // the six it was, and it must say it in the run rather than in a debugger.
+            public method whyNoCity() returns String {
+                if (nations.size() > 0) {
+                    return "";
+                }
+                mutable String said = "no city:";
+                for (int i in 0..Refusal.count()) {
+                    Refusal why = cast<Refusal>(i);
+                    int many = refusals[i];
+                    if (many > 0) {
+                        said = said + " " + Atlas.sentence(why) + " x" + many.toString();
+                    }
+                }
+                return said;
+            }
+
+            public destructor ~Atlas() returns void {
+                for (var one in nations.toArray()) {
+                    delete one;
+                }
+                delete nations;
+                delete refusals;
+                return;
+            }
+        }
+    }
+}

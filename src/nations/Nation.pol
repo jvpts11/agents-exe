@@ -1,0 +1,117 @@
+import System.Collections.ArrayList;
+import Agents.Nations.Subdivision;
+import Agents.Nations.City;
+import Agents.People.CityId;
+
+program AgentsExe;
+
+// A NATION: SUBDIVISIONS, A CAPITAL, AND NO GROUND OF ITS OWN.
+//
+// What is here is what S3.1 gives it. `Realm` (name, culture, religion -- the ruler's, so they
+// change with him), `Rule` (government, ideology, ruler, rank, laws), `Knowledge` (the fog) and
+// `Research` each arrive with the item that gives them a reader: S3.5, S3.6, S3.7. Declaring them
+// now as empty objects would be four structures nothing writes and nothing reads, which is the
+// opposite of the model's own rule -- an empty structure is honest, an invented effect is not, and a
+// field with neither writer nor reader is not a structure, it is a promise.
+//
+// `seaReach` is the exception and it is deliberate: it is one int, the model's field table names it,
+// and S3.8's expeditions are the reader. It is stored, it is inert, and it is one line.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Nation {
+            public static fixed int NO_CAPITAL = 0 - 1;
+
+            private mutable int name;
+            // Which city is the capital. An id and not a pointer, even inside the layer, because the
+            // capital moves (S3.9: a nation whose capital falls names another) and an id survives
+            // that without anybody having to remember to re-point.
+            private mutable CityId capital;
+            // How far its ships cross open water, in cells. Stored, inert until S3.8.
+            private mutable int seaReach;
+            // The subdivisions, which it owns.
+            private mutable ArrayList<Subdivision*>* subdivisions;
+
+            public constructor Nation(int name) {
+                this.name = name;
+                this.capital = cast<CityId>(Nation.NO_CAPITAL);
+                this.seaReach = 0;
+                this.subdivisions = new ArrayList<Subdivision*>() on heap;
+            }
+
+            public method nameOf() returns int {
+                return name;
+            }
+            public method capitalCity() returns CityId {
+                return capital;
+            }
+            public method setCapital(CityId which) returns void {
+                capital = which;
+                return;
+            }
+            public method reach() returns int {
+                return seaReach;
+            }
+            public method subdivisionCount() returns int {
+                return subdivisions.size();
+            }
+            public method subdivisionAt(int i) returns Subdivision* {
+                return subdivisions.get(i);
+            }
+
+            public method take(Subdivision* one) returns void {
+                subdivisions.add(one);
+                return;
+            }
+
+            // The subdivision with room for another city, or nothing. The caller decides what to do
+            // when every one is full -- which is `NoRoomInSubdivision`, and is a refusal rather than
+            // a reason to quietly make a subdivision nobody asked for.
+            public method roomy() returns nullable Subdivision* {
+                for (var one in subdivisions.toArray()) {
+                    if (!one.isFull()) {
+                        return one;
+                    }
+                }
+                return null;
+            }
+
+            // COMPUTED, NEVER STORED -- the layout is explicit about this one. A nation's population
+            // is the sum of its cities', and the same goes for its territory when S3.2 brings it.
+            public method population() returns int {
+                mutable int total = 0;
+                for (var one in subdivisions.toArray()) {
+                    total = total + one.population();
+                }
+                return total;
+            }
+
+            public method cityCount() returns int {
+                mutable int total = 0;
+                for (var one in subdivisions.toArray()) {
+                    total = total + one.cityCount();
+                }
+                return total;
+            }
+
+            // How many armies it may field: one general per army, `ceil(cities / 2)` per subdivision,
+            // summed. Nothing reads it until S5 -- it is here because it is arithmetic over this
+            // tree and belongs where the tree is, not where the war is.
+            public method generals() returns int {
+                mutable int total = 0;
+                for (var one in subdivisions.toArray()) {
+                    total = total + one.generals();
+                }
+                return total;
+            }
+
+            public destructor ~Nation() returns void {
+                for (var one in subdivisions.toArray()) {
+                    delete one;
+                }
+                delete subdivisions;
+                return;
+            }
+        }
+    }
+}

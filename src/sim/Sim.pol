@@ -19,6 +19,11 @@ import Agents.People.Courting;
 import Agents.People.Doings;
 import Agents.People.Hunting;
 import Agents.World.Waymap;
+import Agents.Nations.Atlas;
+import Agents.Nations.City;
+import Agents.Nations.Refusal;
+import Agents.Nations.Settling;
+import System.Errors.Result;
 program AgentsExe;
 
 // THE WORLD, AND THE THING THAT MAKES IT ADVANCE. It owns the layers and it owns the tick.
@@ -74,6 +79,9 @@ public bundle Agents {
             private mutable Wild* beasts;
             // Everybody alive. Made with the world and empty until something sows a band into it.
             private mutable Population* folk;
+            // THE OTHER HALF OF THE WORLD: the nations and what they hold. Made with the crowd and
+            // empty until a band settles -- which is what the one line it adds to the tick is for.
+            private mutable Atlas* realm;
             // Every agent's every field, every tick, to a file -- off unless a run asks for it.
             private mutable Journal* diary;
             // What every block costs to cross, and the bounded search that reads it. Made when the
@@ -129,6 +137,11 @@ public bundle Agents {
             // fifth of a life: often enough to see a generation turn over, rare enough that a
             // three-hundred-year run is fifteen lines.
             public static fixed int CENSUS_EVERY_YEARS = 20;
+            // How often the world is asked whether anybody has settled, in ticks. Sixty is a second
+            // of world at gear 1, which is the pace a founding happens on -- a question asked every
+            // tick would be asked three hundred times a frame at the top gear and answer the same
+            // thing each time.
+            public static fixed int SETTLE_EVERY = 60;
 
             // The size of the world a game is played on.
             public static fixed int WIDTH = 2560;
@@ -157,6 +170,7 @@ public bundle Agents {
                 log = new Chronicle() on heap;
                 beasts = new Wild(width, height) on heap;
                 folk = new Population(width, height) on heap;
+                realm = new Atlas() on heap;
                 diary = new Journal("") on heap;   // silent until `keepJournal` names a file
                 // A DIFFERENT STREAM FROM THE TERRAIN'S. The world is generated once and ticked
                 // forever; one stream shared would make the first animal's decision depend on how
@@ -216,6 +230,11 @@ public bundle Agents {
                 return folk;
             }
 
+            // And the countries. Borrowed, the same way -- the renderer reads it to draw what stands.
+            public method nations() returns Atlas* {
+                return realm;
+            }
+
             // What every block costs to cross, and the search that reads it. Borrowed; it exists
             // only once the ground does.
             public method routes() returns Waymap* {
@@ -230,6 +249,7 @@ public bundle Agents {
                     delete ways;
                 }
                 delete diary;    // its destructor flushes whatever the last ticks wrote
+                delete realm;    // before the crowd: a city holds ids, and ids outlive nobody
                 delete folk;
                 delete beasts;
                 delete dice;
@@ -490,6 +510,25 @@ public bundle Agents {
                     // run's own instrumentation and is deliberately outside it -- a cost that only
                     // exists when somebody asked for a log is not what a person costs.
                     peopleNs = peopleNs + (Time.nanos() - folkBegan);
+                    // AND THE COUNTRY, WHICH TODAY IS ONE QUESTION: is there one yet, and if not,
+                    // why not. Outside the people's meter on purpose -- what a person costs is what
+                    // the seven passes above cost, and a pass that runs once a second over blocks
+                    // rather than over people would flatter that number by being averaged into it.
+                    //
+                    // ONCE A SECOND, not every tick. Settling reads the block index once, which is
+                    // cheap, but it is a question whose answer changes on the scale of a life rather
+                    // than of a tick -- and at gear 6 a tick is a fifth of a second of world.
+                    if (realm.nationCount() == 0 && ticked % cast<long>(Sim.SETTLE_EVERY) == 0) {
+                        Result<City*, Refusal> tried = Settling.trySettle(realm, folk, ground, dice);
+                        if (tried.isErr()) {
+                            realm.noteRefusal(tried.errorOr(Refusal.NobodyLeft));
+                        } else {
+                            City* first = tried.valueOr(0 as City*);
+                            log.note(ticked, "nations",
+                                     $"the first city stands at {first.x()},{first.y()} with {first.population()} people");
+                        }
+                        delete tried;
+                    }
                     // AND EVERY AGENT'S EVERY FIELD IS WRITTEN DOWN, if a run asked for that. After
                     // the passes, so a row is the world as the tick LEFT it rather than half way
                     // through being decided.

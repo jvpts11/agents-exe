@@ -1,0 +1,157 @@
+import System.Errors.Result;
+import System.Errors.Ok;
+import System.Errors.Err;
+import Agents.Nations.Atlas;
+import Agents.Nations.City;
+import Agents.Nations.Refusal;
+import Agents.People.Population;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.CityId;
+import Agents.World.Grid;
+import Agents.World.Rng;
+import Agents.Sim.BlockChain;
+import Agents.World.BlockGrid;
+
+program AgentsExe;
+
+// WHERE THE FIRST CITY COMES FROM -- the one thing the nation model never said, because it was
+// written a week before the world had people in it.
+//
+// The model specifies founding the NEXT city: colonists leave a city, walk, and arrive. It says
+// nothing about the first, and the world it was written for had no bands. The world has 220 of them
+// now, and the answer (João, 2026-08-17) is the one the model's own framing asks for: **a single
+// nation, founded and left to grow**, so its behaviour can be watched before a second exists to
+// interfere with it. One band settles. The other two hundred and nineteen stay what they are today:
+// people living on the land, citizens of nothing.
+//
+// WHICH BAND, and why it is not "the first one found". A scan from a corner settles whatever the
+// scan meets first, which is a fact about the scan and not about the world -- `Banding` says so
+// itself, having put the world's only band on tundra for exactly that reason. So the rule is a
+// measurement: **the block with the most people standing on ground a town may be built on**, ties
+// broken by the lower block index so two runs of one seed settle the same place.
+//
+// The block index is what makes this cheap. Counting neighbours person by person is eighteen
+// thousand searches; the crowd is already filed by block, so this walks the blocks once and reads a
+// chain length. That is the same index the fauna's own questions go through, and the reason it is
+// maintained at all.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Settling {
+            // How many people a site needs before it is a city rather than a camp. A band is 24, and
+            // a founding that needs more than one whole band would never fire in a world where bands
+            // are sown 64 cells apart. Twelve is half a band: enough that a site is a place people
+            // are, not a place one wanderer stands.
+            public static fixed int CRITICAL_MASS = 12;
+            // How far from the chosen block's centre the hall may be moved to find ground it can
+            // stand on, in cells. A block is sixteen; this is one block's reach and no more, so the
+            // city is founded on the site that was measured rather than near it.
+            public static fixed int NUDGE = 16;
+
+            // Try to settle the world's first city. Returns the city, or the reason there is none.
+            //
+            // Nothing here reaches into the Atlas's tree: it measures the world, finds a site, and
+            // hands it over. `Atlas.found` decides where the city sits in the country.
+            public static method trySettle(Atlas* atlas, Population* folk, Grid* g,
+                                           Rng* dice) returns Result<City*, Refusal> {
+                if (folk.count() == 0) {
+                    return new Err<City*, Refusal>(Refusal.NobodyLeft) on heap;
+                }
+                BlockChain* filed = folk.standing();
+                BlockGrid* lat = filed.grid();
+                mutable int bestBlock = 0 - 1;
+                mutable int bestCount = 0;
+                for (int b in 0..lat.count()) {
+                    mutable int many = 0;
+                    mutable int slot = filed.firstIn(b);
+                    while (slot >= 0) {
+                        many = many + 1;
+                        slot = filed.after(slot);
+                    }
+                    if (many > bestCount) {
+                        bestCount = many;
+                        bestBlock = b;
+                    }
+                }
+                if (bestBlock < 0 || bestCount < Settling.CRITICAL_MASS) {
+                    return new Err<City*, Refusal>(Refusal.NobodyLeft) on heap;
+                }
+
+                // The middle of the winning block, then the nearest cell a town may stand on. A
+                // block's middle is water or mountain often enough that refusing there would refuse
+                // most of the coast, which is where people are.
+                int midX = lat.originX(bestBlock) + BlockGrid.SIDE / 2;
+                int midY = lat.originY(bestBlock) + BlockGrid.SIDE / 2;
+                int hall = Settling.firmNear(g, midX, midY, Settling.NUDGE);
+                if (hall < 0) {
+                    return new Err<City*, Refusal>(Refusal.NoReachableGround) on heap;
+                }
+                int hallX = hall % g.width();
+                int hallY = hall / g.width();
+                // AND THE STOREHOUSE BESIDE IT. The model: the town hall is placed, and next to it
+                // the storage building of the nation's era, "this way, a city always have a way to
+                // storage things". Two cells apart, which is the minimum distance the model gives
+                // for buildings.
+                int store = Settling.firmNear(g, hallX + 2, hallY, 6);
+                mutable int storeX = hallX;
+                mutable int storeY = hallY;
+                if (store >= 0) {
+                    storeX = store % g.width();
+                    storeY = store / g.width();
+                }
+
+                Result<City*, Refusal> made =
+                    atlas.found(hallX, hallY, storeX, storeY, dice.range(Atlas.LEAST_ROOM, Atlas.MOST_ROOM));
+                if (made.isErr()) {
+                    return made;
+                }
+                City* one = made.valueOr(0 as City*);
+
+                // EVERYBODY WHO WAS STANDING THERE LIVES THERE, and both halves of the seam are
+                // written at this one call site -- the city takes the id, the agent takes the city.
+                // Split across two passes, they are two facts that drift.
+                CityId which = cast<CityId>(one.nameOf());
+                mutable int slot = filed.firstIn(bestBlock);
+                while (slot >= 0) {
+                    AgentId who = cast<AgentId>(slot);
+                    Agent* body = folk.at(who);
+                    one.admit(who);
+                    body.whereabouts.homeCity = which;
+                    slot = filed.after(slot);
+                }
+                return made;
+            }
+
+            // The nearest cell to (x, y) a town may be built on, within `reach`, or -1. Searched in
+            // rings so that "nearest" means nearest rather than "first in scan order" -- the same
+            // distinction `Banding` had to make, for the same reason.
+            private static method firmNear(Grid* g, int x, int y, int reach) returns int {
+                if (g.mayBuildAt(x, y)) {
+                    return g.idx(x, y);
+                }
+                for (int r in 1..=reach) {
+                    mutable int dx = 0 - r;
+                    while (dx <= r) {
+                        mutable int dy = 0 - r;
+                        while (dy <= r) {
+                            // Only the ring, not its inside: everything nearer was tried already.
+                            boolean onRing = dx == 0 - r || dx == r || dy == 0 - r || dy == r;
+                            if (onRing) {
+                                int cx = x + dx;
+                                int cy = y + dy;
+                                if (cx >= 0 && cy >= 0 && cx < g.width() && cy < g.height()
+                                        && g.mayBuildAt(cx, cy)) {
+                                    return g.idx(cx, cy);
+                                }
+                            }
+                            dy = dy + 1;
+                        }
+                        dx = dx + 1;
+                    }
+                }
+                return 0 - 1;
+            }
+        }
+    }
+}
