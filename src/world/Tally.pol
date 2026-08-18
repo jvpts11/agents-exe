@@ -1,0 +1,126 @@
+program AgentsExe;
+
+// HOW MANY OF EACH -- the same structure three times over, written once.
+//
+// The nation layout §4c counts them: a building's bill of materials and a store's contents (over
+// `Goods`), the crafts an expedition carries and the crafts a city is short of (over `Craft`), the
+// technologies a city is waiting on (over `Tech`). Three near-identical classes, or one generic.
+//
+// THE TYPE PARAMETER IS A TAG AND CARRIES NO SIZE, which is worth saying because the obvious reading
+// is that `Tally<Goods>` could ask `Goods` how many there are. It cannot: a type parameter promises
+// nothing in this language -- the same rule that made `Membership<Owner, Member>` unbuildable -- so
+// the room is handed in at construction and the parameter's whole job is keeping a tally of goods
+// out of a place expecting a tally of crafts. That is not a small job: the two are both `int[]` and
+// nothing else would ever have caught the mix-up.
+//
+// A STRUCT, so a bill is a VALUE. `Bill owed = site.short();` hands back a thing of its own that no
+// later change to the site can reach into, which is what every caller wants and what the loops it
+// replaces got wrong twice.
+//
+// THE OPERATORS ARE THE POINT. Written out, "can the city afford this" is three nested loops over
+// seventy-five goods at every call site, and the site that got it wrong debited a whole bill and
+// then let the builders draw it a second time. `if (store >= cost)` is one line that cannot.
+public bundle Agents {
+    public namespace World {
+
+        public struct Tally<T> {
+            private mutable int[] much;
+
+            public constructor Tally(int room) {
+                this.much = new int[room]();
+            }
+
+            // `which` and not `of`: `of` is a reserved word (`mark of region`), which the layout's
+            // own sketch of this signature did not know.
+            public operator [](int which) returns int {
+                return much[which];
+            }
+
+            public method put(int which, int many) returns void {
+                much[which] = many;
+                return;
+            }
+
+            public method add(int which, int many) returns void {
+                much[which] = much[which] + many;
+                return;
+            }
+
+            public method room() returns int {
+                return much.length();
+            }
+
+            // Whether this holds nothing at all -- an empty store, a bill already paid.
+            public method none() returns boolean {
+                for (int i in 0..much.length()) {
+                    if (much[i] != 0) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            // Everything in it, whatever the kind. What a larder answers when asked how much food
+            // it has rather than which foods.
+            public method total() returns int {
+                mutable int sum = 0;
+                for (int i in 0..much.length()) {
+                    sum = sum + much[i];
+                }
+                return sum;
+            }
+
+            public operator + (Tally<T> other) returns Tally<T> {
+                mutable Tally<T> sum = new Tally<T>(much.length());
+                for (int i in 0..much.length()) {
+                    sum.put(i, much[i] + other[i]);
+                }
+                return sum;
+            }
+
+            // NEVER BELOW NOTHING, which the layout states as part of the operator rather than as a
+            // rule callers remember. A bill that has been over-delivered owes nothing; it does not
+            // owe minus four planks, and a negative in a store is a debt nothing in this world can
+            // hold.
+            public operator - (Tally<T> other) returns Tally<T> {
+                mutable Tally<T> left = new Tally<T>(much.length());
+                for (int i in 0..much.length()) {
+                    mutable int n = much[i] - other[i];
+                    if (n < 0) {
+                        n = 0;
+                    }
+                    left.put(i, n);
+                }
+                return left;
+            }
+
+            // COVERS IT, ITEM FOR ITEM. Not "has more in total": a store with four hundred berries
+            // and no wood does not cover a hut, and a sum would say it did.
+            public operator >= (Tally<T> need) returns boolean {
+                for (int i in 0..much.length()) {
+                    if (much[i] < need[i]) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            public operator == (Tally<T> other) returns boolean {
+                if (much.length() != other.room()) {
+                    return false;
+                }
+                for (int i in 0..much.length()) {
+                    if (much[i] != other[i]) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            public destructor ~Tally() returns void {
+                delete much;
+                return;
+            }
+        }
+    }
+}
