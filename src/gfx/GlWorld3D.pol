@@ -1894,10 +1894,6 @@ public bundle Agents {
                     int cell = here.cellAt(i);
                     int x = cell % grid.width();
                     int y = cell / grid.width();
-                    int biome = grid.biomeAt(x, y);
-                    int lvl = stackLvl(biome, x, y);
-                    float z = terrainLook[biome].top + cast<float>(lvl) * stepH
-                              + terrainLook[biome].lift + 0.06;
                     float wx = cast<float>(x) * 2.0;
                     float wy = cast<float>(y) * 2.0;
                     // The cell's own square, in world units, and the four strips inside its edges.
@@ -1906,16 +1902,16 @@ public bundle Agents {
                     float y0 = wy - 1.0;
                     float y1 = wy + 1.0;
                     if (!heldAt(here, x + 1, y)) {
-                        p = emitStrip(buf, p, x1 - thick, y0, x1, y1, z, ink);
+                        p = emitStrip(buf, p, x1 - thick, y0, x1, y1, x, y, ink);
                     }
                     if (!heldAt(here, x - 1, y)) {
-                        p = emitStrip(buf, p, x0, y0, x0 + thick, y1, z, ink);
+                        p = emitStrip(buf, p, x0, y0, x0 + thick, y1, x, y, ink);
                     }
                     if (!heldAt(here, x, y + 1)) {
-                        p = emitStrip(buf, p, x0, y1 - thick, x1, y1, z, ink);
+                        p = emitStrip(buf, p, x0, y1 - thick, x1, y1, x, y, ink);
                     }
                     if (!heldAt(here, x, y - 1)) {
-                        p = emitStrip(buf, p, x0, y0, x1, y0 + thick, z, ink);
+                        p = emitStrip(buf, p, x0, y0, x1, y0 + thick, x, y, ink);
                     }
                 }
                 return p;
@@ -1929,8 +1925,25 @@ public bundle Agents {
             // colour per city" and "nation borders, the outline of the union of its cities", and a
             // single colour cannot say which of two nations a line belongs to -- which is the one
             // thing a border on a map is for.
+            // IT TAKES THE CELL AND NOT A HEIGHT, and that is the repair rather than a tidy-up.
+            //
+            // THE TERRITORY APPEARED FOR HALF A SECOND AND VANISHED. The caller worked its own
+            // ground height out -- the coarse layer's, plus a hair -- and the detail layer draws the
+            // ground 0.8 ABOVE that. So the line sat under the terrain everywhere the detail window
+            // reached: visible while the camera was far off or still moving, buried the instant the
+            // window finished baking around where it had arrived. Every edge WAS drawn, which is why
+            // a count of them said the territory was fine and a person looking said it blinked.
+            //
+            // Four sites in this renderer write that height by hand and all four agree; this was the
+            // fifth and it did not. So the height is no longer something a caller can get wrong
+            // here: hand it the cell, and it asks `groundTopAt` -- the one place the answer lives,
+            // and what the buildings, the people, the animals and every shadow already stand on.
+            //
+            // The clearance is a hair above the 0.012 the shadows use, so a border crossing a
+            // building's shadow still reads as the line on top of it.
             private method emitStrip(address buf, int w, float x0, float y0, float x1, float y1,
-                                     float z, Rgb ink) returns int {
+                                     int gx, int gy, Rgb ink) returns int {
+                float z = groundTopAt(gx, gy) + 0.02;
                 return emitQuad(buf, w, x0, y0, z, x1, y0, z, x1, y1, z, x0, y1, z,
                                 0.0, 0.0, 1.0, cast<float>(ink.r), cast<float>(ink.g),
                                 cast<float>(ink.b));
