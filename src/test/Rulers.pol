@@ -1,0 +1,172 @@
+import System.Test.Test;
+import System.Errors.Result;
+import Agents.Nations.Atlas;
+import Agents.Nations.City;
+import Agents.Nations.Nation;
+import Agents.Nations.Refusal;
+import Agents.Nations.Subdivision;
+import Agents.Nations.Succession;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.AgentClass;
+import Agents.People.Population;
+import Agents.World.Rng;
+
+program AgentsExe;
+
+// WHO LEADS, AND WHAT HAPPENS WHEN NOBODY DOES.
+//
+// A ruler is always an agent -- never a slot, never a statistic. What a window shows is a figure
+// standing somewhere; what it cannot show is that the post is filled by somebody who exists, that a
+// death empties it, and that a city with no nobility left raises one instead of quietly falling back
+// to a worker. That last distinction is the model's own: losing your nobility and becoming socialist
+// are not the same event, and a fallback would have made them one.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Rulers {
+            public static fixed int CELLS = 4096;
+            public static fixed int SIDE = 64;
+
+            // A city with `many` grown residents, none of them noble.
+            private static method town(Atlas* atlas, Population* folk, int many) returns City* {
+                Result<City*, Refusal> made = atlas.found(folk, 10, 10, 12, 10, 4);
+                City* one = made.valueOr(0 as City*);
+                for (int i in 0..many) {
+                    AgentId who = folk.bear(10.5, 10.5);
+                    folk.at(who).body.age = 30;
+                    one.enrol(who);
+                }
+                delete made;
+                return one;
+            }
+
+            // EVERY LAYER IS LED, and by somebody who is really there. With one city the same person
+            // holds all three posts, which is not a special case -- it is what "a subdivision is led
+            // from its cities" says when there is one city.
+            [Tag(name: "nations")]
+            [Test]
+            public static method every_layer_ends_up_with_a_ruler_who_exists() returns void {
+                Atlas* atlas = new Atlas(Rulers.CELLS) on heap;
+                Population* folk = new Population(Rulers.SIDE, Rulers.SIDE) on heap;
+                Rng* dice = new Rng(3) on heap;
+                City* town = Rulers.town(atlas, folk, 10);
+                Succession.tick(folk, atlas, dice);
+
+                Nation* nation = atlas.nationAt(0);
+                Subdivision* part = nation.subdivisionAt(0);
+                Test.assertFalse(town.headless());
+                Test.assertFalse(part.headless());
+                Test.assertFalse(nation.headless());
+                // And each post is held by a protagonist, which is what a ruler is.
+                Test.assertEqual(cast<int>(folk.at(cast<AgentId>(town.ruledBy())).standing()),
+                                 cast<int>(AgentClass.Protagonist));
+                Test.assertEqual(part.ruledBy(), town.ruledBy());
+                Test.assertEqual(nation.ruledBy(), town.ruledBy());
+                delete dice;
+                delete atlas;
+                delete folk;
+                return;
+            }
+
+            // A CITY WITH NO NOBILITY RAISES ONE -- and does not quietly hand the post to a worker,
+            // which would make losing your nobility and becoming socialist the same event.
+            //
+            // AND NOT ALONE. A nobility re-founded on a single person dies with that person and one
+            // generation later the world is exactly where it was, so the raised one brings families
+            // up with them.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_city_with_no_nobility_raises_one_and_it_is_not_alone() returns void {
+                Atlas* atlas = new Atlas(Rulers.CELLS) on heap;
+                Population* folk = new Population(Rulers.SIDE, Rulers.SIDE) on heap;
+                Rng* dice = new Rng(11) on heap;
+                City* town = Rulers.town(atlas, folk, 12);
+                // Nobody is born noble.
+                mutable int before = 0;
+                mutable int link = town.firstResident();
+                while (link >= 0) {
+                    if (cast<int>(folk.at(town.residentAt(link)).standing())
+                        == cast<int>(AgentClass.Protagonist)) {
+                        before = before + 1;
+                    }
+                    link = town.afterResident(link);
+                }
+                Test.assertEqual(before, 0);
+
+                Succession.tick(folk, atlas, dice);
+
+                mutable int after = 0;
+                mutable int seat = town.firstResident();
+                while (seat >= 0) {
+                    AgentId who = town.residentAt(seat);
+                    seat = town.afterResident(seat);
+                    if (cast<int>(folk.at(who).standing()) == cast<int>(AgentClass.Protagonist)) {
+                        after = after + 1;
+                        // Raised within the ages the model gives: old enough to govern, young
+                        // enough that the post does not fall vacant again within the decade.
+                        Test.assertTrue(folk.at(who).body.age >= Succession.RAISE_FROM);
+                        Test.assertTrue(folk.at(who).body.age < Succession.RAISE_TO);
+                    }
+                }
+                Test.assertTrue(after >= 1);
+                delete dice;
+                delete atlas;
+                delete folk;
+                return;
+            }
+
+            // A CITY OF CHILDREN CANNOT RAISE ONE, and says so by leaving the post empty rather than
+            // by raising a six-year-old. A headless layer is a legal state; this is what it looks
+            // like from the inside.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_city_too_young_to_govern_leaves_the_post_empty() returns void {
+                Atlas* atlas = new Atlas(Rulers.CELLS) on heap;
+                Population* folk = new Population(Rulers.SIDE, Rulers.SIDE) on heap;
+                Rng* dice = new Rng(5) on heap;
+                Result<City*, Refusal> made = atlas.found(folk, 10, 10, 12, 10, 4);
+                City* town = made.valueOr(0 as City*);
+                for (int i in 0..6) {
+                    AgentId who = folk.bear(10.5, 10.5);
+                    folk.at(who).body.age = 7;
+                    town.enrol(who);
+                }
+                Succession.tick(folk, atlas, dice);
+                Test.assertTrue(town.headless());
+                delete made;
+                delete dice;
+                delete atlas;
+                delete folk;
+                return;
+            }
+
+            // A POST NOTICES WHEN THE PERSON IN IT IS GONE. Not by being told -- by the post being
+            // checked against who is really there, which is what makes a swap-remove survivable: the
+            // slot a dead ruler held is somebody else the instant they die.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_post_is_refilled_when_the_person_in_it_is_no_longer_one() returns void {
+                Atlas* atlas = new Atlas(Rulers.CELLS) on heap;
+                Population* folk = new Population(Rulers.SIDE, Rulers.SIDE) on heap;
+                Rng* dice = new Rng(23) on heap;
+                City* town = Rulers.town(atlas, folk, 10);
+                Succession.tick(folk, atlas, dice);
+                int was = town.ruledBy();
+                Test.assertTrue(was >= 0);
+                // The ruler is put back to a worker -- which is what a death looks like to the post:
+                // whoever holds that slot now is not a protagonist.
+                folk.at(cast<AgentId>(was)).becomes(AgentClass.Worker);
+                Succession.tick(folk, atlas, dice);
+                Test.assertFalse(town.headless());
+                // Somebody holds it, and they are a protagonist again.
+                Test.assertEqual(cast<int>(folk.at(cast<AgentId>(town.ruledBy())).standing()),
+                                 cast<int>(AgentClass.Protagonist));
+                delete dice;
+                delete atlas;
+                delete folk;
+                return;
+            }
+        }
+    }
+}

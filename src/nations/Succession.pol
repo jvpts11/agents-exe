@@ -1,0 +1,210 @@
+import System.IO.Console;
+import Agents.Nations.Atlas;
+import Agents.Nations.City;
+import Agents.Nations.Nation;
+import Agents.Nations.Subdivision;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.AgentClass;
+import Agents.People.Population;
+import Agents.World.Rng;
+
+program AgentsExe;
+
+// WHO LEADS, AND WHAT HAPPENS WHEN NOBODY DOES.
+//
+// All three layers are led and a leader is always an agent -- somebody specific, who can be found on
+// the map and killed, and whose layer notices. The rules are a pass so the layers stay parts that
+// mean something on their own, which is the same split `Claiming` and `Housing` are kept by.
+//
+// A HEADLESS LAYER IS LEGAL, and this is what ends it rather than what forbids it. The war design
+// settles the shape from the other side: an army with no general is a legal state, the layer holds
+// one id, and the agent holds nothing pointing back. Rulership is that same one-sided relation, so
+// none of `TEnroller`'s machinery belongs here -- and a ruler who dies simply leaves the post empty
+// until this pass runs.
+//
+// WHAT IS NOT HERE: succession BY GOVERNMENT. The model makes the rules of succession a property of
+// the government -- elective, hereditary, by force -- and there is no `Government` in this program
+// yet (audit finding D6: the work spec was wrong about that, the nation model right). So this fills
+// a vacancy the one way every government would agree on, and S3.6 is where the choosing becomes a
+// decision the government makes.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Succession {
+            // The years between one look at the country's vacancies and the next. A ruler dies a
+            // handful of times a century; asking every tick would be asking three hundred times a
+            // second whether anybody died, which is the shape of question this project already
+            // learned to file rather than to scan.
+            public static fixed int EVERY_YEARS = 1;
+            // The ages a person may be raised at. The model's own bounds: over eighteen and under
+            // fifty -- old enough to govern, young enough that the post does not fall vacant again
+            // within the decade.
+            public static fixed int RAISE_FROM = 18;
+            public static fixed int RAISE_TO = 50;
+            // How many families the newly raised one brings with them. The model: two to four,
+            // "because a nobility re-founded on a single person dies with that person, and one
+            // generation later the world is exactly where it was".
+            public static fixed int KIN_LEAST = 2;
+            public static fixed int KIN_MOST = 4;
+
+            private static mutable long crowned;
+            private static mutable long raised;
+            private static mutable long vacant;
+
+            public static method report() returns void {
+                System.IO.Console.println($"rule: {crowned} took a post, {raised} raised to the nobility, {vacant} posts left empty");
+                return;
+            }
+
+            // Fill whatever is empty, top down. Cheap: it walks the tree, which is one nation and a
+            // handful of cities, not the crowd.
+            public static method tick(Population* folk, Atlas* realm, Rng* dice) returns void {
+                if (realm == null) {
+                    return;
+                }
+                for (int n in 0..realm.nationCount()) {
+                    Nation* who = realm.nationAt(n);
+                    for (int s in 0..who.subdivisionCount()) {
+                        Subdivision* part = who.subdivisionAt(s);
+                        for (int c in 0..part.cityCount()) {
+                            City* town = part.cityAt(c);
+                            if (town.headless() || !Succession.stillThere(folk, town.ruledBy())) {
+                                town.setRuler(Succession.pick(folk, town, dice));
+                            }
+                        }
+                        if (part.headless() || !Succession.stillThere(folk, part.ruledBy())) {
+                            part.setRuler(Succession.fromCities(folk, part));
+                        }
+                    }
+                    if (who.headless() || !Succession.stillThere(folk, who.ruledBy())) {
+                        who.setRuler(Succession.fromSubdivisions(folk, who));
+                    }
+                }
+                return;
+            }
+
+            // WHETHER THE POST IS STILL FILLED BY THE PERSON WHO FILLED IT. A death is a swap-remove,
+            // so the slot a dead ruler held is now somebody else -- checking the id is not enough,
+            // and this is the same trap the city's roll fell into before `renumber` existed. What
+            // makes it answerable is that a ruler is a protagonist: whoever holds the post and is not
+            // one is not the person who took it.
+            private static method stillThere(Population* folk, int who) returns boolean {
+                if (who == Subdivision.NOBODY || who < 0 || who >= folk.count()) {
+                    return false;
+                }
+                return cast<int>(folk.at(cast<AgentId>(who)).standing())
+                       == cast<int>(AgentClass.Protagonist);
+            }
+
+            // WHO LEADS A CITY: one of its own, and a protagonist if it has one. If it has none, one
+            // is raised -- which is the model closing the hole where "the post quietly falls back to
+            // a worker" would have made losing your nobility and becoming socialist the same event.
+            private static method pick(Population* folk, City* town, Rng* dice) returns int {
+                mutable int link = town.firstResident();
+                while (link >= 0) {
+                    AgentId who = town.residentAt(link);
+                    link = town.afterResident(link);
+                    if (cast<int>(folk.at(who).standing()) == cast<int>(AgentClass.Protagonist)) {
+                        crowned = crowned + cast<long>(1);
+                        return cast<int>(who);
+                    }
+                }
+                int made = Succession.raise(folk, town, dice);
+                if (made == Subdivision.NOBODY) {
+                    vacant = vacant + cast<long>(1);
+                    return Subdivision.NOBODY;
+                }
+                crowned = crowned + cast<long>(1);
+                return made;
+            }
+
+            // RAISE ONE, AND THE FAMILIES THEY BRING. A nobility founded on one person dies with
+            // that person, so the raised one carries two to four families up with them -- everybody
+            // who shares a family name with somebody already chosen.
+            private static method raise(Population* folk, City* town, Rng* dice) returns int {
+                mutable int first = Subdivision.NOBODY;
+                mutable int link = town.firstResident();
+                while (link >= 0) {
+                    AgentId who = town.residentAt(link);
+                    link = town.afterResident(link);
+                    Agent* one = folk.at(who);
+                    if (one.body.age >= Succession.RAISE_FROM && one.body.age < Succession.RAISE_TO) {
+                        one.becomes(AgentClass.Protagonist);
+                        raised = raised + cast<long>(1);
+                        first = cast<int>(who);
+                        break;
+                    }
+                }
+                if (first == Subdivision.NOBODY) {
+                    return Subdivision.NOBODY;   // a city of children and the very old
+                }
+                // AND THEIR KIN. Counted in FAMILIES rather than in people, because that is what the
+                // model says and because raising four individuals scattered across a town is not a
+                // nobility -- it is four people who will not marry each other.
+                int want = dice.range(Succession.KIN_LEAST, Succession.KIN_MOST + 1);
+                mutable int families = 1;
+                int firstFamily = folk.at(cast<AgentId>(first)).identity.familyName;
+                mutable int scanning = town.firstResident();
+                while (scanning >= 0 && families < want) {
+                    AgentId who = town.residentAt(scanning);
+                    scanning = town.afterResident(scanning);
+                    Agent* one = folk.at(who);
+                    if (cast<int>(one.standing()) == cast<int>(AgentClass.Protagonist)) {
+                        continue;
+                    }
+                    if (one.identity.familyName == firstFamily) {
+                        continue;   // already the first family
+                    }
+                    Succession.raiseFamily(folk, town, one.identity.familyName);
+                    families = families + 1;
+                }
+                return first;
+            }
+
+            // Everybody of one family name in this city, raised together.
+            private static method raiseFamily(Population* folk, City* town, int family) returns void {
+                mutable int link = town.firstResident();
+                while (link >= 0) {
+                    AgentId who = town.residentAt(link);
+                    link = town.afterResident(link);
+                    Agent* one = folk.at(who);
+                    if (one.identity.familyName == family
+                        && cast<int>(one.standing()) != cast<int>(AgentClass.Protagonist)) {
+                        one.becomes(AgentClass.Protagonist);
+                        raised = raised + cast<long>(1);
+                    }
+                }
+                return;
+            }
+
+            // A SUBDIVISION IS LED FROM ITS CITIES, and a nation from its subdivisions: the post is
+            // filled by somebody who already leads a layer below. That is not a rule this slice
+            // invents -- it is what "the rulers of subdivisions and cities are protagonists for the
+            // same reason the nation's ruler is" means once every layer has one.
+            private static method fromCities(Population* folk, Subdivision* part) returns int {
+                for (int c in 0..part.cityCount()) {
+                    int who = part.cityAt(c).ruledBy();
+                    if (Succession.stillThere(folk, who)) {
+                        crowned = crowned + cast<long>(1);
+                        return who;
+                    }
+                }
+                vacant = vacant + cast<long>(1);
+                return Subdivision.NOBODY;
+            }
+
+            private static method fromSubdivisions(Population* folk, Nation* who) returns int {
+                for (int s in 0..who.subdivisionCount()) {
+                    int lord = who.subdivisionAt(s).ruledBy();
+                    if (Succession.stillThere(folk, lord)) {
+                        crowned = crowned + cast<long>(1);
+                        return lord;
+                    }
+                }
+                vacant = vacant + cast<long>(1);
+                return Subdivision.NOBODY;
+            }
+        }
+    }
+}
