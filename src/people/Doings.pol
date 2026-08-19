@@ -65,10 +65,10 @@ public bundle Agents {
             // empty" has several causes and only this number tells the errand never running from the
             // errand running and not arriving.
             private static mutable long hauled;
-            private static mutable long arrived;
+            private static mutable long unreachable;
 
             public static method report() returns void {
-                System.IO.Console.println($"folk doing: {changes} changes of mind, {together} times a couple was together, {hauled} steps toward a storehouse, {arrived} arrivals");
+                System.IO.Console.println($"folk doing: {changes} changes of mind, {together} times a couple was together, {hauled} errands to a storehouse, {unreachable} with no way there");
                 return;
             }
 
@@ -271,13 +271,33 @@ public bundle Agents {
                 // An errand that does not finish itself relies on somebody else noticing it arrived.
                 float dx = one.x() - sx;
                 float dy = one.y() - sy;
+                // ARRIVED. The larder's own pass over the city's residents usually gets there first
+                // -- it runs every tick and this runs every thirty -- so this rarely fires, and it
+                // is kept because "usually" is not "always": a citizen whose last step lands them at
+                // the shelf between two passes still puts their load down.
                 if (dx * dx + dy * dy <= Larder.REACH * Larder.REACH) {
-                    arrived = arrived + cast<long>(1);
                     Larder.deposit(town, one);
                     return;
                 }
+                // ALREADY ON THE WAY? Then leave the walk alone. Asking for the same destination
+                // again every thirty ticks is how a route gets thrown away and re-searched, which
+                // this project has already paid for once: two million routes asked and ninety-five
+                // per cent of people standing still.
+                if (one.journey.going) {
+                    return;
+                }
+                // SET OUT, rather than nudge. A "step toward" moves a fortieth of a cell and this
+                // method is reached once every thirty ticks -- so the errand covered six cells in a
+                // whole run, across every citizen, and not one of two hundred and fifty-eight
+                // departures ever arrived. `setOut` hands the walk to the same machinery that gets
+                // everybody to a bush, which advances every tick and follows a route.
+                //
+                // It also ANSWERS: there may be no way there at all, and a citizen who cannot reach
+                // their own storehouse should be counted rather than left walking into a wall.
                 hauled = hauled + cast<long>(1);
-                Walking.stepToward(folk, g, ways, cast<AgentId>(mine), sx, sy);
+                if (!Walking.setOut(folk, g, ways, cast<AgentId>(mine), sx, sy)) {
+                    unreachable = unreachable + cast<long>(1);
+                }
                 return;
             }
 
