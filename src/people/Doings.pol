@@ -16,6 +16,7 @@ import Agents.World.Biome;
 import Agents.People.Walking;
 import Agents.Nations.Atlas;
 import Agents.Nations.Building;
+import Agents.Nations.City;
 program AgentsExe;
 
 // THE ONE PLACE THAT DECIDES WHAT ANYBODY IS DOING.
@@ -60,9 +61,14 @@ public bundle Agents {
 
             private static mutable long changes;
             private static mutable long together;
+            // How many times somebody set off for the storehouse. Counted because "the larder is
+            // empty" has several causes and only this number tells the errand never running from the
+            // errand running and not arriving.
+            private static mutable long hauled;
+            private static mutable long arrived;
 
             public static method report() returns void {
-                System.IO.Console.println($"folk doing: {changes} changes of mind, {together} times a couple was together");
+                System.IO.Console.println($"folk doing: {changes} changes of mind, {together} times a couple was together, {hauled} steps toward a storehouse, {arrived} arrivals");
                 return;
             }
 
@@ -198,6 +204,15 @@ public bundle Agents {
                     Doings.goHome(folk, realm, g, ways, one, mine);
                     return;
                 }
+                // AND SOMEBODY CARRYING SURPLUS WALKS IT TO THE STORE. The other half of what makes
+                // a larder a larder: the shelf exists and the arithmetic works, and without this
+                // nobody ever arrives at it -- a citizen would have to wander within two cells of
+                // the storehouse by chance, while full and carrying, which over a whole run happened
+                // exactly nought times.
+                if (cast<int>(what) == cast<int>(Activity.Hauling)) {
+                    Doings.goToStore(folk, realm, g, ways, one, mine);
+                    return;
+                }
                 // AND TALKING DOES NOT STOP A WALK, which it did, and which quietly starved the
                 // world. Somebody walking to a bush who passed a cousin dropped the journey, talked
                 // for half a second, then wanted food again and asked for a WHOLE NEW ROUTE from
@@ -228,6 +243,41 @@ public bundle Agents {
                 }
                 Walking.stepToward(folk, g, ways, cast<AgentId>(mine),
                                    cast<float>(bed.x()) + 0.5, cast<float>(bed.y()) + 0.5);
+                return;
+            }
+
+            // A STEP TOWARD THE CITY'S STOREHOUSE. Its cell is a fact the city has held since its
+            // founding placed it, so this asks the city rather than searching for a building.
+            //
+            // A ROUTE, like going home: the store can be across the territory and behind a stream,
+            // and every citizen with a full hand converges on the same doorway.
+            private static method goToStore(Population* folk, Atlas* realm, Grid* g, Waymap* ways,
+                                            Agent* one, int mine) returns void {
+                if (realm == null) {
+                    return;
+                }
+                nullable City* town = realm.cityNamed(one.whereabouts.homeCity);
+                if (town == null) {
+                    return;
+                }
+                float sx = cast<float>(town.storeAtX()) + 0.5;
+                float sy = cast<float>(town.storeAtY()) + 0.5;
+                // ARRIVED? THEN THE ERRAND IS DONE HERE, and that is the correction rather than a
+                // convenience. The first version had a separate pass scan whoever happened to be
+                // standing near the shelf and take their surplus -- which is a different question
+                // from "who came here to deliver", and it was answered nought times in a whole run
+                // while a hundred and fifty-six people were walking there with full hands.
+                //
+                // An errand that does not finish itself relies on somebody else noticing it arrived.
+                float dx = one.x() - sx;
+                float dy = one.y() - sy;
+                if (dx * dx + dy * dy <= Larder.REACH * Larder.REACH) {
+                    arrived = arrived + cast<long>(1);
+                    Larder.deposit(town, one);
+                    return;
+                }
+                hauled = hauled + cast<long>(1);
+                Walking.stepToward(folk, g, ways, cast<AgentId>(mine), sx, sy);
                 return;
             }
 

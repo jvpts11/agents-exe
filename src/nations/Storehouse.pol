@@ -1,0 +1,76 @@
+import Agents.Nations.Storekeeper;
+import Agents.World.Bill;
+import Agents.World.Goods;
+import Agents.World.Tally;
+
+program AgentsExe;
+
+// THE ONLY PLACE A CITY'S GOODS SIT.
+//
+// The building layout states it as a rule and gives the arithmetic reason rather than a realistic
+// one: goods are in exactly three places -- a store, a carrier's hands, or on a site -- and a fourth
+// place for them to sit is a fourth place for them to vanish. A workshop keeping a buffer of clay is
+// how a ledger stops closing.
+//
+// A THING IN ITS OWN RIGHT, which is why the city HAS one rather than applying it: a storehouse has
+// contents, you can hand one to somebody, and it would still mean something if no city existed. That
+// is the layout's own test for a delegate against a transformer, and this is the delegate side of it.
+//
+// THE OPERATORS ARE THE POINT, and `Tally` carries them: `covers` is one comparison instead of a
+// loop over seventy-five goods at every call site, and the site that got it wrong debited a whole
+// bill and then let the builders draw it a second time.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Storehouse implements Storekeeper {
+            private mutable Bill held;
+
+            public constructor Storehouse() {
+                this.held = new Bill(Goods.count()) on stack;
+            }
+
+            public override method covers(Bill cost) returns boolean {
+                return held >= cost;
+            }
+
+            // WHAT IS TAKEN OUT NEVER GOES BELOW NOTHING, which `Tally`'s own subtraction guarantees
+            // rather than every caller remembering. Drawing more than is there empties the shelf; it
+            // does not owe the difference.
+            public override method draw(Bill cost) returns void {
+                held = held - cost;
+                return;
+            }
+
+            public override method take(Bill got) returns void {
+                held = held + got;
+                return;
+            }
+
+            public override method howMuch(int good) returns int {
+                return held[good];
+            }
+
+            public override method stock() returns int {
+                return held.total();
+            }
+
+            // ONE GOOD AT A TIME, which is what a person walking in with an armful actually does.
+            // A carrier holds a kind and an amount, not a bill.
+            public override method put(int good, int many) returns void {
+                held.add(good, many);
+                return;
+            }
+
+            // And out again, capped at what is there -- answers how much was actually got, because
+            // the caller has to know whether it may eat.
+            public override method takeOut(int good, int many) returns int {
+                mutable int got = many;
+                if (got > held[good]) {
+                    got = held[good];
+                }
+                held.put(good, held[good] - got);
+                return got;
+            }
+        }
+    }
+}

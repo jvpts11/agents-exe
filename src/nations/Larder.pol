@@ -1,0 +1,170 @@
+import Agents.Nations.Atlas;
+import Agents.Nations.City;
+import Agents.People.Agent;
+import Agents.People.AgentId;
+import Agents.People.Body;
+import Agents.People.Foraging;
+import Agents.People.Inventory;
+import Agents.People.Population;
+import Agents.World.Goods;
+import Agents.Nations.Nation;
+import Agents.Nations.Subdivision;
+import System.IO.Console;
+
+program AgentsExe;
+
+// THE CITY'S LARDER: what its people put in, and what they take back out.
+//
+// A storehouse with nothing going into it is a class with no reader, and the model says what the
+// flow is -- "source -> store -> site". This is the first half of it, and the half that needed no
+// new machinery: people already gather into their hands and eat out of them, so what was missing was
+// only the shelf between the two.
+//
+// A CITIZEN WITH FOOD AND NO HUNGER PUTS IT DOWN. Not a rule about generosity: a person who cannot
+// eat any more and is standing where the food is kept has no reason to carry it, and a city whose
+// people all carry their own supper has no larder at all -- which is what this world looked like
+// before, with a storehouse drawn on the ground and nothing in it.
+//
+// AND A HUNGRY ONE WITH EMPTY HANDS TAKES SOME. That is the whole of what a store is for at this
+// slice: the errand that walks goods across town for a building site is the work layer (S4.2), and
+// this needs none of it -- the store is at the storehouse's cell and a person is either near it or
+// is not.
+public bundle Agents {
+    public namespace Nations {
+
+        public class Larder {
+            // How near the storehouse a person has to be to reach the shelf, in cells. Two, which is
+            // the model's own minimum distance between buildings -- so "at the storehouse" means the
+            // ground the storehouse occupies and the ring immediately around it, not a hand reaching
+            // across a street.
+            public static fixed float REACH = 2.0;
+            // WHEN WHAT IS IN HAND STOPS BEING SUPPER AND STARTS BEING SURPLUS -- and it is the
+            // threshold `Foraging` already uses to stop eating, not a third number beside it. A
+            // person eats while another meal would still fit; above that they are carrying more than
+            // they need, which is the whole definition of surplus.
+            //
+            // Written from the two constants rather than as a figure: the first version of this line
+            // said 700, against a `Body.FULL` of 100. Nothing could ever reach it, so the larder
+            // stayed empty and reported `0 put in` as though that were the world's answer.
+            public static fixed int KEEP_FED = Body.FULL - Foraging.A_MEAL;
+
+            private static mutable long stored;
+            private static mutable long drawn;
+            // WHY NOTHING HAPPENED, counted rather than guessed. A larder that reports `0 put in`
+            // has three quite different ways of being right, and they want different fixes: nobody
+            // ever reached the shelf, everybody reached it with nothing to leave, or everybody
+            // reached it hungry. Two evenings of this project have been spent guessing between
+            // shapes like these.
+            private static mutable long looked;
+            private static mutable long reached;
+            private static mutable long hadSurplus;
+
+            public static method report() returns void {
+                System.IO.Console.println($"larder: {stored} put in, {drawn} taken out -- {looked} citizen-visits, {reached} at the shelf, {hadSurplus} carrying surplus");
+                return;
+            }
+
+            // One pass over the people of every city. Cheap: it walks the residents of each city
+            // rather than the whole crowd, and a city's roll is a few dozen links.
+            public static method tick(Population* folk, Atlas* realm) returns void {
+                if (realm == null) {
+                    return;
+                }
+                for (int n in 0..realm.nationCount()) {
+                    Nation* who = realm.nationAt(n);
+                    for (int s in 0..who.subdivisionCount()) {
+                        Subdivision* part = who.subdivisionAt(s);
+                        for (int c in 0..part.cityCount()) {
+                            Larder.serve(folk, part.cityAt(c));
+                        }
+                    }
+                }
+                return;
+            }
+
+            private static method serve(Population* folk, City* town) returns void {
+                float sx = cast<float>(town.storeAtX()) + 0.5;
+                float sy = cast<float>(town.storeAtY()) + 0.5;
+                mutable int link = town.firstResident();
+                while (link >= 0) {
+                    AgentId who = town.residentAt(link);
+                    link = town.afterResident(link);
+                    Agent* one = folk.at(who);
+                    looked = looked + cast<long>(1);
+                    if (!one.inventory.emptyHanded() && one.body.fed.value() >= Larder.KEEP_FED
+                        && Goods.edible(one.inventory.carrying)) {
+                        hadSurplus = hadSurplus + cast<long>(1);
+                    }
+                    float dx = one.x() - sx;
+                    float dy = one.y() - sy;
+                    if (dx * dx + dy * dy > Larder.REACH * Larder.REACH) {
+                        continue;   // not at the shelf
+                    }
+                    reached = reached + cast<long>(1);
+                    // AT THE SHELF WITH MORE THAN THEY CAN EAT: put it down. This does not wait for
+                    // the errand -- a person standing at the storehouse holding twelve meals when
+                    // four would fill them has arrived whether or not that is what they set out to
+                    // do, and most citizens live within a few cells of it.
+                    Larder.deposit(town, one);
+                    // TAKE SOME WHEN HUNGRY AND EMPTY-HANDED. One helping, of whatever the store
+                    // has most of -- a person at a shelf takes what is in front of them rather than
+                    // choosing.
+                    if (one.inventory.emptyHanded() && one.body.fed.value() < Larder.KEEP_FED) {
+                        int what = Larder.mostOf(town);
+                        if (what != Goods.NOTHING) {
+                            int got = town.takeOut(what, 1);
+                            if (got > 0) {
+                                one.inventory.carrying = what;
+                                one.inventory.howMany = got;
+                                drawn = drawn + cast<long>(got);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+
+            // PUT DOWN WHAT WAS CARRIED HERE. Called by the haul errand at the moment it arrives, so
+            // the delivery belongs to the person who made the journey rather than to whoever a scan
+            // happens to find standing nearby.
+            //
+            // Only food goes in at this slice: the store takes everything eventually, but a person
+            // carrying a log is carrying it somewhere, and taking it off them here would be the
+            // larder robbing a building site.
+            public static method deposit(City* town, Agent* one) returns void {
+                if (one.inventory.emptyHanded() || !Goods.edible(one.inventory.carrying)) {
+                    return;
+                }
+                // KEEP WHAT WOULD FILL YOU, SHELVE THE REST. Emptying the hands entirely would send
+                // a person away from the food with nothing, straight back to being hungry -- which
+                // is the larder taking their supper rather than storing the surplus.
+                int wanted = (Body.FULL - one.body.fed.value()) / Foraging.A_MEAL + 1;
+                if (one.inventory.howMany <= wanted) {
+                    return;
+                }
+                int spare = one.inventory.howMany - wanted;
+                town.put(one.inventory.carrying, spare);
+                stored = stored + cast<long>(spare);
+                one.inventory.howMany = wanted;
+                return;
+            }
+
+            // Which good the store has most of, or NOTHING when it is bare.
+            private static method mostOf(City* town) returns int {
+                mutable int best = Goods.NOTHING;
+                mutable int many = 0;
+                for (int g in 0..Goods.count()) {
+                    if (!Goods.edible(g)) {
+                        continue;
+                    }
+                    int here = town.howMuch(g);
+                    if (here > many) {
+                        many = here;
+                        best = g;
+                    }
+                }
+                return best;
+            }
+        }
+    }
+}

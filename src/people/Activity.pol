@@ -9,6 +9,9 @@ import Agents.People.Journey;
 import Agents.People.Courting;
 import Agents.Nations.Atlas;
 import Agents.Nations.Building;
+import Agents.Nations.Larder;
+import Agents.People.Foraging;
+import Agents.World.Goods;
 program AgentsExe;
 
 // WHAT A PERSON IS DOING, AND WHY THAT ONE AND NOT ANOTHER.
@@ -66,7 +69,15 @@ public bundle Agents {
             Eating(     15,     20,      true,  "eating"),
             Gathering(   1,    300,      true,  "gathering"),
             Fetching(   15,    240,      true,  "fetching"),
-            Hauling(    15,    320,      true,  "hauling"),
+            // NOT INTERRUPTIBLE, and that is what makes it an errand rather than an intention. The
+            // chooser runs every fifteen ticks; a walk to the storehouse takes longer than that, so
+            // a haul that may be cut is abandoned every time and the shelf never sees it -- measured
+            // at seventy-nine departures and nought arrivals.
+            //
+            // An uninterruptible activity has to be able to stop wanting itself or the person is
+            // frozen for ever, and this one does: the moment the goods are put down there is no
+            // surplus, so the urge is nought and the world takes them back.
+            Hauling(    15,    320,     false,  "hauling"),
             Travelling( 15,    280,      true,  "travelling"),
             Courting(   15,    100,      true,  "courting"),
             Learning(   15,     80,      true,  "learning"),
@@ -234,7 +245,14 @@ public bundle Agents {
                     case Gathering -> Activity.hungrily(one, 0.95);
                     // THE TWO HALVES OF AN ERRAND, which need a post to be running one for (S4).
                     case Fetching -> Activity.ifPosted(one, 0.35);
-                    case Hauling -> Activity.ifPosted(one, 0.40);
+                    // CARRYING FOOD THIS PERSON DOES NOT NEED, WITH A CITY TO PUT IT IN. A post
+                    // gives a reason to haul as well, and until there are posts (S4.2) this is the
+                    // only one -- but it is a real one, and without it the storehouse a founding
+                    // draws on the ground stays empty for ever: a shelf nobody walks to is a shelf.
+                    //
+                    // Under sleeping and eating on purpose. Somebody exhausted or starving does not
+                    // finish the errand first, which is what would look wrong from outside.
+                    case Hauling -> Activity.ifPosted(one, 0.40) + Activity.ifSurplus(one, 0.30);
                     // MOVING FOR GOOD rather than walking about: a colonist, or a spouse changing
                     // city. Both need cities (S3).
                     case Travelling -> 0.0;
@@ -314,6 +332,32 @@ public bundle Agents {
             // for it to be wrong.
             private static method ifPosted(Agent* one, float much) returns float {
                 if (one.whereabouts.jobless()) {
+                    return 0.0;
+                }
+                return much;
+            }
+
+            // FOOD IN HAND THAT THIS PERSON DOES NOT NEED, AND SOMEWHERE TO PUT IT. Three things at
+            // once, because any two of them is not an errand: a full belly with empty hands has
+            // nothing to carry, a full hand with an empty belly is about to eat it, and either of
+            // those without a city has nowhere to take it.
+            private static method ifSurplus(Agent* one, float much) returns float {
+                if (one.whereabouts.cityless() || one.inventory.emptyHanded()) {
+                    return 0.0;
+                }
+                if (!Goods.edible(one.inventory.carrying)) {
+                    return 0.0;   // a log is being carried somewhere already
+                }
+                // MORE THAN THIS PERSON CAN EAT, which is what surplus means -- not "is full right
+                // now". The first version asked the second question and the errand fell apart on
+                // the way: hunger creeps back over a walk of twenty cells, the condition went false
+                // halfway, and the walker was released to eat what it was carrying. A hundred and
+                // fifty-six people set off for the storehouse over a whole run and not one arrived.
+                //
+                // Carrying twelve when four would fill you is a surplus in the middle of a field and
+                // still a surplus at the door, so the errand survives the journey that finishes it.
+                int wanted = (Body.FULL - one.body.fed.value()) / Foraging.A_MEAL + 1;
+                if (one.inventory.howMany <= wanted) {
                     return 0.0;
                 }
                 return much;

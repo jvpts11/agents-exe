@@ -1,0 +1,95 @@
+import System.Test.Test;
+import System.Errors.Result;
+import Agents.Nations.Atlas;
+import Agents.Nations.City;
+import Agents.Nations.Refusal;
+import Agents.Nations.Storehouse;
+import Agents.People.Population;
+import Agents.World.Bill;
+import Agents.World.Goods;
+import Agents.World.ExtractedGood;
+
+program AgentsExe;
+
+// THE STORE'S ARITHMETIC, which is what a window cannot show.
+//
+// The nation layout asks for these as operators rather than loops for one reason it can point at:
+// written out, "can the city afford this" is three nested loops over seventy-five goods at every
+// call site, and the site that got it wrong debited a whole bill and then let the builders draw it
+// a second time. `if (city.covers(cost))` is one line that cannot do that.
+public bundle Agents {
+    public namespace Checks {
+
+        public class Store {
+            public static fixed int CELLS = 4096;
+            public static fixed int SIDE = 64;
+
+            private static method bill(int good, int many) returns Bill {
+                mutable Bill b = new Bill(Goods.count()) on stack;
+                b.put(good, many);
+                return b;
+            }
+
+            // COVERS IS ITEM FOR ITEM, NOT A TOTAL. A store with four hundred berries and no wood
+            // does not cover a hut, and a sum would say it did -- which is the whole reason the
+            // comparison is an operator on the tally rather than arithmetic at the call site.
+            [Tag(name: "nations")]
+            [Test]
+            public static method covering_is_item_for_item_and_never_a_total() returns void {
+                Storehouse* s = new Storehouse() on heap;
+                int berries = ExtractedGood.Berries.index();
+                int wood = ExtractedGood.Wood.index();
+                s.put(berries, 400);
+                Test.assertTrue(s.covers(Store.bill(berries, 12)));
+                // Four hundred of the wrong thing covers nothing.
+                Test.assertFalse(s.covers(Store.bill(wood, 1)));
+                Test.assertEqual(s.stock(), 400);
+                delete s;
+                return;
+            }
+
+            // NOTHING GOES BELOW NOTHING. Drawing more than is there empties the shelf; it does not
+            // leave the store owing the difference, which is a state this world cannot hold.
+            [Tag(name: "nations")]
+            [Test]
+            public static method drawing_more_than_is_there_empties_rather_than_owes() returns void {
+                Storehouse* s = new Storehouse() on heap;
+                int berries = ExtractedGood.Berries.index();
+                s.put(berries, 5);
+                s.draw(Store.bill(berries, 12));
+                Test.assertEqual(s.howMuch(berries), 0);
+                Test.assertEqual(s.stock(), 0);
+                // And taking out is capped at what is there, and says how much it really got --
+                // the caller has to know whether it may eat.
+                s.put(berries, 3);
+                Test.assertEqual(s.takeOut(berries, 10), 3);
+                Test.assertEqual(s.howMuch(berries), 0);
+                delete s;
+                return;
+            }
+
+            // A CITY ANSWERS LIKE ITS OWN STORE, which is what the delegate buys: no forwarder is
+            // written by hand, and `city.covers(cost)` is the affordability question asked of the
+            // thing that has to answer it.
+            [Tag(name: "nations")]
+            [Test]
+            public static method a_city_answers_like_its_storehouse() returns void {
+                Atlas* atlas = new Atlas(Store.CELLS) on heap;
+                Population* folk = new Population(Store.SIDE, Store.SIDE) on heap;
+                Result<City*, Refusal> made = atlas.found(folk, 10, 10, 12, 10, 4);
+                City* town = made.valueOr(0 as City*);
+                int berries = ExtractedGood.Berries.index();
+                Test.assertEqual(town.stock(), 0);
+                town.put(berries, 20);
+                Test.assertEqual(town.stock(), 20);
+                Test.assertEqual(town.howMuch(berries), 20);
+                Test.assertTrue(town.covers(Store.bill(berries, 20)));
+                Test.assertFalse(town.covers(Store.bill(berries, 21)));
+                delete made;
+                delete atlas;
+                delete folk;
+                return;
+            }
+        }
+    }
+}
