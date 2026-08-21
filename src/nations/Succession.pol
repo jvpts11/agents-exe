@@ -89,28 +89,31 @@ public bundle Agents {
             // and this is the same trap the city's roll fell into before `renumber` existed. What
             // makes it answerable is that a ruler is a protagonist: whoever holds the post and is not
             // one is not the person who took it.
-            private static method stillThere(Population* folk, int who) returns boolean {
-                if (who == Subdivision.NOBODY || who < 0 || who >= folk.count()) {
+            private static method stillThere(Population* folk, AgentId who) returns boolean {
+                // The range check is the one place the id is read as a NUMBER rather than as an id,
+                // so it is the one place the cast belongs -- and having to write it here is what
+                // makes it visible that this, and not `folk.at`, is where the bound is decided.
+                int slot = cast<int>(who);
+                if (who == Subdivision.NOBODY || slot < 0 || slot >= folk.count()) {
                     return false;
                 }
-                return cast<int>(folk.at(cast<AgentId>(who)).standing())
-                       == cast<int>(AgentClass.Protagonist);
+                return cast<int>(folk.at(who).standing()) == cast<int>(AgentClass.Protagonist);
             }
 
             // WHO LEADS A CITY: one of its own, and a protagonist if it has one. If it has none, one
             // is raised -- which is the model closing the hole where "the post quietly falls back to
             // a worker" would have made losing your nobility and becoming socialist the same event.
-            private static method pick(Population* folk, City* town, Rng* dice) returns int {
+            private static method pick(Population* folk, City* town, Rng* dice) returns AgentId {
                 mutable int link = town.firstResident();
                 while (link >= 0) {
                     AgentId who = town.residentAt(link);
                     link = town.afterResident(link);
                     if (cast<int>(folk.at(who).standing()) == cast<int>(AgentClass.Protagonist)) {
                         crowned = crowned + cast<long>(1);
-                        return cast<int>(who);
+                        return who;
                     }
                 }
-                int made = Succession.raise(folk, town, dice);
+                AgentId made = Succession.raise(folk, town, dice);
                 if (made == Subdivision.NOBODY) {
                     vacant = vacant + cast<long>(1);
                     return Subdivision.NOBODY;
@@ -122,8 +125,8 @@ public bundle Agents {
             // RAISE ONE, AND THE FAMILIES THEY BRING. A nobility founded on one person dies with
             // that person, so the raised one carries two to four families up with them -- everybody
             // who shares a family name with somebody already chosen.
-            private static method raise(Population* folk, City* town, Rng* dice) returns int {
-                mutable int first = Subdivision.NOBODY;
+            private static method raise(Population* folk, City* town, Rng* dice) returns AgentId {
+                mutable AgentId first = Subdivision.NOBODY;
                 mutable int link = town.firstResident();
                 while (link >= 0) {
                     AgentId who = town.residentAt(link);
@@ -132,7 +135,7 @@ public bundle Agents {
                     if (one.body.age >= Succession.RAISE_FROM && one.body.age < Succession.RAISE_TO) {
                         one.becomes(AgentClass.Protagonist);
                         raised = raised + cast<long>(1);
-                        first = cast<int>(who);
+                        first = who;
                         break;
                     }
                 }
@@ -144,7 +147,7 @@ public bundle Agents {
                 // nobility -- it is four people who will not marry each other.
                 int want = dice.range(Succession.KIN_LEAST, Succession.KIN_MOST + 1);
                 mutable int families = 1;
-                int firstFamily = folk.at(cast<AgentId>(first)).identity.familyName;
+                int firstFamily = folk.at(first).identity.familyName;
                 mutable int scanning = town.firstResident();
                 while (scanning >= 0 && families < want) {
                     AgentId who = town.residentAt(scanning);
@@ -182,9 +185,9 @@ public bundle Agents {
             // filled by somebody who already leads a layer below. That is not a rule this slice
             // invents -- it is what "the rulers of subdivisions and cities are protagonists for the
             // same reason the nation's ruler is" means once every layer has one.
-            private static method fromCities(Population* folk, Subdivision* part) returns int {
+            private static method fromCities(Population* folk, Subdivision* part) returns AgentId {
                 for (int c in 0..part.cityCount()) {
-                    int who = part.cityAt(c).ruledBy();
+                    AgentId who = part.cityAt(c).ruledBy();
                     if (Succession.stillThere(folk, who)) {
                         crowned = crowned + cast<long>(1);
                         return who;
@@ -194,9 +197,9 @@ public bundle Agents {
                 return Subdivision.NOBODY;
             }
 
-            private static method fromSubdivisions(Population* folk, Nation* who) returns int {
+            private static method fromSubdivisions(Population* folk, Nation* who) returns AgentId {
                 for (int s in 0..who.subdivisionCount()) {
-                    int lord = who.subdivisionAt(s).ruledBy();
+                    AgentId lord = who.subdivisionAt(s).ruledBy();
                     if (Succession.stillThere(folk, lord)) {
                         crowned = crowned + cast<long>(1);
                         return lord;
