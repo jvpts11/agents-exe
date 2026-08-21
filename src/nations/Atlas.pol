@@ -3,7 +3,9 @@ import System.Errors.Result;
 import System.Errors.Ok;
 import System.Errors.Err;
 import Agents.Nations.Nation;
+import Agents.Nations.NationId;
 import Agents.Nations.Subdivision;
+import Agents.Nations.SubdivisionId;
 import Agents.Nations.Building;
 import Agents.Nations.City;
 import Agents.Nations.Refusal;
@@ -60,11 +62,11 @@ public bundle Agents {
 
             // Who holds a cell: a city's number, or -1 for nobody. The map stores number+1 so that
             // an array that arrives zeroed already reads as unowned.
-            public method ownerAt(int cell) returns int {
+            public method ownerAt(int cell) returns CityId {
                 if (cell < 0 || cell >= owner.length()) {
-                    return 0 - 1;
+                    return cast<CityId>(0 - 1);
                 }
-                return owner[cell] - 1;
+                return cast<CityId>(owner[cell] - 1);
             }
 
             // The map itself, for the part that holds ground. Borrowed: the Atlas owns it, and a
@@ -100,14 +102,13 @@ public bundle Agents {
             // If cities ever number in the thousands and this is asked every tick, that is the
             // moment to keep one -- and not before, on a measurement rather than a guess.
             public method cityNamed(CityId which) returns nullable City* {
-                int want = cast<int>(which);
                 for (int n in 0..nations.size()) {
                     Nation* who = nations.get(n);
                     for (int s in 0..who.subdivisionCount()) {
                         Subdivision* part = who.subdivisionAt(s);
                         for (int c in 0..part.cityCount()) {
                             City* one = part.cityAt(c);
-                            if (one.nameOf() == want) {
+                            if (one.nameOf() == which) {
                                 return one;
                             }
                         }
@@ -147,7 +148,7 @@ public bundle Agents {
                                 int room) returns Result<City*, Refusal> {
                 mutable Nation* home = 0 as Nation*;
                 if (nations.size() == 0) {
-                    home = new Nation(0) on heap;
+                    home = new Nation(cast<NationId>(0)) on heap;
                     nations.add(home);
                 } else {
                     home = nations.get(0);
@@ -157,15 +158,20 @@ public bundle Agents {
                     return new Err<City*, Refusal>(Refusal.NoRoomInSubdivision) on heap;
                 }
                 if (where == null) {
-                    Subdivision* made = new Subdivision(divisions, room) on heap;
+                    Subdivision* made = new Subdivision(cast<SubdivisionId>(divisions), room) on heap;
                     divisions = divisions + 1;
                     home.take(made);
                     where = made;
                 }
-                City* one = new City(folk, founded, centreX, centreY, storeX, storeY, owner) on heap;
+                // THE COUNTER BECOMES A NAME HERE, and this is the only line in the game where it
+                // does. A counter is a number while it counts and an id from the moment it names
+                // something, so the cast belongs at the `new` -- not at each of the seams below,
+                // which is where it used to be and where it said nothing about what had happened.
+                CityId named = cast<CityId>(founded);
+                City* one = new City(folk, named, centreX, centreY, storeX, storeY, owner) on heap;
                 where.take(one);
                 if (cast<int>(home.capitalCity()) == Nation.NO_CAPITAL) {
-                    home.setCapital(cast<CityId>(founded));
+                    home.setCapital(named);
                 }
                 founded = founded + 1;
                 return new Ok<City*, Refusal>(one) on heap;
