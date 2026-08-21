@@ -1,0 +1,179 @@
+import System.IO.Console;
+import Agents.World.Grid;
+import Agents.World.Waymap;
+import Agents.World.WorldGen;
+import Agents.World.Rng;
+import Agents.People.Population;
+import Agents.People.Journal;
+import Agents.People.Banding;
+import Agents.Nations.Atlas;
+import Agents.Sim.Wild;
+import Agents.Sim.Chronicle;
+import Agents.Sim.Seeding;
+
+program AgentsExe;
+
+// THE WORLD: everything that IS, and nothing about what happens to it.
+//
+// The nation model's own shape diagram names this as the root -- `World ├── Population └── Atlas` --
+// and until now there was no such class. `Sim` was the state and the loop both: it held the ground,
+// the crowd, the animals, the country, the routes and the dice, AND the gear, the frame budget, the
+// stopwatch and the tick order. Two things in one class is two reasons to open it.
+//
+// THE SPLIT IS ALONG "WHAT WOULD STILL BE TRUE IF NOTHING TICKED". A world with no simulation
+// running is a coherent thing -- it has ground, people standing on it, a country, a route map -- and
+// every one of the systems takes some subset of exactly these handles. That is what makes the split
+// pay rather than merely tidy: `Grazing.tick(beasts, folk, ground, at, dice, log)` and
+// `Doings.tick(folk, realm, ground, ways, at)` are the same call with different holes punched in it,
+// and this class is the shape they are all cut from.
+//
+// IT OWNS THEM, and the order it lets them go in is the one thing here that is not arbitrary: the
+// country before the crowd, because a city holds ids and an id outlives nobody.
+public bundle Agents {
+    public namespace Sim {
+
+        public class World {
+            // What was rolled to make it. Kept because the ground is built later than the world is:
+            // `buildWorld` is a second step, and the seed has to survive until it runs.
+            private mutable int seed;
+            private mutable int wide;
+            private mutable int tall;
+
+            // THE GROUND, which arrives with `buildWorld` and not with the constructor. A world with
+            // no ground is a legal state -- it is what the tick's own arithmetic is checked in --
+            // so `standing` is a fact about the world and not a flag somebody remembered to set.
+            private mutable Grid* terrain;
+            private mutable boolean standing;
+            // What every block costs to cross, and the search that reads it. Exists only once the
+            // ground does, for the same reason.
+            private mutable Waymap* ways;
+
+            private mutable Wild* beasts;
+            private mutable Population* folk;
+            private mutable Atlas* realm;
+            // Every agent's every field, written down, if a run asked for that. Silent until
+            // `keepJournal` names a file.
+            private mutable Journal* diary;
+            private mutable Chronicle* log;
+            // A DIFFERENT STREAM FROM THE TERRAIN'S. The world is generated once and ticked forever;
+            // one stream shared would make the first animal's decision depend on how many rolls the
+            // coastline happened to take, so a change to the generator would silently move every
+            // herd in every world.
+            private mutable Rng* dice;
+
+            // How old it is, in ticks. State and not bookkeeping: half the systems ask it, and a
+            // world that has been running for two centuries is a different world from a new one.
+            private mutable long at;
+
+            public constructor World(int seed, int width, int height) {
+                this.seed = seed;
+                this.wide = width;
+                this.tall = height;
+                this.standing = false;
+                this.at = 0;
+                this.log = new Chronicle() on heap;
+                this.beasts = new Wild(width, height) on heap;
+                this.folk = new Population(width, height) on heap;
+                this.realm = new Atlas(width * height) on heap;
+                this.diary = new Journal("") on heap;
+                this.dice = new Rng(seed ^ 0x5EED) on heap;
+            }
+
+            public destructor ~World() returns void {
+                if (standing) {
+                    delete ways;
+                    delete terrain;
+                }
+                delete diary;    // its destructor flushes whatever the last ticks wrote
+                delete realm;    // before the crowd: a city holds ids, and ids outlive nobody
+                delete folk;
+                delete beasts;
+                delete dice;
+                delete log;
+                return;
+            }
+
+            // ---- what it is ------------------------------------------------------------------
+
+            public method ground() returns Grid* {
+                return terrain;
+            }
+            public method routes() returns Waymap* {
+                return ways;
+            }
+            public method wild() returns Wild* {
+                return beasts;
+            }
+            public method people() returns Population* {
+                return folk;
+            }
+            public method nations() returns Atlas* {
+                return realm;
+            }
+            public method chronicle() returns Chronicle* {
+                return log;
+            }
+            public method journal() returns Journal* {
+                return diary;
+            }
+            public method rolls() returns Rng* {
+                return dice;
+            }
+            public method stands() returns boolean {
+                return standing;
+            }
+            public method age() returns long {
+                return at;
+            }
+            public method width() returns int {
+                return wide;
+            }
+            public method height() returns int {
+                return tall;
+            }
+
+            // One tick older. Called by the loop, which is the only thing that may say so.
+            internal method aged() returns void {
+                at = at + 1;
+                return;
+            }
+
+            // Where every agent's every field goes, if a run asked for that.
+            public method keepJournal(String path) returns void {
+                delete diary;
+                diary = new Journal(path) on heap;
+                return;
+            }
+
+            // ---- and how it comes to be ------------------------------------------------------
+
+            // THE SECOND STEP, and it is a step rather than part of the constructor because
+            // generation is a SEARCH: it rolls worlds until one passes the audit, which is slow
+            // enough that a caller wants to say when.
+            public method build(boolean loud) returns void {
+                terrain = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, wide, tall, 6, loud);
+                standing = true;
+                // WHICH BLOCKS ARE THE SAME CONTINENT, labelled once, here, because the terrain is
+                // final at this line and nobody has been placed on it yet -- which is what
+                // `labelMasses` asks for in its own comment.
+                //
+                // IT WAS NEVER BEING CALLED. The old simulation called it and went to the bin with
+                // it, leaving the labelling orphaned: every block read as mass ZERO, so the whole
+                // world answered "same continent" and nothing noticed, because nothing asked. The
+                // route search asks -- it is how a walk to another continent is refused in two
+                // reads instead of by exploring this one first -- and an unlabelled map would have
+                // let it search the whole of a continent to find out what a lookup knew.
+                terrain.labelMasses();
+                // AND WHAT EACH BLOCK COSTS TO CROSS, measured once here for the same reason. A walk
+                // asks it and never measures anything.
+                ways = new Waymap(terrain, folk.standing().grid()) on heap;
+                Seeding.sow(beasts, terrain, seed, log);
+                // EVERYWHERE THE GROUND WILL HOLD A BAND, and not one band where a sweep first found
+                // firm ground -- which put the whole of humanity on tundra at the top of the map.
+                // See `Banding.sowEverywhere`: one start is one experiment about one biome.
+                Banding.sowEverywhere(folk, terrain, seed, log);
+                return;
+            }
+        }
+    }
+}

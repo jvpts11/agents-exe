@@ -6,6 +6,7 @@ import Agents.World.WorldGen;
 import Agents.World.Rng;
 import Agents.Sim.Chronicle;
 import Agents.Sim.Wild;
+import Agents.Sim.World;
 import Agents.Sim.Grazing;
 import Agents.Sim.Seeding;
 import Agents.People.Population;
@@ -51,18 +52,16 @@ public bundle Agents {
     public namespace Sim {
 
         public class Sim {
-            // THE GROUND EVERYTHING STANDS ON, and the first layer this owns. It was built inside
-            // `renderGlWorld` and handed to the renderer, which made the world a thing the DRAWING
-            // code happened to have -- so anything that wanted a world without a window had to
-            // build its own, by copying six arguments nobody could check.
-            private mutable Grid* ground;
-            // Whether `ground` has been built. A Sim with no world is a legal, useful state -- it
-            // is what the tick's own arithmetic is checked in -- so the destructor has to know
-            // whether there is anything to free.
-            private mutable boolean standing;
-            // How many times the world has advanced, ever. Not a frame count: frames are the
-            // window's business and this is the world's.
-            private mutable long ticked;
+            // THE WORLD ITSELF, which this class used to BE as well as advance. Everything that
+            // simply IS -- the ground, the crowd, the animals, the country, the routes, the draw,
+            // the record, and how old it all is -- moved into one object, and what is left here is
+            // the loop: the gear, the frame budget, the stopwatch and the ORDER.
+            //
+            // The split is along "what would still be true if nothing ticked". It pays rather than
+            // merely tidies because every system takes a subset of exactly those handles:
+            // `Grazing.tick(beasts, folk, ground, at, dice, log)` and
+            // `Doings.tick(folk, realm, ground, ways, at)` are one call with different holes.
+            private mutable World* state;
             // The fraction of a tick carried over from the last call. THE WORLD ADVANCES A WHOLE
             // NUMBER OF TIMES OR NOT AT ALL, so anything left over waits rather than being rounded
             // away -- rounded down, a pace below one never advances anything; rounded up, every
@@ -70,36 +69,6 @@ public bundle Agents {
             private mutable float owed;
             // Ticks that were owed and refused by the ceiling. See `missed`.
             private mutable long behind;
-            // What the world says it is doing, as it does it. Every layer writes here.
-            private mutable Chronicle* log;
-            // THE FIRST LIVING LAYER. Nothing was subscribed to the tick until this; `Population`
-            // and `Atlas` arrive the same way, each adding one line to `tick`.
-            //
-            // IT ARRIVES WITH THE GROUND AND NOT BEFORE IT. The animals stand on the world and their
-            // block index is cut to its size, so a Wild without a world would be a Wild that has to
-            // be told its extent afterwards -- a two-step construction, and the second step is the
-            // one somebody forgets. `standing` guards both.
-            private mutable Wild* beasts;
-            // Everybody alive. Made with the world and empty until something sows a band into it.
-            private mutable Population* folk;
-            // THE OTHER HALF OF THE WORLD: the nations and what they hold. Made with the crowd and
-            // empty until a band settles -- which is what the one line it adds to the tick is for.
-            private mutable Atlas* realm;
-            // Every agent's every field, every tick, to a file -- off unless a run asks for it.
-            private mutable Journal* diary;
-            // What every block costs to cross, and the bounded search that reads it. Made when the
-            // ground is final, because it is a fact ABOUT the ground: measured once, read forever.
-            private mutable Waymap* ways;
-            // THE WORLD'S OWN DRAW, seeded from the world's seed. Every decision the layers make
-            // comes from here, so the same seed replays the same world -- a herd that chose its
-            // pasture from a clock would make two runs of "seed 42" different worlds with one name.
-            private mutable Rng* dice;
-            // The world this Sim is: the number it was rolled from and how big it is. Held because
-            // the layers are cut to them and because `buildWorld` should not be told again what it
-            // was already told.
-            private mutable int seed;
-            private mutable int wide;
-            private mutable int tall;
             // Nanoseconds spent advancing, ever. THE FLOOR EVERY LATER COST IS READ AGAINST: an
             // empty tick has a price, and knowing it is what makes "the fauna costs 40 ns a beast"
             // a number instead of an impression.
@@ -161,25 +130,11 @@ public bundle Agents {
             // absent -- which is a two-step construction, and the second step is the one somebody
             // forgets. Nothing here is optional now except the ground itself.
             public constructor Sim(int seed, int width, int height) {
-                this.seed = seed;
-                this.wide = width;
-                this.tall = height;
-                standing = false;
-                ticked = 0;
                 owed = 0.0;
                 behind = 0;
                 spent = 0;
                 advances = 0;
-                log = new Chronicle() on heap;
-                beasts = new Wild(width, height) on heap;
-                folk = new Population(width, height) on heap;
-                realm = new Atlas(width * height) on heap;
-                diary = new Journal("") on heap;   // silent until `keepJournal` names a file
-                // A DIFFERENT STREAM FROM THE TERRAIN'S. The world is generated once and ticked
-                // forever; one stream shared would make the first animal's decision depend on how
-                // many rolls the coastline happened to take, so a change to the generator would
-                // silently move every herd in every world.
-                dice = new Rng(seed ^ 0x5EED) on heap;
+                state = new World(seed, width, height) on heap;
                 // THE TICK IS SHARED BETWEEN THREE QUARTERS OF THE MACHINE, and the quarter left over
                 // is not politeness -- it is the renderer, the graphics driver and the operating
                 // system, which are running at the same time and need somewhere to run.
@@ -199,70 +154,65 @@ public bundle Agents {
                 //
                 // A world built by a check keeps the one hand it is born with -- checks do not open
                 // windows and must not open threads.
-                beasts.shareBetween(Machine.threads() * 3 / 4);
+                state.wild().shareBetween(Machine.threads() * 3 / 4);
             }
 
             // WRITE EVERY AGENT'S EVERY FIELD, EVERY TICK, TO THIS FILE. Off by default, because a
             // few thousand agents over a few hundred ticks is hundreds of megabytes -- and on when a
             // run wants to be analysed afterwards rather than summarised on the way out.
             public method keepJournal(String path) returns void {
-                delete diary;
-                diary = new Journal(path) on heap;
+                state.keepJournal(path);
                 return;
+            }
+
+            // THE WORLD ITSELF, for whoever wants it whole rather than a handle at a time. The
+            // seven forwarders below are what the callers already say, kept so that moving the
+            // state out of this class was not also a rename at nineteen call sites.
+            public method now() returns World* {
+                return state;
             }
 
             // What the journal wrote, for the line the run prints on its way out.
             public method journal() returns Journal* {
-                return diary;
+                return state.journal();
             }
 
             // Share the tick between this many hands, overriding what the machine suggested. For
             // measuring the number the line above chose, on a machine that is not this one.
             public method shareBetween(int many) returns void {
-                beasts.shareBetween(many);
+                state.wild().shareBetween(many);
                 return;
             }
 
             // The animals. Borrowed: they die with the Sim.
             public method wild() returns Wild* {
-                return beasts;
+                return state.wild();
             }
 
             // And the people. Borrowed, the same way.
             public method people() returns Population* {
-                return folk;
+                return state.people();
             }
 
             // And the countries. Borrowed, the same way -- the renderer reads it to draw what stands.
             public method nations() returns Atlas* {
-                return realm;
+                return state.nations();
             }
 
             // What every block costs to cross, and the search that reads it. Borrowed; it exists
             // only once the ground does.
             public method routes() returns Waymap* {
-                return ways;
+                return state.routes();
             }
 
             public destructor ~Sim() returns void {
-                if (standing) {
-                    delete ground;
-                }
-                if (standing) {
-                    delete ways;
-                }
-                delete diary;    // its destructor flushes whatever the last ticks wrote
-                delete realm;    // before the crowd: a city holds ids, and ids outlive nobody
-                delete folk;
-                delete beasts;
-                delete dice;
-                delete log;
+                delete state;
                 return;
             }
 
             // Where every layer says what it did. Borrowed: it dies with the Sim.
             public method chronicle() returns Chronicle* {
-                return log;
+                return state.chronicle();
             }
 
             // Generate the ground and take it over.
@@ -279,35 +229,19 @@ public bundle Agents {
             // AND IT SOWS THE WORLD IT MADE. Making the ground and putting the animals on it were
             // two calls at the call site, in that order, and the order mattered -- which is a thing
             // to get wrong for no gain. A world arrives with what lives in it.
+            //
+            // IT IS THE WORLD'S OWN, and this is one line because of it: making the ground, labelling
+            // its continents, measuring its routes and sowing what lives on it are all things the
+            // world does to itself, and none of them is about the tick.
             public method buildWorld(boolean loud) returns void {
-                ground = WorldGen.acceptable(seed, 0, 0.0 - 1.0, 0, wide, tall, 6, loud);
-                standing = true;
-                // WHICH BLOCKS ARE THE SAME CONTINENT, labelled once, here, because the terrain is
-                // final at this line and nobody has been placed on it yet -- which is what
-                // `labelMasses` asks for in its own comment.
-                //
-                // IT WAS NEVER BEING CALLED. The old simulation called it and went to the bin with
-                // it, leaving the labelling orphaned: every block read as mass ZERO, so the whole
-                // world answered "same continent" and nothing noticed, because nothing asked. The
-                // route search asks -- it is how a walk to another continent is refused in two
-                // reads instead of by exploring this one first -- and an unlabelled map would have
-                // let it search the whole of a continent to find out what a lookup knew.
-                ground.labelMasses();
-                // AND WHAT EACH BLOCK COSTS TO CROSS, measured once here for the same reason. A walk
-                // asks it and never measures anything.
-                ways = new Waymap(ground, folk.standing().grid()) on heap;
-                Seeding.sow(beasts, ground, seed, log);
-                // EVERYWHERE THE GROUND WILL HOLD A BAND, and not one band where a sweep first found
-                // firm ground -- which put the whole of humanity on tundra at the top of the map.
-                // See `Banding.sowEverywhere`: one start is one experiment about one biome.
-                Banding.sowEverywhere(folk, ground, seed, log);
+                state.build(loud);
                 return;
             }
 
             // The ground, for whoever draws it or reads it. Borrowed, never owned by the caller:
             // it dies with the Sim.
             public method world() returns Grid* {
-                return ground;
+                return state.ground();
             }
 
             // Advance the world by however many whole ticks `pace` has earned, spending at most
@@ -368,7 +302,7 @@ public bundle Agents {
                     // that fell behind on EVERY frame of the run -- and those are different worlds
                     // with the same number. A line per occurrence can be counted afterwards; a
                     // count can never be un-summed.
-                    log.note(ticked, "world",
+                    state.chronicle().note(state.age(), "world",
                              $"ran out of frame with {lost} ticks still owed");
                     owed = 0.0;
                 }
@@ -398,6 +332,7 @@ public bundle Agents {
                 // tick appears to cost 178 ns; at gear 6 it is spread over three hundred and the
                 // same empty tick reads 2 ns. Neither number is wrong and only the second is about
                 // the tick -- so the reader is given the divisor rather than a footnote.
+                long ticked = state.age();
                 mutable long each = 0;
                 if (ticked > 0) {
                     each = spent / ticked;
@@ -444,10 +379,10 @@ public bundle Agents {
             // Nanoseconds a tick has cost on average, for whoever wants the number rather than the
             // sentence. Zero before the world has ticked at all.
             public method nanosPerTick() returns long {
-                if (ticked == 0) {
+                if (state.age() == cast<long>(0)) {
                     return 0;
                 }
-                return spent / ticked;
+                return spent / state.age();
             }
 
             // One tick of the world: every layer's pass, in this order.
@@ -460,8 +395,22 @@ public bundle Agents {
             // ground is a legal state, it is what the tick's own arithmetic is checked in, and its
             // ticks have to keep counting for that check to mean anything.
             private method tick() returns void {
-                ticked = ticked + 1;
-                if (standing) {
+                state.aged();
+                if (state.stands()) {
+                    // THE WORLD, TAKEN APART ONCE. Every pass below wants a different subset of the
+                    // same six handles, so they are read here rather than through the world at each
+                    // of the thirty-odd argument positions -- which would have buried the ORDER,
+                    // and the order is the only thing this method is.
+                    long ticked = state.age();
+                    Grid* ground = state.ground();
+                    Wild* beasts = state.wild();
+                    Population* folk = state.people();
+                    Atlas* realm = state.nations();
+                    Waymap* ways = state.routes();
+                    Rng* dice = state.rolls();
+                    Chronicle* log = state.chronicle();
+                    Journal* diary = state.journal();
+
                     Grazing.tick(beasts, folk, ground, ticked, dice, log);
                     // THE PEOPLE, AFTER THE ANIMALS AND BEFORE ANYTHING READS EITHER. Somebody
                     // decides where to go, and everybody who is going takes a step -- in that
@@ -557,7 +506,7 @@ public bundle Agents {
 
             // How old the world is, in ticks.
             public method age() returns long {
-                return ticked;
+                return state.age();
             }
 
             // How many ticks the budget has refused over the whole run. Anything above zero means
