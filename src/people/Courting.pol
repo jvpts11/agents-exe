@@ -88,9 +88,9 @@ public bundle Agents {
                 int phase = cast<int>(at % cast<long>(Courting.LOOK_EVERY));
                 mutable int slot = phase;
                 while (slot < n) {
-                    int mine = slot;
+                    AgentId mine = cast<AgentId>(slot);
                     slot = slot + Courting.LOOK_EVERY;
-                    Agent* one = folk.at(cast<AgentId>(mine));
+                    Agent* one = folk.at(mine);
                     // WHOEVER'S TURN IT IS THIS TICK is asked BOTH questions -- whether they are
                     // carrying, and whether they are looking. Delivery used to walk the whole
                     // population every tick to find the handful who were due, which is the one
@@ -111,18 +111,23 @@ public bundle Agents {
                     }
                     // WHOEVER IS STANDING IN THE SAME BLOCK. People marry who they meet, and this
                     // is what "meet" means in a world where being near is a chain.
-                    mutable int other = chain.firstIn(chain.blockOf(mine));
-                    while (other != BlockChain.NONE) {
-                        if (other != mine && other < folk.count()) {
-                            Agent* them = folk.at(cast<AgentId>(other));
+                    // THE CHAIN DEALS IN BARE SLOTS, AND THAT IS RIGHT: one `BlockChain` files the
+                    // people and another files the animals, so the only thing it can honestly say
+                    // about what it holds is "a slot". The name is put back on at this line, which
+                    // is where a number that belongs to nobody becomes one that belongs to people.
+                    mutable int link = chain.firstIn(chain.blockOf(cast<int>(mine)));
+                    while (link != BlockChain.NONE) {
+                        AgentId other = cast<AgentId>(link);
+                        if (other != mine && link < folk.count()) {
+                            Agent* them = folk.at(other);
                             if (Courting.wouldHave(one, them, mine, other)) {
                                 Kindred.bind(folk, mine, other, Relation.Spouse, Kindred.WED);
                                 weddings = weddings + cast<long>(1);
-                                other = BlockChain.NONE;
+                                link = BlockChain.NONE;
                                 continue;
                             }
                         }
-                        other = chain.after(other);
+                        link = chain.after(link);
                     }
                 }
                 return;
@@ -136,7 +141,7 @@ public bundle Agents {
 
             // AND WHETHER THESE TWO WOULD HAVE EACH OTHER. Both orientations have to allow it --
             // one person's willingness is not a marriage -- and neither may be the other's blood.
-            private static method wouldHave(Agent* a, Agent* b, int aSlot, int bSlot)
+            private static method wouldHave(Agent* a, Agent* b, AgentId aSlot, AgentId bSlot)
                     returns boolean {
                 if (!Courting.mayMarry(b) || b.kin.spouse() != Kinship.NOBODY) {
                     return false;
@@ -160,18 +165,18 @@ public bundle Agents {
             // A CONCEPTION NEEDS THE TWO THE MODEL SAYS IT NEEDS. `deliver` once read "has a spouse"
             // as "has a husband", so two women married to each other each bore the other's children
             // (ledger S2-10) -- the question lives here now, where the one caller cannot forget it.
-            public static method mayConceive(Population* folk, Agent* her, int mine)
+            public static method mayConceive(Population* folk, Agent* her, AgentId mine)
                     returns boolean {
                 if (cast<int>(her.identity.sex) != cast<int>(Sex.Female)
                     || her.body.carrying != Body.NOT_CARRYING
                     || her.body.age > Courting.PAST_IT) {
                     return false;
                 }
-                int man = her.kin.spouse();
-                if (man == Kinship.NOBODY || man >= folk.count()) {
+                AgentId man = her.kin.spouse();
+                if (man == Kinship.NOBODY || cast<int>(man) >= folk.count()) {
                     return false;
                 }
-                return cast<int>(folk.at(cast<AgentId>(man)).identity.sex) == cast<int>(Sex.Male);
+                return cast<int>(folk.at(man).identity.sex) == cast<int>(Sex.Male);
             }
 
             // AND ONE STARTS. How many are coming is rolled now rather than at the birth, because a
@@ -188,12 +193,12 @@ public bundle Agents {
             // PREGNANCY IS NOT A STATE, and the model is explicit: a pregnant person goes on
             // walking, eating and sleeping, so it is two numbers on the body -- the tick it began
             // and how many are coming -- rather than something that stops her doing anything.
-            private static method deliver(Population* folk, Agent* her, int i, long at)
+            private static method deliver(Population* folk, Agent* her, AgentId i, long at)
                     returns void {
                 if (cast<int>(her.identity.sex) != cast<int>(Sex.Female)) {
                     return;
                 }
-                int man = her.kin.spouse();
+                AgentId man = her.kin.spouse();
                 if (man == Kinship.NOBODY) {
                     return;
                 }
@@ -202,7 +207,7 @@ public bundle Agents {
                 // bearing children of each other, because "has a spouse" was read as "has a
                 // husband". A conception needs the two the model says it needs; a family made any
                 // other way is a thing this world will have to be told about on purpose.
-                if (cast<int>(folk.at(cast<AgentId>(man)).identity.sex) != cast<int>(Sex.Male)) {
+                if (cast<int>(folk.at(man).identity.sex) != cast<int>(Sex.Male)) {
                     return;
                 }
                 if (her.body.carrying == Body.NOT_CARRYING) {
@@ -225,13 +230,12 @@ public bundle Agents {
             }
 
             // ONE CHILD OF TWO PARENTS.
-            private static method beBorn(Population* folk, int mother, int father, long at)
+            private static method beBorn(Population* folk, AgentId mother, AgentId father, long at)
                     returns void {
-                Agent* mum = folk.at(cast<AgentId>(mother));
-                AgentId kid = folk.bear(mum.x(), mum.y());
-                int childSlot = cast<int>(kid);
-                Agent* child = folk.at(kid);
-                Agent* dad = folk.at(cast<AgentId>(father));
+                Agent* mum = folk.at(mother);
+                AgentId childSlot = folk.bear(mum.x(), mum.y());
+                Agent* child = folk.at(childSlot);
+                Agent* dad = folk.at(father);
                 // BOTH PARENTS' NATIONS AND BOTH PARENTS' LANGUAGES, which is the whole of
                 // inheritance here and costs the birth one OR of two bitmasks each.
                 child.belonging.nationalities = mum.belonging.nationalities
@@ -272,10 +276,10 @@ public bundle Agents {
                 Kindred.bind(folk, childSlot, mother, Relation.Parent, Kindred.BLOOD);
                 Kindred.bind(folk, childSlot, father, Relation.Parent, Kindred.BLOOD);
                 // AND ITS BROTHERS AND SISTERS: whoever else holds this mother as a parent.
-                Kinship* hers = folk.at(cast<AgentId>(mother)).kin;
+                Kinship* hers = folk.at(mother).kin;
                 mutable int link = hers.first();
                 while (link >= 0) {
-                    int who = Kinship.whoOf(hers.at(link));
+                    AgentId who = Kinship.whoOf(hers.at(link));
                     if (cast<int>(Kinship.howOf(hers.at(link))) == cast<int>(Relation.Child)
                         && who != childSlot) {
                         Kindred.bind(folk, childSlot, who, Relation.Sibling, Kindred.BLOOD);

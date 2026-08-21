@@ -93,9 +93,9 @@ public bundle Agents {
                 int phase = cast<int>(at % cast<long>(Doings.CHOOSE_EVERY));
                 mutable int slot = phase;
                 while (slot < n) {
-                    int mine = slot;
+                    AgentId mine = cast<AgentId>(slot);
                     slot = slot + Doings.CHOOSE_EVERY;
-                    Agent* one = folk.at(cast<AgentId>(mine));
+                    Agent* one = folk.at(mine);
                     Doings.choose(folk, realm, one);
                     Doings.spend(one);
                     Doings.act(folk, realm, g, ways, one, mine, at);
@@ -168,7 +168,7 @@ public bundle Agents {
             // live where the choosing lives rather than in a file of their own that would hold one
             // line each.
             private static method act(Population* folk, Atlas* realm, Grid* g, Waymap* ways,
-                                      Agent* one, int mine, long at) returns void {
+                                      Agent* one, AgentId mine, long at) returns void {
                 Activity what = one.activity;
                 // A BODY THAT IS ROOTED IS NOT WALKING. Without this a spent person keeps walking
                 // to wherever hunger sent them and mends at the same time, which reads as
@@ -232,7 +232,7 @@ public bundle Agents {
             // stream, and eight of these people converge on the same doorway from every direction.
             // That is what the waymap is for.
             private static method goHome(Population* folk, Atlas* realm, Grid* g, Waymap* ways,
-                                         Agent* one, int mine) returns void {
+                                         Agent* one, AgentId mine) returns void {
                 if (realm == null) {
                     return;
                 }
@@ -241,7 +241,7 @@ public bundle Agents {
                 if (bed == null) {
                     return;
                 }
-                Walking.stepToward(folk, g, ways, cast<AgentId>(mine),
+                Walking.stepToward(folk, g, ways, mine,
                                    cast<float>(bed.x()) + 0.5, cast<float>(bed.y()) + 0.5);
                 return;
             }
@@ -252,7 +252,7 @@ public bundle Agents {
             // A ROUTE, like going home: the store can be across the territory and behind a stream,
             // and every citizen with a full hand converges on the same doorway.
             private static method goToStore(Population* folk, Atlas* realm, Grid* g, Waymap* ways,
-                                            Agent* one, int mine) returns void {
+                                            Agent* one, AgentId mine) returns void {
                 if (realm == null) {
                     return;
                 }
@@ -295,7 +295,7 @@ public bundle Agents {
                 // It also ANSWERS: there may be no way there at all, and a citizen who cannot reach
                 // their own storehouse should be counted rather than left walking into a wall.
                 hauled = hauled + cast<long>(1);
-                if (!Walking.setOut(folk, g, ways, cast<AgentId>(mine), sx, sy)) {
+                if (!Walking.setOut(folk, g, ways, mine, sx, sy)) {
                     unreachable = unreachable + cast<long>(1);
                 }
                 return;
@@ -313,17 +313,18 @@ public bundle Agents {
             // fire -- and a route search for eight cells is the twenty-four thousand searches of
             // ledger S2-7 in a smaller hat.
             private static method goToCompany(Population* folk, Grid* g, Waymap* ways, Agent* one,
-                                              int mine) returns void {
+                                              AgentId mine) returns void {
                 mutable int link = one.kin.first();
-                mutable int nearest = 0 - 1;
+                mutable AgentId nearest = Kinship.NOBODY;
                 mutable float best = Activity.WITHIN_REACH * Activity.WITHIN_REACH;
                 while (link >= 0) {
-                    int slot = Kinship.whoOf(one.kin.at(link));
+                    AgentId slot = Kinship.whoOf(one.kin.at(link));
                     link = one.kin.after(link);
-                    if (slot < 0 || slot >= folk.count() || slot == mine) {
+                    int at = cast<int>(slot);
+                    if (at < 0 || at >= folk.count() || slot == mine) {
                         continue;
                     }
-                    Agent* them = folk.at(cast<AgentId>(slot));
+                    Agent* them = folk.at(slot);
                     float dx = them.x() - one.x();
                     float dy = them.y() - one.y();
                     float gap = dx * dx + dy * dy;
@@ -332,7 +333,7 @@ public bundle Agents {
                         nearest = slot;
                     }
                 }
-                if (nearest < 0) {
+                if (nearest == Kinship.NOBODY) {
                     return;
                 }
                 // ARM'S REACH IS NEAR ENOUGH. Walking the last half-cell would have two people
@@ -341,8 +342,8 @@ public bundle Agents {
                 if (best <= Activity.ARM_LENGTH * Activity.ARM_LENGTH) {
                     return;
                 }
-                Agent* them = folk.at(cast<AgentId>(nearest));
-                Walking.stepToward(folk, g, ways, cast<AgentId>(mine), them.x(), them.y());
+                Agent* them = folk.at(nearest);
+                Walking.stepToward(folk, g, ways, mine, them.x(), them.y());
                 return;
             }
 
@@ -351,7 +352,7 @@ public bundle Agents {
             // ROLLED BY THE WIFE ONLY, once per couple per visit -- the husband entering the same
             // activity is not a second chance at the same child. Which of the two rolls is decided
             // by who can carry one, so it needs no rule of its own.
-            private static method mate(Population* folk, Agent* one, int mine, long at)
+            private static method mate(Population* folk, Agent* one, AgentId mine, long at)
                     returns void {
                 together = together + cast<long>(1);
                 if (!Courting.mayConceive(folk, one, mine)) {
@@ -485,8 +486,8 @@ public bundle Agents {
             // The layout asks for this by name and gives the reason: after a northward tide and a
             // wall-follower, both invisible because nothing could say WHY, a scoring that cannot be
             // read back is a priority list with extra arithmetic.
-            public static method why(Population* folk, Atlas* realm, int mine) returns String {
-                Agent* one = folk.at(cast<AgentId>(mine));
+            public static method why(Population* folk, Atlas* realm, AgentId mine) returns String {
+                Agent* one = folk.at(mine);
                 mutable Activity best = Activity.Idle;
                 mutable Activity next = Activity.Idle;
                 mutable float most = 0.0 - 1.0;

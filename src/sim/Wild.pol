@@ -32,7 +32,11 @@ public bundle Agents {
         // arrive, die by swap-remove, and must never be looked for in a block they left. The three
         // sockets at the bottom are the only lines about it a `Wild` has to write.
         public class Wild applies TFiler {
-            public static fixed int NO_HERD = 0 - 1;
+            // NO HERD AT ALL. A `HerdId` and not an int, because it is only ever written into a
+            // field that holds one -- as an int it had to be cast at each of the three places it is
+            // used, and a sentinel that needs a cast to be itself is a sentinel that can be given
+            // to the wrong field without a word.
+            public static fixed HerdId NO_HERD = cast<HerdId>(0 - 1);
 
             private mutable Beast[] beasts;
             private mutable int alive;
@@ -231,7 +235,7 @@ public bundle Agents {
                 int at = alive;
                 beasts[at].x = x;
                 beasts[at].y = y;
-                beasts[at].herd = cast<HerdId>(Wild.NO_HERD);
+                beasts[at].herd = Wild.NO_HERD;
                 beasts[at].stamina = cast<short>(1000);
                 beasts[at].age = cast<short>(0);
                 // Born at nought. A world being SOWN ages its animals afterwards -- see
@@ -401,8 +405,8 @@ public bundle Agents {
                 return;
             }
 
-            public method herdOf(BeastId who) returns int {
-                return cast<int>(beasts[cast<int>(who)].herd);
+            public method herdOf(BeastId who) returns HerdId {
+                return beasts[cast<int>(who)].herd;
             }
 
             // Written ONLY by the roster transformer's sockets, so the two ends of the relation
@@ -431,14 +435,17 @@ public bundle Agents {
                     growHerds();
                 }
                 Herd* h = new Herd(this, s, x, y, range) on heap;
-                h.beMine(herdCount);
+                h.beMine(cast<HerdId>(herdCount));
                 herds[herdCount] = h;
                 herdCount = herdCount + 1;
                 return h;
             }
 
-            public method herdAt(int at) returns Herd* {
-                return herds[at];
+            // A `HerdId` because that is what a herd id IS -- its index in this array, which is what
+            // `Herd.mine` holds and what `herdOf` answers. The one caller that reaches it from an
+            // animal (`Stir`) had to strip the type off to get in here.
+            public method herdAt(HerdId at) returns Herd* {
+                return herds[cast<int>(at)];
             }
 
             // ---- the herds that are going somewhere ------------------------------------------------
@@ -507,7 +514,7 @@ public bundle Agents {
                 int last = herdCount - 1;
                 if (at != last) {
                     herds[at] = herds[last];
-                    herds[at].beMine(at);
+                    herds[at].beMine(cast<HerdId>(at));
                     // The list of movers holds HERD INDICES, and this herd's just changed.
                     if (herds[at].spot() >= 0) {
                         movers[herds[at].spot()] = at;

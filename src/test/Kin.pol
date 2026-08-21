@@ -78,18 +78,18 @@ public bundle Agents {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
                 mutable Grid* g = Kin.pasture();
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
-                folk.bear(10.5, 10.5);
-                folk.bear(10.5, 10.5);
-                Kindred.bind(folk, 0, 1, Relation.Parent, Kindred.BLOOD);
-                Kinship* mine = folk.at(cast<AgentId>(0)).kin;
-                Kinship* theirs = folk.at(cast<AgentId>(1)).kin;
-                Test.assertTrue(mine.knows(1));
-                Test.assertTrue(theirs.knows(0));
-                Test.assertEqual(cast<int>(mine.howTied(1)), cast<int>(Relation.Parent));
-                Test.assertEqual(cast<int>(theirs.howTied(0)), cast<int>(Relation.Child));
+                AgentId parent = folk.bear(10.5, 10.5);
+                AgentId child = folk.bear(10.5, 10.5);
+                Kindred.bind(folk, parent, child, Relation.Parent, Kindred.BLOOD);
+                Kinship* mine = folk.at(parent).kin;
+                Kinship* theirs = folk.at(child).kin;
+                Test.assertTrue(mine.knows(child));
+                Test.assertTrue(theirs.knows(parent));
+                Test.assertEqual(cast<int>(mine.howTied(child)), cast<int>(Relation.Parent));
+                Test.assertEqual(cast<int>(theirs.howTied(parent)), cast<int>(Relation.Child));
                 // And both directions are blood, so neither may marry the other.
-                Test.assertTrue(mine.isBloodOf(1));
-                Test.assertTrue(theirs.isBloodOf(0));
+                Test.assertTrue(mine.isBloodOf(child));
+                Test.assertTrue(theirs.isBloodOf(parent));
                 delete ways;
                 delete folk;
                 delete g;
@@ -105,17 +105,18 @@ public bundle Agents {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
                 mutable Grid* g = Kin.pasture();
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
-                folk.bear(10.5, 10.5);      // 0: the wife
-                folk.bear(10.5, 10.5);      // 1: the husband, who dies
-                folk.bear(10.5, 10.5);      // 2: a stranger, who will move into slot 1
-                Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
-                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), 1);
-                folk.bury(cast<AgentId>(1));
+                AgentId wife = folk.bear(10.5, 10.5);
+                AgentId husband = folk.bear(10.5, 10.5);      // dies
+                folk.bear(10.5, 10.5);                        // a stranger, who takes his slot
+                Kindred.bind(folk, wife, husband, Relation.Spouse, Kindred.WED);
+                Test.assertEqual(cast<int>(folk.at(wife).kin.spouse()), cast<int>(husband));
+                folk.bury(husband);
                 Test.assertEqual(folk.count(), 2);
-                // The stranger is now in slot 1, and the widow is married to nobody at all.
-                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
-                Test.assertFalse(folk.at(cast<AgentId>(0)).kin.knows(1));
-                Test.assertFalse(folk.at(cast<AgentId>(1)).kin.knows(0));
+                // The stranger holds the husband's slot now, and the widow is married to nobody at
+                // all -- `husband` from here on names that SLOT, which is the whole claim.
+                Test.assertEqual(cast<int>(folk.at(wife).kin.spouse()), cast<int>(Kinship.NOBODY));
+                Test.assertFalse(folk.at(wife).kin.knows(husband));
+                Test.assertFalse(folk.at(husband).kin.knows(wife));
                 delete ways;
                 delete folk;
                 delete g;
@@ -130,17 +131,17 @@ public bundle Agents {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
                 mutable Grid* g = Kin.pasture();
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
-                folk.bear(10.5, 10.5);      // 0: the wife
-                folk.bear(10.5, 10.5);      // 1: a stranger, who dies
-                folk.bear(10.5, 10.5);      // 2: the husband, who moves into slot 1
-                Kindred.bind(folk, 0, 2, Relation.Spouse, Kindred.WED);
-                folk.bury(cast<AgentId>(1));
+                AgentId wife = folk.bear(10.5, 10.5);
+                AgentId stranger = folk.bear(10.5, 10.5);     // dies
+                AgentId husband = folk.bear(10.5, 10.5);      // moves into the stranger's slot
+                Kindred.bind(folk, wife, husband, Relation.Spouse, Kindred.WED);
+                folk.bury(stranger);
                 Test.assertEqual(folk.count(), 2);
-                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), 1);
+                Test.assertEqual(cast<int>(folk.at(wife).kin.spouse()), cast<int>(stranger));
                 // And he still knows her, from his new slot, as her husband.
-                Kinship* his = folk.at(cast<AgentId>(1)).kin;
-                Test.assertEqual(his.whose(), 1);
-                Test.assertEqual(his.spouse(), 0);
+                Kinship* his = folk.at(stranger).kin;
+                Test.assertEqual(cast<int>(his.whose()), cast<int>(stranger));
+                Test.assertEqual(cast<int>(his.spouse()), cast<int>(wife));
                 delete ways;
                 delete folk;
                 delete g;
@@ -156,11 +157,11 @@ public bundle Agents {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
                 mutable Grid* g = Kin.pasture();
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
-                Kin.someone(folk, Sex.Female, 25);
-                Kin.someone(folk, Sex.Male, 27);
+                AgentId her = Kin.someone(folk, Sex.Female, 25);
+                AgentId him = Kin.someone(folk, Sex.Male, 27);
                 Kin.court(folk, g, ways);
-                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), 1);
-                Test.assertEqual(folk.at(cast<AgentId>(1)).kin.spouse(), 0);
+                Test.assertEqual(cast<int>(folk.at(her).kin.spouse()), cast<int>(him));
+                Test.assertEqual(cast<int>(folk.at(him).kin.spouse()), cast<int>(her));
                 delete ways;
                 delete folk;
                 delete g;
@@ -174,11 +175,11 @@ public bundle Agents {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
                 mutable Grid* g = Kin.pasture();
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
-                Kin.someone(folk, Sex.Female, Courting.OF_AGE - 1);
-                Kin.someone(folk, Sex.Male, 30);
+                AgentId child = Kin.someone(folk, Sex.Female, Courting.OF_AGE - 1);
+                AgentId grown = Kin.someone(folk, Sex.Male, 30);
                 Kin.court(folk, g, ways);
-                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
-                Test.assertEqual(folk.at(cast<AgentId>(1)).kin.spouse(), Kinship.NOBODY);
+                Test.assertEqual(cast<int>(folk.at(child).kin.spouse()), cast<int>(Kinship.NOBODY));
+                Test.assertEqual(cast<int>(folk.at(grown).kin.spouse()), cast<int>(Kinship.NOBODY));
                 delete ways;
                 delete folk;
                 delete g;
@@ -193,11 +194,11 @@ public bundle Agents {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
                 mutable Grid* g = Kin.pasture();
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
-                Kin.someone(folk, Sex.Female, 25);
-                Kin.someone(folk, Sex.Male, 27);
-                Kindred.bind(folk, 0, 1, Relation.Sibling, Kindred.BLOOD);
+                AgentId sister = Kin.someone(folk, Sex.Female, 25);
+                AgentId brother = Kin.someone(folk, Sex.Male, 27);
+                Kindred.bind(folk, sister, brother, Relation.Sibling, Kindred.BLOOD);
                 Kin.court(folk, g, ways);
-                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
+                Test.assertEqual(cast<int>(folk.at(sister).kin.spouse()), cast<int>(Kinship.NOBODY));
                 delete ways;
                 delete folk;
                 delete g;
@@ -213,16 +214,16 @@ public bundle Agents {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
                 mutable Grid* g = Kin.pasture();
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
-                Kin.someone(folk, Sex.Female, 25);
-                Kin.someone(folk, Sex.Female, 27);
+                AgentId one = Kin.someone(folk, Sex.Female, 25);
+                AgentId two = Kin.someone(folk, Sex.Female, 27);
                 // She would have a woman; the other would not.
-                folk.at(cast<AgentId>(0)).identity.orientation = Orientation.Gay;
+                folk.at(one).identity.orientation = Orientation.Gay;
                 Kin.court(folk, g, ways);
-                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), Kinship.NOBODY);
+                Test.assertEqual(cast<int>(folk.at(one).kin.spouse()), cast<int>(Kinship.NOBODY));
                 // Both willing, and it happens.
-                folk.at(cast<AgentId>(1)).identity.orientation = Orientation.Gay;
+                folk.at(two).identity.orientation = Orientation.Gay;
                 Kin.court(folk, g, ways);
-                Test.assertEqual(folk.at(cast<AgentId>(0)).kin.spouse(), 1);
+                Test.assertEqual(cast<int>(folk.at(one).kin.spouse()), cast<int>(two));
                 delete ways;
                 delete folk;
                 delete g;
@@ -240,7 +241,7 @@ public bundle Agents {
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 AgentId mum = Kin.someone(folk, Sex.Female, 25);
                 AgentId dad = Kin.someone(folk, Sex.Male, 27);
-                Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
+                Kindred.bind(folk, mum, dad, Relation.Spouse, Kindred.WED);
                 folk.at(mum).belonging.nationalities = cast<long>(1);
                 folk.at(dad).belonging.nationalities = cast<long>(2);
                 folk.at(mum).belonging.languages = cast<long>(4);
@@ -251,16 +252,19 @@ public bundle Agents {
                 Courting.tick(folk, cast<long>(Courting.TERM + Courting.LOOK_EVERY
                                                - (Courting.TERM % Courting.LOOK_EVERY)));
                 Test.assertEqual(folk.count(), 3);
-                Agent* child = folk.at(cast<AgentId>(2));
+                AgentId born = cast<AgentId>(2);   // the slot the birth put it in
+                Agent* child = folk.at(born);
                 Test.assertEqualLong(child.belonging.nationalities, cast<long>(3));
                 Test.assertEqualLong(child.belonging.languages, cast<long>(12));
-                Test.assertTrue(child.kin.knows(0));
-                Test.assertTrue(child.kin.knows(1));
-                Test.assertEqual(cast<int>(child.kin.howTied(0)), cast<int>(Relation.Parent));
-                Test.assertEqual(cast<int>(child.kin.howTied(1)), cast<int>(Relation.Parent));
+                Test.assertTrue(child.kin.knows(mum));
+                Test.assertTrue(child.kin.knows(dad));
+                Test.assertEqual(cast<int>(child.kin.howTied(mum)), cast<int>(Relation.Parent));
+                Test.assertEqual(cast<int>(child.kin.howTied(dad)), cast<int>(Relation.Parent));
                 // And both parents know it as theirs.
-                Test.assertEqual(cast<int>(folk.at(mum).kin.howTied(2)), cast<int>(Relation.Child));
-                Test.assertEqual(cast<int>(folk.at(dad).kin.howTied(2)), cast<int>(Relation.Child));
+                Test.assertEqual(cast<int>(folk.at(mum).kin.howTied(born)),
+                                 cast<int>(Relation.Child));
+                Test.assertEqual(cast<int>(folk.at(dad).kin.howTied(born)),
+                                 cast<int>(Relation.Child));
                 // It is born with no pregnancy left behind it.
                 Test.assertEqual(folk.at(mum).body.carrying, Body.NOT_CARRYING);
                 delete ways;
@@ -279,7 +283,7 @@ public bundle Agents {
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
                 AgentId mum = Kin.someone(folk, Sex.Female, 25);
                 AgentId dad = Kin.someone(folk, Sex.Male, 27);
-                Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
+                Kindred.bind(folk, mum, dad, Relation.Spouse, Kindred.WED);
                 folk.at(mum).identity.nature.boldness = cast<ubyte>(200);
                 folk.at(dad).identity.nature.boldness = cast<ubyte>(100);
                 folk.at(mum).body.carrying = 0;
@@ -303,9 +307,9 @@ public bundle Agents {
                 Population* folk = new Population(Kin.SIDE, Kin.SIDE) on heap;
                 mutable Grid* g = Kin.pasture();
                 Waymap* ways = new Waymap(g, folk.standing().grid()) on heap;
-                Kin.someone(folk, Sex.Female, 25);
-                Kin.someone(folk, Sex.Female, 27);
-                Kindred.bind(folk, 0, 1, Relation.Spouse, Kindred.WED);
+                AgentId one = Kin.someone(folk, Sex.Female, 25);
+                AgentId two = Kin.someone(folk, Sex.Female, 27);
+                Kindred.bind(folk, one, two, Relation.Spouse, Kindred.WED);
                 // Standing together, wanting each other, for four years: everything a conception
                 // needs except the one thing it needs.
                 for (int t in 0..4800) {
@@ -313,8 +317,8 @@ public bundle Agents {
                 }
                 Test.assertTrue(Doings.togetherSoFar() > cast<long>(0));
                 Test.assertEqual(folk.count(), 2);
-                Test.assertEqual(folk.at(cast<AgentId>(0)).body.carrying, Body.NOT_CARRYING);
-                Test.assertEqual(folk.at(cast<AgentId>(1)).body.carrying, Body.NOT_CARRYING);
+                Test.assertEqual(folk.at(one).body.carrying, Body.NOT_CARRYING);
+                Test.assertEqual(folk.at(two).body.carrying, Body.NOT_CARRYING);
                 delete ways;
                 delete folk;
                 delete g;

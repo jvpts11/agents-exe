@@ -1,3 +1,4 @@
+import Agents.People.AgentId;
 import Agents.People.Relation;
 import Agents.People.Tie;
 import Agents.Sim.Chain;
@@ -19,7 +20,10 @@ public bundle Agents {
     public namespace People {
 
         public class Kinship {
-            public static fixed int NOBODY = 0 - 1;
+            // NOBODY, as an `AgentId`, because every field and every return that carries it is one.
+            // As an int it was the same value as "no link in the chain", which is the sentinel three
+            // methods below return -- two different nothings, spelled identically, in one walk.
+            public static fixed AgentId NOBODY = cast<AgentId>(0 - 1);
             // The int a tie is packed into: 24 bits of slot, 4 of relation, 4 of affinity.
             public static fixed int SLOT_BITS = 24;
             public static fixed int KIND_BITS = 4;
@@ -28,9 +32,14 @@ public bundle Agents {
             private mutable Chain<Tie>* ties;
             // WHOSE KINSHIP THIS IS. A tie is written on both sides, so binding needs to know the
             // slot to write on the other person's side.
-            private mutable int mine;
+            //
+            // AN `AgentId`, AND THIS CLASS IS WHY THE TYPE EXISTS. Every walk here is the same five
+            // lines -- a link index into the shared pool, and a person's slot pulled out of the tie
+            // it points at -- and until now both were bare ints in one scope. `Kinship.whoOf(t)` and
+            // `ties.next(link)` return numbers that index different arrays and look identical.
+            private mutable AgentId mine;
 
-            public constructor Kinship(int mine) {
+            public constructor Kinship(AgentId mine) {
                 this.mine = mine;
                 ties = new Chain<Tie>() on heap;
             }
@@ -41,7 +50,7 @@ public bundle Agents {
                 return;
             }
 
-            public method whose() returns int {
+            public method whose() returns AgentId {
                 return mine;
             }
 
@@ -49,14 +58,14 @@ public bundle Agents {
             // kinship that stores slots has to be told -- and every OTHER kinship that holds a tie
             // to the moved person has to be told as well, which is `Kindred.moved`. This is the
             // price of an index rather than a handle, and it is paid in one place.
-            public method renumber(int nowMine) returns void {
+            public method renumber(AgentId nowMine) returns void {
                 mine = nowMine;
                 return;
             }
 
             // ---- one tie ---------------------------------------------------------------------
 
-            public static method pack(int who, Relation how, int affinity) returns Tie {
+            public static method pack(AgentId who, Relation how, int affinity) returns Tie {
                 mutable int warmth = affinity;
                 if (warmth < 0) {
                     warmth = 0;
@@ -64,12 +73,15 @@ public bundle Agents {
                 if (warmth > Kinship.MOST_AFFINITY) {
                     warmth = Kinship.MOST_AFFINITY;
                 }
-                return cast<Tie>(who | (cast<int>(how) << Kinship.SLOT_BITS)
+                // The two casts here are the packing itself: a slot, a relation and a warmth stop
+                // being three things and become one machine word. That is the one place in this
+                // class where an id is bits rather than a name.
+                return cast<Tie>(cast<int>(who) | (cast<int>(how) << Kinship.SLOT_BITS)
                                  | (warmth << (Kinship.SLOT_BITS + Kinship.KIND_BITS)));
             }
 
-            public static method whoOf(Tie t) returns int {
-                return cast<int>(t) & 0xFFFFFF;
+            public static method whoOf(Tie t) returns AgentId {
+                return cast<AgentId>(cast<int>(t) & 0xFFFFFF);
             }
 
             public static method howOf(Tie t) returns Relation {
@@ -100,7 +112,7 @@ public bundle Agents {
 
             // The tie to somebody, or NOBODY's tie. Walks the chain, which is short: a person knows
             // tens of people, not thousands.
-            public method howTied(int who) returns Relation {
+            public method howTied(AgentId who) returns Relation {
                 mutable int link = ties.head();
                 while (link >= 0) {
                     Tie t = ties.at(link);
@@ -112,7 +124,7 @@ public bundle Agents {
                 return Relation.Friend;   // meaningless without `knows`; callers ask that first
             }
 
-            public method knows(int who) returns boolean {
+            public method knows(AgentId who) returns boolean {
                 mutable int link = ties.head();
                 while (link >= 0) {
                     if (Kinship.whoOf(ties.at(link)) == who) {
@@ -125,7 +137,7 @@ public bundle Agents {
 
             // Whether this person is somebody's blood -- the question marriage asks, and the reason
             // `Relation.isBlood` is on the enum rather than in a list here.
-            public method isBloodOf(int who) returns boolean {
+            public method isBloodOf(AgentId who) returns boolean {
                 mutable int link = ties.head();
                 while (link >= 0) {
                     Tie t = ties.at(link);
@@ -137,7 +149,7 @@ public bundle Agents {
                 return false;
             }
 
-            public method spouse() returns int {
+            public method spouse() returns AgentId {
                 mutable int link = ties.head();
                 while (link >= 0) {
                     Tie t = ties.at(link);
@@ -158,12 +170,12 @@ public bundle Agents {
             // that keeps the invariant, and `protected` says "me and my subclasses" -- which the
             // compiler now holds you to. The bundle is the narrowest thing the language can say
             // here, and the pact is still with `Kindred`: nothing else in it writes a tie.
-            internal method hold(int who, Relation how, int affinity) returns void {
+            internal method hold(AgentId who, Relation how, int affinity) returns void {
                 ties.add(Kinship.pack(who, how, affinity));
                 return;
             }
 
-            internal method letGo(int who) returns void {
+            internal method letGo(AgentId who) returns void {
                 mutable int link = ties.head();
                 while (link >= 0) {
                     Tie t = ties.at(link);
@@ -178,7 +190,7 @@ public bundle Agents {
 
             // Somebody this person knows has moved to another slot: rewrite the tie, keeping what
             // it was and how warm.
-            internal method theyMoved(int from, int to) returns void {
+            internal method theyMoved(AgentId from, AgentId to) returns void {
                 mutable int link = ties.head();
                 while (link >= 0) {
                     Tie t = ties.at(link);
