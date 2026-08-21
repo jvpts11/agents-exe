@@ -158,9 +158,9 @@ public bundle Agents {
                 return;
             }
 
-            public method add(float fx, float fy, int k, int q) returns void
-                requires k > 0
-                requires k < Nodes.count()
+            public method add(float fx, float fy, NodeId k, int q) returns void
+                requires cast<int>(k) > 0
+                requires cast<int>(k) < Nodes.count()
                 requires q >= 0
                 requires q <= 32767
             {
@@ -175,7 +175,7 @@ public bundle Agents {
                 }
                 px[n] = fx;
                 py[n] = fy;
-                kind[n] = cast<byte>(k);
+                kind[n] = cast<byte>(cast<int>(k));
                 qty[n] = cast<short>(q);
                 n = n + 1;
                 ordered = false;
@@ -321,8 +321,8 @@ public bundle Agents {
                     blockGood[bg] = 0;
                 }
                 for (int j in 0..this.n) {
-                    int k = cast<int>(kind[j]) & 255;
-                    if (k != 0 && cast<int>(qty[j]) > 0) {
+                    NodeId k = cast<NodeId>(cast<int>(kind[j]) & 255);
+                    if (k != Nodes.NONE && cast<int>(qty[j]) > 0) {
                         creditBlock(j, k);
                     }
                 }
@@ -344,8 +344,8 @@ public bundle Agents {
                 blind = new byte[cap]();
                 mutable int i = 0;
                 while (i < n) {
-                    int k = cast<int>(kind[i]) & 255;
-                    if (k != 0 && cast<int>(qty[i]) == 0) {
+                    NodeId k = cast<NodeId>(cast<int>(kind[i]) & 255);
+                    if (k != Nodes.NONE && cast<int>(qty[i]) == 0) {
                         Harvest hc = Nodes.work(k);
                         if (hc == Harvest.Mine || hc == Harvest.Quarry) {
                             blind[i] = cast<byte>(1);
@@ -379,7 +379,7 @@ public bundle Agents {
             // about a thing that is easy to get half right: the class plane and the GOOD plane are
             // two maps, and crediting one without the other leaves the world claiming there is
             // mining here but no coal, which is a question people actually ask.
-            private method creditBlock(int i, int k) returns void {
+            private method creditBlock(int i, NodeId k) returns void {
                 Harvest hc = Nodes.work(k);
                 if (hc == Harvest.Nothing) {
                     return;
@@ -395,7 +395,7 @@ public bundle Agents {
                 return;
             }
 
-            private method debitBlock(int i, int k) returns void {
+            private method debitBlock(int i, NodeId k) returns void {
                 Harvest hc = Nodes.work(k);
                 if (hc == Harvest.Nothing) {
                     return;
@@ -489,8 +489,8 @@ public bundle Agents {
                 return py[i];
             }
 
-            public method kindAt(int i) returns int {
-                return cast<int>(kind[i]) & 255;
+            public method kindAt(int i) returns NodeId {
+                return cast<NodeId>(cast<int>(kind[i]) & 255);
             }
 
             public method qtyAt(int i) returns int {
@@ -540,8 +540,8 @@ public bundle Agents {
                 }
                 int c = y * w + x;
                 while (i < n && cellOf(i) == c) {
-                    int k = cast<int>(kind[i]) & 255;
-                    if (k != 0 && Nodes.gives(k) == good && cast<int>(qty[i]) > 0) {
+                    NodeId k = cast<NodeId>(cast<int>(kind[i]) & 255);
+                    if (k != Nodes.NONE && Nodes.gives(k) == good && cast<int>(qty[i]) > 0) {
                         return i;
                     }
                     i = i + 1;
@@ -558,8 +558,8 @@ public bundle Agents {
                 }
                 int c = y * w + x;
                 while (i < n && cellOf(i) == c) {
-                    int k = cast<int>(kind[i]) & 255;
-                    if (k != 0 && Nodes.work(k) == hclass && cast<int>(qty[i]) > 0) {
+                    NodeId k = cast<NodeId>(cast<int>(kind[i]) & 255);
+                    if (k != Nodes.NONE && Nodes.work(k) == hclass && cast<int>(qty[i]) > 0) {
                         return i;
                     }
                     i = i + 1;
@@ -584,7 +584,7 @@ public bundle Agents {
                 have = have - take;
                 qty[i] = cast<short>(have);
                 if (have == 0) {
-                    int k = cast<int>(kind[i]) & 255;
+                    NodeId k = cast<NodeId>(cast<int>(kind[i]) & 255);
                     Harvest hc = Nodes.work(k);
                     debitBlock(i, k);
                     // A picked bush is not a destroyed bush. Forage and fishing are FLOWS -- the
@@ -627,13 +627,13 @@ public bundle Agents {
                     // would refill a mine that is genuinely finished, and ore would stop being
                     // finite.
                     if (cast<int>(blind[i]) != 0) {
-                        int k = cast<int>(born[i]) & 255;
-                        if (k != 0) {
+                        NodeId k = cast<NodeId>(cast<int>(born[i]) & 255);
+                        if (k != Nodes.NONE) {
                             blind[i] = cast<byte>(0);
-                            kind[i] = cast<byte>(k);
+                            kind[i] = cast<byte>(cast<int>(k));
                             qty[i] = cast<short>(Nodes.baseQty(k));
                             creditBlock(i, k);
-                            return k;
+                            return cast<int>(k);
                         }
                     }
                     i = i + 1;
@@ -656,8 +656,8 @@ public bundle Agents {
             // comes up for regrowth every REGROW_SWEEPS passes and the world does not come back all
             // at once.
             private method reseed(int i) returns void {
-                int was = cast<int>(born[i]) & 255;
-                if (was == 0) {
+                NodeId was = cast<NodeId>(cast<int>(born[i]) & 255);
+                if (was == Nodes.NONE) {
                     return;
                 }
                 Harvest hc = Nodes.work(was);
@@ -746,8 +746,8 @@ public bundle Agents {
                         renewSweeps = renewSweeps + 1;
                     }
                     done = done + 1;
-                    int k = cast<int>(kind[i]) & 255;
-                    if (k == 0) {
+                    NodeId k = cast<NodeId>(cast<int>(kind[i]) & 255);
+                    if (k == Nodes.NONE) {
                         reseed(i);
                         continue;
                     }
@@ -786,8 +786,8 @@ public bundle Agents {
                     out[i] = cast<byte>(0);
                 }
                 for (int i in 0..this.n) {
-                    int k = cast<int>(kind[i]) & 255;
-                    if (k == 0) {
+                    NodeId k = cast<NodeId>(cast<int>(kind[i]) & 255);
+                    if (k == Nodes.NONE) {
                         continue;
                     }
                     if (treesOnly && !Nodes.isTree(k)) {
