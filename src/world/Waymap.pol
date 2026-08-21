@@ -1,6 +1,8 @@
 import System.IO.Console;
 import Agents.World.Grid;
 import Agents.World.BlockGrid;
+import Agents.World.BlockId;
+import Agents.World.CellId;
 import Agents.World.Biomes;
 program AgentsExe;
 
@@ -46,7 +48,15 @@ public bundle Agents {
             // small integers so the queue is an array of buckets rather than a heap: cheaper, and
             // simpler to bound.
             public static fixed int DEAREST = 8;
-            public static fixed int NOWHERE = 0 - 1;
+            // FOUR KINDS OF NOTHING, WHICH USED TO BE ONE CONSTANT CALLED `NOWHERE`. It stood for a
+            // block nobody can reach, a cell nobody can reach, a place the search never queued, and
+            // a cost that cannot be paid -- and a caller comparing the wrong pair got `true` for
+            // the wrong reason. The places inside a search have always had their own
+            // (`Search.NOWHERE`); these are the two that leave this class, and the toll.
+            public static fixed BlockId NO_BLOCK = cast<BlockId>(0 - 1);
+            public static fixed CellId NO_CELL = cast<CellId>(0 - 1);
+            // The toll of a block with no walkable ground: not a place, a price nobody can pay.
+            public static fixed int UNREACHABLE = 0 - 1;
 
             private mutable Grid* world;
             private mutable BlockGrid* lattice;
@@ -96,8 +106,9 @@ public bundle Agents {
             private method measure() returns void {
                 int side = BlockGrid.SIDE;
                 for (int b in 0..lattice.count()) {
-                    int cx = lattice.originX(b);
-                    int cy = lattice.originY(b);
+                    BlockId block = cast<BlockId>(b);
+                    int cx = lattice.originX(block);
+                    int cy = lattice.originY(block);
                     mutable int walkables = 0;
                     mutable float sum = 0.0;
                     for (int y in 0..side) {
@@ -115,7 +126,7 @@ public bundle Agents {
                         }
                     }
                     if (walkables == 0) {
-                        toll[b] = Waymap.NOWHERE;
+                        toll[b] = Waymap.UNREACHABLE;
                     } else {
                         // Cost is the reciprocal of pace: half speed is twice the cost. Rounded into
                         // small integers so the queue can be buckets, and never zero.
@@ -159,8 +170,8 @@ public bundle Agents {
                 return Biomes.walkable(world.biomeAt(x, y));
             }
 
-            public method tollOf(int block) returns int {
-                return toll[block];
+            public method tollOf(BlockId block) returns int {
+                return toll[cast<int>(block)];
             }
 
             public method searchesAsked() returns long {
@@ -177,31 +188,39 @@ public bundle Agents {
             // Least-cost, so a mountain range is walked around when going round is cheaper and
             // through when it is not -- which is the model's rule, and it needs no rule of its own
             // here because it IS the arithmetic.
-            public method nextBlockToward(int from, int to) returns int {
+            public method nextBlockToward(BlockId from, BlockId to) returns BlockId {
                 asked = asked + cast<long>(1);
-                if (from < 0 || to < 0 || from >= lattice.count() || to >= lattice.count()) {
-                    return Waymap.NOWHERE;
+                // Read as numbers here because this is the bounds check, which is the one question
+                // asked of a block that is about its size rather than its identity.
+                int a = cast<int>(from);
+                int b = cast<int>(to);
+                if (a < 0 || b < 0 || a >= lattice.count() || b >= lattice.count()) {
+                    return Waymap.NO_BLOCK;
                 }
                 if (from == to) {
                     return to;
                 }
-                if (toll[from] == Waymap.NOWHERE || toll[to] == Waymap.NOWHERE) {
-                    return Waymap.NOWHERE;
+                if (toll[a] == Waymap.UNREACHABLE || toll[b] == Waymap.UNREACHABLE) {
+                    return Waymap.NO_BLOCK;
                 }
                 // THE FIRST BOUND, AND IT COSTS TWO READS: different continents, no walk. Without
                 // this the search below explores the whole of this one before admitting it.
                 if (world.massAt(lattice.originX(from), lattice.originY(from))
                     != world.massAt(lattice.originX(to), lattice.originY(to))) {
                     gaveUp = gaveUp + cast<long>(1);
-                    return Waymap.NOWHERE;
+                    return Waymap.NO_BLOCK;
                 }
-                over.open(from);
+                // THE SEARCH DEALS IN BARE PLACES, and keeps its own nothing. It is the same state
+                // machine over blocks here and over window cells below, so "a place" is all it can
+                // honestly say about the numbers it holds -- the same reason `BlockChain` keeps a
+                // bare slot. The name goes back on at the two lines that leave this method.
+                over.open(a);
                 int dials = over.dialCount();
                 mutable int looked = 0;
                 mutable int reach = 0;
                 while (reach < dials) {
                     mutable int here = over.take(reach);
-                    if (here == Waymap.NOWHERE) {
+                    if (here == Search.NOWHERE) {
                         reach = reach + 1;
                         continue;
                     }
@@ -212,9 +231,9 @@ public bundle Agents {
                         continue;
                     }
                     // THE TARGET, and the difference between this loop and the one over cells: this
-                    // one is looking for a PLACE, and says NOWHERE when it never finds it.
-                    if (here == to) {
-                        return over.firstStepOf(here, from);
+                    // one is looking for a PLACE, and says so when it never finds it.
+                    if (here == b) {
+                        return cast<BlockId>(over.firstStepOf(here, a));
                     }
                     looked = looked + 1;
                     if (looked >= Waymap.LOOK_AT_MOST) {
@@ -222,10 +241,10 @@ public bundle Agents {
                         // person does when there is no known way -- which is a decision, not a
                         // silence.
                         gaveUp = gaveUp + cast<long>(1);
-                        return Waymap.NOWHERE;
+                        return Waymap.NO_BLOCK;
                     }
-                    int col = lattice.colOf(here);
-                    int row = lattice.rowOf(here);
+                    int col = lattice.colOf(cast<BlockId>(here));
+                    int row = lattice.rowOf(cast<BlockId>(here));
                     for (int side in 0..4) {
                         mutable int ncol = col;
                         mutable int nrow = row;
@@ -236,15 +255,15 @@ public bundle Agents {
                         if (!lattice.holds(ncol, nrow)) {
                             continue;
                         }
-                        int there = lattice.at(ncol, nrow);
-                        if (toll[there] == Waymap.NOWHERE) {
+                        int there = cast<int>(lattice.at(ncol, nrow));
+                        if (toll[there] == Waymap.UNREACHABLE) {
                             continue;
                         }
                         over.offer(there, reach + toll[there], here);
                     }
                 }
                 gaveUp = gaveUp + cast<long>(1);
-                return Waymap.NOWHERE;
+                return Waymap.NO_BLOCK;
             }
 
             // ---- and the same question over CELLS, in a window around the walker ------------------
@@ -335,8 +354,8 @@ public bundle Agents {
             }
 
             // The next cell to head for on the way toward an aim, packed as y * width + x, or
-            // NOWHERE when the window holds no way to make progress.
-            public method nextCellToward(int fromX, int fromY, int aimX, int aimY) returns int {
+            // NO_CELL when the window holds no way to make progress.
+            public method nextCellToward(int fromX, int fromY, int aimX, int aimY) returns CellId {
                 asked = asked + cast<long>(1);
                 // The window, pinned inside the world -- worked out in the one place that knows it.
                 int wx = Waymap.windowFrom(fromX, world.width());
@@ -345,7 +364,7 @@ public bundle Agents {
                 if (fromX < wx || fromY < wy || fromX >= wx + Waymap.WINDOW
                     || fromY >= wy + Waymap.WINDOW) {
                     gaveUp = gaveUp + cast<long>(1);
-                    return Waymap.NOWHERE;
+                    return Waymap.NO_CELL;
                 }
                 within.open(startLocal);
                 int dials = within.dialCount();
@@ -358,7 +377,7 @@ public bundle Agents {
                 mutable int reach = 0;
                 while (reach < dials) {
                     mutable int here = within.take(reach);
-                    if (here == Waymap.NOWHERE) {
+                    if (here == Search.NOWHERE) {
                         reach = reach + 1;
                         continue;
                     }
@@ -425,7 +444,7 @@ public bundle Agents {
                 if (bestLocal == startLocal) {
                     // Nowhere in the window is nearer the aim than where it already stands.
                     gaveUp = gaveUp + cast<long>(1);
-                    return Waymap.NOWHERE;
+                    return Waymap.NO_CELL;
                 }
                 // A FEW STEPS ALONG THE TRAIL, not the whole of it and not one cell. One cell means
                 // a search every cell -- forty ticks apart at a walking pace, which is thousands of
@@ -439,7 +458,7 @@ public bundle Agents {
                 // with the whole way round already found and thrown away.
                 mutable int at = bestLocal;
                 mutable int back = 0;
-                while (within.cameFrom(at) != Waymap.NOWHERE) {
+                while (within.cameFrom(at) != Search.NOWHERE) {
                     back = back + 1;
                     at = within.cameFrom(at);
                 }
@@ -449,13 +468,13 @@ public bundle Agents {
                 }
                 at = bestLocal;
                 mutable int steps = back;
-                while (steps > want && within.cameFrom(at) != Waymap.NOWHERE) {
+                while (steps > want && within.cameFrom(at) != Search.NOWHERE) {
                     at = within.cameFrom(at);
                     steps = steps - 1;
                 }
                 int cx = wx + at % Waymap.WINDOW;
                 int cy = wy + at / Waymap.WINDOW;
-                return cy * world.width() + cx;
+                return cast<CellId>(cy * world.width() + cx);
             }
 
             // Squared distance in cells, as a long: a world is wider than an int square can hold.
