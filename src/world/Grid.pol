@@ -1,4 +1,5 @@
 import System.IO.Console;
+import Agents.World.CellId;
 
 // The world as Structure-of-Arrays: parallel flat arrays over a W x H grid, indexed y*W + x. The world
 // is a FINITE RECTANGLE -- both X and Y clamp at the edges (real borders, no cylinder wrap). Compact
@@ -68,9 +69,20 @@ public bundle Agents {
                 return h;
             }
 
-            // Finite rectangular index: both X and Y clamp at the edges (no wrap -- the world has real
-            // east/west borders now, not a cylinder).
-            public method idx(int x, int y) returns int {
+            // WHICH CELL OF THE WORLD THAT IS. Finite rectangular index: both X and Y clamp at the
+            // edges (no wrap -- the world has real east/west borders now, not a cylinder).
+            //
+            // This is where a pair of coordinates BECOMES a cell id, so every caller that hands one
+            // to `claim` or `owns` now typechecks with nothing written at the call at all.
+            public method idx(int x, int y) returns CellId {
+                return cast<CellId>(at(x, y));
+            }
+
+            // The same number, as a subscript into this class's own parallel arrays -- which is the
+            // one use of it that is not an id at all. Split out rather than casting at each of the
+            // sixteen accessors below: sixteen casts would say the same thing sixteen times, and
+            // this way the conversion happens once, where it means something.
+            private method at(int x, int y) returns int {
                 mutable int xx = x;
                 if (xx < 0) {
                     xx = 0;
@@ -89,42 +101,42 @@ public bundle Agents {
             }
 
             public method elevAt(int x, int y) returns int {
-                return cast<int>(elevation[idx(x, y)]);
+                return cast<int>(elevation[at(x, y)]);
             }
 
             public method setElev(int x, int y, int v) returns void {
-                elevation[idx(x, y)] = cast<short>(v);
+                elevation[at(x, y)] = cast<short>(v);
             }
 
             public method tempAt(int x, int y) returns int {
-                return cast<int>(temp[idx(x, y)]);
+                return cast<int>(temp[at(x, y)]);
             }
 
             public method setTemp(int x, int y, int v) returns void {
-                temp[idx(x, y)] = cast<byte>(v);
+                temp[at(x, y)] = cast<byte>(v);
             }
 
             public method moistAt(int x, int y) returns int {
-                return cast<int>(moist[idx(x, y)]);
+                return cast<int>(moist[at(x, y)]);
             }
 
             public method setMoist(int x, int y, int v) returns void {
-                moist[idx(x, y)] = cast<byte>(v);
+                moist[at(x, y)] = cast<byte>(v);
             }
 
             public method biomeAt(int x, int y) returns int {
-                return cast<int>(biome[idx(x, y)]);
+                return cast<int>(biome[at(x, y)]);
             }
 
             public method setBiome(int x, int y, int ordinal) returns void {
-                biome[idx(x, y)] = cast<byte>(ordinal);
+                biome[at(x, y)] = cast<byte>(ordinal);
             }
 
             // The whole packed byte, for the one reader that asks several questions of the same
             // cell: the classifier reads it once and puts it to CellFlags three times, rather than
             // touching the array three times per cell across two and a half million of them.
             public method flagsAt(int x, int y) returns int {
-                return cast<int>(flags[idx(x, y)]);
+                return cast<int>(flags[at(x, y)]);
             }
 
             public method hasRiver(int x, int y) returns boolean {
@@ -168,27 +180,27 @@ public bundle Agents {
             }
 
             public method setRiver(int x, int y) returns void {
-                int i = idx(x, y);
+                int i = at(x, y);
                 flags[i] = cast<byte>(CellFlags.withRiver(cast<int>(flags[i])));
             }
 
             public method setLake(int x, int y) returns void {
-                int i = idx(x, y);
+                int i = at(x, y);
                 flags[i] = cast<byte>(CellFlags.withLake(cast<int>(flags[i])));
             }
 
             public method setVent(int x, int y) returns void {
-                int i = idx(x, y);
+                int i = at(x, y);
                 flags[i] = cast<byte>(CellFlags.withVent(cast<int>(flags[i])));
             }
 
             public method setCoast(int x, int y) returns void {
-                int i = idx(x, y);
+                int i = at(x, y);
                 flags[i] = cast<byte>(CellFlags.withCoast(cast<int>(flags[i])));
             }
 
             public method setProspected(int x, int y) returns void {
-                int i = idx(x, y);
+                int i = at(x, y);
                 flags[i] = cast<byte>(CellFlags.withProspected(cast<int>(flags[i])));
             }
 
@@ -201,11 +213,11 @@ public bundle Agents {
 
             // Downstream flow direction as a per-cell code (0 = no flow). dx/dy are each in {-1,0,1}.
             public method setFlowDir(int x, int y, int dx, int dy) returns void {
-                flow[idx(x, y)] = cast<byte>((dy + 1) * 3 + (dx + 1) + 1);
+                flow[at(x, y)] = cast<byte>((dy + 1) * 3 + (dx + 1) + 1);
             }
 
             public method flowCode(int x, int y) returns int {
-                return cast<int>(flow[idx(x, y)]) & 255;
+                return cast<int>(flow[at(x, y)]) & 255;
             }
 
             public method hasFlow(int x, int y) returns boolean {
