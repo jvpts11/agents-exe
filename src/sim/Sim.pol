@@ -7,8 +7,11 @@ import Agents.World.Rng;
 import Agents.Sim.Chronicle;
 import Agents.Sim.Wild;
 import Agents.Sim.World;
+import Agents.Sim.Layer;
 import Agents.Sim.Grazing;
 import Agents.Sim.Seeding;
+import Agents.People.Census;
+import Agents.People.Journalling;
 import Agents.People.Population;
 import Agents.People.Banding;
 import Agents.People.Walking;
@@ -62,6 +65,13 @@ public bundle Agents {
             // `Grazing.tick(beasts, folk, ground, at, dice, log)` and
             // `Doings.tick(folk, realm, ground, ways, at)` are one call with different holes.
             private mutable World* state;
+            // THE ORDER THE WORLD ADVANCES IN, as a list. It was a method body, and every line of it
+            // carried the reason it was where it was -- those reasons are now beside the entries in
+            // `layOut`, which is the one place a reader has to look to know what happens when.
+            //
+            // Owned: fourteen objects with no state of their own, made once and freed with the Sim.
+            private mutable Layer*[] order;
+            private mutable int layers;
             // The fraction of a tick carried over from the last call. THE WORLD ADVANCES A WHOLE
             // NUMBER OF TIMES OR NOT AT ALL, so anything left over waits rather than being rounded
             // away -- rounded down, a pace below one never advances anything; rounded up, every
@@ -155,6 +165,67 @@ public bundle Agents {
                 // A world built by a check keeps the one hand it is born with -- checks do not open
                 // windows and must not open threads.
                 state.wild().shareBetween(Machine.threads() * 3 / 4);
+                layOut();
+            }
+
+            // THE ORDER THE WORLD ADVANCES IN. Every reason below was a comment inside the tick, and
+            // every one of them is a constraint rather than a preference: this list is the file to
+            // read to know what happens when.
+            private method layOut() returns void {
+                layers = 14;
+                order = new Layer*[layers]();
+                mutable int n = 0;
+                // THE ANIMALS FIRST, and before anything reads either crowd.
+                order[n] = new Grazing() on heap;                   n = n + 1;
+
+                // --- and here the people's account opens: everything from here to `Walking` is
+                // what a person costs, measured as one bracket. See `tick`.
+
+                // A YEAR OF BEING ALIVE, on the tick a year turns. Before the walking, so somebody
+                // who dies this year does not take a step first.
+                order[n] = new Living() on heap;                    n = n + 1;
+                // AND THEN EVERYBODY WHOSE TURN IT IS DECIDES WHAT THEY ARE DOING. Before all four
+                // doers below, because every one of them ACTS on the activity rather than deciding
+                // for itself -- and after the ageing, so a body that crossed eighteen this year may
+                // want what an eighteen-year-old wants in the same tick.
+                order[n] = new Doings() on heap;                    n = n + 1;
+                // AND EVERY SO OFTEN THE WORLD SAYS WHAT IT IS DOING, while it is still doing it.
+                order[n] = new Census() on heap;                    n = n + 1;
+                // Marrying, carrying and being born. After the ageing, so somebody who came of age
+                // this year may be courted in it.
+                order[n] = new Courting() on heap;                  n = n + 1;
+                // AND THEN THEY GO AND EAT, before the wandering gets a say: a hungry person has
+                // somewhere to be, and a wander that overwrote that would send them off to look at
+                // the scenery with a bush in front of them.
+                order[n] = new Foraging() on heap;                  n = n + 1;
+                // AND THE SHELF BETWEEN GATHERING AND EATING. After foraging, because what a person
+                // is carrying at this moment is what foraging just decided; before it, the store
+                // would be serving last tick's hands.
+                order[n] = new Larder() on heap;                    n = n + 1;
+                // AND WHOEVER IS AFTER SOMETHING KEEPS COMING. After the foraging, because a hunter
+                // who found a bush on the way has found food and the chase can end; and before the
+                // walking, because a chase moves a body itself rather than through a journey -- its
+                // destination changes every tick and a route search per tick per hunter is ledger
+                // S2-7 with a moving end.
+                order[n] = new Hunting() on heap;                   n = n + 1;
+                order[n] = new Roaming() on heap;                   n = n + 1;
+                order[n] = new Walking() on heap;                   n = n + 1;
+
+                // --- and it closes here. What follows is the country, deliberately outside it: a
+                // pass that runs once a year over BLOCKS would flatter the crowd's number by being
+                // averaged into it.
+
+                // IS THERE A COUNTRY YET, and if not, which of the six reasons.
+                order[n] = new Settling() on heap;                  n = n + 1;
+                // AND THE BORDERS MOVE.
+                order[n] = new Claiming() on heap;                  n = n + 1;
+                // AND WHOEVER IS MISSING FROM A POST IS REPLACED. With the ageing and the claim,
+                // because a ruler dies a handful of times a century.
+                order[n] = new Succession() on heap;                n = n + 1;
+                // AND EVERY AGENT'S EVERY FIELD IS WRITTEN DOWN, if a run asked for that. LAST, so a
+                // row is the world as the tick LEFT it rather than half way through being decided.
+                order[n] = new Journalling() on heap;               n = n + 1;
+                return;
             }
 
             // WRITE EVERY AGENT'S EVERY FIELD, EVERY TICK, TO THIS FILE. Off by default, because a
@@ -206,6 +277,10 @@ public bundle Agents {
             }
 
             public destructor ~Sim() returns void {
+                for (int i in 0..layers) {
+                    delete order[i];
+                }
+                delete order;
                 delete state;
                 return;
             }
@@ -387,119 +462,48 @@ public bundle Agents {
 
             // One tick of the world: every layer's pass, in this order.
             //
-            // THE FAUNA IS THE FIRST LINE IN IT. The people arrive in S2 and the nations in S3, each
-            // adding one line here rather than finding somewhere of its own to run -- which is the
-            // whole reason this method exists rather than the loop inside the window.
-            //
             // A WORLD THAT IS NOT STANDING STILL TICKS. That is not a guard bolted on: a Sim with no
             // ground is a legal state, it is what the tick's own arithmetic is checked in, and its
             // ticks have to keep counting for that check to mean anything.
+            //
+            // THE ORDER IS `order`, and this method is what it costs to walk it. Everything that was
+            // an `if` here -- the census on the twentieth year, the settling every sixty ticks while
+            // there is no country, the claim and the crowning on the year -- moved to the pass it
+            // was about, which is where its constant already lived.
+            //
+            // THE ONE THING THIS METHOD STILL DECIDES is the people's account, and it is here
+            // because it is not a fact about any single pass: what a person costs is the passes over
+            // the crowd, WHOLE. A partial meter does not merely understate a cost, it points at the
+            // WRONG one -- this project has paid for that twice -- so the stopwatch opens at the
+            // first pass charged to the people and closes after the last, one bracket and two clock
+            // reads, exactly as it was when the seven were written out by hand.
             private method tick() returns void {
                 state.aged();
-                if (state.stands()) {
-                    // THE WORLD, TAKEN APART ONCE. Every pass below wants a different subset of the
-                    // same six handles, so they are read here rather than through the world at each
-                    // of the thirty-odd argument positions -- which would have buried the ORDER,
-                    // and the order is the only thing this method is.
-                    long ticked = state.age();
-                    Grid* ground = state.ground();
-                    Wild* beasts = state.wild();
-                    Population* folk = state.people();
-                    Atlas* realm = state.nations();
-                    Waymap* ways = state.routes();
-                    Rng* dice = state.rolls();
-                    Chronicle* log = state.chronicle();
-                    Journal* diary = state.journal();
-
-                    Grazing.tick(beasts, folk, ground, ticked, dice, log);
-                    // THE PEOPLE, AFTER THE ANIMALS AND BEFORE ANYTHING READS EITHER. Somebody
-                    // decides where to go, and everybody who is going takes a step -- in that
-                    // order, so a person who sets out this tick starts walking this tick rather
-                    // than standing through one.
-                    // AND THE WHOLE OF WHAT A PERSON COSTS IS MEASURED FROM HERE TO THE END OF THE
-                    // PASSES, because this is the only place that sees all seven of them.
-                    //
-                    // THE WHOLE ACCOUNT OR NONE OF IT. `Walking` has metered itself since S2.3 and
-                    // that number is a fifth of the truth -- a partial meter does not merely
-                    // understate a cost, it points at the WRONG one, which this project has already
-                    // paid for twice. S2.9 asks what a person costs against what an animal costs,
-                    // and an answer built out of the one pass that happens to have a stopwatch in it
-                    // would be a number about stopwatches.
-                    long folkBegan = Time.nanos();
-                    peopleTicks = peopleTicks + cast<long>(folk.count());
-                    // A YEAR OF BEING ALIVE, on the tick a year turns. Before the walking, so
-                    // somebody who dies this year does not take a step first.
-                    Living.tick(folk, realm, ticked, log);
-                    // AND THEN EVERYBODY WHOSE TURN IT IS DECIDES WHAT THEY ARE DOING. Before all
-                    // four doers below, because every one of them now ACTS on the activity rather
-                    // than deciding for itself -- and after the ageing, so a body that crossed
-                    // eighteen this year may want what an eighteen-year-old wants in the same tick.
-                    Doings.tick(folk, realm, ground, ways, ticked);
-                    // AND EVERY SO OFTEN THE WORLD SAYS WHAT IT IS DOING, while it is still doing
-                    // it. End-of-run totals cannot tell a world that fed itself for two centuries
-                    // and then died from one that was dying the whole time -- and four guesses at
-                    // why a run emptied were wrong before this line existed.
-                    if (Clock.turnsYear(ticked)
-                        && Clock.yearsIn(ticked) % Sim.CENSUS_EVERY_YEARS == 0) {
-                        Doings.census(folk, ground);
+                if (!state.stands()) {
+                    return;
+                }
+                mutable boolean metering = false;
+                mutable long folkBegan = 0;
+                for (int i in 0..layers) {
+                    Layer* one = order[i];
+                    boolean mine = one.chargedToPeople();
+                    if (mine && !metering) {
+                        metering = true;
+                        folkBegan = Time.nanos();
+                        peopleTicks = peopleTicks + cast<long>(state.people().count());
+                    } else if (!mine && metering) {
+                        metering = false;
+                        peopleNs = peopleNs + (Time.nanos() - folkBegan);
                     }
-                    // Marrying, carrying and being born. After the ageing, so somebody who came of
-                    // age this year may be courted in it.
-                    Courting.tick(folk, ticked);
-                    // AND THEN THEY GO AND EAT, before the wandering gets a say: a hungry person
-                    // has somewhere to be, and a wander that overwrote that would send them off
-                    // to look at the scenery with a bush in front of them.
-                    Foraging.tick(folk, ground, ground.surface(), ways, ticked);
-                    // AND THE SHELF BETWEEN GATHERING AND EATING. After foraging, because what a
-                    // person is carrying at this moment is what foraging just decided; before it,
-                    // the store would be serving last tick's hands.
-                    Larder.tick(folk, realm);
-                    // AND WHOEVER IS AFTER SOMETHING KEEPS COMING. After the foraging, because a
-                    // hunter who found a bush on the way has found food and the chase can end; and
-                    // before the walking, because a chase moves a body itself rather than through a
-                    // journey -- its destination changes every tick and a route search per tick per
-                    // hunter is ledger S2-7 with a moving end.
-                    Hunting.tick(folk, beasts, ground, ways, ticked, log);
-                    Roaming.tick(folk, ground, ways, ticked, dice);
-                    Walking.tick(folk, ground, ways, ticked);
-                    // The account closes here: seven passes, one stopwatch. The journal below is a
-                    // run's own instrumentation and is deliberately outside it -- a cost that only
-                    // exists when somebody asked for a log is not what a person costs.
+                    // ASKED BEFORE THE ACCOUNT AND NOT AFTER: the census is charged to the people
+                    // and runs one year in twenty, so a pass that declines this tick must not close
+                    // a bracket the passes around it are still inside.
+                    if (one.runsAt(state)) {
+                        one.pass(state);
+                    }
+                }
+                if (metering) {
                     peopleNs = peopleNs + (Time.nanos() - folkBegan);
-                    // AND THE COUNTRY, WHICH TODAY IS ONE QUESTION: is there one yet, and if not,
-                    // why not. Outside the people's meter on purpose -- what a person costs is what
-                    // the seven passes above cost, and a pass that runs once a second over blocks
-                    // rather than over people would flatter that number by being averaged into it.
-                    //
-                    // ONCE A SECOND, not every tick. Settling reads the block index once, which is
-                    // cheap, but it is a question whose answer changes on the scale of a life rather
-                    // than of a tick -- and at gear 6 a tick is a fifth of a second of world.
-                    if (realm.nationCount() == 0 && ticked % cast<long>(Sim.SETTLE_EVERY) == 0) {
-                        Result<City*, Refusal> tried = Settling.trySettle(realm, folk, ground, dice);
-                        if (tried.isErr()) {
-                            realm.noteRefusal(tried.errorOr(Refusal.NobodyLeft));
-                        } else {
-                            City* first = tried.valueOr(0 as City*);
-                            log.note(ticked, "nations",
-                                     $"the first city stands at {first.x()},{first.y()} with {first.population()} people");
-                        }
-                        delete tried;
-                    }
-                    // AND THE BORDERS MOVE, once a year. A claim a tick would be a border nobody can
-                    // watch and a cost nobody asked for; a year is the pace the model describes the
-                    // growth at ("as the time goes"), and it is the same clock the ageing uses.
-                    if (Clock.turnsYear(ticked)) {
-                        Claiming.tick(realm, ground);
-                        // AND WHOEVER IS MISSING FROM A POST IS REPLACED. On the year, with the
-                        // ageing and the claim, because a ruler dies a handful of times a century
-                        // and asking every tick would be asking three hundred times a second
-                        // whether anybody had.
-                        Succession.tick(folk, realm, dice);
-                    }
-                    // AND EVERY AGENT'S EVERY FIELD IS WRITTEN DOWN, if a run asked for that. After
-                    // the passes, so a row is the world as the tick LEFT it rather than half way
-                    // through being decided.
-                    diary.note(folk, ground, ticked);
                 }
                 return;
             }

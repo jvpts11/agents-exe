@@ -1,3 +1,5 @@
+import Agents.Sim.Layer;
+import Agents.Sim.World;
 import System.Errors.Result;
 import System.Errors.Ok;
 import System.Errors.Err;
@@ -42,7 +44,43 @@ program AgentsExe;
 public bundle Agents {
     public namespace Nations {
 
-        public class Settling {
+        public class Settling implements Layer {
+            // HOW OFTEN THE WORLD IS ASKED WHETHER ANYBODY HAS SETTLED, in ticks. Sixty is a second
+            // of world at gear 1, which is the pace a founding happens on -- a question asked every
+            // tick would be asked three hundred times a frame at the top gear and answer the same
+            // thing each time. It used to live in `Sim` and it is a fact about settling.
+            public static fixed int EVERY = 60;
+
+            public override method name() returns String {
+                return "settling";
+            }
+            // AND ONLY WHILE THERE IS NO COUNTRY. The tick order used to carry that half of the
+            // condition and this class the other, which is the split `runsAt` closes.
+            public override method runsAt(World* now) returns boolean {
+                return now.nations().nationCount() == 0
+                       && now.age() % cast<long>(Settling.EVERY) == cast<long>(0);
+            }
+            public override method chargedToPeople() returns boolean {
+                return false;
+            }
+            // THE REFUSAL IS PART OF THE PASS. Answering "no city, and here is which of the six
+            // reasons" was written at the call site in `Sim.tick`, where a second caller would have
+            // had to remember to count it -- and the whole point of `Refusal` is that a world with
+            // no country says which one it was.
+            public override method pass(World* now) returns void {
+                Result<City*, Refusal> tried = Settling.trySettle(now.nations(), now.people(),
+                                                                  now.ground(), now.rolls());
+                if (tried.isErr()) {
+                    now.nations().noteRefusal(tried.errorOr(Refusal.NobodyLeft));
+                } else {
+                    City* first = tried.valueOr(0 as City*);
+                    now.chronicle().note(now.age(), "nations",
+                        $"the first city stands at {first.x()},{first.y()} with {first.population()} people");
+                }
+                delete tried;
+                return;
+            }
+
             // How many people a site needs before it is a city rather than a camp. A band is 24, and
             // a founding that needs more than one whole band would never fire in a world where bands
             // are sown 64 cells apart. Twelve is half a band: enough that a site is a place people
