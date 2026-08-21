@@ -1,5 +1,6 @@
 import System.IO.Console;
 import Agents.World.BlockId;
+import Agents.World.Harvest;
 
 // Every resource node in the world, as INSTANCES with real positions -- not one slot per tile.
 //
@@ -344,8 +345,8 @@ public bundle Agents {
                 while (i < n) {
                     int k = cast<int>(kind[i]) & 255;
                     if (k != 0 && cast<int>(qty[i]) == 0) {
-                        int hc = Nodes.work(k);
-                        if (hc == cast<int>(Harvest.Mine) || hc == cast<int>(Harvest.Quarry)) {
+                        Harvest hc = Nodes.work(k);
+                        if (hc == Harvest.Mine || hc == Harvest.Quarry) {
                             blind[i] = cast<byte>(1);
                             kind[i] = cast<byte>(0);
                         }
@@ -378,12 +379,12 @@ public bundle Agents {
             // two maps, and crediting one without the other leaves the world claiming there is
             // mining here but no coal, which is a question people actually ask.
             private method creditBlock(int i, int k) returns void {
-                int hc = Nodes.work(k);
-                if (hc == cast<int>(Harvest.Nothing)) {
+                Harvest hc = Nodes.work(k);
+                if (hc == Harvest.Nothing) {
                     return;
                 }
                 int blk = blockOf(i);
-                int b = hc * bplane + blk;
+                int b = cast<int>(hc) * bplane + blk;
                 blockHave[b] = blockHave[b] + 1;
                 int gd = Nodes.gives(k);
                 if (gd != Goods.NOTHING) {
@@ -394,12 +395,12 @@ public bundle Agents {
             }
 
             private method debitBlock(int i, int k) returns void {
-                int hc = Nodes.work(k);
-                if (hc == cast<int>(Harvest.Nothing)) {
+                Harvest hc = Nodes.work(k);
+                if (hc == Harvest.Nothing) {
                     return;
                 }
                 int blk = blockOf(i);
-                int b = hc * bplane + blk;
+                int b = cast<int>(hc) * bplane + blk;
                 blockHave[b] = blockHave[b] - 1;
                 int gd = Nodes.gives(k);
                 if (gd != Goods.NOTHING) {
@@ -424,11 +425,11 @@ public bundle Agents {
             }
 
             // Live nodes of one Harvest class in the 16x16 block (bx, by). Zero outside the world.
-            public method inBlock(int bx, int by, int hclass) returns int {
+            public method inBlock(int bx, int by, Harvest hclass) returns int {
                 if (!blocks.holds(bx, by)) {
                     return 0;
                 }
-                return blockHave[hclass * bplane + cast<int>(blocks.at(bx, by))];
+                return blockHave[cast<int>(hclass) * bplane + cast<int>(blocks.at(bx, by))];
             }
 
             // Live nodes yielding one particular GOOD in the block. Same map, asked the way the
@@ -451,10 +452,11 @@ public bundle Agents {
 
             // Whole-world stock of one Harvest class, which is what says whether a resource is being
             // liquidated or living within its means.
-            public method totalOf(int hclass) returns int {
+            public method totalOf(Harvest hclass) returns int {
                 mutable int t = 0;
+                int plane = cast<int>(hclass) * bplane;
                 for (int b in 0..this.bplane) {
-                    t = t + blockHave[hclass * bplane + b];
+                    t = t + blockHave[plane + b];
                 }
                 return t;
             }
@@ -547,7 +549,7 @@ public bundle Agents {
 
             // A live node this trade can work, standing on the cell, or -1. Instances of one cell are
             // contiguous, so this walks the two or three that share it and no further.
-            public method nodeAt(int x, int y, int hclass) returns int {
+            public method nodeAt(int x, int y, Harvest hclass) returns int {
                 mutable int i = firstAt(x, y);
                 if (i < 0) {
                     return 0 - 1;
@@ -581,7 +583,7 @@ public bundle Agents {
                 qty[i] = cast<short>(have);
                 if (have == 0) {
                     int k = cast<int>(kind[i]) & 255;
-                    int hc = Nodes.work(k);
+                    Harvest hc = Nodes.work(k);
                     debitBlock(i, k);
                     // A picked bush is not a destroyed bush. Forage and fishing are FLOWS -- the
                     // berries come back, the shoal swims back -- so the node stays where it is with
@@ -591,7 +593,7 @@ public bundle Agents {
                     // same kind of gone: ore does not come back on any timescale a person lives
                     // through, and a forest does. `born` remembers what stood here so `regrow` can
                     // put the wood back where there is still wood nearby to seed it.
-                    if (!cast<Harvest>(hc).renews()) {
+                    if (!hc.renews()) {
                         kind[i] = cast<byte>(0);
                     }
                 }
@@ -656,12 +658,12 @@ public bundle Agents {
                 if (was == 0) {
                     return;
                 }
-                int hc = Nodes.work(was);
-                if (hc != cast<int>(Harvest.Timber)) {
+                Harvest hc = Nodes.work(was);
+                if (hc != Harvest.Timber) {
                     return;
                 }
                 int b = blockOf(i);
-                int plane = hc * bplane;
+                int plane = cast<int>(hc) * bplane;
                 int here = blockHave[plane + b];
                 mutable int pace = NodeField.REGROW_SWEEPS;
                 if (here == 0) {
@@ -747,8 +749,8 @@ public bundle Agents {
                         reseed(i);
                         continue;
                     }
-                    int hc = Nodes.work(k);
-                    if (!cast<Harvest>(hc).renews()) {
+                    Harvest hc = Nodes.work(k);
+                    if (!hc.renews()) {
                         continue;
                     }
                     int full = Nodes.baseQty(k);
