@@ -57,6 +57,13 @@ public bundle Agents {
             private mutable int[] spent;
             private mutable int[] seenOn;     // which search stamped this block, so no clearing pass
             private mutable int[] dialHead;   // bucket queue: first block at each distance
+            // WHICH SEARCH LAST PUT ANYTHING IN EACH BUCKET, so the buckets need no clearing either.
+            // `seenOn` above has stamped the blocks since this file was written, and the buckets were
+            // still being emptied by hand: 9,602 writes at the top of every search, 118,980 searches
+            // in a twenty-five second run, which is 1.1 billion writes to empty a queue that a search
+            // of a dozen blocks then puts a dozen things in. Measured before the change: routing was
+            // 39 per cent of the walking pass, and the walking pass 44 per cent of the whole tick.
+            private mutable int[] dialOn;
             private mutable int[] nextInDial;
             private mutable int stamp;
             // How many searches were asked for, and how many gave up. A search that fails is a
@@ -75,6 +82,7 @@ public bundle Agents {
                 seenOn = new int[n]();
                 nextInDial = new int[n]();
                 dialHead = new int[Waymap.LOOK_AT_MOST * Waymap.DEAREST + 2]();
+                dialOn = new int[Waymap.LOOK_AT_MOST * Waymap.DEAREST + 2]();
                 stamp = 0;
                 asked = cast<long>(0);
                 gaveUp = cast<long>(0);
@@ -87,6 +95,7 @@ public bundle Agents {
                 cellSeen = new int[win]();
                 cellNext = new int[win]();
                 cellDial = new int[Waymap.FURTHEST + 2]();
+                cellDialOn = new int[Waymap.FURTHEST + 2]();
                 cellStamp = 0;
                 measure();
             }
@@ -98,11 +107,13 @@ public bundle Agents {
                 delete seenOn;
                 delete nextInDial;
                 delete dialHead;
+                delete dialOn;
                 delete cellFrom;
                 delete cellSpent;
                 delete cellSeen;
                 delete cellNext;
                 delete cellDial;
+                delete cellDialOn;
                 return;
             }
 
@@ -217,18 +228,18 @@ public bundle Agents {
                 }
                 stamp = stamp + 1;
                 int dials = Waymap.LOOK_AT_MOST * Waymap.DEAREST + 2;
-                for (int d in 0..dials) {
-                    dialHead[d] = Waymap.NOWHERE;
-                }
                 seenOn[from] = stamp;
                 spent[from] = 0;
                 cameFrom[from] = Waymap.NOWHERE;
+                dialOn[0] = stamp;
                 dialHead[0] = from;
                 nextInDial[from] = Waymap.NOWHERE;
                 mutable int looked = 0;
                 mutable int reach = 0;
                 while (reach < dials) {
-                    mutable int here = dialHead[reach];
+                    // A bucket nothing put anything in THIS search is empty, whatever the last one
+                    // left in it. That is the whole of what the clearing pass used to establish.
+                    mutable int here = dialOn[reach] == stamp ? dialHead[reach] : Waymap.NOWHERE;
                     if (here == Waymap.NOWHERE) {
                         reach = reach + 1;
                         continue;
@@ -277,6 +288,10 @@ public bundle Agents {
                         seenOn[there] = stamp;
                         spent[there] = cost;
                         cameFrom[there] = here;
+                        if (dialOn[cost] != stamp) {
+                            dialOn[cost] = stamp;
+                            dialHead[cost] = Waymap.NOWHERE;
+                        }
                         nextInDial[there] = dialHead[cost];
                         dialHead[cost] = there;
                     }
@@ -358,6 +373,7 @@ public bundle Agents {
             private mutable int[] cellSeen;
             private mutable int[] cellNext;
             private mutable int[] cellDial;
+            private mutable int[] cellDialOn;   // the same stamp, for the same reason, over the cells
             private mutable int cellStamp;
 
             // WHETHER THE FINE SEARCH CAN SEE A PLACE FROM ANOTHER: whether it falls inside the
@@ -400,12 +416,10 @@ public bundle Agents {
                 }
                 cellStamp = cellStamp + 1;
                 int dials = Waymap.FURTHEST + 2;
-                for (int d in 0..dials) {
-                    cellDial[d] = Waymap.NOWHERE;
-                }
                 cellSeen[startLocal] = cellStamp;
                 cellSpent[startLocal] = 0;
                 cellFrom[startLocal] = Waymap.NOWHERE;
+                cellDialOn[0] = cellStamp;
                 cellDial[0] = startLocal;
                 cellNext[startLocal] = Waymap.NOWHERE;
                 // The best progress found so far: nearest the aim, starting from where it stands.
@@ -414,7 +428,8 @@ public bundle Agents {
                 mutable int looked = 0;
                 mutable int reach = 0;
                 while (reach < dials) {
-                    mutable int here = cellDial[reach];
+                    mutable int here = cellDialOn[reach] == cellStamp ? cellDial[reach]
+                                                                      : Waymap.NOWHERE;
                     if (here == Waymap.NOWHERE) {
                         reach = reach + 1;
                         continue;
@@ -487,6 +502,10 @@ public bundle Agents {
                         cellSeen[there] = cellStamp;
                         cellSpent[there] = cost;
                         cellFrom[there] = here;
+                        if (cellDialOn[cost] != cellStamp) {
+                            cellDialOn[cost] = cellStamp;
+                            cellDial[cost] = Waymap.NOWHERE;
+                        }
                         cellNext[there] = cellDial[cost];
                         cellDial[cost] = there;
                     }
