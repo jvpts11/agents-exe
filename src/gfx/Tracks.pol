@@ -31,10 +31,11 @@ public bundle Agents {
             // from rounding noise -- which is what would make a standing body spin.
             public static fixed float STILL = 0.0000004;
 
-            private mutable float[] atX;
-            private mutable float[] atY;
-            private mutable float[] faceX;
-            private mutable float[] faceY;
+            // WHERE EACH SLOT IS DRAWN AND WHICH WAY IT POINTS. One `Pose` and not four columns:
+            // the pair is the point, and "somebody forgets the facing entirely" -- the defect named
+            // at the top of this file, which has already happened twice here -- is an arrangement
+            // where the facing is a separate array that a writer can leave alone.
+            private mutable Pose[] shown;
             private mutable int room;
             // Of the bodies drawn in the last frame, how many were pointed somewhere of their own.
             private mutable int turned;
@@ -58,10 +59,7 @@ public bundle Agents {
                 if (room < 1) {
                     room = 1;
                 }
-                atX = new float[room]();
-                atY = new float[room]();
-                faceX = new float[room]();
-                faceY = new float[room]();
+                shown = new Pose[room]();
                 turned = 0;
                 snapped = cast<long>(0);
                 glided = cast<long>(0);
@@ -70,10 +68,7 @@ public bundle Agents {
             }
 
             public destructor ~Tracks() returns void {
-                delete atX;
-                delete atY;
-                delete faceX;
-                delete faceY;
+                delete shown;
                 return;
             }
 
@@ -110,14 +105,14 @@ public bundle Agents {
                 // A cosine and a sine is what a `Turn` is, and a unit direction already is one, so
                 // nothing here calls a trigonometric function. A body that has never moved keeps the
                 // zero it was born with, which reads as no rotation at all.
-                if (faceX[slot] == 0.0 && faceY[slot] == 0.0) {
+                if (shown[slot].pointless()) {
                     return Turn.none();
                 }
                 // COUNTED, because "they all face south" is a thing a person had to notice by
                 // looking, twice, and a number that says how many are pointed somewhere of their own
                 // is a thing a gate can notice instead.
                 turned = turned + 1;
-                return Turn.facing(faceX[slot], faceY[slot]);
+                return Turn.facing(shown[slot].facing.x, shown[slot].facing.y);
             }
 
             // THE WALK ITSELF, which both callers need and neither should copy: where this slot was
@@ -128,21 +123,21 @@ public bundle Agents {
                 if (slot >= room) {
                     growTo(slot + 1);
                 }
-                float dx = px - atX[slot];
-                float dy = py - atY[slot];
+                Pose was = shown[slot];
+                float dx = px - was.at.x;
+                float dy = py - was.at.y;
                 float gap = dx * dx + dy * dy;
-                atX[slot] = px;
-                atY[slot] = py;
                 if (gap > Tracks.A_JUMP * Tracks.A_JUMP) {
                     snapped = snapped + cast<long>(1);
+                    shown[slot] = new Pose(vec2(px, py), was.facing);   // a jump keeps the facing
                 } else if (gap > Tracks.STILL) {
                     glided = glided + cast<long>(1);
                     float span = Newton.sqrt(gap);
                     gapSum = gapSum + span;
-                    faceX[slot] = dx / span;
-                    faceY[slot] = dy / span;
+                    shown[slot] = was.walkTo(px, py, dx, dy, span);
                 } else {
                     stood = stood + cast<long>(1);
+                    shown[slot] = new Pose(vec2(px, py), was.facing);
                 }
                 return;
             }
@@ -152,24 +147,12 @@ public bundle Agents {
                 while (bigger < want) {
                     bigger = bigger * 2;
                 }
-                mutable float[] nx = new float[bigger]();
-                mutable float[] ny = new float[bigger]();
-                mutable float[] fx = new float[bigger]();
-                mutable float[] fy = new float[bigger]();
+                Pose[] wider = new Pose[bigger]();
                 for (int i in 0..room) {
-                    nx[i] = atX[i];
-                    ny[i] = atY[i];
-                    fx[i] = faceX[i];
-                    fy[i] = faceY[i];
+                    wider[i] = shown[i];
                 }
-                delete atX;
-                delete atY;
-                delete faceX;
-                delete faceY;
-                atX = nx;
-                atY = ny;
-                faceX = fx;
-                faceY = fy;
+                delete shown;
+                shown = wider;
                 room = bigger;
                 return;
             }
