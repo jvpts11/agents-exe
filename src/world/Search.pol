@@ -1,0 +1,150 @@
+program AgentsExe;
+
+// THE SCRATCH ONE LEAST-COST SEARCH NEEDS, over a lattice of N places whose step costs are small
+// integers. Six arrays and a stamp, and `Waymap` had two copies of them: `cameFrom/spent/seenOn/
+// nextInDial/dialHead/dialOn` for the blocks, and `cellFrom/cellSpent/cellSeen/cellNext/cellDial/
+// cellDialOn` for the cells. One shape, written twice, with the second set named by prefixing the
+// first -- which is what a missing type looks like.
+//
+// ---- WHY THE LOOP IS NOT IN HERE, WHICH IS THE POINT OF THIS FILE ----
+//
+// The two searches are NOT the same algorithm, and it is worth being exact about how they differ,
+// because they look identical for forty lines and then do not:
+//
+//   * the block search wants a PLACE. It stops when it pops the target and answers NOWHERE if it
+//     never does.
+//   * the cell search wants PROGRESS. It has no target inside the window -- it tracks the cell
+//     nearest the aim, stops when it stands on the aim or has settled enough ground, and answers
+//     with the best it found even when the aim is unreachable.
+//
+// A single `Search` covering both needs the caller's stopping rule handed in and asked at every
+// popped place -- a call in the innermost loop of the two searches that account for a third of the
+// walking pass, in a file whose own comment records that the people's walk was four fifths of the
+// world tick before these were bounded. So what is shared is the STATE, and the two loops stay
+// where a reader can see that they end differently.
+//
+// ---- THE STAMP, AND WHY EVERY ARRAY CARRIES IT ----
+//
+// Nothing here is cleared between searches. `seenOn[p] == stamp` is what makes a place visited and
+// `dialOn[d] == stamp` is what makes a bucket non-empty, so opening a search is one increment
+// rather than a pass over N places and D buckets. The block queue has 9,602 buckets and a run asks
+// for 119,000 routes; the clearing pass that used to be at the top of every call was 1.1 billion
+// writes to empty a queue a dozen things then go into.
+public bundle Agents {
+    public namespace World {
+
+        public class Search {
+            public static fixed int NOWHERE = 0 - 1;
+
+            private mutable int[] from;       // the place stepped from, per place
+            private mutable int[] spent;      // the cost it was reached with
+            private mutable int[] seenOn;     // which search stamped it
+            private mutable int[] next;       // the next place in the same bucket
+            private mutable int[] dialHead;   // the first place at each cost
+            private mutable int[] dialOn;     // which search last put anything in that bucket
+            private mutable int stamp;
+            private mutable int dials;
+
+            public constructor Search(int places, int dials)
+                requires places > 0
+                requires dials > 0
+            {
+                from = new int[places]();
+                spent = new int[places]();
+                seenOn = new int[places]();
+                next = new int[places]();
+                dialHead = new int[dials]();
+                dialOn = new int[dials]();
+                this.dials = dials;
+                stamp = 0;
+            }
+
+            public destructor ~Search() returns void {
+                delete from;
+                delete spent;
+                delete seenOn;
+                delete next;
+                delete dialHead;
+                delete dialOn;
+                return;
+            }
+
+            public method dialCount() returns int {
+                return dials;
+            }
+
+            // A NEW SEARCH FROM `at`. One increment invalidates every place and every bucket at
+            // once, which is the whole reason both arrays carry a stamp.
+            public method open(int at) returns void {
+                stamp = stamp + 1;
+                seenOn[at] = stamp;
+                spent[at] = 0;
+                from[at] = Search.NOWHERE;
+                dialOn[0] = stamp;
+                dialHead[0] = at;
+                next[at] = Search.NOWHERE;
+                return;
+            }
+
+            // The head of the bucket for `cost`, unlinked, or NOWHERE when nothing this search put
+            // anything in it -- whatever the last search left there.
+            public method take(int cost) returns int {
+                if (dialOn[cost] != stamp) {
+                    return Search.NOWHERE;
+                }
+                int here = dialHead[cost];
+                if (here != Search.NOWHERE) {
+                    dialHead[cost] = next[here];
+                }
+                return here;
+            }
+
+            // Whether a place popped at `cost` is the live copy of it. A place reached again more
+            // cheaply since it was queued leaves a stale entry behind, and dropping it on the way
+            // out is what lets the queue stay a list of buckets rather than a heap that supports
+            // removal.
+            public method current(int place, int cost) returns boolean {
+                return spent[place] == cost;
+            }
+
+            // A place reached at `cost` from `via`. False when it was already there at that cost or
+            // cheaper, so the caller can tell a step that changed something from one that did not.
+            public method offer(int place, int cost, int via) returns boolean {
+                if (cost >= dials) {
+                    return false;
+                }
+                if (seenOn[place] == stamp && spent[place] <= cost) {
+                    return false;
+                }
+                seenOn[place] = stamp;
+                spent[place] = cost;
+                from[place] = via;
+                if (dialOn[cost] != stamp) {
+                    dialOn[cost] = stamp;
+                    dialHead[cost] = Search.NOWHERE;
+                }
+                next[place] = dialHead[cost];
+                dialHead[cost] = place;
+                return true;
+            }
+
+            // The place stepped from to reach this one, or NOWHERE at the start. The block search
+            // wants only the first step and gets it from the method below; the cell search walks
+            // the whole trail twice -- once to count it and once to stop partway -- because it
+            // hands back a waypoint a few steps along rather than the next one.
+            public method cameFrom(int place) returns int {
+                return from[place];
+            }
+
+            // Walk the trail back from a place to the one step after the start -- which is the one
+            // thing a walker wanted out of the whole search.
+            public method firstStepOf(int at, int start) returns int {
+                mutable int here = at;
+                while (from[here] != start && from[here] != Search.NOWHERE) {
+                    here = from[here];
+                }
+                return here;
+            }
+        }
+    }
+}
