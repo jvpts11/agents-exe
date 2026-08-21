@@ -1,0 +1,78 @@
+program AgentsExe;
+
+// A RECTANGLE OF CELLS, half-open on neither side: `x0..x1` and `y0..y1` both inclusive, which is
+// how every caller in this game already spelled one.
+//
+// It existed four times over, as four parallel arrays each: `WorldAudit` keeps `rx0/ry0/rx1/ry1`
+// per region, the border walk keeps a running extent, a bake keeps the patch it touched, and a
+// city keeps the ground it claims. Four names for one shape is four places to get the order of the
+// corners wrong, and the mistake is silent -- a rectangle with `x1 < x0` is empty rather than
+// wrong, so it draws nothing and reports nothing and looks like a region that happens to be bare.
+//
+// ---- WHY `|` AND NOT A `merge` METHOD ----
+//
+// Two rectangles combine one way and one way only: the smallest rectangle holding both. An audit
+// asks it of every cell it adds to a region; a border asks it of every edge. `a | b` is what that
+// reads as everywhere it is written outside a program, and the operator is the reason a running
+// extent can be a fold rather than eight assignments -- which is what the four copies were.
+//
+// It is `|` and not `+` because a union is not an addition: adding two rectangles has no meaning
+// anybody would agree on, and an operator whose meaning has to be looked up is worse than a method
+// whose name says it.
+public bundle Agents {
+    public namespace World {
+
+        public struct Bounds {
+            public mutable int x0;
+            public mutable int y0;
+            public mutable int x1;
+            public mutable int y1;
+
+            public constructor Bounds(int x0, int y0, int x1, int y1) {
+                this.x0 = x0;
+                this.y0 = y0;
+                this.x1 = x1;
+                this.y1 = y1;
+            }
+
+            // THE EMPTY ONE, and it is not `0,0,0,0` -- that is a rectangle holding one cell at the
+            // origin. An extent that is about to grow starts inverted, so the first cell added
+            // replaces both corners rather than being merged with a corner nobody chose.
+            public static method nothing() returns Bounds {
+                return new Bounds(2147483647, 2147483647, 0 - 2147483647, 0 - 2147483647);
+            }
+
+            // One cell, which is what a growing extent is folded from.
+            public static method around(int x, int y) returns Bounds {
+                return new Bounds(x, y, x, y);
+            }
+
+            public method width() returns int {
+                return this.x1 < this.x0 ? 0 : this.x1 - this.x0 + 1;
+            }
+
+            public method height() returns int {
+                return this.y1 < this.y0 ? 0 : this.y1 - this.y0 + 1;
+            }
+
+            public method empty() returns boolean {
+                return this.x1 < this.x0 || this.y1 < this.y0;
+            }
+
+            public method holds(int x, int y) returns boolean {
+                return x >= this.x0 && x <= this.x1 && y >= this.y0 && y <= this.y1;
+            }
+
+            // The smallest rectangle holding both. An empty one contributes nothing, which is what
+            // makes `Bounds.nothing()` the identity and a running extent a fold.
+            public operator | (Bounds other) returns Bounds {
+                if (this.empty()) { return other; }
+                if (other.empty()) { return this; }
+                return new Bounds(this.x0 < other.x0 ? this.x0 : other.x0,
+                                  this.y0 < other.y0 ? this.y0 : other.y0,
+                                  this.x1 > other.x1 ? this.x1 : other.x1,
+                                  this.y1 > other.y1 ? this.y1 : other.y1);
+            }
+        }
+    }
+}

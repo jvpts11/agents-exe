@@ -28,10 +28,11 @@ public bundle Agents {
             // relief: 8-connected components of the HIGHLAND band, and of the volcanic biome
             private mutable int[] rcomp;
             private mutable int[] rarea;
-            private mutable int[] rx0;
-            private mutable int[] ry0;
-            private mutable int[] rx1;
-            private mutable int[] ry1;
+            // The extent of each component. ONE RECTANGLE, not four parallel arrays: four can be
+            // indexed with different ids and nothing anywhere would say so, and the failure is
+            // silent, because a rectangle whose corners have been crossed reads as an empty region
+            // rather than as a wrong one.
+            private mutable Bounds[] rbox;
             private mutable int highCells;
             private mutable int peakMax;
             private mutable int chainElong;    // area-weighted length/width, x100
@@ -78,10 +79,7 @@ public bundle Agents {
                 nReal = 0;
                 rcomp = new int[w * h]();
                 rarea = new int[capacity]();
-                rx0 = new int[capacity]();
-                ry0 = new int[capacity]();
-                rx1 = new int[capacity]();
-                ry1 = new int[capacity]();
+                rbox = new Bounds[capacity]();
                 highCells = 0;
                 peakMax = 0;
                 chainElong = 0;
@@ -118,10 +116,7 @@ public bundle Agents {
                 delete top;
                 delete rcomp;
                 delete rarea;
-                delete rx0;
-                delete ry0;
-                delete rx1;
-                delete ry1;
+                delete rbox;
                 delete nodeCount;
                 delete subCount;
                 delete biomeCells;
@@ -275,28 +270,17 @@ public bundle Agents {
                             sp = sp + 1;
                             rcomp[seedCell] = id;
                             mutable int count = 0;
-                            mutable int bx0 = x;
-                            mutable int by0 = y;
-                            mutable int bx1 = x;
-                            mutable int by1 = y;
+                            // The extent as a fold rather than as eight assignments: every cell
+                            // added is unioned in, and the four comparisons live in one place where
+                            // getting one of them backwards is a thing that can be read.
+                            mutable Bounds box = Bounds.around(x, y);
                             while (sp > 0) {
                                 sp = sp - 1;
                                 int cell = stack[sp];
                                 int cx = cell % w;
                                 int cy = cell / w;
                                 count = count + 1;
-                                if (cx < bx0) {
-                                    bx0 = cx;
-                                }
-                                if (cy < by0) {
-                                    by0 = cy;
-                                }
-                                if (cx > bx1) {
-                                    bx1 = cx;
-                                }
-                                if (cy > by1) {
-                                    by1 = cy;
-                                }
+                                box = box | Bounds.around(cx, cy);
                                 mutable int dy = 0 - 1;
                                 while (dy <= 1) {
                                     mutable int dx = 0 - 1;
@@ -321,10 +305,7 @@ public bundle Agents {
                                 }
                             }
                             rarea[id] = count;
-                            rx0[id] = bx0;
-                            ry0[id] = by0;
-                            rx1[id] = bx1;
-                            ry1[id] = by1;
+                            rbox[id] = box;
                         }
                         x = x + 1;
                     }
@@ -357,8 +338,8 @@ public bundle Agents {
                 while (i < nc) {
                     int a = rarea[i];
                     if (a >= floorSz) {
-                        mutable int len = rx1[i] - rx0[i] + 1;
-                        int hgt = ry1[i] - ry0[i] + 1;
+                        mutable int len = rbox[i].width();
+                        int hgt = rbox[i].height();
                         if (hgt > len) {
                             len = hgt;
                         }
