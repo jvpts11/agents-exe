@@ -27,13 +27,12 @@ public bundle Agents {
             public int count;                 // number of models (40 terrain biomes)
             public int totalTris;
 
-            // per-vertex, length 3*totalTris (triangle soup: verts 3t, 3t+1, 3t+2 form tri t)
-            public float[] px;
-            public float[] py;
-            public float[] pz;
-            public float[] nx;
-            public float[] ny;
-            public float[] nz;
+            // per-vertex, length 3*totalTris (triangle soup: verts 3t, 3t+1, 3t+2 form tri t).
+            // ONE ROW AND NOT SIX COLUMNS: every reader of these reads all six for one vertex and
+            // writes them straight into an interleaved GL buffer, so six columns were six cache
+            // streams doing the work of one. See `Vertex` for why it is six floats and not two
+            // `vec3`, and why the colour below is not part of it.
+            public Vertex[] verts;
 
             // per-triangle, length totalTris
             public int[] cr;
@@ -50,12 +49,7 @@ public bundle Agents {
                 this.count = count;
                 this.totalTris = totalTris;
                 int nv = totalTris * 3;
-                px = new float[nv]();
-                py = new float[nv]();
-                pz = new float[nv]();
-                nx = new float[nv]();
-                ny = new float[nv]();
-                nz = new float[nv]();
+                verts = new Vertex[nv]();
                 cr = new int[totalTris]();
                 cg = new int[totalTris]();
                 cb = new int[totalTris]();
@@ -66,12 +60,7 @@ public bundle Agents {
             }
 
             public destructor ~MeshAtlas() returns void {
-                delete px;
-                delete py;
-                delete pz;
-                delete nx;
-                delete ny;
-                delete nz;
+                delete verts;
                 delete cr;
                 delete cg;
                 delete cb;
@@ -101,12 +90,15 @@ public bundle Agents {
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
-                        px[vi] = cast<float>(sc.nextInt()) * inv;
-                        py[vi] = cast<float>(sc.nextInt()) * inv;
-                        pz[vi] = cast<float>(sc.nextInt()) * inv;
-                        nx[vi] = cast<float>(sc.nextInt()) * inv;
-                        ny[vi] = cast<float>(sc.nextInt()) * inv;
-                        nz[vi] = cast<float>(sc.nextInt()) * inv;
+                        // The six reads stay in this order and in separate statements: the scanner
+                        // is a stream, so the order they are pulled in IS the file format.
+                        float vx = cast<float>(sc.nextInt()) * inv;
+                        float vy = cast<float>(sc.nextInt()) * inv;
+                        float vz = cast<float>(sc.nextInt()) * inv;
+                        float vnx = cast<float>(sc.nextInt()) * inv;
+                        float vny = cast<float>(sc.nextInt()) * inv;
+                        float vnz = cast<float>(sc.nextInt()) * inv;
+                        verts[vi] = new Vertex(vx, vy, vz, vnx, vny, vnz);
                         k = k + 1;
                     }
                     cr[tri] = sc.nextInt();

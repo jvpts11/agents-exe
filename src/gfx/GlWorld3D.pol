@@ -278,7 +278,7 @@ public bundle Agents {
                 mutable int rm = 0;
                 while (rm < rivers.count) {
                     int vi = (rivers.triStart[rm] + 8) * 3;
-                    riverTop[rm] = rivers.pz[vi];
+                    riverTop[rm] = rivers.verts[vi].z;
                     rm = rm + 1;
                 }
                 riverTiles.load(rivers);
@@ -688,10 +688,10 @@ public bundle Agents {
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = tri * 3 + k;
-                        mutable float lx = rivers.px[vi];
-                        mutable float ly = rivers.py[vi];
-                        mutable float lnx = rivers.nx[vi];
-                        mutable float lny = rivers.ny[vi];
+                        mutable float lx = rivers.verts[vi].x;
+                        mutable float ly = rivers.verts[vi].y;
+                        mutable float lnx = rivers.verts[vi].nx;
+                        mutable float lny = rivers.verts[vi].ny;
                         mutable int rr = 0;
                         while (rr < rot) {
                             float tx = lx;
@@ -702,12 +702,12 @@ public bundle Agents {
                             lny = 0.0 - tnx;
                             rr = rr + 1;
                         }
-                        mutable float lz = rivers.pz[vi];
+                        mutable float lz = rivers.verts[vi].z;
                         if (lz > top && lz < top + 0.05) {
                             lz = top + (lz - top) * 6.0;             // decal lift (channel/foam)
                         }
                         p = wr(buf, p, lx + wx, ly + wy, lz + zOff,
-                                    lnx, lny, rivers.nz[vi], r, g, b);
+                                    lnx, lny, rivers.verts[vi].nz, r, g, b);
                         k = k + 1;
                     }
                     t = t + 1;
@@ -764,9 +764,9 @@ public bundle Agents {
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
-                        float hz = a.pz[vi] * scale;
-                        float lx = a.px[vi] * scale;
-                        float ly = a.py[vi] * scale;
+                        float hz = a.verts[vi].z * scale;
+                        float lx = a.verts[vi].x * scale;
+                        float ly = a.verts[vi].y * scale;
                         // NOT `turn.x(lx, ly)`, and the reason is the association, not the taste.
                         // This sum runs left to right: `((ax + lx*ca) - ly*sa) + ...`, and folding
                         // the rotation into one term would compute `ax + (lx*ca - ly*sa)`, which is
@@ -795,9 +795,9 @@ public bundle Agents {
                         k = 0;
                         while (k < 3) {
                             int vi = vb + k;
-                            float hz = a.pz[vi] * scale;
-                            float lx = a.px[vi] * scale;
-                            float ly = a.py[vi] * scale;
+                            float hz = a.verts[vi].z * scale;
+                            float lx = a.verts[vi].x * scale;
+                            float ly = a.verts[vi].y * scale;
                             p = wr(buf, p,
                                         turn.x(lx, ly) + wx - hz * 0.368,
                                         turn.y(lx, ly) + wy - hz * 0.579,
@@ -948,7 +948,8 @@ public bundle Agents {
                 // rings have plate-level verts too, and keeping them left giant hoops in the far LOD.
                 float top = terrainLook[ord].top + 0.02;
                 int vb = tri * 3;
-                if (terr.pz[vb] > top || terr.pz[vb + 1] > top || terr.pz[vb + 2] > top) {
+                if (terr.verts[vb].z > top || terr.verts[vb + 1].z > top
+                    || terr.verts[vb + 2].z > top) {
                     return true;
                 }
                 return false;
@@ -1043,10 +1044,10 @@ public bundle Agents {
 
             // The highest of a triangle's three vertices, in the tile's own space.
             private method triTop(int tri) returns float {
-                mutable float hi = terr.pz[tri * 3];
+                mutable float hi = terr.verts[tri * 3].z;
                 mutable int v = 1;
                 while (v < 3) {
-                    float pz = terr.pz[tri * 3 + v];
+                    float pz = terr.verts[tri * 3 + v].z;
                     if (pz > hi) {
                         hi = pz;
                     }
@@ -1193,10 +1194,10 @@ public bundle Agents {
                 while (kept.hasNext()) {
                     int tri = kept.next();
                     boolean decor = isDecor(ord, tri);
-                    mutable float triMin = terr.pz[tri * 3];
+                    mutable float triMin = terr.verts[tri * 3].z;
                     mutable int vz = 1;
                     while (vz < 3) {
-                        float pz = terr.pz[tri * 3 + vz];
+                        float pz = terr.verts[tri * 3 + vz].z;
                         if (pz < triMin) {
                             triMin = pz;
                         }
@@ -1224,7 +1225,7 @@ public bundle Agents {
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
-                        mutable float lz = terr.pz[vi];
+                        mutable float lz = terr.verts[vi].z;
                         if (lz > top && lz < top + 0.05) {
                             // flat surface decal: a guaranteed 0.03 clearance off the plate (art
                             // authored 0.001 above it moired against it) plus a PROPORTIONAL rise
@@ -1242,9 +1243,10 @@ public bundle Agents {
                                 lz = top + (lz - top) * ds;
                             }
                         }
-                        p = wr(buf, p, terr.px[vi] * scale + wx, terr.py[vi] * scale + wy,
+                        Vertex v = terr.verts[vi];
+                        p = wr(buf, p, v.x * scale + wx, v.y * scale + wy,
                                     lz + zOff,
-                                    terr.nx[vi], terr.ny[vi], terr.nz[vi], r, g, b);
+                                    v.nx, v.ny, v.nz, r, g, b);
                         k = k + 1;
                     }
                 }
@@ -1330,15 +1332,16 @@ public bundle Agents {
                     mutable int k = 0;
                     while (k < 3) {
                         int vi = vb + k;
-                        float lx = a.px[vi] * scale;
-                        float ly = a.py[vi] * scale;
+                        Vertex v = a.verts[vi];
+                        float lx = v.x * scale;
+                        float ly = v.y * scale;
                         // The normal turns with the body, or somebody walking north is lit as
                         // though they were still facing east.
-                        float bx = a.nx[vi];
-                        float by = a.ny[vi];
+                        float bx = v.nx;
+                        float by = v.ny;
                         p = wr(buf, p, turn.x(lx, ly) + wx, turn.y(lx, ly) + wy,
-                                    a.pz[vi] * scale + wz,
-                                    turn.x(bx, by), turn.y(bx, by), a.nz[vi], r, g, b);
+                                    v.z * scale + wz,
+                                    turn.x(bx, by), turn.y(bx, by), v.nz, r, g, b);
                         k = k + 1;
                     }
                     t = t + 1;
