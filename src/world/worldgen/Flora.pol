@@ -34,11 +34,12 @@ public bundle Agents {
             private mutable int seed;
             private mutable int w;
             private mutable int h;
-            // per-biome palette, as parallel arrays like every other table in this codebase
-            private mutable int[] pa;
-            private mutable int[] pb;
-            private mutable int[] pc;
-            private mutable int[] pcov;
+            // PER-BIOME PALETTE, and it is a `Palette` -- the type this file already built out of
+            // the four arrays every time it drew a tree. Four parallel arrays hold one row across
+            // four places that can disagree, and the row already had a name three hundred lines
+            // down: `new Palette(pa[biome], pb[biome], pc[biome], cov)`. Storing what is read means
+            // the row is assembled once, where it is written, instead of per cell.
+            private mutable Palette[] palettes;
             // scratch, allocated per run
             private mutable int[] dEdge;    // rings to the edge of the tree-bearing region
             private mutable int[] dWat;     // rings to the nearest water
@@ -47,20 +48,14 @@ public bundle Agents {
                 this.seed = seed;
                 w = 1;
                 h = 1;
-                pa = new int[Biomes.count()]();
-                pb = new int[Biomes.count()]();
-                pc = new int[Biomes.count()]();
-                pcov = new int[Biomes.count()]();
+                palettes = new Palette[Biomes.count()]();
                 dEdge = new int[1]();
                 dWat = new int[1]();
                 buildPalettes();
             }
 
             public destructor ~Flora() returns void {
-                delete pa;
-                delete pb;
-                delete pc;
-                delete pcov;
+                delete palettes;
                 delete dEdge;
                 delete dWat;
             }
@@ -75,10 +70,7 @@ public bundle Agents {
                 requires cov >= 0
                 requires cov <= 1000
             {
-                pa[biome] = a;
-                pb[biome] = b;
-                pc[biome] = c;
-                pcov[biome] = cov;
+                palettes[biome] = new Palette(a, b, c, cov);
             }
 
             // Ten species instead of three, because the promoted prop meshes joined the node set.
@@ -204,7 +196,7 @@ public bundle Agents {
                     // nothing. Measuring the edge this way means the transition into a savanna is
                     // NOT an edge -- the savanna simply has a low cover of its own, which is what a
                     // forest margin actually looks like.
-                    if (pcov[g.biomeAt(x, y)] == 0) {
+                    if (palettes[g.biomeAt(x, y)].cover == 0) {
                         dEdge[i] = 0;
                     } else {
                         dEdge[i] = 9999;
@@ -266,7 +258,7 @@ public bundle Agents {
                     for (int x in 0..this.w) {
                         int i = y * w + x;
                         int biome = g.biomeAt(x, y);
-                        int cov = pcov[biome];
+                        int cov = palettes[biome].cover;
                         if (cov == 0) {
                             continue;                       // nothing this biome grows
                         }
@@ -364,7 +356,7 @@ public bundle Agents {
                         float p = ipc / cast<float>(k * k);
                         float span = 1.0 / cast<float>(k);
                         float zone = LandMath.fbm(seed ^ WorldSalts.SPECIES_ZONE, nx, ny, 9, 3);
-                        Palette pal = new Palette(pa[biome], pb[biome], pc[biome], cov);
+                        Palette pal = palettes[biome];
                         for (int sy in 0..k) {
                             for (int sx in 0..k) {
                                 int hx = x * 4 + sx;

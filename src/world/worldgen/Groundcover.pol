@@ -21,11 +21,10 @@ public bundle Agents {
             private mutable int seed;
             private mutable int w;
             private mutable int h;
-            // undergrowth: up to three species per biome and its peak share, per mille
-            private mutable int[] ua;
-            private mutable int[] ub;
-            private mutable int[] uc;
-            private mutable int[] ucov;
+            // UNDERGROWTH: up to three species per biome and its peak share, per mille -- which is a
+            // `Palette`, the same row `Flora` keeps for the trees. It was four parallel arrays here
+            // and four more there: one shape written twice, with different letters.
+            private mutable Palette[] under;
             // loose surface stone per biome, per mille
             private mutable int[] bcov;
             private mutable int[] dFresh;   // rings to river or lake
@@ -36,10 +35,7 @@ public bundle Agents {
                 this.seed = seed;
                 w = 1;
                 h = 1;
-                ua = new int[Biomes.count()]();
-                ub = new int[Biomes.count()]();
-                uc = new int[Biomes.count()]();
-                ucov = new int[Biomes.count()]();
+                under = new Palette[Biomes.count()]();
                 bcov = new int[Biomes.count()]();
                 dFresh = new int[1]();
                 dLand = new int[1]();
@@ -48,10 +44,7 @@ public bundle Agents {
             }
 
             public destructor ~Groundcover() returns void {
-                delete ua;
-                delete ub;
-                delete uc;
-                delete ucov;
+                delete under;
                 delete bcov;
                 delete dFresh;
                 delete dLand;
@@ -68,10 +61,7 @@ public bundle Agents {
                 requires cov >= 0
                 requires cov <= 1000
             {
-                ua[biome] = a;
-                ub[biome] = b;
-                uc[biome] = c;
-                ucov[biome] = cov;
+                under[biome] = new Palette(a, b, c, cov);
             }
 
             private method setStone(int biome, int cov) returns void
@@ -363,7 +353,8 @@ public bundle Agents {
                         // reaches the floor, and none at all is open country. The tile no longer
                         // has to be empty for any of this -- a fern under a tree is exactly where a
                         // fern belongs, and refusing it was an artefact of one slot per tile.
-                        int uc2 = ucov[biome];
+                        Palette pal = under[biome];
+                        int uc2 = pal.cover;
                         if (uc2 == 0) {
                             continue;
                         }
@@ -378,11 +369,11 @@ public bundle Agents {
                         float ud = cast<float>(uc2) / 1000.0 * (0.30 + 1.4 * patch) * shade;
                         float zone = LandMath.fbm(seed ^ WorldSalts.UNDERGROWTH_ZONE, nx, ny, 14, 3);
                         float pick = LandMath.hash01(seed ^ WorldSalts.UNDERGROWTH_PICK, x * 11 + 2, y * 3 + 9);
-                        mutable int kind = ua[biome];
-                        if (pick > 0.88 && uc[biome] != 0) {
-                            kind = uc[biome];
-                        } else if (zone > 0.50 && ub[biome] != 0) {
-                            kind = ub[biome];
+                        mutable int kind = pal.a;
+                        if (pick > 0.88 && pal.c != 0) {
+                            kind = pal.c;
+                        } else if (zone > 0.50 && pal.b != 0) {
+                            kind = pal.b;
                         }
                         if (kind == 0) {
                             continue;
